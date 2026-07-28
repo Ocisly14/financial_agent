@@ -1,5 +1,5 @@
 import type { UUID, Character, StoredStrategy, ExecutionLogEntry } from "@/types/core";
-import type { ProcessingStep, ResearchReport, TrendingSentiscoreResponse } from "../types";
+import type { ProcessingStep, ResearchReport } from "../types";
 
 export type FavoriteTaskChainPayload = {
     favoriteId?: string;
@@ -220,10 +220,6 @@ export const apiClient = {
 
         return { success: response.success, reports };
     },
-		    getTrendingSentiscores: (): Promise<TrendingSentiscoreResponse> =>
-		        fetcher({
-		            url: "/trending-sentiscores",
-		        }),
 		    getCoinMarketCapPrice: (symbol: string, convert = "USD") => {
 		        const qs = new URLSearchParams({ symbol, convert });
 		        return fetcher({

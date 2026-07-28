@@ -15,7 +15,7 @@ export function createSubagentRegistry(): SubagentRegistry {
   registry.register({
     name: "news_research",
     description:
-      "News and research agent for crypto news, web/current-events research, institutional adoption context, and SentiScore multi-source context.",
+      "News and research agent for crypto news, web/current-events research, and institutional adoption context.",
     modelClass: "MEDIUM",
     defaultTools: [...NEWS_RESEARCH_TOOLS],
     systemPrompt: newsResearchSubagentPrompt,

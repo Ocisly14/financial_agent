@@ -48,16 +48,3 @@ export interface ResearchReport {
     s3Key?: string;
 }
 
-export interface TrendingCoinScore {
-    symbol: string;
-    weightedScore: number;
-    dailyScores: number[];
-    rank: number;
-}
-
-export interface TrendingSentiscoreResponse {
-    success: boolean;
-    news: TrendingCoinScore[];
-    twitter: TrendingCoinScore[];
-    lastUpdated: number;
-}

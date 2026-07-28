@@ -1,7 +1,5 @@
 import { McpToolRegistry } from "./toolRegistry.ts";
 
-// news
-import { createGetNewsTool } from "./news/getNewsTool.ts";
 // market
 import { createGetCryptoPriceTool } from "./market/getCryptoPriceTool.ts";
 // search
@@ -9,7 +7,6 @@ import { createWebSearchTool } from "./search/webSearchTool.ts";
 import { createCryptoResearchSearchTool } from "./search/cryptoResearchSearchTool.ts";
 import { createInstitutionalAdoptionSearchTool } from "./search/institutionalAdoptionSearchTool.ts";
 // sentiment
-import { createSentiscoreAnalysisTool } from "./sentiment/sentiscoreAnalysisTool.ts";
 import { createFearGreedAnalysisTool } from "./sentiment/fearGreedAnalysisTool.ts";
 // technical
 import { createTechnicalAnalysisTool } from "./technical/technicalAnalysisTool.ts";
@@ -44,12 +41,10 @@ import {
 
 export function registerAllTools(registry: McpToolRegistry): void {
   // non_trading tools
-  registry.register(createGetNewsTool());
   registry.register(createGetCryptoPriceTool());
   registry.register(createWebSearchTool());
   registry.register(createCryptoResearchSearchTool());
   registry.register(createInstitutionalAdoptionSearchTool());
-  registry.register(createSentiscoreAnalysisTool());
   registry.register(createFearGreedAnalysisTool());
   registry.register(createTechnicalAnalysisTool());
   registry.register(createWhaleAlertTool());
@@ -94,11 +89,9 @@ export const ONCHAIN_DATA_TOOLS = [
 ] as const;
 
 export const NEWS_RESEARCH_TOOLS = [
-  "getnews",
   "web_search",
   "crypto_research_search",
   "institutional_adoption_search",
-  "sentiscore_analysis",
 ] as const;
 
 export const TRADING_TOOLS = [

@@ -24,7 +24,6 @@
   },
   "dependencies": {
     "@ai-sdk/google-vertex": "2.1.10",
-    "@aws-sdk/client-s3": "^3.802.0",
     "@tavily/core": "^0.3.0",
     "ai": "4.1.54",
     "mongodb": "^7.3.0",
