@@ -1,0 +1,227 @@
+{
+  "document_title": "Common Beginner User Scenarios for Crypto Auto-Trading Agent",
+  "version": "1.0",
+  "target_users": "Crypto users with limited financial or trading background",
+  "core_product_flow": [
+    "User expresses a simple investment or trading goal",
+    "Agent collects relevant market, sentiment, news, on-chain, and user-preference data",
+    "Agent explains the analysis in beginner-friendly language",
+    "Agent generates a trading or investment strategy",
+    "User reviews and explicitly approves the strategy",
+    "Agent implements the approved strategy automatically with risk controls"
+  ],
+  "scenarios": [
+    {
+      "id": "scenario_01",
+      "name": "Beginner wants to start investing in Bitcoin or Ethereum",
+      "category": "First-time crypto investing",
+      "user_profile": {
+        "financial_background": "Low",
+        "trading_experience": "Beginner",
+        "typical_concern": "The user wants to invest but does not know when or how much to buy."
+      },
+      "user_goal": "Start investing in major crypto assets without buying everything at the wrong time.",
+      "example_user_input": "I have $1,000 and want to invest in Bitcoin, but I do not know if now is a good time.",
+      "agent_data_collection": {
+        "market_data": [
+          "BTC and ETH price trend",
+          "Recent volatility",
+          "Support and resistance levels",
+          "Trading volume"
+        ],
+        "sentiment_data": [
+          "Crypto news sentiment",
+          "Social media sentiment",
+          "Market fear and greed indicators"
+        ],
+        "macro_and_event_data": [
+          "Interest rate expectations",
+          "ETF inflow or outflow trend",
+          "Major regulatory or market events"
+        ],
+        "user_inputs_optional": [
+          "Investment amount",
+          "Preferred asset",
+          "Risk tolerance",
+          "Investment horizon"
+        ]
+      },
+      "agent_analysis_summary": "The agent explains whether the market looks overbought, oversold, volatile, or suitable for gradual entry.",
+      "generated_strategy": {
+        "strategy_type": "Dollar-cost averaging",
+        "example_strategy": [
+          "Invest 30% immediately",
+          "Invest 30% if BTC or ETH drops by 3%",
+          "Invest 30% if the asset drops by 6%",
+          "Keep 10% as cash reserve"
+        ],
+        "risk_level": "Low to medium",
+        "recommended_order_type": "Spot buy orders and conditional limit orders"
+      },
+      "approval_flow": {
+        "requires_explicit_user_approval": true,
+        "approval_message": "Approve this staged investment plan before the agent places any order.",
+        "user_action_required": "Click Approve, Edit Strategy, or Reject"
+      },
+      "automatic_execution_after_approval": {
+        "actions": [
+          "Place the approved initial buy order",
+          "Set conditional buy orders at approved price levels",
+          "Monitor market changes",
+          "Notify the user if risk conditions change"
+        ],
+        "execution_limit": "The agent only executes the approved strategy and does not place new unapproved trades."
+      },
+      "risk_controls": [
+        "No leverage by default",
+        "Maximum allocation limit",
+        "Cash reserve",
+        "User confirmation before any new strategy change"
+      ],
+      "value_to_user": "The user can begin investing without needing to understand charts, indicators, or timing decisions."
+    },
+    {
+      "id": "scenario_02",
+      "name": "User wants to know whether market news creates a buying or selling opportunity",
+      "category": "News and sentiment-driven trade decision",
+      "user_profile": {
+        "financial_background": "Low",
+        "trading_experience": "Beginner to intermediate",
+        "typical_concern": "The user sees confusing crypto news and does not know whether it is bullish or bearish."
+      },
+      "user_goal": "Translate market news, sentiment, and price movement into a clear trading decision.",
+      "example_user_input": "There is a lot of news about Ethereum today. Should I buy, sell, or wait?",
+      "agent_data_collection": {
+        "market_data": [
+          "ETH price movement",
+          "Short-term momentum",
+          "Volume change",
+          "Volatility level"
+        ],
+        "news_and_sentiment_data": [
+          "Recent Ethereum-related news",
+          "Social media sentiment",
+          "Influencer and community discussion trend",
+          "Positive, negative, and neutral narrative classification"
+        ],
+        "on_chain_and_derivatives_data": [
+          "Whale transfers",
+          "Exchange inflows and outflows",
+          "Funding rates",
+          "Open interest and liquidation risk"
+        ],
+        "user_inputs_optional": [
+          "Trade size",
+          "Preferred holding period",
+          "Risk tolerance",
+          "Spot or leverage preference"
+        ]
+      },
+      "agent_analysis_summary": "The agent explains whether the news is likely a short-term hype event, a real fundamental catalyst, or a high-risk market reaction.",
+      "generated_strategy": {
+        "strategy_type": "Signal-based trade proposal",
+        "example_strategy": [
+          "Buy a small ETH spot position only if sentiment remains positive and price confirms upward momentum",
+          "Avoid trade if volatility is too high",
+          "Set stop-loss at 4%",
+          "Set take-profit at 7%"
+        ],
+        "risk_level": "Medium",
+        "recommended_order_type": "Spot order with stop-loss and take-profit"
+      },
+      "approval_flow": {
+        "requires_explicit_user_approval": true,
+        "approval_message": "The agent presents the trade thesis, order size, stop-loss, and take-profit before execution.",
+        "user_action_required": "Approve, adjust order size, switch to paper trading, or reject"
+      },
+      "automatic_execution_after_approval": {
+        "actions": [
+          "Place the approved ETH order",
+          "Set the approved stop-loss",
+          "Set the approved take-profit",
+          "Continue monitoring sentiment and notify the user if the thesis changes"
+        ],
+        "execution_limit": "The agent cannot increase position size or change exit rules without user approval."
+      },
+      "risk_controls": [
+        "Position-size limit",
+        "Stop-loss required",
+        "Volatility filter",
+        "No automatic leverage unless explicitly approved"
+      ],
+      "value_to_user": "The user does not need to manually interpret news, social sentiment, or on-chain signals."
+    },
+    {
+      "id": "scenario_03",
+      "name": "User already holds crypto and wants the agent to manage risk",
+      "category": "Position monitoring and exit management",
+      "user_profile": {
+        "financial_background": "Low",
+        "trading_experience": "Beginner",
+        "typical_concern": "The user does not know when to sell, take profit, or cut losses."
+      },
+      "user_goal": "Protect an existing crypto position from large losses and avoid emotional decisions.",
+      "example_user_input": "I already bought BTC. Can you help me manage the position and tell me when to sell?",
+      "agent_data_collection": {
+        "portfolio_data": [
+          "Current asset holdings",
+          "Entry price",
+          "Unrealized profit or loss",
+          "Portfolio concentration"
+        ],
+        "market_data": [
+          "Current BTC trend",
+          "Support and resistance levels",
+          "Volatility",
+          "Volume and liquidity"
+        ],
+        "risk_data": [
+          "Market risk score",
+          "Liquidation pressure",
+          "News shock risk",
+          "Sentiment deterioration"
+        ],
+        "user_inputs_optional": [
+          "Maximum acceptable loss",
+          "Profit target",
+          "Holding period",
+          "Whether partial selling is acceptable"
+        ]
+      },
+      "agent_analysis_summary": "The agent explains whether the current position should be held, partially reduced, protected with stop-loss, or exited.",
+      "generated_strategy": {
+        "strategy_type": "Position protection and exit plan",
+        "example_strategy": [
+          "Hold the BTC position while price stays above key support",
+          "Sell 30% if BTC drops below support",
+          "Take profit on 40% if BTC rises by 8%",
+          "Send alert if sentiment turns sharply negative"
+        ],
+        "risk_level": "User-defined",
+        "recommended_order_type": "Conditional sell orders, stop-loss orders, and take-profit orders"
+      },
+      "approval_flow": {
+        "requires_explicit_user_approval": true,
+        "approval_message": "The user must approve all stop-loss, take-profit, or partial-sell rules before the agent places orders.",
+        "user_action_required": "Approve protection rules, edit thresholds, or reject"
+      },
+      "automatic_execution_after_approval": {
+        "actions": [
+          "Place approved stop-loss or conditional sell orders",
+          "Place approved take-profit orders",
+          "Monitor risk indicators",
+          "Send alerts when the position thesis changes"
+        ],
+        "execution_limit": "The agent only manages the position according to the approved rules."
+      },
+      "risk_controls": [
+        "User-defined maximum loss",
+        "Partial exit instead of full panic sell",
+        "Stop-loss confirmation",
+        "Ongoing risk alerts"
+      ],
+      "value_to_user": "The user gets disciplined position management without needing to monitor charts all day."
+    }
+  ],
+  "product_positioning_message": "The auto-trading agent helps non-expert users convert market data, news, sentiment, and personal goals into clear crypto strategies, then executes only after explicit user approval with built-in risk controls."
+}

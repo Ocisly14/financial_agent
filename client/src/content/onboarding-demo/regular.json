@@ -1,0 +1,10 @@
+{
+    "title": "Regular (Saved Example)",
+    "question": "What is the price of BTC?",
+    "blocks": [
+        {
+            "type": "markdown",
+            "markdown": "# Bitcoin (BTC) Price Update\n\n> This is a **saved example** (not real-time market data).\n\n## Current market data\n**Price:** $69,936.95 USD\n\n- **24h change:** +0.74%\n- **1h change:** +0.19%\n- **7d change:** -2.52%\n- **30d change:** +3.43%\n\n## Key metrics\n\n| Metric | Value |\n| --- | --- |\n| Market Cap | $1.40 trillion |\n| 24h Volume | $38.55 billion |\n| Circulating Supply | 20,003,043 BTC |\n| Total Supply | 20,003,043 BTC |\n| Max Supply | 21,000,000 BTC |\n| Fully Diluted Market Cap | $1.47 trillion |\n\n## Recent performance context\n- **52-week high:** $126,208.50\n- **52-week low:** $59,800.00\n\nCurrent price is near the lower end of the 52-week range, reflecting recent consolidation after the earlier rally.\n\n## Market summary\nBitcoin is currently trading just below $70,000, showing modest gains over the past 24 hours (+0.74%) but remains down about 2.5% over the past week. The 30-day performance remains positive (+3.43%), indicating longer-term upward momentum despite recent pullbacks.\n\nVolume activity is healthy at $38.55 billion over the last 24 hours, suggesting continued institutional and retail interest.\n\n> **Key insight:** Bitcoin is consolidating around the $70,000 psychological level after recent volatility. The modest hourly gain suggests some buying pressure, but the weekly decline indicates ongoing profit-taking or uncertainty in the short term."
+        }
+    ]
+}

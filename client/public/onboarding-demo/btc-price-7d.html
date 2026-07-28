@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>BTC Price (90D) — Demo Chart</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: transparent;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+      }
+      .card {
+        padding: 14px 14px 10px 14px;
+      }
+      .title {
+        font-size: 14px;
+        font-weight: 600;
+        margin: 0 0 8px 0;
+        opacity: 0.9;
+      }
+      .subtitle {
+        font-size: 12px;
+        margin: 0 0 12px 0;
+        opacity: 0.65;
+      }
+      .chart {
+        width: 100%;
+        height: 260px;
+        border-radius: 12px;
+        overflow: hidden;
+        border: 1px solid rgba(148, 163, 184, 0.25);
+        background: rgba(2, 6, 23, 0.2);
+      }
+      @media (prefers-color-scheme: light) {
+        .chart {
+          background: rgba(255, 255, 255, 0.7);
+        }
+      }
+      .footer {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        margin-top: 10px;
+        font-size: 12px;
+        opacity: 0.7;
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 10px;
+        border-radius: 999px;
+        border: 1px solid rgba(148, 163, 184, 0.25);
+      }
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #f7931a;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <p class="title">BTC price (90D) — demo chart</p>
+      <p class="subtitle">2025-12-20 → 2026-03-20 (illustrative only).</p>
+      <svg class="chart" viewBox="0 0 900 260" preserveAspectRatio="none" role="img" aria-label="Demo price chart">
+        <!-- Grid -->
+        <g opacity="0.18" stroke="currentColor">
+          <line x1="0" y1="40" x2="900" y2="40" />
+          <line x1="0" y1="90" x2="900" y2="90" />
+          <line x1="0" y1="140" x2="900" y2="140" />
+          <line x1="0" y1="190" x2="900" y2="190" />
+        </g>
+        <!-- Area -->
+        <path
+          d="M0 190 C 70 160, 140 210, 210 170 C 280 130, 350 150, 420 120 C 490 95, 560 140, 630 110 C 700 80, 770 95, 840 70 C 865 62, 885 60, 900 58 L 900 260 L 0 260 Z"
+          fill="rgba(247, 147, 26, 0.20)"
+        />
+        <!-- Line -->
+        <path
+          d="M0 190 C 70 160, 140 210, 210 170 C 280 130, 350 150, 420 120 C 490 95, 560 140, 630 110 C 700 80, 770 95, 840 70 C 865 62, 885 60, 900 58"
+          fill="none"
+          stroke="#F7931A"
+          stroke-width="3.5"
+          stroke-linecap="round"
+        />
+        <!-- Last point -->
+        <circle cx="900" cy="58" r="5.5" fill="#F7931A" />
+      </svg>
+      <div class="footer">
+        <span class="pill"><span class="dot"></span> Last: $69,862 (demo)</span>
+        <span class="pill">90D: +3.2% (demo)</span>
+      </div>
+    </div>
+    <script>
+      const postHeight = () => {
+        try {
+          const height = Math.max(
+            document.documentElement.scrollHeight,
+            document.body.scrollHeight
+          );
+          window.parent?.postMessage({ type: "chartHeight", height }, "*");
+        } catch {
+          // ignore
+        }
+      };
+      window.addEventListener("load", () => setTimeout(postHeight, 0));
+      window.addEventListener("resize", () => setTimeout(postHeight, 50));
+      postHeight();
+    </script>
+  </body>
+</html>

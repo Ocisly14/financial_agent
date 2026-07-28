@@ -1,0 +1,116 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { Dispatcher } from "../framework/dispatcher.ts";
+import { OrchestratorRuntime } from "../framework/orchestrator.ts";
+import { SkillRegistry } from "../framework/skill.ts";
+import { SubagentRuntime } from "../framework/subagent.ts";
+import { MockLlmProvider, ModelRouter, type LlmProvider } from "../infra/llm/provider.ts";
+import { AnthropicProvider } from "../infra/llm/anthropicProvider.ts";
+import { GoogleProvider } from "../infra/llm/googleProvider.ts";
+import { GoogleVertexProvider } from "../infra/llm/googleVertexProvider.ts";
+import { McpToolRegistry } from "../../mcp_tools/toolRegistry.ts";
+import { registerAllTools } from "../../mcp_tools/registerTools.ts";
+import { SessionRegistry } from "../framework/sessionState.ts";
+import type { EventStore } from "../framework/eventStore.ts";
+import { MongoEventStore } from "../infra/db/mongoEventStore.ts";
+import { orchestratorPrompt } from "./prompts/orchestratorPrompt.ts";
+import { createSubagentRegistry } from "./subagents/registerSubagents.ts";
+import { runComprehensiveAnalysisWorkflow } from "./workflows/comprehensiveAnalysis.ts";
+
+export type FinancialAgentApp = Awaited<ReturnType<typeof createFinancialAgentApp>>;
+
+export async function createFinancialAgentApp() {
+  const eventStore = await resolveEventStore();
+  const sessions = new SessionRegistry(eventStore);
+  const toolRegistry = new McpToolRegistry();
+  registerAllTools(toolRegistry);
+
+  const modelRouter = new ModelRouter(resolveLlmProvider());
+  const subagents = createSubagentRegistry();
+  const subagentRuntime = new SubagentRuntime(modelRouter, toolRegistry);
+  const skills = new SkillRegistry();
+  skills.registerWorkflow("comprehensive-analysis", runComprehensiveAnalysisWorkflow);
+  await skills.loadFromDirectory(resolveSkillsPath());
+
+  const dispatcherFactory = (sessionId: string) =>
+    new Dispatcher(sessionId, subagents, subagentRuntime, toolRegistry, sessions.getExisting(sessionId));
+
+  const orchestrator = new OrchestratorRuntime(
+    orchestratorPrompt,
+    modelRouter,
+    dispatcherFactory,
+    subagents,
+    skills,
+    toolRegistry,
+    sessions,
+  );
+
+  return {
+    sessions,
+    toolRegistry,
+    modelRouter,
+    subagents,
+    skills,
+    orchestrator,
+    createDispatcher: dispatcherFactory,
+  };
+}
+
+export function resolveLlmProvider(): LlmProvider {
+  const provider = (process.env["LLM_PROVIDER"] ?? "").toLowerCase();
+  const googleKey = process.env["GOOGLE_GENERATIVE_AI_API_KEY"];
+  const hasVertex = Boolean(process.env["GOOGLE_VERTEX_PROJECT"]);
+
+  if (provider === "vertex" || provider === "google-vertex") {
+    if (!hasVertex) {
+      throw new Error("LLM_PROVIDER=vertex but GOOGLE_VERTEX_PROJECT is not set");
+    }
+    return new GoogleVertexProvider();
+  }
+
+  if (provider === "google" || provider === "gemini") {
+    // Prefer Vertex (service-account auth) when configured; fall back to API key.
+    if (hasVertex) return new GoogleVertexProvider();
+    if (!googleKey) {
+      throw new Error(
+        "LLM_PROVIDER=google but neither GOOGLE_VERTEX_PROJECT nor GOOGLE_GENERATIVE_AI_API_KEY is set",
+      );
+    }
+    return new GoogleProvider(googleKey);
+  }
+
+  if (provider === "anthropic") {
+    const key = process.env["ANTHROPIC_API_KEY"];
+    if (!key) throw new Error("LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY is not set");
+    return new AnthropicProvider(key);
+  }
+
+  // Auto-detect when LLM_PROVIDER is unset: prefer Vertex, then Google API key, then Anthropic.
+  if (!provider) {
+    if (hasVertex) return new GoogleVertexProvider();
+    if (googleKey) return new GoogleProvider(googleKey);
+    if (process.env["ANTHROPIC_API_KEY"]) {
+      return new AnthropicProvider(process.env["ANTHROPIC_API_KEY"]!);
+    }
+  }
+
+  // Default to mock (tests, local dev without an API key)
+  return new MockLlmProvider();
+}
+
+async function resolveEventStore(): Promise<EventStore | undefined> {
+  const uri = process.env["MONGODB_URI"] ?? "mongodb://localhost:27017/financial-agent";
+  try {
+    return await MongoEventStore.connect(uri);
+  } catch (err) {
+    console.warn(
+      `[sessions] could not connect to MongoDB at ${uri}; sessions will not persist across restarts: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return undefined;
+  }
+}
+
+function resolveSkillsPath(): string {
+  const current = path.dirname(fileURLToPath(import.meta.url));
+  return path.resolve(current, "../../skills");
+}

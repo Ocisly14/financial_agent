@@ -1,0 +1,57 @@
+<h2>What should the pill text say while working?</h2>
+<p class="subtitle">The backend gives us, per task: a task description ("Compute technical analysis for BTC"), a tool name ("calling technical_analysis"), and a done summary. The pill updates live — here's the same run shown three ways (top→bottom = time passing).</p>
+
+<style>
+  .seq { display:flex; flex-direction:column; gap:7px; text-align:left; }
+  .pill { display:flex; align-items:center; gap:8px; border:1px solid rgba(120,120,140,.3); border-radius:99px; padding:6px 12px; width:max-content; font:13px ui-sans-serif,system-ui; }
+  .pill .run{ color:#2563eb; } .pill .done{ color:#16a34a; }
+  .chip { font-size:11px; color:#6b7280; border:1px solid rgba(120,120,140,.3); border-radius:99px; padding:1px 7px; }
+  .spin{ display:inline-block; animation:spin 1s linear infinite; } @keyframes spin{ to{ transform:rotate(360deg); } }
+  .faint{ opacity:.5; }
+</style>
+
+<div class="cards">
+  <div class="card" data-choice="tool" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:14px">
+      <div class="seq">
+        <div class="pill faint"><span class="run"><span class="spin">⟳</span></span> calling get_crypto_price <span class="chip">1/3</span></div>
+        <div class="pill"><span class="run"><span class="spin">⟳</span></span> calling technical_analysis <span class="chip">2/3</span></div>
+        <div class="pill faint"><span class="done">✓</span> Done <span class="chip">3 steps ▾</span></div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A · Live tool name</h3>
+      <p>Mirrors exactly what the agent does right now ("calling technical_analysis"). Most transparent, but jumps fast and shows raw tool names.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="task" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:14px">
+      <div class="seq">
+        <div class="pill faint"><span class="run"><span class="spin">⟳</span></span> Fetching market price <span class="chip">1/3</span></div>
+        <div class="pill"><span class="run"><span class="spin">⟳</span></span> Running technical analysis <span class="chip">2/3</span></div>
+        <div class="pill faint"><span class="done">✓</span> Done <span class="chip">3 steps ▾</span></div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B · Task description</h3>
+      <p>Shows the human-readable task ("Running technical analysis"), not the raw tool name. Readable, still specific. (Derived from the dispatched task text.)</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="phase" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:14px">
+      <div class="seq">
+        <div class="pill faint"><span class="run"><span class="spin">⟳</span></span> Gathering data… <span class="chip">3 tasks</span></div>
+        <div class="pill"><span class="run"><span class="spin">⟳</span></span> Analyzing… <span class="chip">3 tasks</span></div>
+        <div class="pill faint"><span class="done">✓</span> Done <span class="chip">3 steps ▾</span></div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C · Generic phase</h3>
+      <p>One calm word per phase ("Gathering data…", "Analyzing…"). Cleanest, least jumpy, but vaguest — hides which tool/asset.</p>
+    </div>
+  </div>
+</div>
+
+<p class="subtitle" style="margin-top:14px">Note: whichever you pick, clicking the chip (▾) expands the full per-task list. This is only about the <b>collapsed pill line</b>.</p>

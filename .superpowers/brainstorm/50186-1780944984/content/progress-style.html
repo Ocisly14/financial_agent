@@ -1,0 +1,72 @@
+<h2>How should the live progress look?</h2>
+<p class="subtitle">While the agent works, the backend tells us each dispatched task + the tool it's calling + when it's done. Pick the overall style. (Example: "draw a 30-day BTC chart and analyze the technicals")</p>
+
+<style>
+  .pm { font: 13px/1.4 ui-sans-serif, system-ui; text-align:left; }
+  .pm .row { display:flex; align-items:center; gap:8px; padding:4px 0; }
+  .pm .ic { width:16px; text-align:center; flex:0 0 16px; }
+  .pm .done { color:#16a34a; }
+  .pm .run  { color:#2563eb; }
+  .pm .wait { color:#9ca3af; }
+  .pm .muted{ color:#6b7280; }
+  .pm-card { border:1px solid rgba(120,120,140,.3); border-radius:10px; padding:10px 12px; background:rgba(130,130,160,.06); }
+  .pm-head { display:flex; align-items:center; justify-content:space-between; font-weight:600; margin-bottom:8px; }
+  .pm-bar  { height:6px; border-radius:99px; background:rgba(120,120,140,.2); margin:6px 0 10px; overflow:hidden; }
+  .pm-bar > i { display:block; height:100%; width:55%; background:#2563eb; }
+  .pm-timeline { border-left:2px solid rgba(120,120,140,.25); padding-left:12px; }
+  .pm-oneline { display:flex; align-items:center; gap:8px; border:1px solid rgba(120,120,140,.3); border-radius:99px; padding:6px 12px; width:max-content; }
+  .pm-chip { font-size:11px; color:#6b7280; border:1px solid rgba(120,120,140,.3); border-radius:99px; padding:1px 7px; }
+  .spin { display:inline-block; animation:spin 1s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+</style>
+
+<div class="cards">
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:14px">
+      <div class="pm">
+        <div class="pm-card">
+          <div class="pm-head"><span>🧠 Working…</span><span class="muted">3 / 5 ▾</span></div>
+          <div class="pm-bar"><i></i></div>
+          <div class="row"><span class="ic done">✓</span><span>Fetch BTC price &amp; 24h metrics</span></div>
+          <div class="row"><span class="ic run"><span class="spin">⟳</span></span><span>Technical analysis · <span class="muted">calling technical_analysis</span></span></div>
+          <div class="row"><span class="ic done">✓</span><span>Generate 30-day price chart</span></div>
+          <div class="row"><span class="ic wait">○</span><span class="muted">Recent news</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A · Rich panel</h3>
+      <p>Bordered card with title + progress bar + per-task list (status icon, task, current tool). Collapsible; stays (collapsed) after done. Most informative.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:14px">
+      <div class="pm">
+        <div class="pm-timeline">
+          <div class="row"><span class="ic done">✓</span><span>Fetched BTC price</span></div>
+          <div class="row"><span class="ic done">✓</span><span>Generated price chart</span></div>
+          <div class="row"><span class="ic run"><span class="spin">⟳</span></span><span>Running technical analysis…</span></div>
+          <div class="row"><span class="ic wait">○</span><span class="muted">Recent news</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B · Flat timeline</h3>
+      <p>Lightweight left-border list, one line per task, no card chrome. Cleaner / less boxy. Less prominent than A.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:14px">
+      <div class="pm" style="display:flex;flex-direction:column;gap:10px">
+        <div class="pm-oneline"><span class="run"><span class="spin">⟳</span></span><span>Analyzing markets…</span><span class="pm-chip">3 steps ▾</span></div>
+        <div class="muted" style="font-size:11px">↑ collapsed by default — click chip to expand the full list (style A)</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C · One-line status</h3>
+      <p>Single compact pill that updates ("Searching…" → "Analyzing…"), with a count. Expands to the full list on click. Most minimal, ChatGPT-style.</p>
+    </div>
+  </div>
+</div>

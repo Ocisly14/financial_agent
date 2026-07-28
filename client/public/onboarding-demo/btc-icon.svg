@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="320" height="320" viewBox="0 0 320 320" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="bg" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(110 90) rotate(55) scale(260)">
+      <stop stop-color="#FFB74A"/>
+      <stop offset="1" stop-color="#F7931A"/>
+    </radialGradient>
+    <filter id="shadow" x="-20" y="-20" width="360" height="360" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#000000" flood-opacity="0.25"/>
+    </filter>
+  </defs>
+
+  <g filter="url(#shadow)">
+    <circle cx="160" cy="160" r="140" fill="url(#bg)"/>
+    <circle cx="160" cy="160" r="140" fill="none" stroke="#FFFFFF" stroke-opacity="0.25" stroke-width="6"/>
+  </g>
+
+  <!-- Stylized "B" -->
+  <g transform="translate(160 168) rotate(-12) translate(-160 -168)">
+    <path
+      d="M148 66H184C214 66 232 82 232 106C232 124 223 138 207 146C229 154 242 171 242 194C242 224 220 244 186 244H148V66Z"
+      fill="#FFFFFF"
+      opacity="0.95"
+    />
+    <path
+      d="M168 92H184C198 92 206 100 206 112C206 124 198 132 184 132H168V92Z"
+      fill="#F7931A"
+      opacity="0.9"
+    />
+    <path
+      d="M168 158H186C202 158 212 168 212 184C212 200 202 210 186 210H168V158Z"
+      fill="#F7931A"
+      opacity="0.9"
+    />
+    <rect x="138" y="56" width="10" height="210" fill="#FFFFFF" opacity="0.85"/>
+    <rect x="188" y="56" width="10" height="210" fill="#FFFFFF" opacity="0.85"/>
+  </g>
+</svg>

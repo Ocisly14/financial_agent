@@ -1,0 +1,53 @@
+<h2>After the answer is done — does the progress stay?</h2>
+<p class="subtitle">The pill sits at the top of the assistant's reply (mock below). The question is what happens once the final answer arrives.</p>
+
+<style>
+  .chat { border:1px solid rgba(120,120,140,.3); border-radius:12px; padding:14px; background:rgba(130,130,160,.05); max-width:560px; margin:0 auto; text-align:left; font:13px/1.5 ui-sans-serif,system-ui; }
+  .u { display:flex; justify-content:flex-end; margin-bottom:14px; }
+  .u > div { background:#2563eb; color:#fff; border-radius:12px 12px 4px 12px; padding:8px 12px; max-width:75%; }
+  .a { display:flex; gap:8px; }
+  .av { width:26px;height:26px;border-radius:99px;border:1px solid rgba(120,120,140,.3);flex:0 0 26px;display:flex;align-items:center;justify-content:center;font-size:12px; }
+  .abody { flex:1; min-width:0; }
+  .pill { display:inline-flex; align-items:center; gap:7px; border:1px solid rgba(120,120,140,.3); border-radius:99px; padding:4px 10px; font-size:12px; margin-bottom:8px; }
+  .done{ color:#16a34a; }
+  .chip{ color:#6b7280; }
+  .ans { background:rgba(130,130,160,.08); border:1px solid rgba(120,120,140,.2); border-radius:4px 12px 12px 12px; padding:10px 12px; }
+  .chart { height:60px; border:1px dashed rgba(120,120,140,.4); border-radius:6px; display:flex; align-items:center; justify-content:center; color:#6b7280; margin-top:8px; font-size:12px; }
+</style>
+
+<div class="chat">
+  <div class="u"><div>draw a 30-day BTC chart and analyze the technicals</div></div>
+  <div class="a">
+    <div class="av">🧠</div>
+    <div class="abody">
+      <span class="pill"><span class="done">✓</span> Done <span class="chip">· 3 steps ▾</span></span>
+      <div class="ans">BTC is trading at <b>$67,420</b>, +3.2% over 30 days. The trend is constructive…<div class="chart">[ BTC 30-day chart ]</div></div>
+    </div>
+  </div>
+</div>
+
+<p class="subtitle" style="margin-top:16px">↑ pill shown collapsed above the answer. Pick the persistence behavior:</p>
+
+<div class="options">
+  <div class="option" data-choice="trace" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Keep on every answer (trace)</h3>
+      <p>Each past reply keeps its own collapsed "✓ N steps ▾" — expand any old answer anytime to see what it did. Full history. (Stores steps per message.)</p>
+    </div>
+  </div>
+  <div class="option" data-choice="last" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Keep on the latest answer only</h3>
+      <p>The current/last reply keeps its collapsed pill; it clears when you send the next message. Lighter — only one trace at a time.</p>
+    </div>
+  </div>
+  <div class="option" data-choice="live" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>Live only — vanish when done</h3>
+      <p>Pill shows while working, then disappears once the answer lands. No trace afterward. Cleanest, but you can't review what it did.</p>
+    </div>
+  </div>
+</div>

@@ -1,0 +1,34 @@
+.DS_Store
+
+# Local git worktrees
+.worktrees/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Dependencies
+node_modules/
+
+# Build and cache output
+dist/
+build/
+.next/
+coverage/
+cache/
+/charts
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# runtime state and local agent memory (not versioned)
+data/
+memory/
+
+# brainstorming visual-companion scratch files
+.superpowers/
