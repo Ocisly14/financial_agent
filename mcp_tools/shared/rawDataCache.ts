@@ -2,8 +2,8 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 /**
- * Local disk cache for raw tool payloads (OHLCV bars, sentiment time-series,
- * fear/greed history, exchange order/fill lists, …). These raw arrays must NOT
+ * Local disk cache for raw tool payloads (OHLCV bars, search records,
+ * exchange order/fill lists, …). These raw arrays must NOT
  * flow into `generation_context` — they bloat the agent context and the
  * generating model never references them point-by-point. Tools curate a small
  * subset for `generation_context.data` and persist the full payload here so it

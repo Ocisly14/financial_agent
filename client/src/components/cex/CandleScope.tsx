@@ -10,11 +10,9 @@ export { DEFAULT_CANDLE_THEME, type CandleTheme } from "./candleTheme";
  * optional live mark, and it renders a calibrated price grid, candles, a live
  * mark line, and a hover crosshair with an OHLC readout.
  *
- * NOTE ON DATA: this codebase has no historical klines endpoint. The Strategy
- * Floor builds candles forward-in-time by bucketing real mid marks polled from
- * `getMarketSnapshot`, seeded once from the real 24h session range so the scope
- * is not empty on first paint. The seed boundary is passed as `liveFromTs` so we
- * can mark where the genuine live tape begins.
+ * NOTE ON DATA: the component is shared. Strategy Floor builds crypto candles
+ * from Binance history plus live marks; StockChart supplies Alpaca OHLC bars.
+ * `liveFromTs` remains optional so Strategy Floor can distinguish seeded data.
  */
 
 export interface Candle {

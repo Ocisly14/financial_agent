@@ -7,8 +7,6 @@ export const formatSourceName = (source: string | undefined | null): string => {
     switch (source) {
         case "regular_message":
             return i18n.t("chat.sources.regularMessage");
-        case "comprehensive_analysis":
-            return i18n.t("chat.sources.comprehensiveAnalysis");
         case "task_chain_action":
             return i18n.t("chat.sources.taskChain");
         case "task_chain_planning":
@@ -66,8 +64,6 @@ export const extractReportPaths = (text: string): string[] => {
     const patterns = [
         /(?:find.*?report at|saved to|at):\s*([^\s]+saved_data[\/\\]Reports[\/\\][^\s]+\.html)/gi,
         /([^\s]*saved_data[\/\\]Reports[\/\\][^\s]+\.html)/gi,
-        /([^\s]*[a-z0-9_-]+_comprehensive_analysis_[^\s]*\.html)/gi,
-        /`([a-z0-9_-]+_comprehensive_analysis_[^`]*\.html)`/gi,
     ];
 
     for (const pattern of patterns) {
@@ -81,10 +77,6 @@ export const extractReportPaths = (text: string): string[] => {
             if (path.includes("saved_data")) {
                 const savedDataIndex = path.indexOf("saved_data");
                 path = path.substring(savedDataIndex);
-            }
-
-            if (!path.includes("saved_data") && path.includes("_comprehensive_analysis_") && path.endsWith(".html")) {
-                path = `saved_data/Reports/${path}`;
             }
 
             if (!reportPaths.includes(path)) {
@@ -126,7 +118,7 @@ export const resolveMessageId = (message: ContentWithUser): string | number | un
 export interface GetMessageChartPathsOptions {
     /**
      * When true (default), include chart paths discovered in metadata.chartPaths arrays.
-     * Disable to avoid attaching global chart collections (e.g., comprehensive analysis summaries)
+     * Disable to avoid attaching global chart collections from summary messages.
      * when rendering individual action nodes.
      */
     includeMetadataArray?: boolean;

@@ -1,28 +1,13 @@
 import { McpToolRegistry } from "./toolRegistry.ts";
 
-// market
-import { createGetCryptoPriceTool } from "./market/getCryptoPriceTool.ts";
 // stock
 import { createGetStockPriceTool } from "./stock/getStockPriceTool.ts";
 // search
 import { createWebSearchTool } from "./search/webSearchTool.ts";
 import { createCryptoResearchSearchTool } from "./search/cryptoResearchSearchTool.ts";
 import { createInstitutionalAdoptionSearchTool } from "./search/institutionalAdoptionSearchTool.ts";
-// sentiment
-import { createFearGreedAnalysisTool } from "./sentiment/fearGreedAnalysisTool.ts";
 // technical
 import { createTechnicalAnalysisTool } from "./technical/technicalAnalysisTool.ts";
-// onchain
-import { createWhaleAlertTool } from "./onchain/whaleAlertTool.ts";
-import { createInflowOutflowTool } from "./onchain/inflowOutflowTool.ts";
-import { createTransactionVolumeTool } from "./onchain/transactionVolumeTool.ts";
-import { createBidAskVolumeTool } from "./onchain/bidAskVolumeTool.ts";
-import { createAddressTransactionTool } from "./onchain/addressTransactionTool.ts";
-// chart
-import { createPriceChartTool } from "./chart/priceChartTool.ts";
-// launchpad
-import { createTokenMetadataOverviewTool } from "./launchpad/tokenMetadataOverviewTool.ts";
-import { createTokenHourlyMetricsTool } from "./launchpad/tokenHourlyMetricsTool.ts";
 // trading
 import { createGetBalanceTool } from "./trading/getBalanceTool.ts";
 import { createGetOrdersTool } from "./trading/getOrdersTool.ts";
@@ -43,21 +28,11 @@ import {
 
 export function registerAllTools(registry: McpToolRegistry): void {
   // non_trading tools
-  registry.register(createGetCryptoPriceTool());
   registry.register(createGetStockPriceTool());
   registry.register(createWebSearchTool());
   registry.register(createCryptoResearchSearchTool());
   registry.register(createInstitutionalAdoptionSearchTool());
-  registry.register(createFearGreedAnalysisTool());
   registry.register(createTechnicalAnalysisTool());
-  registry.register(createWhaleAlertTool());
-  registry.register(createInflowOutflowTool());
-  registry.register(createTransactionVolumeTool());
-  registry.register(createBidAskVolumeTool());
-  registry.register(createAddressTransactionTool());
-  registry.register(createTokenMetadataOverviewTool());
-  registry.register(createTokenHourlyMetricsTool());
-  registry.register(createPriceChartTool());
   // trading tools
   registry.register(createGetBalanceTool());
   registry.register(createGetOrdersTool());
@@ -77,19 +52,9 @@ export function registerAllTools(registry: McpToolRegistry): void {
 }
 
 export const MARKET_DATA_TOOLS = [
-  "get_crypto_price",
   "get_stock_price",
   "web_search",
   "technical_analysis",
-  "price_chart",
-  "whale_alert",
-  "inflow_outflow_analysis",
-  "transaction_volume_analysis",
-  "bid_ask_volume_analysis",
-  "address_transaction_data",
-  "fear_greed_index_analysis",
-  "token_metadata_overview",
-  "token_hourly_metrics",
 ] as const;
 
 export const MARKET_RESEARCH_TOOLS = [

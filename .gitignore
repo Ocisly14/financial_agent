@@ -27,7 +27,7 @@ yarn-error.log*
 pnpm-debug.log*
 
 # runtime state and local agent memory (not versioned)
-data/
+/data/
 memory/
 
 # brainstorming visual-companion scratch files

@@ -15,7 +15,7 @@ export const failureTimestamps = new Map<string, number>();
 
 /** Active workflow state per session (agentId → status). */
 export interface ActiveWorkflow {
-  kind: "cex_human_input" | "task_chain" | "comprehensive_analysis";
+  kind: "cex_human_input" | "task_chain";
   startedAt: number;
   sessionId?: string;
 }

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createGetStockPriceTool } from "../getStockPriceTool.ts";
-import type { Snapshot, DailyBar } from "../alpacaClient.ts";
+import type { Snapshot, DailyBar } from "../../../src/data/stock/index.ts";
 
 function bar(t: string, c: number): DailyBar {
   return { t, o: c, h: c, l: c, c, v: 1000, vw: c };

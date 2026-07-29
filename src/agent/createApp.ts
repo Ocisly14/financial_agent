@@ -15,7 +15,6 @@ import type { EventStore } from "../framework/eventStore.ts";
 import { MongoEventStore } from "../infra/db/mongoEventStore.ts";
 import { orchestratorPrompt } from "./prompts/orchestratorPrompt.ts";
 import { createSubagentRegistry } from "./subagents/registerSubagents.ts";
-import { runComprehensiveAnalysisWorkflow } from "./workflows/comprehensiveAnalysis.ts";
 
 export type FinancialAgentApp = Awaited<ReturnType<typeof createFinancialAgentApp>>;
 
@@ -29,7 +28,6 @@ export async function createFinancialAgentApp() {
   const subagents = createSubagentRegistry();
   const subagentRuntime = new SubagentRuntime(modelRouter, toolRegistry);
   const skills = new SkillRegistry();
-  skills.registerWorkflow("comprehensive-analysis", runComprehensiveAnalysisWorkflow);
   await skills.loadFromDirectory(resolveSkillsPath());
 
   const dispatcherFactory = (sessionId: string) =>

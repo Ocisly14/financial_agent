@@ -194,13 +194,6 @@ const zhCN = {
             faq: "常见问题",
             copyright: "© 2025 Financial Agent。保留所有权利。",
         },
-        dailyAnalysis: {
-            title: "每日分析",
-            cardTitle: "{{symbol}} 综合分析",
-            emptySummary: "打开这份日报以查看完整的市场分析。",
-            cta: "阅读完整报告",
-            loadError: "获取每日分析失败",
-        },
         trendingResearch: {
             title: "最热门任务链",
             empty: "还没有热门任务链，快去收藏并执行一些任务链吧！",
@@ -209,19 +202,6 @@ const zhCN = {
         agentTools: {
             title: "查看 Financial Agent 为更聪明的加密洞察打造的专属智能工具",
             tools: [
-                {
-                    id: "sentiment",
-                    name: "社交情绪分析",
-                    description:
-                        "实时追踪新闻源与 X（Twitter）中的 SentiScore，快速把握加密市场情绪变化。",
-                    metric: "实时情绪追踪",
-                },
-                {
-                    id: "comprehensive",
-                    name: "综合分析",
-                    description:
-                        "将情绪、技术面、链上指标、新闻与预测整合为统一的市场全景视图。",
-                },
                 {
                     id: "prediction",
                     name: "市场预测",
@@ -232,12 +212,6 @@ const zhCN = {
                     name: "技术分析",
                     description:
                         "结合 40+ 技术指标与衍生品市场数据，输出更精准的实时趋势与信号。",
-                },
-                {
-                    id: "onchain",
-                    name: "链上数据分析",
-                    description: "追踪巨鲸动向、交易所资金流与区块链指标，识别聪明钱行为与趋势。",
-                    metric: "实时链上数据",
                 },
                 {
                     id: "news",
@@ -261,7 +235,7 @@ const zhCN = {
         },
         reports: {
             title: "每周研究报告",
-            subtitle: "点击任一报告，查看每周加密市场的综合分析。",
+            subtitle: "点击任一报告，查看每周加密市场研究。",
             loading: "正在加载报告...",
             loadError: "加载报告失败",
             loginRequired: "需要登录",
@@ -496,7 +470,6 @@ const zhCN = {
                     "综合链上数据分析与可视化",
                     "主流币种技术分析与可视化",
                     "主流币种价格走势预测",
-                    "主流币种综合分析",
                     "邮件支持",
                 ],
             },
@@ -600,13 +573,6 @@ const zhCN = {
         chartLabel: "图表 {{index}}",
         defaultTitle: "图表",
         valueAxis: "数值",
-        networkActivityTrend: "链上活跃趋势",
-        nativeRender: "原生渲染",
-        change: "变化",
-        range: "范围",
-        vsPrevious: "较前值",
-        noComparison: "暂无对比",
-        rangeSeparator: "至",
     },
     reportsPage: {
         sourcesAndReferences: "来源与参考",
@@ -618,7 +584,6 @@ const zhCN = {
         dailyReport: "日报",
         backToHome: "返回首页",
         catalogue: "目录",
-        comprehensiveAnalysisTitle: "{{asset}} 综合分析",
         share: "分享",
         linkCopied: "链接已复制",
         disclaimer:
@@ -759,10 +724,6 @@ const zhCN = {
         action: "动作",
         analysisAction: "分析动作",
         analysisActions: "分析动作",
-        liveComprehensiveAnalysis: "实时综合分析",
-        comprehensiveAnalysis: "综合分析",
-        comprehensiveAnalysisDescription: "使用 12 个必选动作执行的综合加密货币分析",
-        comprehensiveAnalysisActionDescription: "综合分析 {{actionName}}",
         roomCreatedTitle: "房间已创建",
         roomCreatedDescription: "“{{name}}” 已创建。",
         anonymousRoomCreatedTitle: "匿名房间已创建",
@@ -852,7 +813,6 @@ const zhCN = {
         quotaWarningLabel: "已使用 {{percent}}% · {{date}} 重置",
         sources: {
             regularMessage: "普通消息",
-            comprehensiveAnalysis: "综合分析",
             taskChain: "任务链",
             taskPlanning: "任务规划",
         },

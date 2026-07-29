@@ -1,7 +1,11 @@
-import { env } from "../config.ts";
-
 const ALPACA_BASE = "https://data.alpaca.markets/v2";
 const FEED = "iex";
+
+function requiredEnv(key: string): string {
+  const value = process.env[key];
+  if (value === undefined) throw new Error(`Missing required env var: ${key}`);
+  return value;
+}
 
 export type DailyBar = {
   t: string;   // 交易日 "2026-07-27"（日线）或完整 ISO 时刻（分钟线）
@@ -46,8 +50,8 @@ async function alpacaFetch(path: string): Promise<Record<string, unknown>> {
   const res = await fetch(`${ALPACA_BASE}${path}`, {
     headers: {
       Accept: "application/json",
-      "APCA-API-KEY-ID": env("ALPACA_API_KEY_ID"),
-      "APCA-API-SECRET-KEY": env("ALPACA_API_SECRET_KEY"),
+      "APCA-API-KEY-ID": requiredEnv("ALPACA_API_KEY_ID"),
+      "APCA-API-SECRET-KEY": requiredEnv("ALPACA_API_SECRET_KEY"),
     },
   });
   if (!res.ok) {

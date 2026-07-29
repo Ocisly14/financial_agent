@@ -3,7 +3,6 @@ import { useMemo, useState, useCallback, useRef, useEffect } from 'react';
 import type { CSSProperties } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { LandingPageHero } from '../components/landing/LandingPageHero';
-import { DailyAnalysis } from '../components/landing/DailyAnalysis';
 import { TrendingResearch, type TrendingTaskChain } from '../components/landing/TrendingResearch';
 import { AgentToolsShowcase } from '../components/landing/AgentToolsShowcase';
 import { SidebarTrigger, useSidebar } from '../components/ui/sidebar';
@@ -120,13 +119,6 @@ export default function LandingPage() {
           <LandingPageHero
             onSearch={handleSearch}
             onVoiceStart={handleVoiceStart}
-            containerStyle={dynamicContentWidth}
-          />
-        </section>
-
-        {/* Daily analysis section */}
-        <section className="py-8 border-t border-gray-200 dark:border-gray-700">
-          <DailyAnalysis
             containerStyle={dynamicContentWidth}
           />
         </section>

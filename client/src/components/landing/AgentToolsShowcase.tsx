@@ -1,5 +1,5 @@
 import type { CSSProperties } from 'react';
-import { TrendingUp, BarChart3, Brain, Newspaper, Activity, Target } from 'lucide-react';
+import { TrendingUp, BarChart3, Brain, Newspaper, Target } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 interface AgentTool {
@@ -17,11 +17,9 @@ interface AgentToolsShowcaseProps {
 
 const getIconComponent = (iconName: string) => {
   const icons: Record<string, React.ReactNode> = {
-    sentiment: <TrendingUp className="w-8 h-8" />,
     technical: <BarChart3 className="w-8 h-8" />,
     prediction: <Brain className="w-8 h-8" />,
     news: <Newspaper className="w-8 h-8" />,
-    onchain: <Activity className="w-8 h-8" />,
     market: <Target className="w-8 h-8" />,
   };
   return icons[iconName] || <TrendingUp className="w-8 h-8" />;
@@ -31,11 +29,8 @@ export const AgentToolsShowcase: React.FC<AgentToolsShowcaseProps> = ({ containe
   const { t } = useTranslation();
   const agentTools = t("landing.agentTools.tools", { returnObjects: true }) as AgentTool[];
   const previews: Record<string, string> = {
-    sentiment: "📊",
-    comprehensive: "📊",
     prediction: "🔮",
     technical: "📈",
-    onchain: "⛓️",
     news: "📰",
   };
 

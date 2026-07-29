@@ -220,13 +220,6 @@ export const apiClient = {
 
         return { success: response.success, reports };
     },
-		    getCoinMarketCapPrice: (symbol: string, convert = "USD") => {
-		        const qs = new URLSearchParams({ symbol, convert });
-		        return fetcher({
-		            url: `/market/coinmarketcap/price?${qs.toString()}`,
-		            method: "GET",
-		        });
-		    },
 		    deleteFile: (filePath: string, agentId?: string, roomId?: string): Promise<{ success: boolean; message: string }> =>
 		        fetcher({
 		            url: "/files",

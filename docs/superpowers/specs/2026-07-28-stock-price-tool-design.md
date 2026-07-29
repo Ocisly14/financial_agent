@@ -7,13 +7,13 @@ status: spec
 **Status:** Implemented (2026-07-28)
 **Date:** 2026-07-28
 **Author:** victor530914@gmail.com (with Claude)
-**Scope:** 新增 `mcp_tools/stock/` 目录与 `get_stock_price` 工具;新增 SQLite 表 `stock_bars` / `stock_bar_coverage`;在 `registerAllTools` 与 `ONCHAIN_DATA_TOOLS` 中注册。不改 orchestrator / dispatcher / subagent 协议,不改现有任何工具。
+**Scope:** 新增 `mcp_tools/stock/` 目录与 `get_stock_price` 工具;新增 SQLite 表 `stock_bars` / `stock_bar_coverage`;在 `registerAllTools` 与市场数据工具列表中注册。不改 orchestrator / dispatcher / subagent 协议,不改现有任何工具。
 
 ---
 
 ## 1. 背景与目标
 
-现有市场数据工具只覆盖加密货币(`get_crypto_price`,数据源 CoinMarketCap)。需要一个等价的美股工具,让 agent 能回答"AAPL 现在多少钱""过去三个月走势如何"这类问题。
+需要一个美股市场数据工具,让 agent 能回答"AAPL 现在多少钱""过去三个月走势如何"这类问题。
 
 两个约束驱动了整个设计:
 
@@ -52,7 +52,7 @@ status: spec
 
 ## 3. 分层架构
 
-沿用 `mcp_tools/market/` 已有的 client + tool + prompts 三件套模式,新增一个 store/repository 层:
+采用 client + tool + prompts 三件套模式,并增加一个 store/repository 层:
 
 ```
 getStockPriceTool.ts        工具定义,组装 summary + generation_context
@@ -158,7 +158,7 @@ inputSchema: {
 
 **`symbol` 由调用方 agent 给出,工具内不做 ticker 推断。** agent 读得到完整对话,判断用户指的是哪支票远比工具内部的正则可靠;工具侧的启发式(大写词匹配 + 停用词表)必然会把 "US"、"CEO"、"AI" 这类词误判成股票代码。工具的 description 与 `symbol` 字段说明中明确要求调用前先确定标的。
 
-缺少 `symbol` 时返回 `error: "symbol_required"` 的错误上下文,提示 agent 补齐参数后重新调用,**不猜测默认标的**——`get_crypto_price` 默认回退 BTC 是因为加密场景下 BTC 是合理基准,美股没有等价物,猜错会让模型分析完全错误的公司。
+缺少 `symbol` 时返回 `error: "symbol_required"` 的错误上下文,提示 agent 补齐参数后重新调用,**不猜测默认标的**——美股没有合理的默认标的,猜错会让模型分析完全错误的公司。
 
 返回结构与现有工具同构:
 
@@ -186,7 +186,7 @@ inputSchema: {
 | 情况 | 行为 |
 |---|---|
 | snapshot 请求失败,但库中有日 K | 返回库数据,`data.staleness` 标注"实时报价不可用,最新收盘数据截至 YYYY-MM-DD",summary 明示 |
-| snapshot 与库都无数据 | 返回错误上下文,prompt 为"No market data available for {symbol}",与 `get_crypto_price` 的 catch 分支同构 |
+| snapshot 与库都无数据 | 返回错误上下文,prompt 为"No market data available for {symbol}" |
 | symbol 无效 / Alpaca 返回 404 | summary 说明该代码不存在,不写入 coverage(避免把无效 symbol 固化进库) |
 | SQLite 打不开(磁盘只读等) | 退化为纯 API 模式:直接拉取日 K 返回,不落库。工具可用性不应被存储故障连坐 |
 | 增量拉取失败但库中数据够用 | 返回库数据,标注 staleness,不抛错 |
@@ -217,7 +217,7 @@ inputSchema: {
 ## 9. 注册与配置
 
 - `registerAllTools()` 中注册 `createGetStockPriceTool()`。
-- 加入 `ONCHAIN_DATA_TOOLS` 常量数组——该列表是喂给 `onchain_data` 这个市场数据 subagent 的工具集。
+- 加入市场数据工具常量数组——该列表用于配置市场数据 subagent 的工具集。
 - `.env.example` 新增一段:
 
 ```

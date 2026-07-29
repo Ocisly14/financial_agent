@@ -197,13 +197,6 @@ const en = {
             faq: "FAQ",
             copyright: "© 2025 Financial Agent. All rights reserved.",
         },
-        dailyAnalysis: {
-            title: "Daily Analysis",
-            cardTitle: "Comprehensive {{symbol}} Analysis",
-            emptySummary: "Open this daily report to view the full market analysis.",
-            cta: "Read full report",
-            loadError: "Failed to fetch daily analysis",
-        },
         trendingResearch: {
             title: "Hottest Task Chains",
             empty: "No trending task chains yet. Be the first to favorite and execute some!",
@@ -212,19 +205,6 @@ const en = {
         agentTools: {
             title: "Check out Financial Agent's tailored agent tools for smarter crypto insights",
             tools: [
-                {
-                    id: "sentiment",
-                    name: "Social Sentiment Analysis",
-                    description:
-                        "Real-time SentiScore tracking from news sources and X (Twitter), providing instant sentiment insights on crypto markets.",
-                    metric: "Live sentiment tracking",
-                },
-                {
-                    id: "comprehensive",
-                    name: "Comprehensive Analysis",
-                    description:
-                        "Combine sentiment, technicals, on-chain metrics, news, and forecasting into a single comprehensive market view.",
-                },
                 {
                     id: "prediction",
                     name: "Market Prediction",
@@ -236,13 +216,6 @@ const en = {
                     name: "Technical Analysis",
                     description:
                         "Leverage 40+ technical indicators and derivatives market data to deliver precise trends and signals for real-time...",
-                },
-                {
-                    id: "onchain",
-                    name: "On-Chain Data Analysis",
-                    description:
-                        "Track whale movements, exchange flows, and blockchain metrics to identify smart money behavior and market trends.",
-                    metric: "Live blockchain data",
                 },
                 {
                     id: "news",
@@ -269,7 +242,7 @@ const en = {
         reports: {
             title: "Weekly Research Reports",
             subtitle:
-                "Click on any report to read the comprehensive analysis of the weekly crypto market.",
+                "Click any report to read the weekly crypto market research.",
             loading: "Loading reports...",
             loadError: "Failed to load reports",
             loginRequired: "Login Required",
@@ -283,7 +256,7 @@ const en = {
             latestLockedDescription:
                 "Upgrade to Pro to access the most recent weekly research report as soon as it's published.",
             premiumLockedDescription:
-                "Upgrade to access comprehensive weekly research reports with in-depth crypto market analysis, on-chain metrics, and AI-powered insights.",
+                "Upgrade to access weekly research reports with in-depth crypto market analysis, on-chain metrics, and AI-powered insights.",
             upgradeTo: "Upgrade to {{plan}}",
         },
         trending: {
@@ -519,7 +492,6 @@ const en = {
                     "Comprehensive On-Chain Data analysis and visualization",
                     "Technical analysis on main cryptos and visualization",
                     "Price movement prediction on main cryptos",
-                    "Comprehensive analysis on main cryptos",
                     "Email support",
                 ],
             },
@@ -626,13 +598,6 @@ const en = {
         chartLabel: "Chart {{index}}",
         defaultTitle: "Chart",
         valueAxis: "Value",
-        networkActivityTrend: "Network Activity Trend",
-        nativeRender: "Native Render",
-        change: "Change",
-        range: "Range",
-        vsPrevious: "vs prev",
-        noComparison: "No comparison",
-        rangeSeparator: "to",
     },
     reportsPage: {
         sourcesAndReferences: "Sources & References",
@@ -644,7 +609,6 @@ const en = {
         dailyReport: "Daily Report",
         backToHome: "Back to home",
         catalogue: "Catalogue",
-        comprehensiveAnalysisTitle: "Comprehensive {{asset}} Analysis",
         share: "Share",
         linkCopied: "Link copied",
         disclaimer:
@@ -789,11 +753,6 @@ const en = {
         action: "action",
         analysisAction: "Analysis Action",
         analysisActions: "Analysis Actions",
-        liveComprehensiveAnalysis: "Live Comprehensive Analysis",
-        comprehensiveAnalysis: "Comprehensive Analysis",
-        comprehensiveAnalysisDescription:
-            "Comprehensive cryptocurrency analysis using 12 mandatory actions",
-        comprehensiveAnalysisActionDescription: "Comprehensive analysis {{actionName}}",
         roomCreatedTitle: "Room created",
         roomCreatedDescription: '"{{name}}" has been created.',
         anonymousRoomCreatedTitle: "Anonymous room created",
@@ -892,7 +851,6 @@ const en = {
         quotaWarningLabel: "{{percent}}% used · resets {{date}}",
         sources: {
             regularMessage: "Regular Message",
-            comprehensiveAnalysis: "Comprehensive Analysis",
             taskChain: "Task Chain",
             taskPlanning: "Task Planning",
         },

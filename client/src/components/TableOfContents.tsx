@@ -194,7 +194,7 @@ const addNumbering = (headings: Omit<TocItem, "number">[]): TocItem[] => {
  * Backend Integration:
  * All LLM-generated content is automatically sanitized via:
  * - packages/core/src/utils/markdownSanitizer.ts
- * - Integrated in regularMessageHandler.ts and comprehensiveAnalysisWorkflowGraph.ts
+ * - Integrated in report and regular-message rendering flows.
  * - Fixes malformed headings like "##Heading" → "## Heading"
  *
  * See CLAUDE.md "Markdown Content Generation Guidelines" for full documentation.

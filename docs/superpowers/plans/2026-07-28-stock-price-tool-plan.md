@@ -1352,13 +1352,13 @@ import 区（`// market` 分组下）加一行：
 import { createGetStockPriceTool } from "./stock/getStockPriceTool.ts";
 ```
 
-`registerAllTools` 的 non_trading 段，在 `createGetCryptoPriceTool()` 之后加：
+`registerAllTools` 的 non_trading 段添加：
 
 ```ts
   registry.register(createGetStockPriceTool());
 ```
 
-`ONCHAIN_DATA_TOOLS` 数组在 `"get_crypto_price",` 之后加：
+`ONCHAIN_DATA_TOOLS` 数组添加：
 
 ```ts
   "get_stock_price",

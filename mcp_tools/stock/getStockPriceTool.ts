@@ -1,19 +1,15 @@
 import type { RegisteredTool } from "../toolRegistry.ts";
 import type { JsonObject } from "../../src/framework/types.ts";
-import * as alpaca from "./alpacaClient.ts";
-import { getSnapshotCached, fetchIntradayBars, type DailyBar, type Snapshot } from "./alpacaClient.ts";
-import { marketSession, etDateString } from "./marketHours.ts";
-import type { BarRepository } from "./barRepository.ts";
-import { getSharedBarRepository } from "./sharedRepository.ts";
+import {
+  loadStockPriceData,
+  STOCK_PRICE_DATA_SOURCE,
+  type BarRepository,
+  type Snapshot,
+  type StockPriceData,
+} from "../../src/data/stock/index.ts";
 import { buildStockPricePrompt } from "./prompts.ts";
 
 const DEFAULT_HISTORY_DAYS = 60;
-const DATA_SOURCE = "Alpaca (IEX feed)";
-
-function pct(current: number, base: number): number | null {
-  if (!isFinite(base) || base === 0) return null;
-  return parseFloat((((current - base) / base) * 100).toFixed(2));
-}
 
 function fmtVolume(volume: number | null): string {
   if (volume === null) return "N/A";
@@ -23,12 +19,32 @@ function fmtVolume(volume: number | null): string {
   return String(volume);
 }
 
+function toJsonData(data: StockPriceData): JsonObject {
+  return {
+    symbol: data.symbol,
+    price: data.price,
+    bidPrice: data.bidPrice,
+    askPrice: data.askPrice,
+    dayOpen: data.dayOpen,
+    dayHigh: data.dayHigh,
+    dayLow: data.dayLow,
+    prevClose: data.prevClose,
+    changePercent: data.changePercent,
+    volume: data.volume,
+    marketSession: data.marketSession,
+    quoteTimestamp: data.quoteTimestamp,
+    dailyBars: data.dailyBars.map((bar) => ({ ...bar })),
+    dataSource: data.dataSource,
+    ...(data.intradayBars ? { intradayBars: data.intradayBars.map((bar) => ({ ...bar })) } : {}),
+    ...(data.staleness ? { staleness: data.staleness } : {}),
+  };
+}
+
+/** Thin MCP adapter: validate tool input, call the stock data service, shape the tool response. */
 export function createGetStockPriceTool(overrides?: {
   repository?: BarRepository;
   snapshot?: (symbol: string, nowMs: number) => Promise<Snapshot>;
 }): RegisteredTool {
-  const loadSnapshot = overrides?.snapshot ?? getSnapshotCached;
-
   return {
     name: "get_stock_price",
     description:
@@ -78,98 +94,40 @@ export function createGetStockPriceTool(overrides?: {
         typeof input["historyDays"] === "number" && input["historyDays"] > 0
           ? Math.floor(input["historyDays"])
           : DEFAULT_HISTORY_DAYS;
-      const includeIntraday = input["includeIntraday"] === true;
-      const current = new Date();
-      const session = marketSession(current);
 
-      // 日 K：优先走本地库；库不可用时直接拉 API
-      let dailyBars: DailyBar[] = [];
-      try {
-        const repository = overrides?.repository ?? (await getSharedBarRepository());
-        if (repository) {
-          dailyBars = await repository.getBars(symbol, "1Day", historyDays);
-        } else {
-          // Mongo 不可用：退化为纯 API 模式。多取自然日以覆盖 historyDays 个交易日
-          const from = new Date(current);
-          from.setUTCDate(from.getUTCDate() - Math.ceil(historyDays * 1.5) - 5);
-          const fetched = await alpaca.fetchDailyBars(
-            symbol,
-            from.toISOString().slice(0, 10),
-            etDateString(current),
-          );
-          dailyBars = fetched.slice(Math.max(0, fetched.length - historyDays));
-        }
-      } catch {
-        dailyBars = [];
-      }
+      const result = await loadStockPriceData(
+        { symbol, historyDays, includeIntraday: input["includeIntraday"] === true },
+        {
+          ...(overrides?.repository ? { repository: overrides.repository } : {}),
+          ...(overrides?.snapshot ? { snapshot: overrides.snapshot } : {}),
+        },
+      );
 
-      let snapshot: Snapshot | undefined;
-      let snapshotError: string | undefined;
-      try {
-        snapshot = await loadSnapshot(symbol, current.getTime());
-      } catch (err) {
-        snapshotError = err instanceof Error ? err.message : String(err);
-      }
-
-      const latestBar = dailyBars[dailyBars.length - 1];
-
-      if (!snapshot && !latestBar) {
+      if (!result.ok) {
         return {
-          summary: `Market data unavailable for ${symbol}: ${snapshotError ?? "no data"}`,
+          summary: `Market data unavailable for ${symbol}: ${result.error}`,
           generation_context: {
             prompt: `No market data available for ${symbol}.`,
-            data: { symbol, error: snapshotError ?? "no data", dataSource: DATA_SOURCE },
+            data: { symbol, error: result.error, dataSource: STOCK_PRICE_DATA_SOURCE },
           },
         };
       }
 
-      const staleness =
-        !snapshot && latestBar
-          ? `Live quote unavailable; the most recent data is the daily close for ${latestBar.t}.`
-          : undefined;
-
-      const price = snapshot?.price ?? latestBar?.c ?? null;
-      const prevClose =
-        snapshot?.prevClose ?? (dailyBars.length >= 2 ? dailyBars[dailyBars.length - 2]!.c : null);
-      const changePercent = price !== null && prevClose !== null ? pct(price, prevClose) : null;
-
-      let intradayBars: DailyBar[] | undefined;
-      if (includeIntraday) {
-        try {
-          intradayBars = await fetchIntradayBars(symbol, etDateString(current));
-        } catch {
-          intradayBars = [];
-        }
-      }
-
-      const data: JsonObject = {
-        symbol,
-        price,
-        bidPrice: snapshot?.bidPrice ?? null,
-        askPrice: snapshot?.askPrice ?? null,
-        dayOpen: snapshot?.dayOpen ?? latestBar?.o ?? null,
-        dayHigh: snapshot?.dayHigh ?? latestBar?.h ?? null,
-        dayLow: snapshot?.dayLow ?? latestBar?.l ?? null,
-        prevClose,
-        changePercent,
-        volume: snapshot?.volume ?? latestBar?.v ?? null,
-        marketSession: session,
-        quoteTimestamp: snapshot?.quoteTimestamp ?? latestBar?.t ?? null,
-        dailyBars,
-        dataSource: DATA_SOURCE,
-        ...(intradayBars ? { intradayBars } : {}),
-        ...(staleness ? { staleness } : {}),
-      };
-
-      const changeStr = changePercent !== null ? `${changePercent >= 0 ? "+" : ""}${changePercent}%` : "N/A";
-      const priceStr = price !== null ? `$${price}` : "N/A";
-      const suffix = staleness ? ` | 数据截至 ${latestBar?.t}` : ` | ${session}`;
+      const data = result.data;
+      const changeStr =
+        data.changePercent !== null
+          ? `${data.changePercent >= 0 ? "+" : ""}${data.changePercent}%`
+          : "N/A";
+      const priceStr = data.price !== null ? `$${data.price}` : "N/A";
+      const suffix = data.staleness
+        ? ` | 数据截至 ${data.dailyBars[data.dailyBars.length - 1]?.t}`
+        : ` | ${data.marketSession}`;
 
       return {
-        summary: `${symbol} ${priceStr} | ${changeStr} | Vol ${fmtVolume(data["volume"] as number | null)}${suffix}`,
+        summary: `${symbol} ${priceStr} | ${changeStr} | Vol ${fmtVolume(data.volume)}${suffix}`,
         generation_context: {
-          prompt: buildStockPricePrompt(symbol, session, staleness),
-          data,
+          prompt: buildStockPricePrompt(symbol, data.marketSession, data.staleness),
+          data: toJsonData(data),
         },
       };
     },

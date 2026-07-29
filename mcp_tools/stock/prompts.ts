@@ -1,4 +1,4 @@
-import type { MarketSession } from "./marketHours.ts";
+import type { MarketSession } from "../../src/data/stock/index.ts";
 
 const SESSION_LABEL: Record<MarketSession, string> = {
   "pre-market": "pre-market trading (regular session has not opened)",

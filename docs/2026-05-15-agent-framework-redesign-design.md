@@ -22,7 +22,7 @@
 
 ### Goals
 
-- 消除 Eliza / LangGraph 带来的复杂度（13-step comprehensive analysis 等)
+- 消除 Eliza / LangGraph 带来的复杂度（13-step report workflow 等)
 - 明确"工具 / 子 agent / skill" 三种扩展机制的边界，业务团队只在这三处加东西
 - 主 agent 的上下文不被子 agent 中间产物污染
 - 同 session 对话连贯；跨 session 不自动回放，按需查 RAG / profile
@@ -50,7 +50,7 @@
 │  L3  Application Layer                                   │
 │  - Orchestrator system prompt（含 subagent + skill 描述）│
 │  - Subagent 定义（execution / trade）                  │
-│  - Skill markdown 文件（comprehensive-analysis 等）     │
+│  - Skill markdown 文件（report-workflow 等）     │
 └────────────────────────┬─────────────────────────────────┘
                          │
 ┌────────────────────────▼─────────────────────────────────┐
@@ -138,13 +138,13 @@
 
 ### 5.2 Skill 清单（MVP 首批）
 
-- `comprehensive-analysis` — 现有 13 步报告蒸馏；MVP 做成 skill + code-backed workflow，按固定步骤调用 execution tasks 并组装报告，保持现有 workflow 形态
+- `report-workflow` — 现有 13 步报告蒸馏；MVP 做成 skill + code-backed workflow，按固定步骤调用 execution tasks 并组装报告，保持现有 workflow 形态
 - 其他后续补（new-token-research / portfolio-review / strategy-explain 等）
 
 Skill 文件结构：
 
 ```
-skills/comprehensive-analysis/
+skills/report-workflow/
 ├── SKILL.md                  # 含 YAML frontmatter: name / description / workflow?
 └── references/
     ├── report-template.md    # 报告章节模板
@@ -155,13 +155,13 @@ SKILL.md frontmatter 示例：
 
 ```yaml
 ---
-name: comprehensive-analysis
+name: report-workflow
 description: Generate a comprehensive multi-section crypto asset analysis report.
-workflow: comprehensive-analysis
+workflow: report-workflow
 ---
 ```
 
-Skill 采用 Claude Code 风格：只提供"怎么做"的过程性知识，不是函数 API，不定义参数 schema。用户请求或 scheduler 触发时的资产、日期、语言等上下文通过当前会话消息进入主 agent，再由主 agent 按 Skill 指导拆成自然语言 `TaskRequest.task`。对于 `comprehensive-analysis` 这类已有固定流程的能力，Skill 可在 YAML frontmatter 中声明 `workflow`；`invoke_skill(name)` 时 runtime 自动调用对应 application-level workflow 代码，按既定步骤调用 `dispatch` / `execution`，避免让主 agent 临时自由规划完整流程。workflow step list / title / order 等运行时 metadata 由 workflow 代码定义，不写在 Skill markdown 里。workflow 完成后返回代码生成的 summary，说明执行了哪些步骤、产出了哪些 `generation_context` 和 artifacts。未声明 `workflow` 的 Skill 只加载 markdown 内容。
+Skill 采用 Claude Code 风格：只提供"怎么做"的过程性知识，不是函数 API，不定义参数 schema。用户请求或 scheduler 触发时的资产、日期、语言等上下文通过当前会话消息进入主 agent，再由主 agent 按 Skill 指导拆成自然语言 `TaskRequest.task`。对于 `report-workflow` 这类已有固定流程的能力，Skill 可在 YAML frontmatter 中声明 `workflow`；`invoke_skill(name)` 时 runtime 自动调用对应 application-level workflow 代码，按既定步骤调用 `dispatch` / `execution`，避免让主 agent 临时自由规划完整流程。workflow step list / title / order 等运行时 metadata 由 workflow 代码定义，不写在 Skill markdown 里。workflow 完成后返回代码生成的 summary，说明执行了哪些步骤、产出了哪些 `generation_context` 和 artifacts。未声明 `workflow` 的 Skill 只加载 markdown 内容。
 
 ### 5.3 Background Agents / Scheduled Workflows
 
@@ -257,7 +257,7 @@ Dispatcher 只强校验 `TaskResult` envelope；`generation_context.prompt` / `g
 
 `SkillResult.summary` 由 workflow 代码生成，不由 LLM 临时总结；它告诉主 agent workflow 做了哪些步骤、哪些 execution task 完成、哪些 artifacts 可用。主 agent 再基于 `SkillResult.task_results[].generation_context` 和 artifacts 生成最终用户可见回复。
 
-`generation_context.prompt` 使用 rendered prompt：MCP tool 负责把本次 task 的数据注入现有报告/分析 prompt 后返回。主 agent 将它作为当前 task 的生成材料，不把它提升为 system prompt。MVP 不引入 prompt template / template engine，也不在 `TaskResult` 协议里加入 `prompt_ref` / `data_ref`；comprehensive analysis 这类大流程通过 skill 对应的 code-backed workflow 控制调用顺序和上下文规模。
+`generation_context.prompt` 使用 rendered prompt：MCP tool 负责把本次 task 的数据注入现有报告/分析 prompt 后返回。主 agent 将它作为当前 task 的生成材料，不把它提升为 system prompt。MVP 不引入 prompt template / template engine，也不在 `TaskResult` 协议里加入 `prompt_ref` / `data_ref`；report workflow 这类大流程通过 skill 对应的 code-backed workflow 控制调用顺序和上下文规模。
 
 ### 6.3 SSE 事件（用户/前端可见）
 
@@ -280,7 +280,7 @@ type SSEEvent =
 
 **关键**：子 agent 的 LLM token **不出现在 SSE**。主 agent 的 token + 任务的进度事件复用同一通道。
 
-声明 `workflow` 的 Skill 会额外发 workflow 级 SSE：`workflow_started` / `workflow_step` / `workflow_done`。这些事件用于前端像现有 comprehensive analysis 一样单独展示整体流程；workflow step metadata 由 code-backed workflow 定义并发出。workflow 内部每个 execution task 仍然继续发 `dispatch` / `progress` / `task_done` / `artifact`。
+声明 `workflow` 的 Skill 会额外发 workflow 级 SSE：`workflow_started` / `workflow_step` / `workflow_done`。这些事件用于前端像现有 report workflow 一样单独展示整体流程；workflow step metadata 由 code-backed workflow 定义并发出。workflow 内部每个 execution task 仍然继续发 `dispatch` / `progress` / `task_done` / `artifact`。
 
 ### 6.4 典型数据流（用户问 "BTC 怎么样"）
 
@@ -350,7 +350,7 @@ Transcript Store:
 ### 7.4 重启恢复
 
 - **主 agent transcript**：JSONL 留库，下一条用户消息触发重装 → LLM 续跑
-- **code-backed workflow**：Workflow Store 留存 `workflow_id` / steps / task_ids / summary / artifacts；重连时按 `workflow_id` 恢复 comprehensive analysis 进度卡片并重放 workflow SSE
+- **code-backed workflow**：Workflow Store 留存 `workflow_id` / steps / task_ids / summary / artifacts；重连时按 `workflow_id` 恢复 report workflow 进度卡片并重放 workflow SSE
 - **异步任务**：worker 启动时扫 Task Store 中 `status=running` 且 `updated_at` 超时的 task → 重启或标 failed；已完成异步 task 不自动唤醒主 agent，等待后续 `await_task` 或用户追问
 - **同步任务**：连接断时主 agent 拿到 error，自行决定重试
 - **SSE**：客户端用 `last_event_id` 重连，dispatcher 重放未确认事件
@@ -431,16 +431,16 @@ MCP server 具体数量和分类先不在本 spec 固定；在 plugin/action 重
 ## 12. 测试策略（沿用 Vitest）
 
 - **单测**：Dispatcher（并发 / 异步 / 超时 / envelope 校验 / 错误归一化）；SubagentRegistry；SkillRegistry；MCP client 重启逻辑
-- **集成测试**：mock LLM provider；端到端跑 1 个 skill（comprehensive-analysis on BTC 缩水版），断言 Workflow Store 状态、workflow SSE + task SSE 顺序
+- **集成测试**：mock LLM provider；端到端跑 1 个 skill（report-workflow on BTC 缩水版），断言 Workflow Store 状态、workflow SSE + task SSE 顺序
 - **smoke tests**：MCP server 启动 + 每个工具至少调用一次
-- **e2e**：staging 环境跑 daily-report background agent 和 comprehensive analysis workflow，对比新旧输出
+- **e2e**：staging 环境跑 daily-report background agent 和 report workflow workflow，对比新旧输出
 
 ---
 
 ## 13. 迁移与下线
 
 - **Big-bang**：不与 Eliza 共存；新框架就绪后整体切换
-- 切换前在 staging 跑 1 周以上 daily-report background agent + comprehensive analysis workflow，比对结果一致性
+- 切换前在 staging 跑 1 周以上 daily-report background agent + report workflow workflow，比对结果一致性
 - 切换时 Memory Store schema 兼容：profile / RAG collection 不动；transcripts collection 新建（旧 messages 保留只读供回看）
 
 ### 落地阶段（建议，写在 implementation plan 里）
@@ -452,7 +452,7 @@ MCP server 具体数量和分类先不在本 spec 固定；在 plugin/action 重
 5. 主 agent memory/RAG/profile 接入：主 agent 持有 memory，subagent 禁止访问跨 session memory。
 6. Task Store / Workflow Store / Artifact Store / Approval Store 接入。
 7. SkillRegistry：YAML frontmatter + optional `workflow` binding + `SkillResult`。
-8. comprehensive-analysis code-backed workflow：固定 steps、workflow SSE、Workflow Store 恢复。
+8. report-workflow code-backed workflow：固定 steps、workflow SSE、Workflow Store 恢复。
 9. CEX prepare-order dispatch + Approval Store + approval handler 代码层执行。
 10. daily-report background agent：scheduler 触发，直接调用 MCP tools，写 Artifact Store / report history。
 11. `ask_user` 工具与悬挂态恢复。
@@ -467,7 +467,7 @@ MCP server 具体数量和分类先不在本 spec 固定；在 plugin/action 重
 | MCP stdio 进程开销 | MCP server 数量未固定，进程数和 RSS 取决于 plugin 重构后的拓扑 | 实现期按工具依赖和部署隔离需求监控并调整 |
 | Skill 描述泛滥污染主 prompt | 主 agent system prompt 变长 | 严格 description 字数；定期清理无用 skill |
 | execution agent 在大工具池里选错 | 非交易工具数量较多 | system prompt 内分组描述工具；必要时由主 agent / skill 传 `tools[]` 白名单；监控 tool_call 准确率 |
-| 大 payload handoff（决策 #23 暂不做） | 多个 execution task 返回 rendered prompt/data 时主 agent context 变长 | MVP 不加 `prompt_ref` / `data_ref`；通过 comprehensive-analysis 的 code-backed workflow 控制上下文规模，后续按监控再评估 artifact 引用机制 |
+| 大 payload handoff（决策 #23 暂不做） | 多个 execution task 返回 rendered prompt/data 时主 agent context 变长 | MVP 不加 `prompt_ref` / `data_ref`；通过 report-workflow 的 code-backed workflow 控制上下文规模，后续按监控再评估 artifact 引用机制 |
 | Multi-replica dispatcher 协调 | 多容器扩展时 in-flight slot 状态不一致 | 短期单容器；未来 Redis or DocumentDB 协调 |
 | Settings 合并层数 | 4 层 vs 2 层未定 | 实现期按需要补，不阻塞 MVP |
 

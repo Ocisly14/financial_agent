@@ -89,18 +89,6 @@ Status: first tool migrated.
 - Remove: Eliza callback response, `createActionResponse`, `generateActionSummary`, runtime/state/message dependencies.
 - Output: articles array plus rendered news prompt.
 
-### `plugin-coinmarketcap`
-
-- Old action: `GET_CRYPTO_PRICE`
-- New tool: `mcp_tools/get_crypto_price/getCryptoPriceTool.ts`
-- Tool name: `get_crypto_price`
-- Category: `non_trading`
-- Input: `task`, `symbol`, `convert`, `date`, `from`, `to`, `includeFearIndex`.
-- Extract price API/data parsing into pure functions.
-- Move provider-specific logic out of old Eliza provider shape.
-- Output `generation_context.data` with price, market cap, volume, rank, supply, requested date/range, and optional fear index.
-- Output `generation_context.prompt` as a concise market metrics block.
-
 ### `plugin-web-search`
 
 - Old action: `WEB_SEARCH`
@@ -137,18 +125,6 @@ Status: first tool migrated.
 - Output source list plus adoption-signal summary data.
 - Keep prompt instructions in `mcp_tools/institutional_adoption_search/prompts.ts`.
 
-### `plugin-sentiscore`
-
-- Old action: `Sentiment_Analysis`
-- New tool: `mcp_tools/sentiscore_analysis/sentiscoreAnalysisTool.ts`
-- Tool name: `sentiscore_analysis`
-- Category: `non_trading`
-- Input: `task`, `symbol`, `from`, `to`, `locale`, retention options.
-- Extract source fetch/fusion/narration pipeline into pure local modules.
-- Keep source role weights and horizons.
-- If the old pipeline calls an LLM for narration, move that prompt into `mcp_tools/sentiscore_analysis/prompts.ts`; otherwise return deterministic narrative prompt material.
-- Output structured horizon summaries, composite score, source breakdown, divergence/consensus features, and prompt text.
-
 ### `plugin-technic_analysis`
 
 - Old action: `TECHNICAL_ANALYSIS`
@@ -160,31 +136,14 @@ Status: first tool migrated.
 - Move old `dynamicPrompt` construction into `mcp_tools/technical_analysis/prompts.ts`.
 - Output indicators, trend, support/resistance, volatility, timeframe summaries, chart artifacts if generated.
 
-### `plugin-on_chain_data`
-
-Migrate each old action as a separate one-tool folder under `mcp_tools/`.
-
-- `WHALE_ALERT` -> `mcp_tools/whale_alert/`
-- `INFLOW_OUTFLOW_ANALYSIS` -> `mcp_tools/inflow_outflow_analysis/`
-- `GET_TRANSACTION_VOLUME` -> `mcp_tools/transaction_volume_analysis/`
-- `BID_ASK_VOLUME_ANALYSIS` -> `mcp_tools/bid_ask_volume_analysis/`
-- `GET_ADDRESS_AND_TRANSACTION_DATA` -> `mcp_tools/address_transaction_data/`
-
-Common rules:
-
-- Category: `non_trading`
-- Input: `task`, `symbol`, `from`, `to`, retention options.
-- Extract external API calls and parsing into shared on-chain data clients.
-- Output raw metrics, normalized summary fields, and chart/file artifacts only if the old action generated them deterministically.
-
 ### `plugin-prediction`
 
 - Old action: `PREDICTION`
 - New tool: `mcp_tools/prediction/predictionTool.ts`
 - Tool name: `prediction`
 - Category: `non_trading`
-- Input: `task`, `symbol`, `timeframes`, optional prior contexts from technical/sentiment/news tools.
-- Do not read old `state.taskChainResults` or comprehensive-analysis state.
+- Input: `task`, `symbol`, `timeframes`, optional prior contexts from technical/news tools.
+- Do not read old workflow-specific state.
 - Accept prior context explicitly in input or let workflow pass previous `TaskResult.generation_context.data`.
 - Move LLM forecasting prompt into `mcp_tools/prediction/prompts.ts`.
 - Output scenarios, confidence, assumptions, invalidation levels, and rendered prompt material.
@@ -201,38 +160,13 @@ Reason:
 
 If this capability is needed later, implement only a deterministic content extraction/fetching tool, for example `extract_content_context`, and let the main agent perform the actual analysis.
 
-### `plugin-fearandindex_analysis`
-
-- Old action: `FEAR_GREED_INDEX_ANALYSIS`
-- New tool: `mcp_tools/fear_greed_index_analysis/fearGreedAnalysisTool.ts`
-- Tool name: `fear_greed_index_analysis`
-- Category: `non_trading`
-- Input: `task`, `from`, `to`, `includeChart`.
-- Extract data fetch and historical comparison logic.
-- Output current index, trend, historical context, contrarian/momentum interpretation, and optional chart artifact.
-
 ### `plugin-charts`
 
 Migrate deterministic chart creation only. Do not expose a generic render-chart tool to LLMs.
 
-- `PlotChartAction` -> tool-local helper used by market/technical/sentiment tools, not a default execution tool.
-- `GetFearIndexAction` / fear image actions should be folded into `fear_greed_index_analysis` if still needed.
-- New location: the specific tool folder that owns the chart output, for example `mcp_tools/technical_analysis/chartArtifacts.ts` or `mcp_tools/fear_greed_index_analysis/chartArtifacts.ts`.
+- `PlotChartAction` -> tool-local helper used by technical tools, not a default execution tool.
+- New location: the specific tool folder that owns the chart output, for example `mcp_tools/technical_analysis/chartArtifacts.ts`.
 - Output chart artifacts from business tools, not from an independently selected chart tool.
-
-### `plugin-launchpad`
-
-Migrate as two one-tool folders under `mcp_tools/`.
-
-- `TOKEN_METADATA_OVERVIEW` -> `mcp_tools/token_metadata_overview/`
-- `TOKEN_HOURLY_METRICS` -> `mcp_tools/token_hourly_metrics/`
-
-Common rules:
-
-- Category: `non_trading`
-- Input: `task`, `token`, `mint`, `from`, `to`.
-- Keep Hubble Launchpad API handling in a local client helper.
-- Output token metadata, hourly metrics, liquidity/volume/social fields if available, and rendered prompt material.
 
 ### `plugin-cex`
 
@@ -256,14 +190,11 @@ Do not migrate as a business MCP tool unless a concrete action is needed.
 
 Recommended order after `getnews` review:
 
-1. `get_crypto_price`
-2. `web_search`
-3. `crypto_research_search`
-4. `sentiscore_analysis`
-5. `technical_analysis`
-6. on-chain tools
-7. `prediction`
-8. content/fear-greed/institutional/launchpad
-9. CEX trading tools
+1. `web_search`
+2. `crypto_research_search`
+3. `technical_analysis`
+4. `prediction`
+5. institutional search
+6. CEX trading tools
 
-This order keeps the comprehensive-analysis pipeline useful early while avoiding trading and approval complexity until the non-trading tool pattern is stable.
+This order keeps the analysis pipeline useful early while avoiding trading and approval complexity until the non-trading tool pattern is stable.

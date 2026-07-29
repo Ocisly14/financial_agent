@@ -7,7 +7,7 @@ export function createSubagentRegistry(): SubagentRegistry {
   registry.register({
     name: "market_data",
     description:
-      "Cross-market data agent for live stock and digital-asset prices, technical analysis, charts, market microstructure, flows, on-chain activity, sentiment indicators, and supporting data lookup.",
+      "Cross-market data agent for live stock and digital-asset prices, technical analysis, charts, market microstructure, and supporting data lookup.",
     modelClass: "MEDIUM",
     defaultTools: [...MARKET_DATA_TOOLS],
     systemPrompt: marketDataSubagentPrompt,
