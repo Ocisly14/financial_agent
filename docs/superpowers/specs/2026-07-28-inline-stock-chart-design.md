@@ -4,10 +4,12 @@ date: 2026-07-28
 status: spec
 ---
 
-**Status:** Design (pending implementation)
+**Status:** Implemented；§4(端点参数)与 §7(呈现)已被 `2026-07-29-stock-candle-ranges-design.md` 替代
 **Date:** 2026-07-28
 **Author:** victor530914@gmail.com (with Claude)
-**Scope:** 新增前端组件 `StockChart` 及其 markdown override 注册;新增后端端点 `GET /market/stocks/:symbol`;抽出 `mcp_tools/stock/sharedRepository.ts`;orchestrator 提示词增加标签使用说明。不改消息协议、不改 SSE、不改 `get_stock_price` 工具的行为。
+**Scope:** 新增前端组件 `StockChart` 及其 markdown override 注册;新增后端端点 `GET /market/stocks/:symbol`;抽出 `mcp_tools/stock/sharedRepository.ts`;`getSnapshotCached` 的 TTL 由 10 秒改为 5 秒;orchestrator 提示词增加标签使用说明。不改消息协议、不改 SSE。
+
+`get_stock_price` 工具的**代码**不改,但它与本端点共用 `getSnapshotCached`,因此会连带受 TTL 变更影响——同一 symbol 在 5–10 秒内的重复调用会多打一次 Alpaca。这是可接受的:该工具本就不在热路径上,而组件需要 5 秒粒度(见 §5)。
 
 前置依赖:`docs/superpowers/specs/2026-07-28-stock-price-tool-design.md`(已实现)提供的 `alpacaClient`、`barRepository`、`marketHours`。
 
@@ -51,7 +53,41 @@ AAPL 今天走强,收复了 340 关口。
 
 - **何时用**:回答涉及某支美股的价格或走势时。
 - **语法**:`<StockChart symbol="TICKER" days="60" />`,`days` 可省略(默认 60)。
-- **三条约束**:一支股票在一条回答里只放一个标签;标签必须独占一行,不能写进代码块或行内;仅限美股,加密货币不要用这个标签。
+- **四条约束**:一支股票在一条回答里只放一个标签;**标签必须独占一行,且前后各留一个空行**;不能写进代码块或行内;仅限美股,加密货币不要用这个标签。
+
+"前后各留空行"不是排版洁癖,是正确性要求,见下。
+
+### 块级 vs 行内:必须留空行的原因
+
+markdown-to-jsx 只有在标签前后都有空行时才把它当块级 HTML 处理。若标签只是独占一行却与上下文粘在同一段落内,它会被当作 inline 节点,外面套着 `CustomParagraph` 渲染出的 `<p>` —— 而 `<p>` 内嵌 `<div><canvas>` 是非法 DOM 嵌套,React 会告警且布局会塌。
+
+实测(markdown-to-jsx 7.7.17 + `renderToStaticMarkup`,override 为 `p` 与 `StockChart`):
+
+| 写法 | 渲染结果 |
+|---|---|
+| 前后有空行 | `<div><p>…</p><span …>CHART</span><p>…</p></div>` —— 块级兄弟节点 |
+| 独占一行但无空行 | `<p>AAPL 走强。\n<span …>CHART</span>后文。</p>` —— **嵌在 `<p>` 内** |
+| 行内 | `<span>… <span …>CHART</span> …</span>` |
+| 半截标签 | `<p>&lt;StockChart symb</p>` —— 转义为字面文本,不吞后续正文 |
+
+第二行就是必须兜底的原因:那个位置若是 `<div>` 即为非法嵌套。提示词负责让模型留空行,但模型输出不可信,组件本身也要兜底:`StockChartBlock` 的最外层用 `<span className="block ...">` 而非 `<div>`。`<span>` 在 `<p>` 内合法,`display:block` 又保证了块级视觉效果。canvas 是 replaced element,同样可以合法出现在 `<p>` 里。这样即便模型忘了空行,页面也只是嵌在段落里,不会报错。
+
+### 流式渲染
+
+`client/src/components/chat.tsx:590` 把 `streamingText` 逐 token 喂给 `MarkdownRenderer`,标签会依次经历 `<StockChart`、`<StockChart symb`、`<StockChart symbol="AAPL"` 等中间态。实测(见下)markdown-to-jsx 会把未闭合的 `<` **转义成字面文本**渲染,于是用户看到半截原始标记一闪而过;标签一旦补全,组件又会在回答尚未写完时挂载并开始轮询。
+
+处理方式:**流式期间不渲染该标签**。`MarkdownRenderer` 增加一个可选 prop `streaming?: boolean`,为真时:
+
+1. 用 `stripIncompleteTrailingTag(text)` 砍掉末尾未闭合的 `<...` 片段(正则 `/<[^>]*$/`),藏掉半截标记的闪现;
+2. overrides 里把 `StockChart` 映射到一个占位组件(一行"图表将在回答完成后显示"的骨架),不发任何请求。
+
+`chat.tsx:590` 的流式预览传 `streaming`,已定稿的消息(`chat.tsx:503`/`507`)不传。定稿后组件正常挂载,只挂载一次。
+
+### 消息分段的不变量
+
+`renderAssistantContent`(`chat.tsx:496`)会用 `getArtifactSegments` 把一条消息切成多段,每段各自一个 `MarkdownRenderer`。若切分边界落在 `<StockChart ... />` 内部,标签就废了。本设计依赖一条不变量:**分段只发生在 artifact(`chartPath`)边界上,而 artifact 标记与 `StockChart` 标签互不嵌套**。
+
+已核对:`client/src/components/chat/message-utils.ts:259` 只按 `/(\{\{artifact:\d+\}\})/` 切分,该标记不可能出现在 `<StockChart ... />` 内部,标签总是完整落在同一个 text 段里。不变量成立,无需改动。
 
 ---
 
@@ -65,10 +101,18 @@ AAPL 今天走强,收复了 340 关口。
 parseStockChartProps({ symbol, days }) -> { symbol: string; days: number } | { error: string }
 ```
 
-- `symbol`:必须匹配 `/^[A-Z][A-Z.-]{0,5}$/`(先 trim + 转大写)。不匹配则渲染一行"无效的股票代码:{原样显示}",不发请求。
+- `symbol`:先 trim + 转大写,再要求匹配 `/^[A-Z][A-Z.-]{0,5}$/`。不匹配则渲染一行"无效的股票代码:{原样显示}",不发请求。
 - `days`:解析为整数并夹在 `[1, 365]`,非数字则取默认值 60。
 
-后端**独立再校验一次**,不依赖前端已经拦过。两侧用同一条正则,但各自实现,避免前端被绕过时后端裸奔。
+后端**独立再校验一次**,不依赖前端已经拦过。两侧用同一条正则、**同样先 trim + 转大写再匹配**,但各自实现,避免前端被绕过时后端裸奔。归一化口径必须两侧一致:后端收到 `aapl` 应视为 `AAPL` 正常返回,而不是判 400 —— 否则前端归一化过的请求能过、直接调用端点的请求却被拒,行为不可预测。400 只留给归一化后仍不合法的输入(含 `/`、`..`、空格、超长等)。
+
+拼 URL 时对 symbol 做 `encodeURIComponent`,即使它已经过正则。
+
+### props 与 query 参数的映射
+
+组件的 prop 叫 `days`(对模型友好:"要多少天的日 K"),端点的 query 参数叫 `bars`(对后端诚实:实际返回的是几根 K 线,休市日不产生 bar,两者不等)。映射就是直传数值:`days=60` → `?bars=60`。
+
+`bars` 参数缺省时默认 60;`bars=0` 是显式请求"不要 K 线"(见 §4)。
 
 ---
 
@@ -87,14 +131,23 @@ parseStockChartProps({ symbol, days }) -> { symbol: string; days: number } | { e
   },
   "session": "regular",
   "bars": [{ "t": "2026-07-27", "o": 336.5, "h": 338.1, "l": 335.0, "c": 336.93, "v": 2428489 }],
+  "staleness": null,
   "dataSource": "Alpaca (IEX feed)",
   "fetchedAtMs": 1785700567000
 }
 ```
 
+`staleness` 在正常响应中为 `null`;当 snapshot 失败、只能返回库中日 K 时,它是 `{ "reason": "quote_unavailable", "asOf": "2026-07-27" }`,`asOf` 为最后一根 bar 的日期。类型上恒定存在,避免前端做 `in` 判断。
+
 `bars=0` 时**省略 `bars` 字段**。这是刻意的:日 K 盘中几乎不变(repository 本身有 30 分钟新鲜窗口),而报价 5 秒一刷。客户端分两条查询后,高频的那条就不必每 5 秒重复搬运 60 根 K 线。
 
-数据来源全部复用现成件:`getSnapshotCached`(10 秒 TTL,多个浏览器标签同时打开也只打一次网络)与 `barRepository.getDailyBars`(读 SQLite)。
+数据来源全部复用现成件:`getSnapshotCached`(TTL 见 §5,多个浏览器标签同时打开也只打一次网络)与 `barRepository.getDailyBars`(读 SQLite)。
+
+### 鉴权与限流
+
+`client/src/lib/api.ts:24` 写明本仓库没有鉴权后端("no Bearer tokens, no CSRF, no cookies"),因此本端点不带鉴权,与既有的 `/user/*`、`/trading/*` 一致,不算破例。
+
+但它与那些端点有一点不同:**symbol 由模型生成,且每次请求可能穿透到付费上游**。因此加一道进程内限流——按 symbol 的 TTL 缓存已经挡住了同标的的重复请求,再补一个全局上限:每分钟最多向 Alpaca 发起 120 次 snapshot 拉取,超出则返回 429 `{ error: "rate_limited" }`,前端显示"请求过于频繁"并由 react-query 退避重试。这不是安全边界,是账单边界。
 
 ### 落点与一处顺带的重构
 
@@ -106,7 +159,8 @@ parseStockChartProps({ symbol, days }) -> { symbol: string; days: number } | { e
 
 | 情况 | 行为 |
 |---|---|
-| symbol 不合法(未过正则) | 400,`{ error: "invalid_symbol" }` |
+| symbol 归一化后仍不合法 | 400,`{ error: "invalid_symbol" }` |
+| 超过每分钟上游调用上限 | 429,`{ error: "rate_limited" }` |
 | Alpaca 无此代码 / 404 | 404,`{ error: "symbol_not_found" }` |
 | snapshot 失败但库中有日 K | 200,省略 `quote`,照常返回 `bars`,附 `staleness` 字段 |
 | 两者都失败 | 502,`{ error: "market_data_unavailable" }` |
@@ -115,6 +169,21 @@ parseStockChartProps({ symbol, days }) -> { symbol: string; days: number } | { e
 ---
 
 ## 5. 轮询策略
+
+### 先决条件:`getSnapshotCached` 的 TTL 改为 5 秒
+
+`mcp_tools/stock/alpacaClient.ts:150` 目前是 `createTtlCache(fetchSnapshot, 10_000)`。若保持 10 秒不动而前端按 5 秒轮询,则一半的轮询命中缓存、拿回一模一样的数据,实际刷新粒度是 10 秒——下表的"5 秒"就是假的。
+
+两种对齐方式,本设计选前者:
+
+1. **TTL 降到 5 秒**,轮询保持 5 秒。上游调用量翻倍,但盘中活跃图表数量有限,且 §4 的限流兜底。
+2. 轮询放慢到 10 秒。省流量,但盘中读价体验明显钝。
+
+改动为一行:`createTtlCache(fetchSnapshot, 5_000)`,注释同步改。`createTtlCache` 的 4 个现有测试(`alpacaClient.test.ts:7,15,23,37`)各自传入自己的 ttl 参数,不依赖这个常量;`getStockPriceTool` 在测试中走 `overrides.snapshot` 注入。因此该改动不影响现有 54 个测试。
+
+原则:**轮询间隔与上游缓存 TTL 必须相等**。仓库里 `client/src/hooks/useMarketSnapshot.ts` 的注释已经确立了这个口径("matches the upstream 5 s cache TTL so polling faster yields no fresher data"),本设计沿用。
+
+### 间隔表
 
 `refetchInterval` 由**后端返回的 `session` 字段**驱动,而非前端自行计算美东时间:
 
@@ -137,6 +206,19 @@ pollIntervalForSession(session: MarketSession): number | false
 - `["stock-bars", symbol, days]` —— `staleTime` 5 分钟,不轮询
 - `["stock-quote", symbol]` —— `refetchInterval` 按上表,`bars=0`
 
+两条查询都加 `placeholderData: (prev) => prev`,照 `useMarketSnapshot.ts` 的做法,保证 symbol 或 days 变化时不闪空白。
+
+### 可见性门控
+
+聊天记录是持久的,一个长会话里可能存在十几条带图表的历史消息。若每个组件都无条件轮询,就是十几路 5 秒请求常驻——不同 symbol 之间 react-query 不会去重(query key 不同),而用户实际只在看屏幕上的那一两个。
+
+两道门控:
+
+- **视口**:组件用 `IntersectionObserver` 维护 `isVisible`,作为 `enabled` 的一部分。滚出视口即停,滚回来立即 refetch。
+- **标签页**:`refetchIntervalInBackground: false`(react-query 默认值,显式写出以免日后被改掉)。浏览器标签页不在前台时不轮询。
+
+`refetchOnWindowFocus` 保持默认开启:用户切回来时看到的应该是当下价格。
+
 ---
 
 ## 6. 历史消息的时间错位
@@ -145,7 +227,7 @@ pollIntervalForSession(session: MarketSession): number | false
 
 处理方式:**图表照常实时,但在顶部标注消息的发送时间距今多久**——"实时数据 · 消息发于 3 天前"。图文不符的地方由这行提示解释,而不是假装不存在。
 
-实现:`client/src/components/chat.tsx` 在渲染消息时用一个 `MessageTimeContext.Provider` 包住 `MarkdownRenderer`,把 `message.timestamp` 传下去;`StockChart` 用 `useContext` 读取。无 context 时(例如在非聊天场景复用该组件)不显示角标。
+实现:`client/src/components/chat.tsx` 的 `renderAssistantBubble` 用一个 `MessageTimeContext.Provider` 包住 `MarkdownRenderer`,把 `m.createdAt`(number,毫秒时间戳——`chat.tsx:537` 用的就是这个字段,消息上**没有** `timestamp` 字段)传下去;`StockChart` 用 `useContext` 读取。无 context 时(例如在非聊天场景复用该组件)不显示角标。
 
 选这个方案而非"历史消息渲染静态快照",是因为后者需要把"是否最新消息"这个上下文一路传进渲染层,且用户往往就是想看那支股票现在什么价——冻结反而不符合预期。
 
@@ -158,6 +240,8 @@ pollIntervalForSession(session: MarketSession): number | false
 - **配色**:以 `prevClose` 为基准,涨为绿、跌为红,与仓库既有的涨跌语义一致。
 - **头部一行**:价格、涨跌幅、时段徽标(盘前 / 盘中 / 盘后 / 休市)、`Alpaca (IEX)` 小字标注。IEX 而非 SIP 这个限制必须在 UI 上如实呈现,与工具层的口径一致。
 - **加载与断连**:首次加载显示骨架;轮询失败时**保留上一次成功的数据**并在头部显示"连接中断 · 数据截至 hh:mm",由 react-query 自动重试。
+- **标记**:所有容器元素用 `<span className="block ...">`,理由见 §2 的"块级 vs 行内"。头部那一行同理。canvas 本身在 `<p>` 内合法,不必包装。
+- **流式占位**:`streaming` 为真时渲染一个与最终图表等高的骨架块,避免定稿瞬间的布局跳动。
 
 ---
 
@@ -166,25 +250,37 @@ pollIntervalForSession(session: MarketSession): number | false
 **后端** `handleStockQuote`(注入假 repository 与假 snapshot,不打网络):
 
 1. `bars=60` → 响应含 `bars` 数组且长度正确。
-2. `bars=0` → 响应**不含** `bars` 字段。
-3. 非法 symbol(`../etc`、小写、超长)→ 400,且假 repository 的调用计数为 0。
-4. snapshot 抛错但库中有 bar → 200,无 `quote`,有 `staleness`。
-5. 两者都失败 → 502。
-6. `session` 字段透传自 `marketSession`。
+2. `bars=0` → 响应**不含** `bars` 字段;`bars` 参数缺省 → 含 `bars`,长度 60。
+3. 非法 symbol(`../etc`、含空格、超长)→ 400,且假 repository 的调用计数为 0。
+4. **小写 `aapl` → 200**,归一化为 `AAPL` 后正常返回(与 §3 的两侧一致口径)。
+5. snapshot 抛错但库中有 bar → 200,无 `quote`,`staleness.reason === "quote_unavailable"`。
+6. 两者都失败 → 502。
+7. 正常响应中 `staleness` 为 `null` 而非缺失。
+8. `session` 字段透传自 `marketSession`。
+9. 超过每分钟上游调用上限 → 429,且不再调用假 snapshot。
 
 **前端纯函数**:
 
-7. `pollIntervalForSession` —— 四个时段分别得到 5000 / 30000 / 30000 / false。
-8. `parseStockChartProps` —— 合法 symbol 通过;`aapl` 归一化为 `AAPL`;含注入字符的被拒;`days` 越界被钳制到 `[1, 365]`;`days` 缺省为 60。
+10. `pollIntervalForSession` —— 四个时段分别得到 5000 / 30000 / 30000 / false。
+11. `parseStockChartProps` —— 合法 symbol 通过;`aapl` 归一化为 `AAPL`;含注入字符的被拒;`days` 越界被钳制到 `[1, 365]`;`days` 缺省为 60。
+12. `stripIncompleteTrailingTag` —— `"文字 <StockChart symb"` → `"文字 "`;`"文字 <StockChart symbol=\"AAPL\" />"` 原样返回;不含 `<` 的文本原样返回;文本中的 `a < b` 不被误砍(仅当 `<` 之后到字符串末尾都没有 `>` 时才砍,`a < b` 满足该条件会被砍——这是可接受的:流式期间末尾片段马上会被后续 token 补全,且只影响预览态)。
 
-canvas 渲染本身不做单测:断言像素成本高、价值低,靠手工验证(交易时段与休市各看一次)。
+**组件级(需要 DOM,用现有前端测试设施;若前端尚无测试运行器则降级为手工验证并在 PR 说明中记录)**:
+
+13. `streaming` 为真时,完整的 `<StockChart />` 标签渲染为占位骨架且**不发起 fetch**。
+14. `streaming` 为假时,同样的输入挂载真实组件并发起一次 fetch。
+15. 标签未被空行包围(嵌在段落内)时,渲染结果不产生 `<div>` 嵌在 `<p>` 内的非法结构——断言外层是 `span`。
+
+canvas 绘制本身不做单测:断言像素成本高、价值低,靠手工验证(交易时段与休市各看一次)。
 
 ---
 
 ## 9. 实施顺序
 
-1. `sharedRepository.ts` 抽取 + `getStockPriceTool.ts` 改为调用它(纯重构,现有 54 个测试须保持全绿)。
-2. `stockMarketRoutes.ts` + §8 的 1–6 号测试 + `server.ts` 路由接线。
-3. `parseStockChartProps` / `pollIntervalForSession` 两个纯函数 + 7、8 号测试。
-4. `StockChart` 组件 + `MarkdownRenderer` override 注册 + `MessageTimeContext`。
-5. orchestrator 提示词补充说明,手工验证模型确实会输出该标签且渲染正常。
+1. `sharedRepository.ts` 抽取 + `getStockPriceTool.ts` 改为调用它;同一步把 `alpacaClient.ts:150` 的 TTL 改为 `5_000` 并更新注释(纯重构 + 一行常量,现有 54 个测试须保持全绿)。
+2. `stockMarketRoutes.ts`(含 symbol 归一化与限流)+ §8 的 1–9 号测试 + `server.ts` 路由接线。
+3. `parseStockChartProps` / `pollIntervalForSession` / `stripIncompleteTrailingTag` 三个纯函数 + 10–12 号测试。
+4. 核对 `getArtifactSegments` 满足 §2 的分段不变量(不满足则先修);`StockChart` 组件 + `MarkdownRenderer` override 注册与 `streaming` prop + `MessageTimeContext` + 13–15 号测试。
+5. orchestrator 提示词补充说明(含"前后各留空行"),手工验证模型确实会输出该标签、流式期间显示占位、定稿后渲染正常。
+
+第 1 步会连带改变 `get_stock_price` 的缓存行为(见文首 Scope),虽是一行改动也应单独成 commit,便于日后回滚时不牵连 `sharedRepository` 的抽取。
