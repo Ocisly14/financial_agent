@@ -154,7 +154,7 @@ export type OrchestratorResult = {
 };
 
 /** Tools the orchestrator can call directly (by name). */
-const ORCHESTRATOR_DIRECT_TOOLS = new Set(["web_search"]);
+const ORCHESTRATOR_DIRECT_TOOLS = new Set<string>();
 
 function normalizeToolError(output: { summary: string; error?: { code: string; message: string } }): { code: string; message: string } | undefined {
   if (output.error) return output.error;
@@ -286,6 +286,7 @@ export class OrchestratorRuntime {
           const output = await this.tools.call(name, { ...toolInput }, { sessionId: input.sessionId });
           const toolResultPayload: JsonObject = { name, summary: output.summary };
           if (output.generation_context) toolResultPayload.generation_context = output.generation_context as unknown as JsonObject;
+          if (output.visualizations?.length) toolResultPayload.visualizations = output.visualizations;
           const normalizedError = normalizeToolError(output);
           if (normalizedError) toolResultPayload.error = normalizedError;
           state.record("orchestrator", "tool_result", toolResultPayload);

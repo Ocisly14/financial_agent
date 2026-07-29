@@ -19,6 +19,29 @@ export const DEFAULT_STOCK_RANGE: StockRange = "1D";
 export type StockChartProps = { symbol: string; range: StockRange };
 export type StockChartPropsError = { error: string };
 
+const STOCK_CHART_TAG_RE = /<StockChart\b([^>]*)\/?\s*>/gi;
+
+function readTagAttribute(attributes: string, name: string): string | undefined {
+  const match = attributes.match(
+    new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'=<>]+))`, "i"),
+  );
+  return match?.[1] ?? match?.[2] ?? match?.[3];
+}
+
+/** Extract valid chart display directives emitted in an agent response. */
+export function extractStockCharts(text: string): StockChartProps[] {
+  const charts: StockChartProps[] = [];
+  for (const match of text.matchAll(STOCK_CHART_TAG_RE)) {
+    const attributes = match[1] ?? "";
+    const parsed = parseStockChartProps({
+      symbol: readTagAttribute(attributes, "symbol"),
+      range: readTagAttribute(attributes, "range"),
+    });
+    if (!("error" in parsed)) charts.push(parsed);
+  }
+  return charts;
+}
+
 /**
  * symbol 会被拼进请求 URL，而它来自模型生成的文本——这是本组件唯一的新风险面。
  * 不合法就不发请求。

@@ -125,6 +125,7 @@ export function createGetStockPriceTool(overrides?: {
 
       return {
         summary: `${symbol} ${priceStr} | ${changeStr} | Vol ${fmtVolume(data.volume)}${suffix}`,
+        visualizations: [{ type: "stock_price", symbol, range: "1D" }],
         generation_context: {
           prompt: buildStockPricePrompt(symbol, data.marketSession, data.staleness),
           data: toJsonData(data),

@@ -27,7 +27,7 @@ status: spec
 - 不做 WebSocket 推送。MCP 工具是请求-响应的,agent 每轮只需要一个快照,常驻连接拿不到推送流的好处,反而引入冷启动无数据的问题。
 - 不做常驻后台 updater / 定时任务。更新由使用自然驱动(见 §4)。
 - 不覆盖 A 股、港股。这些市场需要完全不同的数据源,应另立 spec。
-- 不做分钟线的历史持久化(见 §5)。
+- 分钟线只保留按需使用的近期窗口，不做全市场常驻采集。
 
 ---
 
@@ -46,7 +46,7 @@ status: spec
 
 **已知限制(需在工具输出中如实标注):** 免费档的实时数据源自 IEX 单一交易所,并非官方 SIP 合并行情。对 LLM 分析场景足够,但不构成交易决策依据。完整 SIP 行情需付费档。
 
-**认证:** 两个环境变量 `ALPACA_API_KEY_ID`、`ALPACA_API_SECRET_KEY`,经 `mcp_tools/config.ts` 的 `env()` 读取(缺失即抛错,与现有工具一致)。请求头 `APCA-API-KEY-ID` / `APCA-API-SECRET-KEY`,base URL `https://data.alpaca.markets/v2`。
+**认证:** 两个环境变量 `ALPACA_API_KEY_ID`、`ALPACA_API_SECRET_KEY` 由股票数据 client 读取（缺失即抛错）。请求头 `APCA-API-KEY-ID` / `APCA-API-SECRET-KEY`,base URL `https://data.alpaca.markets/v2`。
 
 ---
 
@@ -137,7 +137,7 @@ CREATE TABLE stock_bar_coverage (
 |---|---|---|
 | 历史日 K | 持久化到 SQLite,增量更新 | 不可变、有界,重复拉取纯属浪费 |
 | 实时报价 / 盘前盘后 | 每次调 snapshot 端点,10 秒 TTL 进程内缓存 | 持续变化的当前状态,天然不可落库 |
-| 日内分时 1Min | 现拉不落库 | 只在当天有意义、盘中持续变化、数据量是日 K 的 390 倍,落库收益远小于成本 |
+| 日内分时 1Min | 持久化近期 180 天并增量更新 | 支持图表以及任意分钟技术指标的本地聚合，避免每个指标重复拉取上游 |
 
 snapshot 端点 `/v2/stocks/{symbol}/snapshot` 一次返回 latestTrade、latestQuote、minuteBar、dailyBar、prevDailyBar,盘前盘后时段的报价包含在 latestQuote 中。10 秒 TTL 缓存用一个模块级 `Map<symbol, {data, expiresAt}>` 实现,避免同一轮对话中多次调用重复打网络。
 

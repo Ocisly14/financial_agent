@@ -755,7 +755,7 @@ function buildSession(): SessionState {
     status: "ok",
     summary: "Inflow is up 12% over 24h",
     generation_context: { prompt: "compute inflow/outflow for BTC", data: { inflow: 1200, outflow: 900 } },
-    artifacts: [{ type: "chart", ref: "./charts/btc-flow.html", label: "BTC flow chart" }],
+    artifacts: [{ type: "file", ref: "./reports/flow.txt", label: "Flow data" }],
   });
   state.recordReply("BTC inflows are up 12% over the last 24h.", true);
 
@@ -841,7 +841,7 @@ Respond with the summary text only, no preamble.`;
 /** Fold turns [from, targetThrough] into the rolling compaction cache:
  *  - user/assistant turn text → merged into a new LLM-generated summary
  *  - task_result generation_context.data → appended to preservedData verbatim
- *  - generation_context.prompt and artifacts (charts) are dropped entirely
+ *  - generation_context.prompt and UI-only visualizations are dropped entirely
  *  Then trims those turns from the in-memory event log (the EventStore, if
  *  configured, retains the full history). */
 export async function compact(

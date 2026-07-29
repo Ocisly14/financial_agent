@@ -30,7 +30,7 @@ function buildSession(): SessionState {
     status: "ok",
     summary: "Inflow is up 12% over 24h",
     generation_context: { prompt: "compute inflow/outflow for BTC", data: { inflow: 1200, outflow: 900 } },
-    artifacts: [{ type: "chart", ref: "./charts/btc-flow.html", label: "BTC flow chart" }],
+    artifacts: [{ type: "file", ref: "./reports/flow.txt", label: "Flow data" }],
   });
   state.recordReply("BTC inflows are up 12% over the last 24h.", true);
 

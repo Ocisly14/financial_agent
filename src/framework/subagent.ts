@@ -268,6 +268,7 @@ export class SubagentRuntime {
       status: firstToolError ? "failed" : "ok",
       summary: firstToolError?.message ?? (finishSummary || `${definition.name} completed task.`),
       artifacts: outputs.flatMap((o) => o.artifacts ?? []),
+      visualizations: outputs.flatMap((o) => o.visualizations ?? []),
       metrics: { ms: Date.now() - started, tool_calls: outputs.length + toolErrors.length, llm_calls: llmCalls },
     };
     if (firstToolError) {
@@ -276,13 +277,14 @@ export class SubagentRuntime {
 
     log.info(`[${definition.name}] done`, { ms: Date.now() - started, tool_calls: outputs.length, llm_calls: llmCalls });
     if (generationContexts.length > 0) {
+      const prompts = [...new Set(generationContexts.map((context) => context.prompt?.trim()).filter((prompt): prompt is string => Boolean(prompt)))];
       result.generation_context = {
-        prompt: [...new Set(generationContexts.map((context) => context.prompt))].join("\n\n"),
         data: {
           task: input.request.task,
           tool_outputs: outputs.map((o) => ({ tool: o.name, summary: o.summary, data: o.generation_context?.data ?? {} })),
         },
       };
+      if (prompts.length > 0) result.generation_context.prompt = prompts.join("\n\n");
     }
     state.recordTaskResult(definition.name, parentEventId, result);
   }
@@ -341,6 +343,7 @@ export class SubagentRuntime {
     if (output.generation_context) toolResultPayload.generation_context = output.generation_context as unknown as JsonObject;
     if (normalizedError) toolResultPayload.error = normalizedError;
     if (output.artifacts?.length) toolResultPayload.artifacts = output.artifacts as unknown as JsonObject[string];
+    if (output.visualizations?.length) toolResultPayload.visualizations = output.visualizations;
     state.record(definition.name, "tool_result", toolResultPayload, { isSidechain: true, parent: useEv.event_id });
 
     if (output.approval) {

@@ -75,7 +75,7 @@
 
   ┌────────────────────────────────────────────────────────┐
   │                 internal MCP server(s)                 │
-  │  web_search, news, sentiscore, technic_analysis, cex,  │
+  │  financial_search, technic_analysis, cex,              │
   │  prediction, content_analysis, query_memory, artifacts │
   │  ...                                                   │
   └────────────────────────────────────────────────────────┘
@@ -93,7 +93,7 @@
 
 | 组件 | 职责 | 类型 |
 |---|---|---|
-| **Orchestrator** | 主 LLM 循环；唯一对用户输出 token；持有 memory/RAG/profile；可调 `dispatch` / `ask_user` / `invoke_skill` 和少量常用轻量工具（如 `web_search`） | LLM 驱动 |
+| **Orchestrator** | 主 LLM 循环；唯一对用户输出 token；持有 memory/RAG/profile；通过 `dispatch` 将实时金融搜索交给 research subagent | LLM 驱动 |
 | **Dispatcher** | Subagent 注册表 + 并行 fan-out + 同步/异步任务池 + 进度事件 + 结果 envelope 校验/错误归一化 | 确定性代码 |
 | **SubagentRegistry** | 启动时加载所有 subagent 定义（description / tools / system prompt / model） | 静态注册 |
 | **Subagent Worker** | 一次一用的无状态 LLM 循环；返回 JSON 后销毁；不见用户；不访问 MemoryStore/RAG/profile；MCP client 拿到自己声明的工具子集 | LLM 驱动 |
@@ -200,10 +200,10 @@ ask_user({
 // 主 agent 直连的少量上下文/轻量工具
 query_memory(filter: object) → MemoryResult[]
 read_profile() → UserProfile
-web_search(query: string) → WebSearchResult[]
+financial_search(query: string, topic?: string, limit?: number, search_depth?: string) → SearchResult[]
 ```
 
-主 agent 拥有 MemoryStore/RAG/profile 访问权，并可直接调用少量常用轻量工具（如 `web_search`）。业务分析、图表、预测、内容分析和交易工具默认通过 `execution` / `trade` subagent 调用；subagent 不直接查询 memory/RAG/profile。
+主 agent 拥有 MemoryStore/RAG/profile 访问权。实时金融搜索由 market-research subagent 调用 `financial_search`；subagent 负责写完整 query，工具仅调用 Tavily 并返回结果。业务分析和交易工具同样通过对应 subagent 调用；subagent 不直接查询 memory/RAG/profile。
 
 执行模型：
 - 默认使用 `dispatch`：主 agent 当前 turn 阻塞等待 task 完成，然后基于 `TaskResult[]` 继续生成回复。
@@ -231,7 +231,8 @@ type TaskResult = {
     prompt: string;              // 已注入数据的 rendered prompt，用于主 agent 生成本次回答
     data: object;                // 注入 prompt 的结构化数据
   };
-  artifacts?: { type: "chart" | "file" | "url"; ref: string; label?: string }[];
+  artifacts?: { type: "file" | "url"; ref: string; label?: string }[];
+  visualizations?: object[];     // UI-only structured chart specs
   error?: { code: string; message: string };
   metrics?: {                   // 可观测性 metadata；缺失不应导致 task 失败
     ms: number;
@@ -248,7 +249,7 @@ type SkillResult = {
   status: "loaded" | "ok" | "failed";
   summary: string;               // 代码生成，说明加载/执行了哪些步骤和产物
   task_results?: TaskResult[];    // workflow 调用 dispatch/execution 后收集到的结果
-  artifacts?: { type: "chart" | "file" | "url"; ref: string; label?: string }[];
+  artifacts?: { type: "file" | "url"; ref: string; label?: string }[];
   error?: { code: string; message: string };
 };
 ```
@@ -481,7 +482,7 @@ MCP server 具体数量和分类先不在本 spec 固定；在 plugin/action 重
 |---|---|---|---|
 | 1 | 05-15 | 项目定位 | 替换当前 financial-agent 框架（big-bang） |
 | 2 | 05-15 | 子 agent 定义 | 两类：execution + trade |
-| 3 | 05-15 | 主 agent 工具能力 | 持有 memory/RAG/profile，并可直接调用少量常用轻量工具（如 `web_search`） |
+| 3 | 05-15 | 主 agent 工具能力 | 持有 memory/RAG/profile；实时金融搜索通过 research subagent 调用 `financial_search` |
 | 4 | 05-15 | 子 agent 返回格式 | `TaskResult` envelope；execution 返回 `generation_context.prompt/data` + artifacts；trade 只返回 summary/status，审批详情走 `approval_required.payload` + Approval Store |
 | 5 | 05-15 | 并行执行 | 支持，主 agent 一轮可 fan-out 多个 task |
 | 6 | 05-15 | 流式输出 | 只流主 agent 的 token；子 agent 发结构化 progress；code-backed workflow 发独立 workflow SSE |

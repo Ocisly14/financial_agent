@@ -83,14 +83,16 @@ function tokenize(reply: string): SSEEvent[] {
 }
 
 function buildFinal(event: SessionEvent, state: SessionState): SSEEvent {
-  const artifacts: { n: number; type: string; ref: string; label: string }[] = [];
+  const artifacts: { n: number; type: "file" | "url"; ref: string; label: string }[] = [];
+  const visualizations: JsonObject[] = [];
   let n = 1;
   for (const result of state.turnResults(event.turn)) {
+    visualizations.push(...(result.visualizations ?? []));
     for (const a of result.artifacts ?? []) {
       artifacts.push({ n: n++, type: a.type, ref: a.ref, label: a.label ?? "" });
     }
   }
-  return { type: "final", sessionId: state.session_id, response: event.payload.content as string, artifacts };
+  return { type: "final", sessionId: state.session_id, response: event.payload.content as string, artifacts, visualizations };
 }
 
 /**

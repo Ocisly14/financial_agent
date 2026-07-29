@@ -21,7 +21,6 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // client/dist is two levels up from src/server/
 const CLIENT_DIST = path.resolve(__dirname, "../../client/dist");
-const CHART_DIR = path.resolve(process.env["CHART_OUTPUT_DIR"] ?? "./charts");
 // Public market-data host (klines/ticker/depth/exchangeInfo). Defaults to
 // Binance's official, non-geo-restricted data mirror; override per region.
 const BINANCE_DATA_BASE = process.env["BINANCE_DATA_BASE"] || "https://data-api.binance.vision";
@@ -278,32 +277,6 @@ async function handleChat(
     unsub();
     activeWorkflows.delete(agentIdHeader);
     res.end();
-  }
-}
-
-async function handleChart(pathname: string, res: http.ServerResponse, headOnly = false) {
-  const filename = path.basename(decodeURIComponent(pathname.slice("/charts/".length)));
-  if (!filename || filename.includes("..")) {
-    res.writeHead(400);
-    res.end("Bad filename");
-    return;
-  }
-
-  const filePath = path.join(CHART_DIR, filename);
-  const resolved = path.resolve(filePath);
-  if (!resolved.startsWith(CHART_DIR + path.sep) && resolved !== CHART_DIR) {
-    res.writeHead(403);
-    res.end("Forbidden");
-    return;
-  }
-
-  try {
-    const content = await fs.readFile(filePath);
-    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-    res.end(headOnly ? undefined : content);
-  } catch {
-    res.writeHead(404, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: `Chart not found: ${filename}` }));
   }
 }
 
@@ -819,11 +792,6 @@ export function createHttpServer(app: FinancialAgentApp): http.Server {
       // ── Chat (SSE) ────────────────────────────────────────────────────────
       if (method === "POST" && pathname === "/api/chat") {
         return await handleChat(req, res, app);
-      }
-
-      // ── Charts ────────────────────────────────────────────────────────────
-      if ((method === "GET" || method === "HEAD") && pathname.startsWith("/charts/")) {
-        return await handleChart(pathname, res, method === "HEAD");
       }
 
       // ── Health ────────────────────────────────────────────────────────────

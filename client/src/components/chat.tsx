@@ -23,11 +23,13 @@ import CopyButton from "./copy-button";
 import ChatTtsButton from "./ui/chat/chat-tts-button";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 import { MessageTimeContext } from "./stockChartContext";
-import { ChartEmbed } from "./ChartEmbed";
-import { getArtifactSegments } from "./chat/message-utils";
+import { MarketChartWorkspace } from "./MarketChartWorkspace";
 import type { ContentWithUser } from "./chat/types";
 import { ChatProgressPill, type ProgressAgent, type ProgressTask } from "./ChatProgressPill";
-import { moment } from "@/lib/utils";
+import { cn, moment } from "@/lib/utils";
+import {
+    buildSymbolChartWorkspace,
+} from "@/lib/chartWorkspace";
 
 interface ChatProps {
     agentId: UUID;
@@ -54,8 +56,8 @@ type ClientInterrupt = {
 
 /**
  * MVP chat: send a message to the agent backend (POST /api/chat, SSE), stream
- * the reply, and render markdown + inline chart artifacts using the original
- * chat bubble components. Messages live in the react-query cache keyed by
+ * the reply, and render markdown plus declarative stock charts. Messages live
+ * in the react-query cache keyed by
  * ["messages", agentId, roomId] (no server history).
  */
 export default function Chat({ agentId, roomId }: ChatProps) {
@@ -68,6 +70,9 @@ export default function Chat({ agentId, roomId }: ChatProps) {
     const [input, setInput] = useState("");
     const [isProcessing, setIsProcessing] = useState(false);
     const [streamingText, setStreamingText] = useState("");
+    const [showDesktopChartWorkspace, setShowDesktopChartWorkspace] = useState(() =>
+        typeof window !== "undefined" && window.matchMedia("(min-width: 1280px)").matches,
+    );
     const [liveTasks, setLiveTasks] = useState<ProgressTask[]>([]);
     const tasksRef = useRef<Map<string, ProgressTask>>(new Map());
     const initialHandledRef = useRef(false);
@@ -93,6 +98,28 @@ export default function Chat({ agentId, roomId }: ChatProps) {
         initialData: [],
         staleTime: Number.POSITIVE_INFINITY,
     });
+
+    useEffect(() => {
+        const media = window.matchMedia("(min-width: 1280px)");
+        const update = () => setShowDesktopChartWorkspace(media.matches);
+        update();
+        media.addEventListener("change", update);
+        return () => media.removeEventListener("change", update);
+    }, []);
+
+    const chartWorkspace = useMemo(() => buildSymbolChartWorkspace(
+        messages.map((message) => {
+            const metadata = (message as { content?: { metadata?: Record<string, unknown> }; metadata?: Record<string, unknown> }).content?.metadata
+                ?? (message as { metadata?: Record<string, unknown> }).metadata;
+            return {
+                user: message.user,
+                text: message.text,
+                createdAt: message.createdAt,
+                visualizations: Array.isArray(metadata?.visualizations) ? metadata.visualizations : [],
+            };
+        }),
+        streamingText,
+    ), [messages, streamingText]);
 
     const appendMessages = useCallback(
         (msgs: ContentWithUser[]) => {
@@ -494,19 +521,7 @@ export default function Chat({ agentId, roomId }: ChatProps) {
         }
     };
 
-    // getArtifactSegments 只在 {{artifact:N}} 标记处切分，而该标记不可能出现在
-    // <StockChart ... /> 标签内部，所以标签总是完整落在同一个 text 段里。
     const renderAssistantContent = (m: ContentWithUser, streaming: boolean) => {
-        const segments = getArtifactSegments(m);
-        if (segments) {
-            return segments.map((seg, i) =>
-                "chartPath" in seg ? (
-                    <ChartEmbed key={i} chartPath={seg.chartPath} chartUrl={apiClient.getChartUrl(seg.chartPath)} />
-                ) : (
-                    <MarkdownRenderer key={i} streaming={streaming}>{seg.text}</MarkdownRenderer>
-                )
-            );
-        }
         return <MarkdownRenderer streaming={streaming}>{m.text ?? ""}</MarkdownRenderer>;
     };
 
@@ -574,43 +589,60 @@ export default function Chat({ agentId, roomId }: ChatProps) {
 
     return (
         <>
-        <div className="flex flex-col h-full w-full min-h-0">
-            <div className="flex-1 min-h-0">
-                <ChatMessageList
-                    scrollRef={scrollRef}
-                    isAtBottom={isAtBottom}
-                    scrollToBottom={scrollToBottom}
-                    disableAutoScroll={disableAutoScroll}
-                >
-                    {messages.map((m) => (
-                        <div key={String(m.id)} className="max-w-full min-w-0">
-                            {m.user === "user"
-                                ? renderUserBubble(m)
-                                : renderAssistantBubble(m, {
-                                      tasks: (m as { progressTasks?: ProgressTask[] }).progressTasks,
-                                      tasksComplete: true,
-                                  })}
-                        </div>
-                    ))}
-                    {isProcessing &&
-                        renderAssistantBubble(
-                            { text: streamingText, createdAt: Date.now() } as unknown as ContentWithUser,
-                            { isLoading: !streamingText, streaming: true, tasks: liveTasks, tasksComplete: liveTasks.length > 0 && liveTasks.every((t) => t.status === "completed" || t.status === "error") }
-                        )}
-                </ChatMessageList>
-            </div>
+        <div className={cn(
+            "grid h-dvh max-h-dvh w-full min-h-0 grid-cols-1 grid-rows-[minmax(0,1fr)] overflow-hidden",
+            showDesktopChartWorkspace && chartWorkspace.charts.length > 0
+                ? "xl:grid-cols-[minmax(0,1fr)_minmax(380px,440px)]"
+                : "",
+        )}>
+            {showDesktopChartWorkspace && chartWorkspace.charts.length > 0 && (
+                <div className="h-dvh max-h-dvh min-h-0 min-w-0 overflow-hidden">
+                    <MarketChartWorkspace
+                        charts={chartWorkspace.charts}
+                        focusSymbol={chartWorkspace.focusSymbol}
+                        focusRevision={chartWorkspace.focusRevision}
+                    />
+                </div>
+            )}
 
-            <ChatComposer
-                agentId={agentId}
-                input={input}
-                isProcessing={isProcessing}
-                isAtBottom={isAtBottom}
-                onInputChange={setInput}
-                onSend={() => void sendMessage(input)}
-                onStop={handleStop}
-                onScrollToBottom={scrollToBottom}
-                onComposedSend={handleComposedSend}
-            />
+            <div className="flex h-dvh max-h-dvh min-h-0 min-w-0 flex-col overflow-hidden">
+                <div className="flex-1 min-h-0">
+                    <ChatMessageList
+                        scrollRef={scrollRef}
+                        isAtBottom={isAtBottom}
+                        scrollToBottom={scrollToBottom}
+                        disableAutoScroll={disableAutoScroll}
+                    >
+                        {messages.map((m) => (
+                            <div key={String(m.id)} className="max-w-full min-w-0">
+                                {m.user === "user"
+                                    ? renderUserBubble(m)
+                                    : renderAssistantBubble(m, {
+                                          tasks: (m as { progressTasks?: ProgressTask[] }).progressTasks,
+                                          tasksComplete: true,
+                                      })}
+                            </div>
+                        ))}
+                        {isProcessing &&
+                            renderAssistantBubble(
+                                { text: streamingText, createdAt: Date.now() } as unknown as ContentWithUser,
+                                { isLoading: !streamingText, streaming: true, tasks: liveTasks, tasksComplete: liveTasks.length > 0 && liveTasks.every((t) => t.status === "completed" || t.status === "error") }
+                            )}
+                    </ChatMessageList>
+                </div>
+
+                <ChatComposer
+                    agentId={agentId}
+                    input={input}
+                    isProcessing={isProcessing}
+                    isAtBottom={isAtBottom}
+                    onInputChange={setInput}
+                    onSend={() => void sendMessage(input)}
+                    onStop={handleStop}
+                    onScrollToBottom={scrollToBottom}
+                    onComposedSend={handleComposedSend}
+                />
+            </div>
         </div>
 
         {/* CEX post-PR237 cleanup — `trading_approval` was retired.

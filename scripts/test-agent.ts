@@ -6,7 +6,7 @@
  *
  * Tests:
  *   1. Stock price query   → get_stock_price  → markdown table + price section
- *   2. Web search query    → web_search       → Sources citation section
+ *   2. Financial research  → financial_search → Sources citation section
  *   3. Stock chart request → get_stock_price  → inline <StockChart /> component
  */
 
@@ -72,7 +72,7 @@ async function main() {
     check("Tasks dispatched (≥1)", t1.taskResults.length >= 1),
     check("Contains markdown (## or ** or |)", /##|^\*\*|^\|/m.test(t1.response)),
     check("Mentions AAPL or price", /aapl|price|价格|\$|USD/i.test(t1.response)),
-    check("No raw file paths exposed", !/\/Users\/|\.\/charts\//i.test(t1.response)),
+    check("No raw file paths exposed", !/\/Users\//i.test(t1.response)),
     check("No raw JSON leak ({ status: )", !/\{\s*"status"\s*:/.test(t1.response)),
   ];
   printChecks(checks1);
@@ -96,7 +96,7 @@ async function main() {
       /sources|来源|参考|http[s]?:\/\//i.test(t2.response),
       "expected Sources section or URL link",
     ),
-    check("No raw file paths exposed", !/\/Users\/|\.\/charts\//i.test(t2.response)),
+    check("No raw file paths exposed", !/\/Users\//i.test(t2.response)),
   ];
   printChecks(checks2);
   totalPass += checks2.filter((c) => c.ok).length;
@@ -119,8 +119,7 @@ async function main() {
       hasStockChart,
       hasStockChart ? undefined : "agent didn't embed the live StockChart component",
     ),
-    check("No legacy chart artifact placeholder", !/\{\{artifact:\d+\}\}/.test(t3.response)),
-    check("No raw file paths exposed", !/\/Users\/|\.\/charts\//i.test(t3.response)),
+    check("No raw file paths exposed", !/\/Users\//i.test(t3.response)),
   ];
   printChecks(checks3);
   totalPass += checks3.filter((c) => c.ok).length;

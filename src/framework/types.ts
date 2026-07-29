@@ -9,13 +9,13 @@ export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue
 export type JsonObject = { [key: string]: JsonValue };
 
 export type ArtifactRef = {
-  type: "chart" | "file" | "url";
+  type: "file" | "url";
   ref: string;
   label?: string;
 };
 
 export type GenerationContext = {
-  prompt: string;
+  prompt?: string;
   data: JsonObject;
 };
 
@@ -33,6 +33,8 @@ export type TaskResult = {
   summary: string;
   generation_context?: GenerationContext;
   artifacts?: ArtifactRef[];
+  /** Structured UI-only chart sources; excluded from model prompt projection. */
+  visualizations?: JsonObject[];
   error?: { code: string; message: string };
   metrics?: {
     ms: number;
@@ -75,6 +77,8 @@ export type ToolExecutionResult = {
   summary: string;
   generation_context?: GenerationContext;
   artifacts?: ArtifactRef[];
+  /** Structured UI-only chart sources; excluded from generation_context. */
+  visualizations?: JsonObject[];
   error?: { code: string; message: string };
   approval?: {
     approval_id: string;
@@ -108,5 +112,5 @@ export type SSEEvent =
   | { type: "artifact"; task_id: string; artifact: ArtifactRef }
   | { type: "approval_required"; approval_id: string; payload: JsonObject }
   | { type: "error"; scope: "main" | "task"; task_id?: string; message: string }
-  | { type: "final"; sessionId: string; response: string; artifacts: { n: number; type: string; ref: string; label: string }[] }
+  | { type: "final"; sessionId: string; response: string; artifacts: { n: number; type: "file" | "url"; ref: string; label: string }[]; visualizations: JsonObject[] }
   | { type: "done"; reason: "complete" | "stopped" | "disconnected" };

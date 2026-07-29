@@ -7,8 +7,8 @@ const FIVE_MIN_FRESHNESS_MS = 5 * 60 * 1000;
 const ONE_MIN_FRESHNESS_MS = 60 * 1000;
 const DAILY_OVERLAP_DAYS = 10;
 const INTRADAY_OVERLAP_MINUTES = 5;
+const ONE_MIN_BACKFILL_DAYS = 180;
 const FIVE_MIN_BACKFILL_DAYS = 10;
-const PREVIOUS_SESSION_LOOKBACK_DAYS = 10;
 /** 重叠区收盘价相对偏差阈值；超过即判定发生拆股/分红。 */
 const SPLIT_EPSILON = 0.0001;
 
@@ -56,7 +56,7 @@ function freshnessFor(timeframe: Timeframe): number {
 function fullWindow(timeframe: Timeframe, today: string, backfillYears: number): string {
   if (timeframe === "1Day") return shiftYears(today, -backfillYears);
   if (timeframe === "5Min") return shiftDays(today, -FIVE_MIN_BACKFILL_DAYS);
-  return today;
+  return shiftDays(today, -ONE_MIN_BACKFILL_DAYS);
 }
 
 function incrementalFrom(timeframe: Timeframe, lastBarTs: string): string {
@@ -81,7 +81,7 @@ export function createBarRepository(deps: BarRepositoryDeps): BarRepository {
   const now = deps.now ?? ((): Date => new Date());
   const backfillYears = deps.backfillYears ?? DEFAULT_BACKFILL_YEARS;
 
-  /** 全量回补。1Min 当天无数据时扩到最近十天，以支持休市时回退上一交易日。 */
+  /** 全量回补。分钟线保留足够历史，以支持任意分钟周期的本地聚合。 */
   async function backfill(
     symbol: string,
     timeframe: Timeframe,
@@ -89,15 +89,7 @@ export function createBarRepository(deps: BarRepositoryDeps): BarRepository {
     nowIso: string,
   ): Promise<boolean> {
     const from = fullWindow(timeframe, today, backfillYears);
-    let bars = await client.fetchBars(symbol, timeframe, from, today);
-    if (timeframe === "1Min" && bars.length === 0) {
-      bars = await client.fetchBars(
-        symbol,
-        timeframe,
-        shiftDays(today, -PREVIOUS_SESSION_LOOKBACK_DAYS),
-        today,
-      );
-    }
+    const bars = await client.fetchBars(symbol, timeframe, from, today);
     if (bars.length === 0) return false;
     await store.putBars(symbol, timeframe, bars);
     await store.putCoverage({

@@ -50,6 +50,7 @@ test("正常路径：返回报价、日 K 与数据源标注", async () => {
   assert.equal((data["dailyBars"] as DailyBar[]).length, 2);
   assert.match(result.summary, /AAPL/);
   assert.match(result.summary, /213\.45/);
+  assert.deepEqual(result.visualizations, [{ type: "stock_price", symbol: "AAPL", range: "1D" }]);
 });
 
 test("snapshot 失败但库中有日 K：降级返回并标注 staleness", async () => {
@@ -72,6 +73,6 @@ test("snapshot 与库都无数据：返回错误上下文而非抛异常", async
   });
   const result = await tool.execute({ task: "AAPL", symbol: "AAPL" }, CTX);
 
-  assert.match(result.generation_context!.prompt, /No market data available for AAPL/);
+  assert.match(result.generation_context!.prompt ?? "", /No market data available for AAPL/);
   assert.equal(result.generation_context!.data["error"], "network down");
 });

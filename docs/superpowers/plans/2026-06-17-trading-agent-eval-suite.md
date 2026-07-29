@@ -785,7 +785,7 @@ test("trade agent maps to trading, others to non_trading", () => {
 test("assert throws when a non-trade agent requests a trading tool", () => {
   assert.throws(() => assertToolAllowedForAgent("news_research", "cex_create_order", "trading"), /not allowed for news_research/);
   assert.doesNotThrow(() => assertToolAllowedForAgent("trade", "cex_create_order", "trading"));
-  assert.doesNotThrow(() => assertToolAllowedForAgent("news_research", "web_search", "non_trading"));
+  assert.doesNotThrow(() => assertToolAllowedForAgent("market_research", "financial_search", "non_trading"));
 });
 ```
 

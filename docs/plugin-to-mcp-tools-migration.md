@@ -34,7 +34,8 @@ Output requirements:
 - `summary`: short deterministic statement of what the tool produced.
 - `generation_context.prompt`: rendered text for the main agent or subagent to use as answer material.
 - `generation_context.data`: structured JSON containing raw/normalized data used in the prompt.
-- `artifacts`: chart/file/url refs only when the tool deterministically creates or finds them.
+- `artifacts`: file/url refs only when the tool deterministically creates or finds them.
+- `visualizations`: normalized UI-only series/levels specs; tools never generate chart HTML.
 - External errors should return structured empty/failed context when possible; do not leak local file paths or secrets.
 - MCP tools must not generate final user-facing reports. They return structured data and rendered report-generation instructions for the orchestrator/main agent.
 
@@ -59,10 +60,10 @@ return {
 Use the provided technical analysis data to write the Technical Analysis section.
 Cover trend, momentum, volatility, support/resistance, and invalidation levels.
 Do not invent values beyond generation_context.data.
-Reference chart artifacts if present.
+Return a structured visualization spec when the result should be drawn by the client.
 `
   },
-  artifacts: [{ type: "chart", ref: "...", label: "BTC technical chart" }]
+  visualizations: [{ type: "stock_technical", symbol: "AAPL", indicator: "SMA", series }]
 };
 
 // Bad: tool returns the final report directly.
@@ -89,52 +90,24 @@ Status: first tool migrated.
 - Remove: Eliza callback response, `createActionResponse`, `generateActionSummary`, runtime/state/message dependencies.
 - Output: articles array plus rendered news prompt.
 
-### `plugin-web-search`
+### Financial search
 
-- Old action: `WEB_SEARCH`
-- New tool: `mcp_tools/web_search/webSearchTool.ts`
-- Tool name: `web_search`
+- Tool: `mcp_tools/search/financialSearchTool.ts`
+- Tool name: `financial_search`
 - Category: `non_trading`
-- Input: `task`, `query`, `topic: "general" | "news"`, `limit`.
-- Keep Tavily key rotation and sanitized search query logic.
-- Remove runtime setting lookups; read env/config through a small local config helper.
-- Output structured search results with title, url, snippet, source, published date if available.
-- Prompt must instruct the main agent to cite URLs when using results.
-- Keep prompt instructions in `mcp_tools/web_search/prompts.ts`.
+- Input: required `query`, optional `topic`, `limit`, and `search_depth`.
+- The market-research subagent writes the complete query. The tool does not derive, expand, or specialize it.
+- The tool calls Tavily and returns structured result records directly; it does not produce an analysis prompt.
+- Crypto research and institutional-adoption searches use the same generic tool with queries written by the subagent.
 
-### `plugin-crypto_research_search`
+### Stock technical indicators
 
-- Old action: `CRYPTO_RESEARCH_SEARCH`
-- New tool: `mcp_tools/crypto_research_search/cryptoResearchSearchTool.ts`
-- Tool name: `crypto_research_search`
-- Category: `non_trading`
-- Input: `task`, `query`, `symbol`, `limit`.
-- Reuse the same search client layer as `web_search`, but apply crypto research focused query shaping.
-- Output research-oriented results and a rendered prompt emphasizing source quality and institutional/academic context.
-- Keep prompt instructions in `mcp_tools/crypto_research_search/prompts.ts`.
-
-### `plugin-institutional_adoption`
-
-- Old action: `INSTITUTIONAL_CRYPTO_SEARCH`
-- New tool: `mcp_tools/institutional_adoption_search/institutionalAdoptionSearchTool.ts`
-- Tool name: `institutional_adoption_search`
-- Category: `non_trading`
-- Input: `task`, `query`, `symbol`, `limit`.
-- Reuse shared search client.
-- Query shaping should target ETFs, treasury holdings, custody, funds, regulatory filings, and corporate adoption.
-- Output source list plus adoption-signal summary data.
-- Keep prompt instructions in `mcp_tools/institutional_adoption_search/prompts.ts`.
-
-### `plugin-technic_analysis`
-
-- Old action: `TECHNICAL_ANALYSIS`
-- New tool: `mcp_tools/technical_analysis/technicalAnalysisTool.ts`
-- Tool name: `technical_analysis`
-- Category: `non_trading`
-- Input: `task`, `symbol`, `from`, `to`, `timeframes`, retention options.
-- Extract market data retrieval, indicator calculation, and chart generation into pure modules.
-- Move old `dynamicPrompt` construction into `mcp_tools/technical_analysis/prompts.ts`.
-- Output indicators, trend, support/resistance, volatility, timeframe summaries, chart artifacts if generated.
+- Tools: `stock_sma`, `stock_ema`, `stock_rsi`, `stock_macd`, `stock_bollinger_bands`, `stock_atr`, `stock_obv`, `stock_vwap`, and `stock_support_resistance`.
+- Category: `non_trading`.
+- Each tool requires an explicit US stock or ETF `symbol` and optionally accepts `timeframe` and `history_bars`. `1Day` reads daily bars; arbitrary 1-390 minute/hour intervals are aggregated from database 1-minute bars on 09:30 ET session boundaries.
+- Bars come from the shared local stock-bar repository, which persists data in SQLite and refreshes it incrementally from Alpaca.
+- Each indicator is independently callable; there is no fixed indicator bundle and no analysis prompt template.
+- Tools return structured calculation data for the agent to interpret.
 
 ### `plugin-prediction`
 
@@ -162,11 +135,7 @@ If this capability is needed later, implement only a deterministic content extra
 
 ### `plugin-charts`
 
-Migrate deterministic chart creation only. Do not expose a generic render-chart tool to LLMs.
-
-- `PlotChartAction` -> tool-local helper used by technical tools, not a default execution tool.
-- New location: the specific tool folder that owns the chart output, for example `mcp_tools/technical_analysis/chartArtifacts.ts`.
-- Output chart artifacts from business tools, not from an independently selected chart tool.
+Removed. Do not expose a render-chart tool and do not generate HTML files. Business tools return normalized visualization specs; the client-owned financial chart renderer performs all drawing.
 
 ### `plugin-cex`
 
@@ -190,11 +159,9 @@ Do not migrate as a business MCP tool unless a concrete action is needed.
 
 Recommended order after `getnews` review:
 
-1. `web_search`
-2. `crypto_research_search`
-3. `technical_analysis`
-4. `prediction`
-5. institutional search
-6. CEX trading tools
+1. `financial_search`
+2. stock technical indicator tools
+3. `prediction`
+4. CEX trading tools
 
 This order keeps the analysis pipeline useful early while avoiding trading and approval complexity until the non-trading tool pattern is stable.

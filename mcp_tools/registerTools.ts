@@ -3,11 +3,9 @@ import { McpToolRegistry } from "./toolRegistry.ts";
 // stock
 import { createGetStockPriceTool } from "./stock/getStockPriceTool.ts";
 // search
-import { createWebSearchTool } from "./search/webSearchTool.ts";
-import { createCryptoResearchSearchTool } from "./search/cryptoResearchSearchTool.ts";
-import { createInstitutionalAdoptionSearchTool } from "./search/institutionalAdoptionSearchTool.ts";
+import { createFinancialSearchTool } from "./search/financialSearchTool.ts";
 // technical
-import { createTechnicalAnalysisTool } from "./technical/technicalAnalysisTool.ts";
+import { createTechnicalIndicatorTools, TECHNICAL_TOOL_NAMES } from "./technical/technicalIndicatorTools.ts";
 // trading
 import { createGetBalanceTool } from "./trading/getBalanceTool.ts";
 import { createGetOrdersTool } from "./trading/getOrdersTool.ts";
@@ -29,10 +27,8 @@ import {
 export function registerAllTools(registry: McpToolRegistry): void {
   // non_trading tools
   registry.register(createGetStockPriceTool());
-  registry.register(createWebSearchTool());
-  registry.register(createCryptoResearchSearchTool());
-  registry.register(createInstitutionalAdoptionSearchTool());
-  registry.register(createTechnicalAnalysisTool());
+  registry.register(createFinancialSearchTool());
+  for (const tool of createTechnicalIndicatorTools()) registry.register(tool);
   // trading tools
   registry.register(createGetBalanceTool());
   registry.register(createGetOrdersTool());
@@ -53,14 +49,11 @@ export function registerAllTools(registry: McpToolRegistry): void {
 
 export const MARKET_DATA_TOOLS = [
   "get_stock_price",
-  "web_search",
-  "technical_analysis",
+  ...TECHNICAL_TOOL_NAMES,
 ] as const;
 
 export const MARKET_RESEARCH_TOOLS = [
-  "web_search",
-  "crypto_research_search",
-  "institutional_adoption_search",
+  "financial_search",
 ] as const;
 
 export const TRADING_OPERATIONS_TOOLS = [

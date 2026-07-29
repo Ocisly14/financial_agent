@@ -16,12 +16,9 @@ export default defineConfig(({ mode }) => {
         (env.SERVER_BASE_URL && env.SERVER_BASE_URL.trim()) ||
         (mode === "development" ? `http://localhost:${serverPort}` : "");
     const proxyTarget = serverBaseUrl || `http://localhost:${serverPort}`;
-    // Charts are served by the backend at /charts/:filename. getChartUrl() builds
-    // URLs against the page origin (Vite :5173), so /charts must proxy to the
-    // backend. /api and /health are added defensively (if BASE_URL is ever empty).
+    // /api and /health are added defensively (if BASE_URL is ever empty).
     const devProxy = {
         "/api": { target: proxyTarget, changeOrigin: true },
-        "/charts": { target: proxyTarget, changeOrigin: true },
         "/health": { target: proxyTarget, changeOrigin: true },
     };
     return {

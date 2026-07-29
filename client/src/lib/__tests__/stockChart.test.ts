@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   DEFAULT_STOCK_RANGE,
+  extractStockCharts,
   parseStockChartProps,
   pollIntervalForSession,
   shouldPollCandles,
@@ -80,4 +81,26 @@ test("stripIncompleteTrailingTag leaves complete tags and plain text alone", () 
 test("stripIncompleteTrailingTag keeps a closed angle bracket earlier in the text", () => {
   // `<` 后面还有 `>` 的不受影响，只有"到末尾都没闭合"的才砍。
   assert.equal(stripIncompleteTrailingTag("a < b > c"), "a < b > c");
+});
+
+test("extractStockCharts reads valid agent chart directives", () => {
+  assert.deepEqual(
+    extractStockCharts([
+      "走势如下：",
+      '<StockChart range="1Y" symbol="aapl" />',
+      "以及指数：",
+      "<StockChart symbol='SPY' range='5D'/>",
+    ].join("\n")),
+    [
+      { symbol: "AAPL", range: "1Y" },
+      { symbol: "SPY", range: "5D" },
+    ],
+  );
+});
+
+test("extractStockCharts ignores invalid symbols and defaults invalid ranges", () => {
+  assert.deepEqual(
+    extractStockCharts('<StockChart symbol="../etc" /><StockChart symbol="MSFT" range="7D" />'),
+    [{ symbol: "MSFT", range: DEFAULT_STOCK_RANGE }],
+  );
 });

@@ -55,7 +55,7 @@ test("不同 timeframe 使用各自的全量回补窗口", async () => {
   await repo.getBars("AAPL", "1Min", 390);
   await repo.getBars("AAPL", "5Min", 390);
 
-  assert.equal(calls[0]!.from, "2026-07-28");
+  assert.equal(calls[0]!.from, "2026-01-29");
   assert.equal(calls[1]!.from, "2026-07-18");
 });
 
@@ -134,18 +134,17 @@ test("拆股价格漂移只清空对应 timeframe 并全量重拉", async () => 
   assert.deepEqual(bars.map((b) => b.c), [95, 100, 102]);
 });
 
-test("1Min 当日无数据时回补最近交易日", async () => {
+test("1Min 首次回补覆盖 180 天以支持任意分钟聚合", async () => {
   const store = new InMemoryBarStore();
   const { client, calls } = fakeClient([
-    [],
     [bar("2026-07-27T13:30:00Z", 100), bar("2026-07-27T13:31:00Z", 101)],
   ]);
   const repo = createBarRepository({ store, client, now: fixedNow });
 
   const bars = await repo.getBars("AAPL", "1Min", 390);
 
-  assert.equal(calls.length, 2);
-  assert.equal(calls[1]!.from, "2026-07-18");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.from, "2026-01-29");
   assert.equal(bars.length, 2);
 });
 

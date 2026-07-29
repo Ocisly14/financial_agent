@@ -12,9 +12,9 @@
 
 ## Global Constraints
 
-- Node `>=23.0.0`，源码直接以 `.ts` 运行，**import 路径必须带 `.ts` 后缀**（如 `from "../config.ts"`），与现有代码一致。
+- Node `>=23.0.0`，源码直接以 `.ts` 运行，**import 路径必须带 `.ts` 后缀**，与现有代码一致。
 - 测试文件必须放在 `mcp_tools/stock/__tests__/` 下并以 `.test.ts` 结尾——`npm test` 的 glob 是 `mcp_tools/**/__tests__/*.test.ts`。
-- 环境变量经 `mcp_tools/config.ts` 的 `env(key)` 读取（缺失时抛错），不要直接读 `process.env`。
+- Alpaca 环境变量由股票数据 client 的必填配置读取器处理（缺失时抛错）。
 - 工具返回结构固定为 `{ summary: string, generation_context: { prompt: string, data: JsonObject } }`，所有失败路径也必须返回该结构而非抛异常。
 - 数据源标注一律为 `"Alpaca (IEX feed)"`——免费档是 IEX 单一交易所行情，不是 SIP 合并行情，不得在文案中称其为"全市场"。
 - Alpaca 请求头：`APCA-API-KEY-ID` 与 `APCA-API-SECRET-KEY`；base URL `https://data.alpaca.markets/v2`；日 K 一律带 `adjustment=all`。
@@ -46,7 +46,7 @@
 - Test: `mcp_tools/stock/__tests__/alpacaClient.test.ts`
 
 **Interfaces:**
-- Consumes: `env` from `mcp_tools/config.ts`
+- Consumes: Alpaca credentials from the stock data client environment.
 - Produces:
   - `type DailyBar = { t: string; o: number; h: number; l: number; c: number; v: number; vw: number }`
   - `type Snapshot = { symbol: string; price: number | null; bidPrice: number | null; askPrice: number | null; dayOpen: number | null; dayHigh: number | null; dayLow: number | null; prevClose: number | null; volume: number | null; quoteTimestamp: string }`
@@ -114,7 +114,7 @@ Expected: FAIL — `Cannot find module '../alpacaClient.ts'`
 - [ ] **Step 3: 实现 alpacaClient.ts**
 
 ```ts
-import { env } from "../config.ts";
+// Read required Alpaca credentials in the stock data client.
 
 const ALPACA_BASE = "https://data.alpaca.markets/v2";
 const FEED = "iex";
@@ -1426,7 +1426,7 @@ Expected:
 | §4 数据模型与索引 | Task 3 |
 | §4 读时增量 | Task 4 规则 1 与测试 2、3 |
 | §4 复权与拆股检测 | Task 4 规则 2、3 与测试 5、6 |
-| §5 三类数据落地方式 | 日 K → Task 3/4；snapshot 10 秒 TTL → Task 1；分钟线现拉不落库 → Task 5 |
+| §5 三类数据落地方式 | 日 K 与近期分钟线 → Task 3/4；snapshot TTL → Task 1；分钟线支持任意周期本地聚合 |
 | §6 工具接口（symbol 必填，由 agent 给出） | Task 5 |
 | §7 错误处理七种情况 | Task 5（snapshot 失败降级、双失败、无效 symbol 不写 coverage → Task 4 测试 8、Mongo 不可用退化） |
 | §8 六个测试用例 | Task 4 测试 1–6，另加 days 限制与空回补两例 |

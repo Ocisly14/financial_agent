@@ -23,6 +23,20 @@ export interface Candle {
     c: number;
 }
 
+export interface CandleOverlay {
+    key: string;
+    label: string;
+    points: Array<{ t: number; value: number }>;
+    color?: string;
+}
+
+export interface CandlePriceLevel {
+    key: string;
+    value: number;
+    label: string;
+    color?: string;
+}
+
 interface Props {
     candles: Candle[];
     lastPrice?: number;
@@ -36,7 +50,13 @@ interface Props {
     theme?: CandleTheme;
     /** 可选 x 轴标签；不传时保持 Strategy Floor 当前像素输出不变。 */
     formatTimestamp?: (timestampMs: number) => string;
+    /** Price-scale technical lines such as SMA, EMA, Bollinger Bands, and VWAP. */
+    overlays?: CandleOverlay[];
+    /** Horizontal price levels such as support and resistance. */
+    levels?: CandlePriceLevel[];
 }
+
+export const CANDLE_OVERLAY_COLORS = ["#2563eb", "#8b5cf6", "#06b6d4", "#f97316", "#ec4899", "#84cc16"];
 
 function fmtPrice(v: number): string {
     if (!Number.isFinite(v)) return "—";
@@ -61,6 +81,8 @@ export function CandleScope({
     quote = "USDT",
     theme = DEFAULT_CANDLE_THEME,
     formatTimestamp,
+    overlays = [],
+    levels = [],
 }: Props) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const wrapRef = useRef<HTMLSpanElement>(null);
@@ -94,6 +116,22 @@ export function CandleScope({
             lo = Math.min(lo, c.l);
             hi = Math.max(hi, c.h);
         }
+        const firstTimestamp = candles[0]?.t ?? -Infinity;
+        const lastTimestamp = candles.at(-1)?.t ?? Infinity;
+        for (const overlay of overlays) {
+            for (const point of overlay.points) {
+                if (point.t >= firstTimestamp && point.t <= lastTimestamp && Number.isFinite(point.value)) {
+                    lo = Math.min(lo, point.value);
+                    hi = Math.max(hi, point.value);
+                }
+            }
+        }
+        for (const level of levels) {
+            if (Number.isFinite(level.value)) {
+                lo = Math.min(lo, level.value);
+                hi = Math.max(hi, level.value);
+            }
+        }
         if (typeof lastPrice === "number") {
             lo = Math.min(lo, lastPrice);
             hi = Math.max(hi, lastPrice);
@@ -108,7 +146,7 @@ export function CandleScope({
         }
         const pad = (hi - lo) * 0.12;
         return { lo: lo - pad, hi: hi + pad };
-    }, [candles, lastPrice]);
+    }, [candles, lastPrice, overlays, levels]);
 
     const layout = useMemo(() => {
         const padR = 78; // price gutter on the right (TradingView-style)
@@ -236,6 +274,44 @@ export function CandleScope({
             });
         }
 
+        // ── technical overlays on the shared price scale ──
+        const firstTimestamp = candles[0]?.t;
+        const lastTimestamp = candles.at(-1)?.t;
+        if (firstTimestamp !== undefined && lastTimestamp !== undefined) {
+            const timestampSpan = Math.max(1, lastTimestamp - firstTimestamp);
+            const xOfTimestamp = (timestamp: number) =>
+                padL + ((timestamp - firstTimestamp) / timestampSpan) * plotW;
+            overlays.forEach((overlay, overlayIndex) => {
+                const visible = overlay.points.filter((point) =>
+                    point.t >= firstTimestamp && point.t <= lastTimestamp && Number.isFinite(point.value),
+                );
+                if (visible.length === 0) return;
+                ctx.strokeStyle = overlay.color ?? CANDLE_OVERLAY_COLORS[overlayIndex % CANDLE_OVERLAY_COLORS.length]!;
+                ctx.lineWidth = 1.6;
+                ctx.setLineDash([]);
+                ctx.beginPath();
+                visible.forEach((point, pointIndex) => {
+                    const x = xOfTimestamp(point.t);
+                    const y = yOf(point.value);
+                    if (pointIndex === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                });
+                ctx.stroke();
+            });
+
+            levels.forEach((level, levelIndex) => {
+                const y = yOf(level.value);
+                ctx.strokeStyle = level.color ?? CANDLE_OVERLAY_COLORS[(overlays.length + levelIndex) % CANDLE_OVERLAY_COLORS.length]!;
+                ctx.lineWidth = 1;
+                ctx.setLineDash([6, 4]);
+                ctx.beginPath();
+                ctx.moveTo(padL, y);
+                ctx.lineTo(xRight, y);
+                ctx.stroke();
+                ctx.setLineDash([]);
+            });
+        }
+
         // ── live mark line + right-axis price tag ──
         if (typeof lastPrice === "number") {
             const y = yOf(lastPrice);
@@ -283,7 +359,7 @@ export function CandleScope({
             ctx.textAlign = "left";
             ctx.fillText(tag, xRight + 8, hover.y + 0.5);
         }
-    }, [candles, width, height, domain, layout, hover, lastPrice, high24h, low24h, liveFromTs, pulse, theme, formatTimestamp]);
+    }, [candles, width, height, domain, layout, hover, lastPrice, high24h, low24h, liveFromTs, pulse, theme, formatTimestamp, overlays, levels]);
 
     // hovered candle for the OHLC readout
     const hovered = useMemo(() => {

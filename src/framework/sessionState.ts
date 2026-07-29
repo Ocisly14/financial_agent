@@ -183,6 +183,7 @@ export class SessionState {
     const payload: JsonObject = { status: result.status, summary: result.summary };
     if (result.generation_context) payload.generation_context = result.generation_context as unknown as JsonObject;
     if (result.artifacts) payload.artifacts = result.artifacts as unknown as JsonObject[string];
+    if (result.visualizations) payload.visualizations = result.visualizations;
     if (result.error) payload.error = result.error;
     if (result.metrics) payload.metrics = result.metrics as unknown as JsonObject;
     return this.record(agent, "task_result", payload, { parent: dispatchEventId });
@@ -212,6 +213,7 @@ export class SessionState {
       };
       if (resultEv.payload.generation_context) result.generation_context = resultEv.payload.generation_context as unknown as GenerationContext;
       if (resultEv.payload.artifacts) result.artifacts = resultEv.payload.artifacts as unknown as ArtifactRef[];
+      if (resultEv.payload.visualizations) result.visualizations = resultEv.payload.visualizations as JsonObject[];
       if (resultEv.payload.error) result.error = resultEv.payload.error as { code: string; message: string };
       if (resultEv.payload.metrics) result.metrics = resultEv.payload.metrics as unknown as NonNullable<TaskResult["metrics"]>;
       out.result = result;
@@ -255,16 +257,17 @@ export class SessionState {
 
   /** Successful tool outputs for a subagent task, read from the log, used to
    *  assemble the task_result's generation_context. */
-  subagentToolOutputs(dispatchEventId: string): { name: string; summary: string; generation_context?: GenerationContext; artifacts?: ArtifactRef[] }[] {
-    const out: { name: string; summary: string; generation_context?: GenerationContext; artifacts?: ArtifactRef[] }[] = [];
+  subagentToolOutputs(dispatchEventId: string): { name: string; summary: string; generation_context?: GenerationContext; artifacts?: ArtifactRef[]; visualizations?: JsonObject[] }[] {
+    const out: { name: string; summary: string; generation_context?: GenerationContext; artifacts?: ArtifactRef[]; visualizations?: JsonObject[] }[] = [];
     for (const e of this.events) {
       if (!e.is_sidechain || e.kind !== "tool_result" || e.payload.task_id !== dispatchEventId || e.payload.error) continue;
-      const item: { name: string; summary: string; generation_context?: GenerationContext; artifacts?: ArtifactRef[] } = {
+      const item: { name: string; summary: string; generation_context?: GenerationContext; artifacts?: ArtifactRef[]; visualizations?: JsonObject[] } = {
         name: (e.payload.name as string) ?? "tool",
         summary: e.payload.summary as string,
       };
       if (e.payload.generation_context) item.generation_context = e.payload.generation_context as unknown as GenerationContext;
       if (e.payload.artifacts) item.artifacts = e.payload.artifacts as unknown as ArtifactRef[];
+      if (e.payload.visualizations) item.visualizations = e.payload.visualizations as JsonObject[];
       out.push(item);
     }
     return out;
@@ -368,7 +371,7 @@ export class SessionState {
           const gc = e.payload.generation_context as GenerationContext | undefined;
           const lines = [`[${name} result] ${e.payload.summary as string}`];
           if (gc) {
-            lines.push(`  generation_context_prompt: ${gc.prompt}`);
+            if (gc.prompt) lines.push(`  generation_context_prompt: ${gc.prompt}`);
             lines.push(`  generation_data: ${JSON.stringify(gc.data)}`);
           }
           progressLines.push(lines.join("\n"));
@@ -411,7 +414,7 @@ export class SessionState {
     const parts: string[] = [`[${agent} result] status=${e.payload.status as string} | ${e.payload.summary as string}`];
     if (error) parts.push(`  error(${error.code}): ${error.message}`);
     if (gc) {
-      parts.push(`  generation_context_prompt: ${gc.prompt}`);
+      if (gc.prompt) parts.push(`  generation_context_prompt: ${gc.prompt}`);
       parts.push(`  generation_data: ${JSON.stringify(gc.data)}`);
     }
     for (const artifact of evArtifacts) {

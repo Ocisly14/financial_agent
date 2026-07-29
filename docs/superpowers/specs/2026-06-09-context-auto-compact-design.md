@@ -209,9 +209,9 @@ if (ratio >= COMPACTION_THRESHOLD_RATIO) {
 4. `await store?.saveCompaction(sessionId, cache)`(若配置了 Mongo)。
 5. **内存裁剪**:从 `state.events` 中移除所有 `turn <= targetThrough` 的事件(含该范围内的 sidechain 事件)。原始事件已在 §3.2 持续写入 Mongo,裁剪不丢数据。
 
-### 图表文件
+### 可视化数据
 
-`artifacts` 中的 chart 是磁盘文件引用(`./charts/*.html`),compact 不删除磁盘文件,只是这些轮次的 artifact 引用不再出现在 prompt 中。
+图表使用 UI-only visualization spec,不写入 prompt。compact 只保留生成回答所需的结构化业务数据,不保留已过期的前端可视化序列。
 
 ### 裁剪安全性
 

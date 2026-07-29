@@ -11,11 +11,15 @@ import {
     type StockRange,
 } from "@/lib/stockChart";
 import {
+    CANDLE_OVERLAY_COLORS,
     CandleScope,
     type Candle,
+    type CandleOverlay,
+    type CandlePriceLevel,
     type CandleTheme,
 } from "./cex/CandleScope";
 import { MessageTimeContext, StreamingContext } from "./stockChartContext";
+import type { TechnicalStudy } from "@/lib/chartWorkspace";
 
 interface StockCandle {
     t: string;
@@ -156,22 +160,78 @@ function formatMessageAge(sentAtMs: number, nowMs: number): string | null {
     return `消息发于 ${minutes} 分钟前`;
 }
 
-function StockChartSkeleton({ symbol, note }: { symbol: string; note: string }) {
+function StockChartSkeleton({
+    symbol,
+    note,
+    height = 210,
+    workspace = false,
+}: {
+    symbol: string;
+    note: string;
+    height?: number;
+    workspace?: boolean;
+}) {
     return (
-        <span className="my-3 block rounded-xl border border-gray-200 bg-white p-4 dark:border-white/10 dark:bg-[hsl(229,50%,6%)]">
+        <span className={cn(
+            "block rounded-xl border border-gray-200 bg-white p-4 dark:border-white/10 dark:bg-[hsl(229,50%,6%)]",
+            workspace ? "h-full border-0 bg-transparent dark:bg-transparent" : "my-3",
+        )}>
             <span className="block text-sm font-medium text-slate-900 dark:text-white/90">{symbol}</span>
             <span className="mt-1 block text-xs text-slate-500 dark:text-slate-400">{note}</span>
-            <span className="mt-3 block h-[210px] animate-pulse rounded-lg bg-slate-100 dark:bg-white/5" />
+            <span
+                className="mt-3 block animate-pulse rounded-lg bg-slate-100 dark:bg-white/5"
+                style={{ height }}
+            />
         </span>
     );
 }
 
-function StockChartLive({ symbol, initialRange }: { symbol: string; initialRange: StockRange }) {
+function StockChartLive({
+    symbol,
+    initialRange,
+    height = 210,
+    workspace = false,
+    studies = [],
+}: {
+    symbol: string;
+    initialRange: StockRange;
+    height?: number;
+    workspace?: boolean;
+    studies?: TechnicalStudy[];
+}) {
     const [range, setRange] = useState<StockRange>(initialRange);
     const containerRef = useRef<HTMLSpanElement | null>(null);
     const isVisible = useIsVisible(containerRef);
     const sentAtMs = useContext(MessageTimeContext);
     const theme = useCandleTheme();
+
+    const priceOverlays = useMemo<CandleOverlay[]>(() => {
+        let colorIndex = 0;
+        return studies.filter((study) => study.placement === "overlay").flatMap((study) =>
+            study.series.map((series) => ({
+                key: `${study.id}:${series.key}`,
+                label: series.label,
+                color: CANDLE_OVERLAY_COLORS[colorIndex++ % CANDLE_OVERLAY_COLORS.length],
+                points: series.points.map((point) => ({
+                    t: new Date(point.timestamp.length === 10 ? `${point.timestamp}T00:00:00Z` : point.timestamp).getTime(),
+                    value: point.value,
+                })).filter((point) => Number.isFinite(point.t)),
+            })),
+        );
+    }, [studies]);
+    const priceLevels = useMemo<CandlePriceLevel[]>(() => {
+        let colorIndex = priceOverlays.length;
+        return studies.filter((study) => study.placement === "overlay").flatMap((study) =>
+            study.levels.map((level, index) => ({
+                key: `${study.id}:${level.kind}:${index}`,
+                label: level.label,
+                value: level.value,
+                color: CANDLE_OVERLAY_COLORS[colorIndex++ % CANDLE_OVERLAY_COLORS.length],
+            })),
+        );
+    }, [priceOverlays.length, studies]);
+
+    useEffect(() => setRange(initialRange), [initialRange, symbol]);
 
     const quoteQuery = useQuery({
         queryKey: ["stock-quote", symbol],
@@ -231,11 +291,18 @@ function StockChartLive({ symbol, initialRange }: { symbol: string; initialRange
     }, [candlesQuery.data?.timeframe]);
 
     if (loading) {
-        return <span ref={containerRef} className="block"><StockChartSkeleton symbol={symbol} note="加载行情…" /></span>;
+        return (
+            <span ref={containerRef} className="block h-full">
+                <StockChartSkeleton symbol={symbol} note="加载行情…" height={height} workspace={workspace} />
+            </span>
+        );
     }
     if (failed) {
         return (
-            <span ref={containerRef} className="my-3 block rounded-xl border border-gray-200 bg-white p-4 text-sm text-slate-500 dark:border-white/10 dark:bg-[hsl(229,50%,6%)] dark:text-slate-400">
+            <span ref={containerRef} className={cn(
+                "block rounded-xl border border-gray-200 bg-white p-4 text-sm text-slate-500 dark:border-white/10 dark:bg-[hsl(229,50%,6%)] dark:text-slate-400",
+                workspace ? "h-full border-0 bg-transparent dark:bg-transparent" : "my-3",
+            )}>
                 {symbol} 行情暂时不可用。
             </span>
         );
@@ -243,7 +310,10 @@ function StockChartLive({ symbol, initialRange }: { symbol: string; initialRange
 
     const candleStaleness = candlesQuery.data?.staleness;
     return (
-        <span ref={containerRef} className="my-3 block rounded-xl border border-gray-200 bg-white p-4 dark:border-white/10 dark:bg-[hsl(229,50%,6%)]">
+        <span ref={containerRef} className={cn(
+            "block rounded-xl border border-gray-200 bg-white p-4 dark:border-white/10 dark:bg-[hsl(229,50%,6%)]",
+            workspace ? "h-full border-0 bg-transparent dark:bg-transparent" : "my-3",
+        )}>
             <span className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
                 <span className="text-sm font-semibold text-slate-900 dark:text-white/90">{symbol}</span>
                 <span className="text-lg font-semibold tabular-nums text-slate-900 dark:text-white">{formatPrice(price)}</span>
@@ -284,14 +354,51 @@ function StockChartLive({ symbol, initialRange }: { symbol: string; initialRange
                 ))}
             </span>
 
-            <span className="mt-2 block h-[210px] overflow-hidden">
+            <span className="mt-2 block overflow-hidden" style={{ height }}>
                 {candles.length > 0 ? (
-                    <CandleScope candles={candles} lastPrice={quote?.price ?? undefined} height={210} quote="USD" theme={theme} formatTimestamp={formatTimestamp} />
+                    <CandleScope
+                        candles={candles}
+                        lastPrice={quote?.price ?? undefined}
+                        height={height}
+                        quote="USD"
+                        theme={theme}
+                        formatTimestamp={formatTimestamp}
+                        overlays={priceOverlays}
+                        levels={priceLevels}
+                    />
                 ) : (
                     <span className="flex h-full items-center justify-center text-xs text-slate-400">暂无 K 线数据</span>
                 )}
             </span>
         </span>
+    );
+}
+
+export function StockChartView({
+    symbol,
+    range,
+    height = 520,
+    workspace = false,
+    studies = [],
+}: {
+    symbol: unknown;
+    range?: unknown;
+    height?: number;
+    workspace?: boolean;
+    studies?: TechnicalStudy[];
+}) {
+    const parsed = parseStockChartProps({ symbol, range });
+    if ("error" in parsed) {
+        return <span className="text-sm text-red-600 dark:text-red-400">无效的股票代码：{parsed.error}</span>;
+    }
+    return (
+        <StockChartLive
+            symbol={parsed.symbol}
+            initialRange={parsed.range}
+            height={height}
+            workspace={workspace}
+            studies={studies}
+        />
     );
 }
 

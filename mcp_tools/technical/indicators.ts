@@ -1,4 +1,4 @@
-import type { OhlcvBar } from "../shared/coinglassClient.ts";
+import type { DailyBar } from "../../src/data/stock/index.ts";
 
 // ─── Simple Moving Average ────────────────────────────────────────────────────
 
@@ -134,12 +134,12 @@ export function bollinger(closes: number[], period = 20, stdMult = 2): Bollinger
 
 // ─── ATR (Average True Range) ─────────────────────────────────────────────────
 
-export function atr(bars: OhlcvBar[], period = 14): number[] {
+export function atr(bars: DailyBar[], period = 14): number[] {
   if (bars.length < 2) return [];
   const trueRanges: number[] = [];
   for (let i = 1; i < bars.length; i++) {
-    const { high, low } = bars[i]!;
-    const prevClose = bars[i - 1]!.close;
+    const { h: high, l: low } = bars[i]!;
+    const prevClose = bars[i - 1]!.c;
     const tr = Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose));
     trueRanges.push(tr);
   }
@@ -157,13 +157,13 @@ export function atr(bars: OhlcvBar[], period = 14): number[] {
 
 // ─── OBV (On-Balance Volume) ──────────────────────────────────────────────────
 
-export function obv(bars: OhlcvBar[]): number[] {
+export function obv(bars: DailyBar[]): number[] {
   if (bars.length === 0) return [];
   const result: number[] = [0];
   let current = 0;
   for (let i = 1; i < bars.length; i++) {
-    const { close, volume } = bars[i]!;
-    const prevClose = bars[i - 1]!.close;
+    const { c: close, v: volume } = bars[i]!;
+    const prevClose = bars[i - 1]!.c;
     if (close > prevClose) current += volume;
     else if (close < prevClose) current -= volume;
     // equal: unchanged
@@ -174,15 +174,15 @@ export function obv(bars: OhlcvBar[]): number[] {
 
 // ─── VWAP (Volume-Weighted Average Price) ─────────────────────────────────────
 
-export function vwap(bars: OhlcvBar[]): number[] {
+export function vwap(bars: DailyBar[]): number[] {
   if (bars.length === 0) return [];
   const result: number[] = [];
   let cumulativePV = 0;
   let cumulativeVol = 0;
   for (const bar of bars) {
-    const typical = (bar.high + bar.low + bar.close) / 3;
-    cumulativePV += typical * bar.volume;
-    cumulativeVol += bar.volume;
+    const typical = (bar.h + bar.l + bar.c) / 3;
+    cumulativePV += typical * bar.v;
+    cumulativeVol += bar.v;
     result.push(cumulativeVol !== 0 ? cumulativePV / cumulativeVol : typical);
   }
   return result;
@@ -195,7 +195,7 @@ export type SupportResistance = {
   resistance: number[];
 };
 
-export function supportResistance(closes: number[], lookback = 20): SupportResistance {
+export function supportResistance(closes: number[], lookback = 20, maxLevels = 5): SupportResistance {
   const support: number[] = [];
   const resistance: number[] = [];
 
@@ -221,92 +221,17 @@ export function supportResistance(closes: number[], lookback = 20): SupportResis
     return deduped;
   };
 
+  const latest = closes.at(-1);
+  const supports = dedup(support);
+  const resistances = dedup(resistance);
   return {
-    support: dedup(support).slice(-5),
-    resistance: dedup(resistance).slice(-5),
-  };
-}
-
-// ─── Trend Summary ────────────────────────────────────────────────────────────
-
-export type TrendSummary = {
-  sma20: number;
-  sma50: number;
-  sma200: number;
-  ema12: number;
-  ema26: number;
-  rsi14: number;
-  macdValue: number;
-  macdSignal: number;
-  macdHistogram: number;
-  bb_upper: number;
-  bb_middle: number;
-  bb_lower: number;
-  bb_pctB: number;
-  atr14: number;
-  obvChangePct: number; // 10-bar OBV % change (raw value; the agent judges direction)
-  support: number[];
-  resistance: number[];
-  vwap: number;
-};
-
-function lastOf(arr: number[]): number {
-  return arr[arr.length - 1] ?? 0;
-}
-
-export function computeTrend(bars: OhlcvBar[]): TrendSummary {
-  const closes = bars.map((b) => b.close);
-
-  const sma20Val = lastOf(sma(closes, 20));
-  const sma50Val = lastOf(sma(closes, 50));
-  const sma200Val = lastOf(sma(closes, 200));
-  const ema12Val = lastOf(ema(closes, 12));
-  const ema26Val = lastOf(ema(closes, 26));
-  const rsi14Val = lastOf(rsi(closes, 14));
-
-  const macdResult = macd(closes, 12, 26, 9);
-  const macdValue = lastOf(macdResult.macd);
-  const macdSignalVal = lastOf(macdResult.signal);
-  const macdHistogram = lastOf(macdResult.histogram);
-
-  const bbResult = bollinger(closes, 20, 2);
-  const bb_upper = lastOf(bbResult.upper);
-  const bb_middle = lastOf(bbResult.middle);
-  const bb_lower = lastOf(bbResult.lower);
-  const bb_pctB = lastOf(bbResult.pctB);
-
-  const atr14Val = lastOf(atr(bars, 14));
-
-  const obvSeries = obv(bars);
-  const obvLen = obvSeries.length;
-  let obvChangePct = 0;
-  if (obvLen >= 10) {
-    const recent = obvSeries[obvLen - 1]!;
-    const older = obvSeries[obvLen - 10]!;
-    obvChangePct = (recent - older) / (Math.abs(older) || 1);
-  }
-
-  const sr = supportResistance(closes, 20);
-  const vwapVal = lastOf(vwap(bars));
-
-  return {
-    sma20: sma20Val,
-    sma50: sma50Val,
-    sma200: sma200Val,
-    ema12: ema12Val,
-    ema26: ema26Val,
-    rsi14: rsi14Val,
-    macdValue,
-    macdSignal: macdSignalVal,
-    macdHistogram,
-    bb_upper,
-    bb_middle,
-    bb_lower,
-    bb_pctB,
-    atr14: atr14Val,
-    obvChangePct,
-    support: sr.support,
-    resistance: sr.resistance,
-    vwap: vwapVal,
+    support: supports
+      .filter((level) => latest === undefined || level <= latest)
+      .sort((a, b) => b - a)
+      .slice(0, maxLevels),
+    resistance: resistances
+      .filter((level) => latest === undefined || level >= latest)
+      .sort((a, b) => a - b)
+      .slice(0, maxLevels),
   };
 }

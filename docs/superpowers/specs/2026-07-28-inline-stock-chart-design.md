@@ -21,13 +21,13 @@ status: spec
 
 目标:让主 agent 能在回答正文里嵌入一块**活的**股价图表——随行情自动刷新,而不是生成一张静态图片或一个需要另开的 HTML 文件。
 
-现有的 `price_chart` 工具走的是"生成 HTML 文件 → 存盘 → 以 artifact 返回路径"的路线。那条路线产出的是死快照,且脱离了对话正文。本设计不复用它,也不改动它。
+旧的"生成 HTML 文件 → 存盘 → 返回路径"路线已彻底删除。所有新图表使用结构化 visualization spec,由前端统一 renderer 绘制。
 
 ### 非目标
 
 - 不做自选列表(watchlist)。本设计只交付一个可嵌入的单标的组件;若日后要做行情页,在此组件之上搭建。
 - 不做 WebSocket 推送。轮询已足够,理由见 §5。
-- 不覆盖加密货币。crypto 已有 `price_chart` 与 Strategy Floor 的图表路径。
+- 不覆盖加密货币。该组件只接受通过股票 symbol 校验的美股/ETF。
 
 ---
 
@@ -83,11 +83,7 @@ markdown-to-jsx 只有在标签前后都有空行时才把它当块级 HTML 处�
 
 `chat.tsx:590` 的流式预览传 `streaming`,已定稿的消息(`chat.tsx:503`/`507`)不传。定稿后组件正常挂载,只挂载一次。
 
-### 消息分段的不变量
-
-`renderAssistantContent`(`chat.tsx:496`)会用 `getArtifactSegments` 把一条消息切成多段,每段各自一个 `MarkdownRenderer`。若切分边界落在 `<StockChart ... />` 内部,标签就废了。本设计依赖一条不变量:**分段只发生在 artifact(`chartPath`)边界上,而 artifact 标记与 `StockChart` 标签互不嵌套**。
-
-已核对:`client/src/components/chat/message-utils.ts:259` 只按 `/(\{\{artifact:\d+\}\})/` 切分,该标记不可能出现在 `<StockChart ... />` 内部,标签总是完整落在同一个 text 段里。不变量成立,无需改动。
+消息正文直接交给单个 `MarkdownRenderer`;不存在文件式图表分段或 iframe 嵌入链路。
 
 ---
 
@@ -280,7 +276,7 @@ canvas 绘制本身不做单测:断言像素成本高、价值低,靠手工验�
 1. `sharedRepository.ts` 抽取 + `getStockPriceTool.ts` 改为调用它;同一步把 `alpacaClient.ts:150` 的 TTL 改为 `5_000` 并更新注释(纯重构 + 一行常量,现有 54 个测试须保持全绿)。
 2. `stockMarketRoutes.ts`(含 symbol 归一化与限流)+ §8 的 1–9 号测试 + `server.ts` 路由接线。
 3. `parseStockChartProps` / `pollIntervalForSession` / `stripIncompleteTrailingTag` 三个纯函数 + 10–12 号测试。
-4. 核对 `getArtifactSegments` 满足 §2 的分段不变量(不满足则先修);`StockChart` 组件 + `MarkdownRenderer` override 注册与 `streaming` prop + `MessageTimeContext` + 13–15 号测试。
+4. `StockChart` 组件 + `MarkdownRenderer` override 注册与 `streaming` prop + `MessageTimeContext` + 13–15 号测试。
 5. orchestrator 提示词补充说明(含"前后各留空行"),手工验证模型确实会输出该标签、流式期间显示占位、定稿后渲染正常。
 
 第 1 步会连带改变 `get_stock_price` 的缓存行为(见文首 Scope),虽是一行改动也应单独成 commit,便于日后回滚时不牵连 `sharedRepository` 的抽取。

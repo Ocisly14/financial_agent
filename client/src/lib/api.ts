@@ -173,18 +173,6 @@ export const apiClient = {
             body: formData,
         });
     },
-    getChartUrl: (chartPath: string) => {
-        if (!chartPath) return '';
-        if (chartPath.startsWith('http')) return chartPath;
-        // financial-agent serves charts at /charts/:filename (basename only).
-        // artifact.ref is a full local path — take just the basename.
-        const filename = chartPath.replace(/\\/g, '/').split('/').pop() ?? chartPath;
-        const origin =
-            typeof window !== "undefined" && typeof window.location?.origin === "string"
-                ? window.location.origin
-                : BASE_URL;
-        return `${origin}/charts/${encodeURIComponent(filename)}`;
-    },
     getReportUrl: (reportPath: string) => {
         // Remove leading slash and convert to server URL
         let relativePath = reportPath.replace(/^\/+/, '');
@@ -1299,23 +1287,25 @@ function buildOrderConfigFromApproval(payload: Record<string, unknown>): {
     return { order_configuration: JSON.stringify({ [variantKey]: inner }), product_id };
 }
 
-// Artifact emitted by the financial-agent backend `final` event.
-type ChatArtifact = { n: number; type: string; ref: string; label?: string };
+// File/URL artifact emitted by the financial-agent backend `final` event.
+type ChatArtifact = { n: number; type: "file" | "url"; ref: string; label?: string };
 
 /**
  * Translate a backend `final` event into the assistant-message object that
- * chat.tsx renders. The raw narrative (with `{{artifact:N}}` placeholders) is
- * kept in `content.metadata.artifactText` so the renderer can split on the
- * placeholders and drop each chart inline at its exact position; `text` is a
- * placeholder-stripped copy used for the markdown fallback + copy button.
+ * chat.tsx renders. File/URL artifact markers become their human label;
+ * visualization data travels through its own structured side-channel.
  */
-function buildAssistantResponse(agentId: string, response: string, artifacts: ChatArtifact[]) {
+function buildAssistantResponse(
+    agentId: string,
+    response: string,
+    artifacts: ChatArtifact[],
+    visualizations: Record<string, unknown>[] = [],
+) {
     const byN = new Map(artifacts.map((a) => [a.n, a]));
-    const chartPaths = artifacts.filter((a) => a.type === "chart").map((a) => a.ref);
     const text = response
         .replace(/\{\{artifact:(\d+)\}\}/g, (_m, n) => {
             const a = byN.get(Number(n));
-            return a && a.type !== "chart" && a.label ? a.label : "";
+            return a?.label ?? "";
         })
         .replace(/\n{3,}/g, "\n\n")
         .trim();
@@ -1332,8 +1322,7 @@ function buildAssistantResponse(agentId: string, response: string, artifacts: Ch
             source: "regular_message",
             metadata: {
                 artifacts,
-                artifactText: response,
-                chartPaths,
+                visualizations,
             },
         },
     };
@@ -1599,7 +1588,12 @@ export class StreamingApiClient {
                             onRoomUpdate?.({ id: parsed.sessionId, name: '' });
                         }
                         onFinalResponse([
-                            buildAssistantResponse(agentId, parsed.response ?? '', parsed.artifacts ?? []),
+                            buildAssistantResponse(
+                                agentId,
+                                parsed.response ?? '',
+                                parsed.artifacts ?? [],
+                                parsed.visualizations ?? [],
+                            ),
                         ]);
                         break;
                     case 'approval_required': {

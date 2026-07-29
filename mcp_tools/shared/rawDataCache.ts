@@ -1,13 +1,12 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 /**
- * Local disk cache for raw tool payloads (OHLCV bars, search records,
- * exchange order/fill lists, …). These raw arrays must NOT
+ * Local disk cache for raw exchange order/fill payloads. These raw arrays must NOT
  * flow into `generation_context` — they bloat the agent context and the
  * generating model never references them point-by-point. Tools curate a small
- * subset for `generation_context.data` and persist the full payload here so it
- * can be cached and re-read later (debugging, deeper analysis, re-use).
+ * subset for `generation_context.data` and persist the full payload here for
+ * debugging and offline inspection.
  *
  * Best-effort: cache failures never break a tool. Dir is `RAW_DATA_CACHE_DIR`
  * (default `./cache/raw`), one JSON file per `<namespace>/<key>.json`.
@@ -26,16 +25,6 @@ export async function cacheRawData(namespace: string, key: string, data: unknown
     await mkdir(dir, { recursive: true });
     await writeFile(file, JSON.stringify(data), "utf8");
     return file;
-  } catch {
-    return null;
-  }
-}
-
-/** Read a previously cached raw payload, or null if missing/unreadable. */
-export async function readRawData<T = unknown>(namespace: string, key: string): Promise<T | null> {
-  const file = join(CACHE_ROOT, safeKey(namespace), `${safeKey(key)}.json`);
-  try {
-    return JSON.parse(await readFile(file, "utf8")) as T;
   } catch {
     return null;
   }
