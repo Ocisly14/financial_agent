@@ -1,6 +1,9 @@
 import Markdown from "markdown-to-jsx";
 import React, { useMemo } from "react";
 import { cn } from "@/lib/utils";
+import { stripIncompleteTrailingTag } from "@/lib/stockChart";
+import StockChartBlock from "./StockChart";
+import { StreamingContext } from "./stockChartContext";
 
 /**
  * Extracts plain text from React children (recursively)
@@ -689,6 +692,10 @@ const baseMarkdownOverrides = {
     th: CustomTH,
     td: CustomTD,
     img: CustomImg,
+    // markdown-to-jsx 的 overrides 原生支持正文里的自定义标签，所以主 agent 只需
+    // 写 <StockChart symbol="AAPL" range="1Y" /> 就能内嵌一块实时图表。不发明新
+    // 语法、不写解析器、不碰 SSE。
+    StockChart: StockChartBlock,
 };
 
 // Markdown component overrides generator for minimal spacing with optional anchor prefixes
@@ -718,18 +725,25 @@ interface MarkdownRendererProps {
     children: string;
     className?: string;
     anchorPrefix?: string;
+    /**
+     * 正文仍在 SSE 流式增长时置为 true。此时末尾未闭合的 `<...` 会被砍掉
+     * （否则 markdown-to-jsx 会把半截标签转义成字面文本闪现出来），
+     * 且 `<StockChart />` 只渲染占位骨架、不发请求。
+     */
+    streaming?: boolean;
 }
 
 export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
     children,
     className = "",
     anchorPrefix = "",
+    streaming = false,
 }) => {
     const options = useMemo(() => markdownOptions(anchorPrefix), [anchorPrefix]);
-    const normalized = useMemo(
-        () => normalizeOrderedListItemBreak(normalizeMarkdownAtxHeadingIndent(children)),
-        [children],
-    );
+    const normalized = useMemo(() => {
+        const source = streaming ? stripIncompleteTrailingTag(children) : children;
+        return normalizeOrderedListItemBreak(normalizeMarkdownAtxHeadingIndent(source));
+    }, [children, streaming]);
 
     return (
         <div
@@ -738,9 +752,11 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
                 className
             )}
         >
-            <Markdown options={options}>
-                {normalized}
-            </Markdown>
+            <StreamingContext.Provider value={streaming}>
+                <Markdown options={options}>
+                    {normalized}
+                </Markdown>
+            </StreamingContext.Provider>
         </div>
     );
 };

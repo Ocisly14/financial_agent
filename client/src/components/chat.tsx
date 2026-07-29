@@ -22,6 +22,7 @@ import { Avatar, AvatarFallback } from "./ui/avatar";
 import CopyButton from "./copy-button";
 import ChatTtsButton from "./ui/chat/chat-tts-button";
 import { MarkdownRenderer } from "./MarkdownRenderer";
+import { MessageTimeContext } from "./stockChartContext";
 import { ChartEmbed } from "./ChartEmbed";
 import { getArtifactSegments } from "./chat/message-utils";
 import type { ContentWithUser } from "./chat/types";
@@ -152,7 +153,7 @@ export default function Chat({ agentId, roomId }: ChatProps) {
                                 const data = step.data as { agent?: string; task?: string } | undefined;
                                 const task = data?.task;
                                 rec.description = task || rec.description || step.message || "";
-                                if (data?.agent === "onchain_data" || data?.agent === "news_research" || data?.agent === "trade") {
+                                if (data?.agent === "market_data" || data?.agent === "market_research" || data?.agent === "trading_operations") {
                                     rec.agent = data.agent as ProgressAgent;
                                 }
                                 if (rec.status !== "completed" && rec.status !== "error") rec.status = "in_progress";
@@ -493,23 +494,25 @@ export default function Chat({ agentId, roomId }: ChatProps) {
         }
     };
 
-    const renderAssistantContent = (m: ContentWithUser) => {
+    // getArtifactSegments 只在 {{artifact:N}} 标记处切分，而该标记不可能出现在
+    // <StockChart ... /> 标签内部，所以标签总是完整落在同一个 text 段里。
+    const renderAssistantContent = (m: ContentWithUser, streaming: boolean) => {
         const segments = getArtifactSegments(m);
         if (segments) {
             return segments.map((seg, i) =>
                 "chartPath" in seg ? (
                     <ChartEmbed key={i} chartPath={seg.chartPath} chartUrl={apiClient.getChartUrl(seg.chartPath)} />
                 ) : (
-                    <MarkdownRenderer key={i}>{seg.text}</MarkdownRenderer>
+                    <MarkdownRenderer key={i} streaming={streaming}>{seg.text}</MarkdownRenderer>
                 )
             );
         }
-        return <MarkdownRenderer>{m.text ?? ""}</MarkdownRenderer>;
+        return <MarkdownRenderer streaming={streaming}>{m.text ?? ""}</MarkdownRenderer>;
     };
 
     const renderAssistantBubble = (
         m: ContentWithUser,
-        opts: { isLoading?: boolean; tasks?: ProgressTask[]; tasksComplete?: boolean } = {}
+        opts: { isLoading?: boolean; tasks?: ProgressTask[]; tasksComplete?: boolean; streaming?: boolean } = {}
     ) => (
         <div className="flex flex-col gap-3 max-w-full min-w-0">
             <div className="max-w-full min-w-0">
@@ -523,7 +526,11 @@ export default function Chat({ agentId, roomId }: ChatProps) {
                                 <ChatProgressPill tasks={opts.tasks} isComplete={opts.tasksComplete ?? true} />
                             )}
                             <ChatBubbleMessage isLoading={opts.isLoading}>
-                                {renderAssistantContent(m)}
+                                {/* 图表画的是当下行情，而聊天记录是持久的。把消息的发送
+                                    时间传下去，StockChart 才能标注"消息发于 N 天前"。 */}
+                                <MessageTimeContext.Provider value={m.createdAt ?? null}>
+                                    {renderAssistantContent(m, opts.streaming ?? false)}
+                                </MessageTimeContext.Provider>
                             </ChatBubbleMessage>
                             <div className="flex items-center gap-4 justify-between w-full mt-1">
                                 {m.text && !opts.isLoading ? (
@@ -588,7 +595,7 @@ export default function Chat({ agentId, roomId }: ChatProps) {
                     {isProcessing &&
                         renderAssistantBubble(
                             { text: streamingText, createdAt: Date.now() } as unknown as ContentWithUser,
-                            { isLoading: !streamingText, tasks: liveTasks, tasksComplete: liveTasks.length > 0 && liveTasks.every((t) => t.status === "completed" || t.status === "error") }
+                            { isLoading: !streamingText, streaming: true, tasks: liveTasks, tasksComplete: liveTasks.length > 0 && liveTasks.every((t) => t.status === "completed" || t.status === "error") }
                         )}
                 </ChatMessageList>
             </div>

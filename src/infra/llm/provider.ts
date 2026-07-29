@@ -103,7 +103,7 @@ export class MockLlmProvider implements LlmProvider {
     }
     return JSON.stringify({
       reply: "Fetching the data needed to answer your request, one moment.",
-      dispatch: [{ agent: "onchain_data", task: "Fetch the data needed to answer the user's request." }],
+      dispatch: [{ agent: "market_data", task: "Fetch the data needed to answer the user's request." }],
       skill: null,
       tool_call: null,
     });
@@ -113,7 +113,7 @@ export class MockLlmProvider implements LlmProvider {
     // The subagent runs a tool-calling loop. The mock finishes immediately
     // (no real tool calls) so local/dev runs stay deterministic and offline.
     const task = extractBetween(userPrompt, "<task>", "</task>") || userPrompt;
-    const agent = typeof metadata.agent === "string" ? metadata.agent : "onchain_data";
+    const agent = typeof metadata.agent === "string" ? metadata.agent : "market_data";
     return JSON.stringify({
       action: "finish",
       summary: `${agent} completed task: ${task.slice(0, 120)}`,

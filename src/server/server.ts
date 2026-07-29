@@ -10,6 +10,7 @@ import { binanceFetch } from "../../mcp_tools/trading/binanceClient.ts";
 import { coinbaseFetch } from "../../mcp_tools/trading/coinbaseAuth.ts";
 import { reconciliationService } from "../trading/reconciliation.ts";
 import { fetchCandles } from "../trading/marketData.ts";
+import { handleStockQuote } from "./stockMarketRoutes.ts";
 import {
   killSwitchStore,
   consentStore,
@@ -199,12 +200,12 @@ function recordApprovalTaskResult(
 ) {
   if (!approvalContext || !approvalId || !approvalTaskId) return;
   approvalContext.state.record(
-    "trade",
+    "trading_operations",
     "approval_resolved",
     { approval_id: approvalId, decision, summary: result.summary },
     { parent: approvalContext.event.event_id },
   );
-  approvalContext.state.recordTaskResult("trade", approvalTaskId, result);
+  approvalContext.state.recordTaskResult("trading_operations", approvalTaskId, result);
 }
 
 function sseWrite(res: http.ServerResponse, data: unknown) {
@@ -561,14 +562,14 @@ async function handleCexApproval(
   if (body.decision === "rejected") {
     if (approvalContext && body.approvalId && approvalTaskId) {
       approvalContext.state.record(
-        "trade",
+        "trading_operations",
         "approval_resolved",
         { approval_id: body.approvalId, decision: "rejected" },
         { parent: approvalContext.event.event_id },
       );
-      approvalContext.state.recordTaskResult("trade", approvalTaskId, {
+      approvalContext.state.recordTaskResult("trading_operations", approvalTaskId, {
         task_id: approvalTaskId,
-        agent: "trade",
+        agent: "trading_operations",
         status: "failed",
         summary: "Order rejected by user. No order was submitted.",
         error: { code: "approval_rejected", message: "Order rejected by user. No order was submitted." },
@@ -587,7 +588,7 @@ async function handleCexApproval(
     const summary = "Order failed: Kill switch is active — trading is disabled.";
     recordApprovalTaskResult(approvalContext, approvalTaskId, body.approvalId, "failed", {
       task_id: approvalTaskId ?? "unknown",
-      agent: "trade",
+      agent: "trading_operations",
       status: "failed",
       summary,
       error: { code: "order_failed", message: summary },
@@ -624,7 +625,7 @@ async function handleCexApproval(
     const summary = "Order failed: order parameters incomplete; symbol and side are required.";
     recordApprovalTaskResult(approvalContext, approvalTaskId, body.approvalId, "failed", {
       task_id: approvalTaskId ?? "unknown",
-      agent: "trade",
+      agent: "trading_operations",
       status: "failed",
       summary,
       error: { code: "order_failed", message: summary },
@@ -659,14 +660,14 @@ async function handleCexApproval(
 
     if (approvalContext && body.approvalId && approvalTaskId) {
       approvalContext.state.record(
-        "trade",
+        "trading_operations",
         "approval_resolved",
         { approval_id: body.approvalId, decision: failed ? "failed" : "approved", summary: output.summary },
         { parent: approvalContext.event.event_id },
       );
-      approvalContext.state.recordTaskResult("trade", approvalTaskId, {
+      approvalContext.state.recordTaskResult("trading_operations", approvalTaskId, {
         task_id: approvalTaskId,
-        agent: "trade",
+        agent: "trading_operations",
         status: failed ? "failed" : "ok",
         summary: output.summary,
         ...(output.generation_context ? { generation_context: output.generation_context } : {}),
@@ -683,14 +684,14 @@ async function handleCexApproval(
     const message = String(err);
     if (approvalContext && body.approvalId && approvalTaskId) {
       approvalContext.state.record(
-        "trade",
+        "trading_operations",
         "approval_resolved",
         { approval_id: body.approvalId, decision: "failed", summary: message },
         { parent: approvalContext.event.event_id },
       );
-      approvalContext.state.recordTaskResult("trade", approvalTaskId, {
+      approvalContext.state.recordTaskResult("trading_operations", approvalTaskId, {
         task_id: approvalTaskId,
-        agent: "trade",
+        agent: "trading_operations",
         status: "failed",
         summary: `Order failed: ${message}`,
         error: { code: "order_failed", message },
@@ -832,6 +833,12 @@ export function createHttpServer(app: FinancialAgentApp): http.Server {
         return;
       }
 
+      // ── Stock market data (backs the inline <StockChart /> component) ──────
+      const stockQuoteMatch = pathname.match(/^\/market\/stocks\/([^/?]+)$/);
+      if (method === "GET" && stockQuoteMatch) {
+        return await handleStockQuote(stockQuoteMatch[1]!, sp, res);
+      }
+
       // ── Exchange registry ──────────────────────────────────────────────────
       if (method === "GET" && pathname === "/trading/exchanges") {
         return handleGetExchanges(res);
@@ -958,7 +965,7 @@ export function createHttpServer(app: FinancialAgentApp): http.Server {
           rejected ? "rejected" : "approved",
           {
             task_id: approvalTaskId ?? "unknown",
-            agent: "trade",
+            agent: "trading_operations",
             status: rejected ? "failed" : "ok",
             summary,
             ...(rejected

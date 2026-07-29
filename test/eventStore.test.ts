@@ -40,13 +40,13 @@ test("InMemoryEventStore round-trips compaction cache", async () => {
   await store.saveCompaction("sess_1", {
     summarizedThroughTurn: 2,
     summaryText: "user wants BTC analysis",
-    preservedData: [{ turn: 2, agent: "onchain_data", data: { inflow: 100 } }],
+    preservedData: [{ turn: 2, agent: "market_data", data: { inflow: 100 } }],
   });
 
   const cache = await store.loadCompaction("sess_1");
   assert.deepEqual(cache, {
     summarizedThroughTurn: 2,
     summaryText: "user wants BTC analysis",
-    preservedData: [{ turn: 2, agent: "onchain_data", data: { inflow: 100 } }],
+    preservedData: [{ turn: 2, agent: "market_data", data: { inflow: 100 } }],
   });
 });

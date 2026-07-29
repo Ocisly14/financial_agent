@@ -7,19 +7,19 @@ const STEPS: { step_id: string; title: string; tasks: TaskRequest[] }[] = [
     step_id: "market",
     title: "Market, research, and Fear & Greed context",
     tasks: [
-      { agent: "onchain_data", task: "Prepare current market price context for the requested crypto asset.", tools: ["get_crypto_price"] },
-      { agent: "news_research", task: "Search current web context for the requested crypto asset.", tools: ["web_search"] },
-      { agent: "news_research", task: "Search crypto research context for the requested crypto asset.", tools: ["crypto_research_search"] },
-      { agent: "news_research", task: "Search institutional adoption context for the requested crypto asset.", tools: ["institutional_adoption_search"] },
-      { agent: "onchain_data", task: "Prepare broad crypto Fear & Greed Index market sentiment context.", tools: ["fear_greed_index_analysis"] },
+      { agent: "market_data", task: "Prepare current market price context for the requested crypto asset.", tools: ["get_crypto_price"] },
+      { agent: "market_research", task: "Search current web context for the requested crypto asset.", tools: ["web_search"] },
+      { agent: "market_research", task: "Search crypto research context for the requested crypto asset.", tools: ["crypto_research_search"] },
+      { agent: "market_research", task: "Search institutional adoption context for the requested crypto asset.", tools: ["institutional_adoption_search"] },
+      { agent: "market_data", task: "Prepare broad crypto Fear & Greed Index market sentiment context.", tools: ["fear_greed_index_analysis"] },
     ],
   },
   {
     step_id: "technical",
     title: "Technical and on-chain context",
     tasks: [
-      { agent: "onchain_data", task: "Compute technical analysis indicators for the requested crypto asset.", tools: ["technical_analysis"] },
-      { agent: "onchain_data", task: "Fetch on-chain whale positions and large holder activity.", tools: ["whale_alert"] },
+      { agent: "market_data", task: "Compute technical analysis indicators for the requested crypto asset.", tools: ["technical_analysis"] },
+      { agent: "market_data", task: "Fetch on-chain whale positions and large holder activity.", tools: ["whale_alert"] },
     ],
   },
 ];

@@ -3,30 +3,12 @@ import type { JsonObject } from "../../src/framework/types.ts";
 import * as alpaca from "./alpacaClient.ts";
 import { getSnapshotCached, fetchIntradayBars, type DailyBar, type Snapshot } from "./alpacaClient.ts";
 import { marketSession, etDateString } from "./marketHours.ts";
-import { createBarRepository, type BarRepository } from "./barRepository.ts";
-import { SqliteBarStore } from "./barStore.ts";
+import type { BarRepository } from "./barRepository.ts";
+import { getSharedBarRepository } from "./sharedRepository.ts";
 import { buildStockPricePrompt } from "./prompts.ts";
 
 const DEFAULT_HISTORY_DAYS = 60;
 const DATA_SOURCE = "Alpaca (IEX feed)";
-
-let sharedRepository: BarRepository | undefined;
-let repositoryFailed = false;
-
-/** 惰性打开 SQLite 库；失败则退化为纯 API 模式（见 spec §7）。 */
-async function getRepository(): Promise<BarRepository | undefined> {
-  if (sharedRepository) return sharedRepository;
-  if (repositoryFailed) return undefined;
-  try {
-    const path = process.env["STOCK_DB_PATH"] ?? "data/stock.db";
-    const store = SqliteBarStore.open(path);
-    sharedRepository = createBarRepository({ store, client: { fetchDailyBars: alpaca.fetchDailyBars } });
-    return sharedRepository;
-  } catch {
-    repositoryFailed = true;
-    return undefined;
-  }
-}
 
 function pct(current: number, base: number): number | null {
   if (!isFinite(base) || base === 0) return null;
@@ -103,9 +85,9 @@ export function createGetStockPriceTool(overrides?: {
       // 日 K：优先走本地库；库不可用时直接拉 API
       let dailyBars: DailyBar[] = [];
       try {
-        const repository = overrides?.repository ?? (await getRepository());
+        const repository = overrides?.repository ?? (await getSharedBarRepository());
         if (repository) {
-          dailyBars = await repository.getDailyBars(symbol, historyDays);
+          dailyBars = await repository.getBars(symbol, "1Day", historyDays);
         } else {
           // Mongo 不可用：退化为纯 API 模式。多取自然日以覆盖 historyDays 个交易日
           const from = new Date(current);

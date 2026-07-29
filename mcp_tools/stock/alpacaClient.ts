@@ -13,6 +13,8 @@ export type DailyBar = {
   vw: number;
 };
 
+export type Timeframe = "1Min" | "5Min" | "1Day";
+
 export type Snapshot = {
   symbol: string;
   price: number | null;
@@ -27,7 +29,7 @@ export type Snapshot = {
 };
 
 export type BarFetcher = {
-  fetchDailyBars: (symbol: string, from: string, to: string) => Promise<DailyBar[]>;
+  fetchBars: (symbol: string, timeframe: Timeframe, from: string, to: string) => Promise<DailyBar[]>;
 };
 
 function asRecord(val: unknown): Record<string, unknown> | undefined {
@@ -90,16 +92,25 @@ async function fetchBarsPaged(path: string, dateOnly: boolean): Promise<DailyBar
   return bars;
 }
 
-/** 日 K。from/to 为 "YYYY-MM-DD"，闭区间。一律取复权后价。 */
+/** 任意受支持 timeframe 的 K 线。一律取复权后价。 */
+export async function fetchBars(
+  symbol: string,
+  timeframe: Timeframe,
+  from: string,
+  to: string,
+): Promise<DailyBar[]> {
+  const qs = `timeframe=${timeframe}&start=${encodeURIComponent(from)}&end=${encodeURIComponent(to)}&adjustment=all&limit=10000&feed=${FEED}`;
+  return fetchBarsPaged(`/stocks/${encodeURIComponent(symbol)}/bars?${qs}`, timeframe === "1Day");
+}
+
+/** 日 K。from/to 为 "YYYY-MM-DD"，闭区间。保留供 get_stock_price 调用。 */
 export async function fetchDailyBars(symbol: string, from: string, to: string): Promise<DailyBar[]> {
-  const qs = `timeframe=1Day&start=${from}&end=${to}&adjustment=all&limit=10000&feed=${FEED}`;
-  return fetchBarsPaged(`/stocks/${encodeURIComponent(symbol)}/bars?${qs}`, true);
+  return fetchBars(symbol, "1Day", from, to);
 }
 
 /** 指定交易日的分钟线。day 为 "YYYY-MM-DD"。 */
 export async function fetchIntradayBars(symbol: string, day: string): Promise<DailyBar[]> {
-  const qs = `timeframe=1Min&start=${day}&end=${day}&limit=1000&feed=${FEED}`;
-  return fetchBarsPaged(`/stocks/${encodeURIComponent(symbol)}/bars?${qs}`, false);
+  return fetchBars(symbol, "1Min", day, day);
 }
 
 export async function fetchSnapshot(symbol: string): Promise<Snapshot> {
@@ -146,5 +157,10 @@ export function createTtlCache<T>(
   };
 }
 
-/** 实时报价缓存：10 秒 TTL。 */
-export const getSnapshotCached = createTtlCache(fetchSnapshot, 10_000);
+/**
+ * 实时报价缓存：5 秒 TTL。
+ *
+ * 与 `StockChart` 组件的 5 秒轮询间隔相等（见 inline-stock-chart spec §5）。
+ * 缓存比轮询慢会让一半的轮询拿回同样的数据，快则纯属浪费上游配额。
+ */
+export const getSnapshotCached = createTtlCache(fetchSnapshot, 5_000);

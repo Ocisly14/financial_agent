@@ -59,7 +59,7 @@ export class Dispatcher {
     }
     return taskIds.map((taskId) => ({
       task_id: taskId,
-      agent: this.state.task(taskId)?.agent ?? "onchain_data",
+      agent: this.state.task(taskId)?.agent ?? "market_data",
       status: "timeout",
       summary: "Timed out waiting for async task.",
       error: { code: "await_timeout", message: "Timed out waiting for async task." },
@@ -91,13 +91,13 @@ export class Dispatcher {
           state: this.state,
           parentEventId: taskId,
         }),
-        request.timeout_ms ?? (request.agent === "trade" ? DEFAULT_TRADE_TASK_TIMEOUT_MS : DEFAULT_TASK_TIMEOUT_MS),
+        request.timeout_ms ?? (request.agent === "trading_operations" ? DEFAULT_TRADE_TASK_TIMEOUT_MS : DEFAULT_TASK_TIMEOUT_MS),
       );
       log.info(`done ← ${request.agent}`, { taskId });
     } catch (error) {
       const isTimeout = error instanceof Error && error.message === "timeout";
       if (isTimeout) {
-        log.warn(`timeout ← ${request.agent}`, { taskId, timeout_ms: request.timeout_ms ?? (request.agent === "trade" ? DEFAULT_TRADE_TASK_TIMEOUT_MS : DEFAULT_TASK_TIMEOUT_MS) });
+        log.warn(`timeout ← ${request.agent}`, { taskId, timeout_ms: request.timeout_ms ?? (request.agent === "trading_operations" ? DEFAULT_TRADE_TASK_TIMEOUT_MS : DEFAULT_TASK_TIMEOUT_MS) });
       } else {
         log.error(`failed ← ${request.agent}`, { taskId, error: error instanceof Error ? error.message : String(error) });
       }

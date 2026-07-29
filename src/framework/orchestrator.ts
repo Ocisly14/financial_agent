@@ -248,15 +248,15 @@ export class OrchestratorRuntime {
         .map((t) => ({ agent: t.agent as AgentKind, task: t.task.trim() }));
 
       if (tasks.length > 0) {
-        const tradeRetryBlocked = tasks.some((task) => task.agent === "trade")
+        const tradingRetryBlocked = tasks.some((task) => task.agent === "trading_operations")
           ? [...state.turnResults(turn)].reverse().find(
               (result) =>
-                result.agent === "trade" &&
+                result.agent === "trading_operations" &&
                 (result.status !== "ok" || result.generation_context?.data?.["rejected"] === true),
             )
           : undefined;
-        if (tradeRetryBlocked) {
-          finalReply = tradeRetryBlocked.summary;
+        if (tradingRetryBlocked) {
+          finalReply = tradingRetryBlocked.summary;
           break;
         }
         if (status) state.recordReply(status, false);

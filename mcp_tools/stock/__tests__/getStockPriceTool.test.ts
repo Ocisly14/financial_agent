@@ -17,7 +17,7 @@ const SNAPSHOT: Snapshot = {
 
 test("缺少 symbol 参数时返回错误上下文，不猜标的", async () => {
   const tool = createGetStockPriceTool({
-    repository: { getDailyBars: async () => { throw new Error("should not be called"); } },
+    repository: { getBars: async () => { throw new Error("should not be called"); } },
     snapshot: async () => { throw new Error("should not be called"); },
   });
   const result = await tool.execute({ task: "帮我看看今天的行情" }, CTX);
@@ -28,7 +28,7 @@ test("缺少 symbol 参数时返回错误上下文，不猜标的", async () => 
 
 test("symbol 统一转为大写并去除空白", async () => {
   const tool = createGetStockPriceTool({
-    repository: { getDailyBars: async () => [bar("2026-07-27", 211)] },
+    repository: { getBars: async () => [bar("2026-07-27", 211)] },
     snapshot: async () => ({ ...SNAPSHOT, symbol: "AAPL" }),
   });
   const result = await tool.execute({ task: "查一下", symbol: "  aapl " }, CTX);
@@ -37,7 +37,7 @@ test("symbol 统一转为大写并去除空白", async () => {
 
 test("正常路径：返回报价、日 K 与数据源标注", async () => {
   const tool = createGetStockPriceTool({
-    repository: { getDailyBars: async () => [bar("2026-07-24", 210), bar("2026-07-27", 211)] },
+    repository: { getBars: async () => [bar("2026-07-24", 210), bar("2026-07-27", 211)] },
     snapshot: async () => SNAPSHOT,
   });
   const result = await tool.execute({ task: "AAPL 现在多少钱", symbol: "AAPL" }, CTX);
@@ -54,7 +54,7 @@ test("正常路径：返回报价、日 K 与数据源标注", async () => {
 
 test("snapshot 失败但库中有日 K：降级返回并标注 staleness", async () => {
   const tool = createGetStockPriceTool({
-    repository: { getDailyBars: async () => [bar("2026-07-27", 211)] },
+    repository: { getBars: async () => [bar("2026-07-27", 211)] },
     snapshot: async () => { throw new Error("network down"); },
   });
   const result = await tool.execute({ task: "AAPL", symbol: "AAPL" }, CTX);
@@ -67,7 +67,7 @@ test("snapshot 失败但库中有日 K：降级返回并标注 staleness", async
 
 test("snapshot 与库都无数据：返回错误上下文而非抛异常", async () => {
   const tool = createGetStockPriceTool({
-    repository: { getDailyBars: async () => [] },
+    repository: { getBars: async () => [] },
     snapshot: async () => { throw new Error("network down"); },
   });
   const result = await tool.execute({ task: "AAPL", symbol: "AAPL" }, CTX);

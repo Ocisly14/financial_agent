@@ -1,15 +1,19 @@
-import type { BarFetcher, DailyBar } from "./alpacaClient.ts";
+import type { BarFetcher, DailyBar, Timeframe } from "./alpacaClient.ts";
 import type { BarStore } from "./barStore.ts";
 
 const DEFAULT_BACKFILL_YEARS = 5;
-const DEFAULT_FRESHNESS_MS = 30 * 60 * 1000;
-/** 增量请求回退的自然日数，确保覆盖至少 5 个交易日用于重叠比对。 */
-const OVERLAP_DAYS = 10;
+const DAILY_FRESHNESS_MS = 30 * 60 * 1000;
+const FIVE_MIN_FRESHNESS_MS = 5 * 60 * 1000;
+const ONE_MIN_FRESHNESS_MS = 60 * 1000;
+const DAILY_OVERLAP_DAYS = 10;
+const INTRADAY_OVERLAP_MINUTES = 5;
+const FIVE_MIN_BACKFILL_DAYS = 10;
+const PREVIOUS_SESSION_LOOKBACK_DAYS = 10;
 /** 重叠区收盘价相对偏差阈值；超过即判定发生拆股/分红。 */
 const SPLIT_EPSILON = 0.0001;
 
 export type BarRepository = {
-  getDailyBars(symbol: string, days: number): Promise<DailyBar[]>;
+  getBars(symbol: string, timeframe: Timeframe, count: number): Promise<DailyBar[]>;
 };
 
 export type BarRepositoryDeps = {
@@ -17,6 +21,7 @@ export type BarRepositoryDeps = {
   client: BarFetcher;
   now?: () => Date;
   backfillYears?: number;
+  /** 测试覆写；生产按 timeframe 使用 1m / 5m / 30m。 */
   freshnessMs?: number;
 };
 
@@ -24,8 +29,8 @@ function isoDate(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
 
-function shiftDays(date: string, days: number): string {
-  const d = new Date(`${date}T00:00:00Z`);
+function shiftDays(value: string, days: number): string {
+  const d = new Date(`${value.slice(0, 10)}T00:00:00Z`);
   d.setUTCDate(d.getUTCDate() + days);
   return isoDate(d);
 }
@@ -36,11 +41,35 @@ function shiftYears(date: string, years: number): string {
   return isoDate(d);
 }
 
-/** 重叠区任一交易日的收盘价偏差超过阈值即为 true。 */
+function shiftMinutes(value: string, minutes: number): string {
+  const d = new Date(value);
+  d.setUTCMinutes(d.getUTCMinutes() + minutes);
+  return d.toISOString();
+}
+
+function freshnessFor(timeframe: Timeframe): number {
+  if (timeframe === "1Min") return ONE_MIN_FRESHNESS_MS;
+  if (timeframe === "5Min") return FIVE_MIN_FRESHNESS_MS;
+  return DAILY_FRESHNESS_MS;
+}
+
+function fullWindow(timeframe: Timeframe, today: string, backfillYears: number): string {
+  if (timeframe === "1Day") return shiftYears(today, -backfillYears);
+  if (timeframe === "5Min") return shiftDays(today, -FIVE_MIN_BACKFILL_DAYS);
+  return today;
+}
+
+function incrementalFrom(timeframe: Timeframe, lastBarTs: string): string {
+  return timeframe === "1Day"
+    ? shiftDays(lastBarTs, -DAILY_OVERLAP_DAYS)
+    : shiftMinutes(lastBarTs, -INTRADAY_OVERLAP_MINUTES);
+}
+
+/** 重叠区任一 bar 的收盘价偏差超过阈值即为 true。 */
 function hasSplitDivergence(stored: DailyBar[], fetched: DailyBar[]): boolean {
-  const fetchedByDate = new Map(fetched.map((bar) => [bar.t, bar]));
+  const fetchedByTimestamp = new Map(fetched.map((bar) => [bar.t, bar]));
   for (const old of stored) {
-    const fresh = fetchedByDate.get(old.t);
+    const fresh = fetchedByTimestamp.get(old.t);
     if (!fresh || old.c === 0) continue;
     if (Math.abs(fresh.c - old.c) / Math.abs(old.c) > SPLIT_EPSILON) return true;
   }
@@ -51,15 +80,29 @@ export function createBarRepository(deps: BarRepositoryDeps): BarRepository {
   const { store, client } = deps;
   const now = deps.now ?? ((): Date => new Date());
   const backfillYears = deps.backfillYears ?? DEFAULT_BACKFILL_YEARS;
-  const freshnessMs = deps.freshnessMs ?? DEFAULT_FRESHNESS_MS;
 
-  /** 全量回补。返回是否写入了数据。 */
-  async function backfill(symbol: string, today: string, nowIso: string): Promise<boolean> {
-    const bars = await client.fetchDailyBars(symbol, shiftYears(today, -backfillYears), today);
+  /** 全量回补。1Min 当天无数据时扩到最近十天，以支持休市时回退上一交易日。 */
+  async function backfill(
+    symbol: string,
+    timeframe: Timeframe,
+    today: string,
+    nowIso: string,
+  ): Promise<boolean> {
+    const from = fullWindow(timeframe, today, backfillYears);
+    let bars = await client.fetchBars(symbol, timeframe, from, today);
+    if (timeframe === "1Min" && bars.length === 0) {
+      bars = await client.fetchBars(
+        symbol,
+        timeframe,
+        shiftDays(today, -PREVIOUS_SESSION_LOOKBACK_DAYS),
+        today,
+      );
+    }
     if (bars.length === 0) return false;
-    await store.putBars(symbol, bars);
+    await store.putBars(symbol, timeframe, bars);
     await store.putCoverage({
       symbol,
+      timeframe,
       firstDate: bars[0]!.t,
       lastDate: bars[bars.length - 1]!.t,
       backfilledAt: nowIso,
@@ -69,46 +112,46 @@ export function createBarRepository(deps: BarRepositoryDeps): BarRepository {
   }
 
   return {
-    async getDailyBars(symbol: string, days: number): Promise<DailyBar[]> {
+    async getBars(symbol: string, timeframe: Timeframe, count: number): Promise<DailyBar[]> {
       const current = now();
       const nowIso = current.toISOString();
       const today = isoDate(current);
-      const coverage = await store.getCoverage(symbol);
+      const coverage = await store.getCoverage(symbol, timeframe);
 
       if (!coverage) {
-        await backfill(symbol, today, nowIso);
-        return store.getBars(symbol, days);
+        await backfill(symbol, timeframe, today, nowIso);
+        return store.getBars(symbol, timeframe, count);
       }
 
       const checkedAgeMs = current.getTime() - new Date(coverage.lastCheckedAt).getTime();
+      const freshnessMs = deps.freshnessMs ?? freshnessFor(timeframe);
       if (checkedAgeMs < freshnessMs) {
-        return store.getBars(symbol, days);
+        return store.getBars(symbol, timeframe, count);
       }
 
-      const from = shiftDays(coverage.lastDate, -OVERLAP_DAYS);
-      const fetched = await client.fetchDailyBars(symbol, from, today);
+      const from = incrementalFrom(timeframe, coverage.lastDate);
+      const fetched = await client.fetchBars(symbol, timeframe, from, today);
 
       if (fetched.length === 0) {
         await store.putCoverage({ ...coverage, lastCheckedAt: nowIso });
-        return store.getBars(symbol, days);
+        return store.getBars(symbol, timeframe, count);
       }
 
-      const overlap = await store.getBarsOnOrAfter(symbol, from);
+      const overlap = await store.getBarsOnOrAfter(symbol, timeframe, from);
       if (hasSplitDivergence(overlap, fetched)) {
-        // 拆股/分红：库中历史已是过期口径，整体重拉
-        await store.clearSymbol(symbol);
-        await backfill(symbol, today, nowIso);
-        return store.getBars(symbol, days);
+        await store.clearSymbol(symbol, timeframe);
+        await backfill(symbol, timeframe, today, nowIso);
+        return store.getBars(symbol, timeframe, count);
       }
 
-      await store.putBars(symbol, fetched);
+      await store.putBars(symbol, timeframe, fetched);
       const newest = fetched[fetched.length - 1]!.t;
       await store.putCoverage({
         ...coverage,
         lastDate: newest > coverage.lastDate ? newest : coverage.lastDate,
         lastCheckedAt: nowIso,
       });
-      return store.getBars(symbol, days);
+      return store.getBars(symbol, timeframe, count);
     },
   };
 }

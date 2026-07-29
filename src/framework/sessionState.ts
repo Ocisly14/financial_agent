@@ -22,7 +22,7 @@ import type { CompactionCache, EventStore } from "./eventStore.ts";
  * transport; the two are not the same concern.
  */
 
-export type Source = "user" | "orchestrator" | "onchain_data" | "news_research" | "trade" | "skill";
+export type Source = "user" | "orchestrator" | "market_data" | "market_research" | "trading_operations" | "skill";
 
 export interface SessionEvent {
   event_id: string;
@@ -42,9 +42,9 @@ const APPROVAL_TTL_MS = 15 * 60_000;
 const KINDS: Record<Source, ReadonlySet<string>> = {
   user: new Set(["user_message"]),
   orchestrator: new Set(["reply", "dispatch", "skill_invoke", "error", "tool_use", "tool_result"]),
-  onchain_data: new Set(["task_result", "tool_use", "tool_result"]),
-  news_research: new Set(["task_result", "tool_use", "tool_result"]),
-  trade: new Set(["task_result", "tool_use", "tool_result", "approval_required", "approval_resolved"]),
+  market_data: new Set(["task_result", "tool_use", "tool_result"]),
+  market_research: new Set(["task_result", "tool_use", "tool_result"]),
+  trading_operations: new Set(["task_result", "tool_use", "tool_result", "approval_required", "approval_resolved"]),
   skill: new Set(["skill_invoke", "workflow_started", "workflow_step", "workflow_done"]),
 };
 

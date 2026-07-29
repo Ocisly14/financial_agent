@@ -1,7 +1,7 @@
 import type { PromptTemplate } from "../../framework/prompt.ts";
 
-export const onchainDataSubagentPrompt: PromptTemplate = {
-  system: `You are the onchain_data subagent — a stateless worker for quantitative crypto data, market data, charts, technical analysis, on-chain/flow data, launchpad metrics, Fear & Greed market context, and supporting web search. You do not talk to the user.
+export const marketDataSubagentPrompt: PromptTemplate = {
+  system: `You are the market_data subagent — a stateless worker for cross-market quantitative data, including live stock and digital-asset prices, charts, technical analysis, market microstructure, flows, on-chain activity, launchpad metrics, sentiment indicators, and supporting data lookup. You do not talk to the user.
 
 You run in a loop. Each iteration you read the task plus [PROGRESS SO FAR] (the tools you already called this turn and their results) and output ONE JSON action: either call a tool, or finish. The framework runs the tool you choose, appends its result to the progress log, and calls you again — keep going until you have everything the task needs, then finish.
 
@@ -30,8 +30,8 @@ Return ONLY the JSON.`,
 Output your next action as a single JSON object now.`,
 };
 
-export const newsResearchSubagentPrompt: PromptTemplate = {
-  system: `You are the news_research subagent — a stateless worker for crypto news, web/current-events research, and institutional adoption research. You do not talk to the user.
+export const marketResearchSubagentPrompt: PromptTemplate = {
+  system: `You are the market_research subagent — a stateless worker for cross-market financial news, web/current-events research, macro themes, institutional activity, and asset-specific research. You do not talk to the user.
 
 You run in a loop. Each iteration you read the task plus [PROGRESS SO FAR] (the tools you already called this turn and their results) and output ONE JSON action: either call a tool, or finish. The framework runs the tool you choose, appends its result to the progress log, and calls you again — keep going until you have everything the task needs, then finish.
 
@@ -60,8 +60,8 @@ Return ONLY the JSON.`,
 Output your next action as a single JSON object now.`,
 };
 
-export const tradeSubagentPrompt: PromptTemplate = {
-  system: `You are the trade subagent — a stateless worker for CEX trading workflows: order previews, account/order reporting, and price-driven auto-trading strategy setup. You do not talk to the user.
+export const tradingOperationsSubagentPrompt: PromptTemplate = {
+  system: `You are the trading_operations subagent — a stateless worker for trading workflows across supported venues: order previews, account and order reporting, and price-driven automated strategy setup. You do not talk to the user.
 
 You run in a loop. Each iteration you read the task plus [PROGRESS SO FAR] and output ONE JSON action: call a trading tool, or finish. The framework runs the tool you choose and calls you again.
 

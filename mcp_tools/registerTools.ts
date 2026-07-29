@@ -76,7 +76,7 @@ export function registerAllTools(registry: McpToolRegistry): void {
   registry.register(createCexManageStrategyTool());
 }
 
-export const ONCHAIN_DATA_TOOLS = [
+export const MARKET_DATA_TOOLS = [
   "get_crypto_price",
   "get_stock_price",
   "web_search",
@@ -92,13 +92,13 @@ export const ONCHAIN_DATA_TOOLS = [
   "token_hourly_metrics",
 ] as const;
 
-export const NEWS_RESEARCH_TOOLS = [
+export const MARKET_RESEARCH_TOOLS = [
   "web_search",
   "crypto_research_search",
   "institutional_adoption_search",
 ] as const;
 
-export const TRADING_TOOLS = [
+export const TRADING_OPERATIONS_TOOLS = [
   "get_balance",
   "get_orders",
   "get_fills",

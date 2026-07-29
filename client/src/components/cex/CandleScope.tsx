@@ -1,4 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { DEFAULT_CANDLE_THEME, type CandleTheme } from "./candleTheme";
+
+export { DEFAULT_CANDLE_THEME, type CandleTheme } from "./candleTheme";
 
 /**
  * CandleScope — a hand-drawn canvas candlestick chart in the "Phosphor Desk"
@@ -22,17 +25,6 @@ export interface Candle {
     c: number;
 }
 
-const COL = {
-    grid: "rgba(255,255,255,0.05)",
-    gridStrong: "rgba(255,255,255,0.09)",
-    axis: "#545a67",
-    ink: "#edeff3",
-    inkDim: "#8b909c",
-    amber: "#ffb648",
-    pos: "#4ade80",
-    neg: "#fb5d7a",
-};
-
 interface Props {
     candles: Candle[];
     lastPrice?: number;
@@ -42,6 +34,10 @@ interface Props {
     liveFromTs?: number;
     height?: number;
     quote?: string;
+    /** 缺省保持 Strategy Floor 的 Phosphor Desk 配色。 */
+    theme?: CandleTheme;
+    /** 可选 x 轴标签；不传时保持 Strategy Floor 当前像素输出不变。 */
+    formatTimestamp?: (timestampMs: number) => string;
 }
 
 function fmtPrice(v: number): string {
@@ -65,9 +61,11 @@ export function CandleScope({
     liveFromTs,
     height = 360,
     quote = "USDT",
+    theme = DEFAULT_CANDLE_THEME,
+    formatTimestamp,
 }: Props) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
-    const wrapRef = useRef<HTMLDivElement>(null);
+    const wrapRef = useRef<HTMLSpanElement>(null);
     const [width, setWidth] = useState(720);
     const [hover, setHover] = useState<{ x: number; y: number } | null>(null);
     const [pulse, setPulse] = useState(0);
@@ -147,6 +145,23 @@ export function CandleScope({
         const xRight = padL + plotW;
         const yBottom = padT + plotH;
 
+        // ── optional x-axis labels (StockChart supplies time/date formatting) ──
+        if (formatTimestamp && candles.length > 0) {
+            const slot = plotW / Math.max(candles.length, 30);
+            const labelCount = Math.min(5, candles.length);
+            ctx.font = "10px 'Martian Mono', ui-monospace, monospace";
+            ctx.fillStyle = theme.axis;
+            ctx.textBaseline = "top";
+            for (let i = 0; i < labelCount; i++) {
+                const index = labelCount === 1
+                    ? 0
+                    : Math.round((i * (candles.length - 1)) / (labelCount - 1));
+                const x = padL + slot * (index + 0.5);
+                ctx.textAlign = i === 0 ? "left" : i === labelCount - 1 ? "right" : "center";
+                ctx.fillText(formatTimestamp(candles[index]!.t), x, yBottom + 7);
+            }
+        }
+
         // ── horizontal price grid + right-axis ticks ──
         ctx.font = "10px 'Martian Mono', ui-monospace, monospace";
         ctx.textBaseline = "middle";
@@ -154,21 +169,21 @@ export function CandleScope({
         for (let i = 0; i <= ticks; i++) {
             const price = domain.lo + ((domain.hi - domain.lo) * i) / ticks;
             const y = yOf(price);
-            ctx.strokeStyle = COL.grid;
+            ctx.strokeStyle = theme.grid;
             ctx.lineWidth = 1;
             ctx.beginPath();
             ctx.moveTo(padL, y);
             ctx.lineTo(xRight, y);
             ctx.stroke();
-            ctx.fillStyle = COL.axis;
+            ctx.fillStyle = theme.axis;
             ctx.textAlign = "left";
             ctx.fillText(fmtPrice(price), xRight + 8, y);
         }
 
         // ── 24h high / low calibration bands (real session bounds) ──
         for (const [val, label, color] of [
-            [high24h, "24H H", COL.pos] as const,
-            [low24h, "24H L", COL.neg] as const,
+            [high24h, "24H H", theme.pos] as const,
+            [low24h, "24H L", theme.neg] as const,
         ]) {
             if (typeof val !== "number") continue;
             const y = yOf(val);
@@ -193,7 +208,7 @@ export function CandleScope({
             candles.forEach((c, i) => {
                 const cx = padL + slot * (i + 0.5);
                 const up = c.c >= c.o;
-                const color = up ? COL.pos : COL.neg;
+                const color = up ? theme.pos : theme.neg;
                 const seeded = typeof liveFromTs === "number" && c.t < liveFromTs;
                 const isLast = i === n - 1;
                 ctx.globalAlpha = seeded ? 0.42 : 1;
@@ -226,7 +241,7 @@ export function CandleScope({
         // ── live mark line + right-axis price tag ──
         if (typeof lastPrice === "number") {
             const y = yOf(lastPrice);
-            ctx.strokeStyle = COL.amber;
+            ctx.strokeStyle = theme.amber;
             ctx.setLineDash([3, 3]);
             ctx.lineWidth = 1;
             ctx.beginPath();
@@ -238,9 +253,9 @@ export function CandleScope({
             const tag = fmtPrice(lastPrice);
             ctx.font = "600 10px 'Martian Mono', ui-monospace, monospace";
             const tw = ctx.measureText(tag).width + 14;
-            ctx.fillStyle = COL.amber;
+            ctx.fillStyle = theme.amber;
             ctx.fillRect(xRight + 2, y - 8, Math.min(tw, layout.padR - 4), 16);
-            ctx.fillStyle = "#0a0a0a";
+            ctx.fillStyle = theme.liveTagInk;
             ctx.textAlign = "left";
             ctx.textBaseline = "middle";
             ctx.fillText(tag, xRight + 8, y + 0.5);
@@ -248,7 +263,7 @@ export function CandleScope({
 
         // ── crosshair ──
         if (hover && hover.x >= padL && hover.x <= xRight && hover.y >= padT && hover.y <= yBottom) {
-            ctx.strokeStyle = "rgba(255,182,72,0.5)";
+            ctx.strokeStyle = theme.crosshair;
             ctx.setLineDash([2, 3]);
             ctx.lineWidth = 1;
             ctx.beginPath();
@@ -264,13 +279,13 @@ export function CandleScope({
             const tag = fmtPrice(price);
             ctx.font = "10px 'Martian Mono', ui-monospace, monospace";
             const tw = ctx.measureText(tag).width + 14;
-            ctx.fillStyle = "#1a1d26";
+            ctx.fillStyle = theme.hoverTag;
             ctx.fillRect(xRight + 2, hover.y - 8, Math.min(tw, layout.padR - 4), 16);
-            ctx.fillStyle = COL.ink;
+            ctx.fillStyle = theme.ink;
             ctx.textAlign = "left";
             ctx.fillText(tag, xRight + 8, hover.y + 0.5);
         }
-    }, [candles, width, height, domain, layout, hover, lastPrice, high24h, low24h, liveFromTs, pulse]);
+    }, [candles, width, height, domain, layout, hover, lastPrice, high24h, low24h, liveFromTs, pulse, theme, formatTimestamp]);
 
     // hovered candle for the OHLC readout
     const hovered = useMemo(() => {
@@ -285,16 +300,27 @@ export function CandleScope({
     const up = readout ? readout.c >= readout.o : true;
 
     return (
-        <div className="sq-scope-canvas" ref={wrapRef}>
+        <span className="sq-scope-canvas block" ref={wrapRef}>
             {readout && (
-                <div className="sq-ohlc" data-dir={up ? "up" : "down"}>
-                    <span>O <b>{fmtPrice(readout.o)}</b></span>
-                    <span>H <b>{fmtPrice(readout.h)}</b></span>
-                    <span>L <b>{fmtPrice(readout.l)}</b></span>
-                    <span>C <b>{fmtPrice(readout.c)}</b></span>
-                    {hovered && <span className="sq-ohlc-t">{fmtClock(hovered.t)}</span>}
-                    <span className="sq-ohlc-q">{quote}</span>
-                </div>
+                <span
+                    className="sq-ohlc"
+                    data-dir={up ? "up" : "down"}
+                    style={theme === DEFAULT_CANDLE_THEME ? undefined : {
+                        color: theme.inkDim,
+                        display: "flex",
+                        flexWrap: "wrap",
+                        gap: "4px 12px",
+                        fontSize: 11,
+                        fontVariantNumeric: "tabular-nums",
+                    }}
+                >
+                    <span>O <b style={theme === DEFAULT_CANDLE_THEME ? undefined : { color: up ? theme.pos : theme.neg }}>{fmtPrice(readout.o)}</b></span>
+                    <span>H <b style={theme === DEFAULT_CANDLE_THEME ? undefined : { color: up ? theme.pos : theme.neg }}>{fmtPrice(readout.h)}</b></span>
+                    <span>L <b style={theme === DEFAULT_CANDLE_THEME ? undefined : { color: up ? theme.pos : theme.neg }}>{fmtPrice(readout.l)}</b></span>
+                    <span>C <b style={theme === DEFAULT_CANDLE_THEME ? undefined : { color: up ? theme.pos : theme.neg }}>{fmtPrice(readout.c)}</b></span>
+                    {hovered && <span className="sq-ohlc-t" style={theme === DEFAULT_CANDLE_THEME ? undefined : { color: theme.amber }}>{fmtClock(hovered.t)}</span>}
+                    <span className="sq-ohlc-q" style={theme === DEFAULT_CANDLE_THEME ? undefined : { color: theme.axis }}>{quote}</span>
+                </span>
             )}
             <canvas
                 ref={canvasRef}
@@ -305,6 +331,6 @@ export function CandleScope({
                 }}
                 onMouseLeave={() => setHover(null)}
             />
-        </div>
+        </span>
     );
 }

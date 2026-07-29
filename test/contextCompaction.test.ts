@@ -23,10 +23,10 @@ function buildSession(): SessionState {
 
   // Turn 1
   state.beginTurn("What's BTC's on-chain inflow looking like?");
-  const dispatch = state.recordDispatch("onchain_data", "fetch BTC exchange inflow/outflow");
-  state.recordTaskResult("onchain_data", dispatch.event_id, {
+  const dispatch = state.recordDispatch("market_data", "fetch BTC exchange inflow/outflow");
+  state.recordTaskResult("market_data", dispatch.event_id, {
     task_id: dispatch.event_id,
-    agent: "onchain_data",
+    agent: "market_data",
     status: "ok",
     summary: "Inflow is up 12% over 24h",
     generation_context: { prompt: "compute inflow/outflow for BTC", data: { inflow: 1200, outflow: 900 } },
@@ -52,7 +52,7 @@ test("compact() summarizes turns 1..targetThrough and preserves task data withou
   assert.equal(cache!.summarizedThroughTurn, 1);
   assert.equal(cache!.summaryText, "User is researching BTC and ETH on-chain flows.");
   assert.deepEqual(cache!.preservedData, [
-    { turn: 1, agent: "onchain_data", data: { inflow: 1200, outflow: 900 } },
+    { turn: 1, agent: "market_data", data: { inflow: 1200, outflow: 900 } },
   ]);
 
   // Turn 1 events have been trimmed from the in-memory log.
@@ -79,7 +79,7 @@ test("compact() persists the compaction cache to the EventStore", async () => {
 
 test("compact() trims sidechain events within the compacted turn range", async () => {
   const state = buildSession();
-  state.record("onchain_data", "tool_result", { task_id: "fetch_inflow", output: "ok" }, { isSidechain: true, turn: 1 });
+  state.record("market_data", "tool_result", { task_id: "fetch_inflow", output: "ok" }, { isSidechain: true, turn: 1 });
 
   const router = new ModelRouter(fakeProvider("User is researching BTC and ETH on-chain flows."));
   await compact(state, router, 1, 1);

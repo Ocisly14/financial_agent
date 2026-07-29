@@ -1,4 +1,4 @@
-export type AgentKind = "onchain_data" | "news_research" | "trade";
+export type AgentKind = "market_data" | "market_research" | "trading_operations";
 
 export type TaskStatus = "ok" | "failed" | "timeout";
 

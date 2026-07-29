@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Loader2, CheckCircle, Circle, XCircle, ChevronDown, ChevronRight, Database, Newspaper, Wallet } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-export type ProgressAgent = "onchain_data" | "news_research" | "trade";
+export type ProgressAgent = "market_data" | "market_research" | "trading_operations";
 
 export interface ProgressTask {
     taskId: string;
@@ -27,25 +27,25 @@ function statusIcon(status: ProgressTask["status"]) {
 }
 
 const agentMeta: Record<ProgressAgent, { label: string; icon: typeof Database; iconClassName: string }> = {
-    onchain_data: {
-        label: "On-chain data agent",
+    market_data: {
+        label: "Market data agent",
         icon: Database,
         iconClassName: "text-blue-600 dark:text-blue-300",
     },
-    news_research: {
-        label: "News & research agent",
+    market_research: {
+        label: "Market research agent",
         icon: Newspaper,
         iconClassName: "text-violet-600 dark:text-violet-300",
     },
-    trade: {
-        label: "Trade agent",
+    trading_operations: {
+        label: "Trading operations agent",
         icon: Wallet,
         iconClassName: "text-amber-600 dark:text-amber-300",
     },
 };
 
 function uniqueAgents(tasks: ProgressTask[]) {
-    return (["onchain_data", "news_research", "trade"] as const).filter((agent) => tasks.some((task) => task.agent === agent));
+    return (["market_data", "market_research", "trading_operations"] as const).filter((agent) => tasks.some((task) => task.agent === agent));
 }
 
 function taskGroups(tasks: ProgressTask[], agents: ProgressAgent[]): Array<ProgressAgent | "uncategorized"> {
