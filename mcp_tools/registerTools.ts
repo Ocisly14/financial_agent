@@ -2,6 +2,8 @@ import { McpToolRegistry } from "./toolRegistry.ts";
 
 // market
 import { createGetCryptoPriceTool } from "./market/getCryptoPriceTool.ts";
+// stock
+import { createGetStockPriceTool } from "./stock/getStockPriceTool.ts";
 // search
 import { createWebSearchTool } from "./search/webSearchTool.ts";
 import { createCryptoResearchSearchTool } from "./search/cryptoResearchSearchTool.ts";
@@ -42,6 +44,7 @@ import {
 export function registerAllTools(registry: McpToolRegistry): void {
   // non_trading tools
   registry.register(createGetCryptoPriceTool());
+  registry.register(createGetStockPriceTool());
   registry.register(createWebSearchTool());
   registry.register(createCryptoResearchSearchTool());
   registry.register(createInstitutionalAdoptionSearchTool());
@@ -75,6 +78,7 @@ export function registerAllTools(registry: McpToolRegistry): void {
 
 export const ONCHAIN_DATA_TOOLS = [
   "get_crypto_price",
+  "get_stock_price",
   "web_search",
   "technical_analysis",
   "price_chart",

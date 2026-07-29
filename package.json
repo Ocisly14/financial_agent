@@ -4,16 +4,16 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "tools:list": "node --env-file=.env --experimental-strip-types -e \"import('./mcp_tools/index.ts').then(m => { const r = new m.McpToolRegistry(); m.registerAllTools(r); console.log(r.list().map(t => t.name).join('\\n')); })\"",
+    "tools:list": "node --env-file=.env --experimental-strip-types --experimental-sqlite -e \"import('./mcp_tools/index.ts').then(m => { const r = new m.McpToolRegistry(); m.registerAllTools(r); console.log(r.list().map(t => t.name).join('\\n')); })\"",
     "build": "tsc -p tsconfig.json",
-    "test:agent": "node --env-file=.env --experimental-strip-types scripts/test-agent.ts",
+    "test:agent": "node --env-file=.env --experimental-strip-types --experimental-sqlite scripts/test-agent.ts",
     "build:client": "pnpm --prefix client install && pnpm --prefix client build",
     "start:client": "pnpm --prefix client dev",
-    "start": "node --env-file=.env --experimental-strip-types src/server.ts",
-    "dev": "node --env-file=.env --experimental-strip-types --watch src/server.ts",
-    "test": "node --env-file=.env --experimental-strip-types --test \"mcp_tools/**/__tests__/*.test.ts\"",
-    "eval": "node --env-file=.env --experimental-strip-types scripts/eval/run.ts",
-    "eval:nl-dsl": "node --env-file=.env --experimental-strip-types scripts/eval/nl-dsl.ts"
+    "start": "node --env-file=.env --experimental-strip-types --experimental-sqlite src/server.ts",
+    "dev": "node --env-file=.env --experimental-strip-types --experimental-sqlite --watch src/server.ts",
+    "test": "node --env-file=.env --experimental-strip-types --experimental-sqlite --test \"mcp_tools/**/__tests__/*.test.ts\"",
+    "eval": "node --env-file=.env --experimental-strip-types --experimental-sqlite scripts/eval/run.ts",
+    "eval:nl-dsl": "node --env-file=.env --experimental-strip-types --experimental-sqlite scripts/eval/nl-dsl.ts"
   },
   "engines": {
     "node": ">=23.0.0"
