@@ -116,11 +116,11 @@ export function CandleScope({
         const padR = 78; // price gutter on the right (TradingView-style)
         const padL = 8;
         const padT = 16;
-        const padB = 26;
+        const padB = formatTimestamp ? 32 : 26;
         const plotW = Math.max(40, width - padL - padR);
         const plotH = Math.max(40, height - padT - padB);
         return { padR, padL, padT, padB, plotW, plotH };
-    }, [width, height]);
+    }, [width, height, formatTimestamp]);
 
     const yOf = (price: number) => {
         const { padT, plotH } = layout;
@@ -300,18 +300,31 @@ export function CandleScope({
     const up = readout ? readout.c >= readout.o : true;
 
     return (
-        <span className="sq-scope-canvas block" ref={wrapRef}>
+        <span
+            className="sq-scope-canvas block"
+            ref={wrapRef}
+            style={theme === DEFAULT_CANDLE_THEME ? undefined : {
+                position: "relative",
+                width: "100%",
+                height,
+            }}
+        >
             {readout && (
                 <span
                     className="sq-ohlc"
                     data-dir={up ? "up" : "down"}
                     style={theme === DEFAULT_CANDLE_THEME ? undefined : {
+                        position: "absolute",
+                        top: 10,
+                        left: 14,
+                        zIndex: 2,
                         color: theme.inkDim,
                         display: "flex",
                         flexWrap: "wrap",
                         gap: "4px 12px",
                         fontSize: 11,
                         fontVariantNumeric: "tabular-nums",
+                        pointerEvents: "none",
                     }}
                 >
                     <span>O <b style={theme === DEFAULT_CANDLE_THEME ? undefined : { color: up ? theme.pos : theme.neg }}>{fmtPrice(readout.o)}</b></span>
@@ -325,6 +338,11 @@ export function CandleScope({
             <canvas
                 ref={canvasRef}
                 className="sq-scope-c"
+                style={theme === DEFAULT_CANDLE_THEME ? undefined : {
+                    display: "block",
+                    width: "100%",
+                    cursor: "crosshair",
+                }}
                 onMouseMove={(e) => {
                     const r = e.currentTarget.getBoundingClientRect();
                     setHover({ x: e.clientX - r.left, y: e.clientY - r.top });
