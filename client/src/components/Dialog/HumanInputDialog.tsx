@@ -644,11 +644,9 @@ export const HumanInputDialog: React.FC<HumanInputDialogProps> = ({
     // the 30 s staleTime expires or the window refocuses, so the badge keeps
     // showing the OLD mode for half a minute after the chat says "switched".
     // Optimistically write the new mode into the cache. We deliberately do
-    // NOT call invalidateQueries here: the chat-side backend write to
-    // MongoDB happens asynchronously after `onApprove` (chat handler →
-    // set_trading_mode action → mongo write), so an eager refetch races
-    // that write and frequently clobbers the optimistic value with the
-    // stale pre-switch mode, which then locks in for the 30 s staleTime.
+    // NOT call invalidateQueries here: the chat-side backend update happens
+    // after `onApprove`, so an eager refetch can race that update and clobber
+    // the optimistic value with the stale pre-switch mode for 30 seconds.
     // The optimistic write is enough for instant UX; the next legitimate
     // refetch (window focus or staleTime expiry) reconciles with the server.
     const primeTradingModeCacheAfterConfirm = (parsed: Record<string, unknown>) => {

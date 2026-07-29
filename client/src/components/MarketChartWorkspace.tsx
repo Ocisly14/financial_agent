@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { BarChart3, Layers3 } from "lucide-react";
+import { BarChart3, Layers3, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { SymbolChartWorkspace } from "@/lib/chartWorkspace";
 import { cn } from "@/lib/utils";
@@ -18,10 +18,14 @@ export function MarketChartWorkspace({
     charts,
     focusSymbol,
     focusRevision,
+    collapsed,
+    onCollapsedChange,
 }: {
     charts: SymbolChartWorkspace[];
     focusSymbol?: string;
     focusRevision: number;
+    collapsed: boolean;
+    onCollapsedChange: (collapsed: boolean) => void;
 }) {
     const { t } = useTranslation();
     const [activeSymbol, setActiveSymbol] = useState(focusSymbol ?? charts[0]?.symbol);
@@ -43,6 +47,25 @@ export function MarketChartWorkspace({
     );
     if (!active) return null;
 
+    if (collapsed) {
+        return (
+            <aside
+                className="flex h-dvh max-h-dvh items-start justify-center overflow-hidden border-r border-border/80 bg-background py-3"
+                aria-label={t("charts.marketWorkspace")}
+            >
+                <button
+                    type="button"
+                    onClick={() => onCollapsedChange(false)}
+                    className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    aria-label={t("charts.expandWorkspace")}
+                    title={t("charts.expandWorkspace")}
+                >
+                    <PanelLeftOpen className="size-4" />
+                </button>
+            </aside>
+        );
+    }
+
     return (
         <section className="flex h-dvh max-h-dvh min-h-0 flex-col overflow-hidden border-r border-border/80 bg-background" aria-label={t("charts.marketWorkspace")}>
             <header className="shrink-0 border-b border-border/80 px-4 py-3">
@@ -51,9 +74,20 @@ export function MarketChartWorkspace({
                         <BarChart3 className="size-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
                         <h2 className="truncate text-sm font-semibold">{t("charts.marketWorkspace")}</h2>
                     </div>
-                    <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
-                        <Layers3 className="size-3.5" />
-                        {t("charts.studyCount", { count: active.studies.length })}
+                    <div className="flex shrink-0 items-center gap-2">
+                        <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
+                            <Layers3 className="size-3.5" />
+                            {t("charts.studyCount", { count: active.studies.length })}
+                        </div>
+                        <button
+                            type="button"
+                            onClick={() => onCollapsedChange(true)}
+                            className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                            aria-label={t("charts.collapseWorkspace")}
+                            title={t("charts.collapseWorkspace")}
+                        >
+                            <PanelLeftClose className="size-4" />
+                        </button>
                     </div>
                 </div>
 

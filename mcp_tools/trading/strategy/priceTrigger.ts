@@ -5,7 +5,7 @@ export const priceTriggerSchema = z
     type: z.enum(["rolling_change", "absolute_threshold", "trailing_stop"]),
     direction: z.enum(["up", "down"]),
     pct: z.number().positive().optional(),
-    window_minutes: z.number().int().min(1).optional(),
+    window_minutes: z.number().int().min(1).max(10080).optional(),
     price: z.number().positive().optional(),
     reference_price: z.number().positive().optional(),
     confirm_samples: z.number().int().min(1).default(2),

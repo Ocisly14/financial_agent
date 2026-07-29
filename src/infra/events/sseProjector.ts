@@ -62,7 +62,7 @@ function strategyCreatedFrames(payload: JsonObject): SSEEvent[] {
   const outputs = Array.isArray(data.tool_outputs) ? data.tool_outputs : [];
   return outputs
     .map((value) => asObject(value))
-    .filter((output) => output?.tool === "cex_create_strategy")
+    .filter((output) => output?.tool === "create_strategy")
     .map((output) => asObject(output?.data))
     .filter((createData): createData is JsonObject => typeof createData?.strategy_id === "string")
     .map((createData) => {

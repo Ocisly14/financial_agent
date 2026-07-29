@@ -13,8 +13,8 @@ export const strategyPhaseSchema = z.object({
 
 export const priceStrategySchema = z.object({
   name: z.string().min(1),
-  symbol: z.string().min(1), // full Binance pair, e.g. "BTCUSDT"
-  mode: z.enum(["paper", "shadow", "live"]).default("paper"),
+  symbol: z.string().regex(/^[A-Z]{1,5}(?:\.[A-Z])?$/, "use a US stock or ETF ticker such as AAPL or BRK.B"),
+  mode: z.enum(["paper", "shadow"]).default("paper"),
   phases: z.array(strategyPhaseSchema).min(1),
   guardrails: z
     .object({
@@ -66,9 +66,7 @@ function firstNum(o: Record<string, unknown>, keys: string[]): number | undefine
 }
 
 function normalizeSymbol(raw: string): string {
-  let s = raw.replace(/[/\s-]/g, "").toUpperCase();
-  if (/USD$/.test(s) && !/USD[TC]$/.test(s) && !/BUSD$/.test(s)) s = s.replace(/USD$/, "USDT");
-  return s;
+  return raw.trim().toUpperCase();
 }
 
 function slug(value: string, fallback: string): string {
@@ -168,12 +166,14 @@ function normalizePhase(raw: unknown, index: number): Record<string, unknown> {
 export function normalizePriceStrategyInput(input: Record<string, unknown>): Record<string, unknown> {
   const rawPhases = Array.isArray(input["phases"]) ? input["phases"] : [];
   const out: Record<string, unknown> = {
-    name: str(input["name"]) || "Auto-trading strategy",
+    name: str(input["name"]) || "Price strategy",
     symbol: normalizeSymbol(str(input["symbol"])),
     phases: rawPhases.map(normalizePhase),
   };
   const mode = str(input["mode"]).toLowerCase();
-  out["mode"] = mode === "paper" || mode === "live" || mode === "shadow" ? mode : "paper";
+  // Preserve an explicit unsupported mode so schema validation rejects it
+  // instead of silently changing a requested live strategy into paper mode.
+  out["mode"] = mode === "shadow" || mode === "live" ? mode : "paper";
   if (input["guardrails"] !== undefined) out["guardrails"] = input["guardrails"];
   return out;
 }

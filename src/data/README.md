@@ -16,4 +16,4 @@ domain's `index.ts` instead of talking to providers or databases directly.
 - `stockChartData.ts`: chart-range assembly shared by the HTTP endpoint.
 - `index.ts`: the only import surface intended for adapters.
 
-Runtime SQLite files remain at the project-root `data/stock.db*` by default and are ignored by Git.
+Runtime SQLite files remain at the project-root `data/stock.db*` and `data/sessions.sqlite*` by default and are ignored by Git.

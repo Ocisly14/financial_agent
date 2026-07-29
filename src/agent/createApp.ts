@@ -11,8 +11,7 @@ import { GoogleVertexProvider } from "../infra/llm/googleVertexProvider.ts";
 import { McpToolRegistry } from "../../mcp_tools/toolRegistry.ts";
 import { registerAllTools } from "../../mcp_tools/registerTools.ts";
 import { SessionRegistry } from "../framework/sessionState.ts";
-import type { EventStore } from "../framework/eventStore.ts";
-import { MongoEventStore } from "../infra/db/mongoEventStore.ts";
+import { SqliteEventStore } from "../infra/db/sqliteEventStore.ts";
 import { orchestratorPrompt } from "./prompts/orchestratorPrompt.ts";
 import { createSubagentRegistry } from "./subagents/registerSubagents.ts";
 
@@ -44,6 +43,7 @@ export async function createFinancialAgentApp() {
   );
 
   return {
+    eventStore,
     sessions,
     toolRegistry,
     modelRouter,
@@ -96,16 +96,11 @@ export function resolveLlmProvider(): LlmProvider {
   return new MockLlmProvider();
 }
 
-async function resolveEventStore(): Promise<EventStore | undefined> {
-  const uri = process.env["MONGODB_URI"] ?? "mongodb://localhost:27017/financial-agent";
-  try {
-    return await MongoEventStore.connect(uri);
-  } catch (err) {
-    console.warn(
-      `[sessions] could not connect to MongoDB at ${uri}; sessions will not persist across restarts: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return undefined;
-  }
+async function resolveEventStore(): Promise<SqliteEventStore> {
+  const databasePath = path.resolve(process.env["SESSION_DB_PATH"] ?? "data/sessions.sqlite");
+  const store = SqliteEventStore.open(databasePath);
+  console.log(`[sessions] SQLite persistence enabled at ${databasePath}`);
+  return store;
 }
 
 function resolveSkillsPath(): string {

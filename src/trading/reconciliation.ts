@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
-import { binanceFetch } from "../../mcp_tools/trading/binanceClient.ts";
-import { coinbaseFetch } from "../../mcp_tools/trading/coinbaseAuth.ts";
+import { binanceFetch } from "./cex/binanceClient.ts";
+import { coinbaseFetch } from "./cex/coinbaseAuth.ts";
 
 export type OrderState =
   | "pending"

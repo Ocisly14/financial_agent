@@ -16,7 +16,7 @@ server.listen(PORT, () => {
   console.log(`  Health:   ${url}/health`);
   console.log(`  LLM:      ${process.env["LLM_PROVIDER"] ?? "mock"}`);
   startMonitor();
-  console.log("  Strategy monitor started (auto-trading)");
+  console.log("  Strategy monitor started (stock paper/shadow evaluation)");
 });
 
 server.on("error", (err) => {

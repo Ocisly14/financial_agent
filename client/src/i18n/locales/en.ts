@@ -36,9 +36,7 @@ const en = {
         account: "Account",
         payment: "Payment",
         accessToken: "Access Token",
-        hub: "Hub",
         agents: "Agents",
-        navigation: "Navigation",
         adminAnalytics: "Admin Analytics",
         copy: "Copy",
         copied: "Copied!",
@@ -170,108 +168,6 @@ const en = {
             confirmPassword: "Confirm Password *",
             submitting: "Creating account...",
             submit: "Create account",
-        },
-    },
-    landing: {
-        hero: {
-            title: "What are we exploring in crypto today?",
-            placeholder: "Dive into Crypto with Financial Agent",
-            attach: "Attach",
-            favorites: "Favorites",
-            voice: "Voice",
-            ask: "Ask",
-            attachTitle: "Attach File",
-            favoriteTitle: "Favorite Task Chain",
-            voiceTitle: "Voice Input",
-        },
-        alerts: {
-            trendingUnavailable:
-                "This trending task chain is temporarily unavailable. Please try another one.",
-            voiceUnavailable: "Voice input will be available when you start a chat session",
-            noAgents: "No agents available yet. Please create an agent to save favorites.",
-            favoritesUnavailable:
-                "Unable to load favorite task chains right now. Please try again later.",
-        },
-        footer: {
-            tagline: "AI-powered crypto analysis and insights",
-            faq: "FAQ",
-            copyright: "© 2025 Financial Agent. All rights reserved.",
-        },
-        trendingResearch: {
-            title: "Hottest Task Chains",
-            empty: "No trending task chains yet. Be the first to favorite and execute some!",
-            loadError: "Failed to fetch trending task chains",
-        },
-        agentTools: {
-            title: "Check out Financial Agent's tailored agent tools for smarter crypto insights",
-            tools: [
-                {
-                    id: "prediction",
-                    name: "Market Prediction",
-                    description:
-                        "Advanced AI models combining multiple data sources to forecast price movements and market trends.",
-                },
-                {
-                    id: "technical",
-                    name: "Technical Analysis",
-                    description:
-                        "Leverage 40+ technical indicators and derivatives market data to deliver precise trends and signals for real-time...",
-                },
-                {
-                    id: "news",
-                    name: "News Aggregation & Sentiment",
-                    description:
-                        "Aggregate crypto news from multiple sources with AI-powered sentiment analysis to capture market-moving events.",
-                },
-            ],
-        },
-    },
-    hub: {
-        title: "Discovery Hub",
-        subtitle: "Explore crypto projects, analysis reports, and trending insights",
-        tabs: {
-            projects: "Projects",
-            reports: "Reports",
-            trending: "Trending",
-        },
-        projects: {
-            emptyTitle: "No Projects Yet",
-            emptyDescription:
-                "Project listings will appear here soon. Stay tuned for cryptocurrency project insights and analysis.",
-        },
-        reports: {
-            title: "Weekly Research Reports",
-            subtitle:
-                "Click any report to read the weekly crypto market research.",
-            loading: "Loading reports...",
-            loadError: "Failed to load reports",
-            loginRequired: "Login Required",
-            noReportsAvailable: "No Reports Available",
-            loginDescription: "Please log in to access weekly research reports.",
-            freeTierDescription:
-                "No reports available for free tier. Upgrade to access recent reports.",
-            emptyDescription: "Reports will appear here once they are synced from S3",
-            latestLockedTitle: "Latest Report Exclusive to Pro Members",
-            premiumLockedTitle: "{{count}} Premium Reports Locked",
-            latestLockedDescription:
-                "Upgrade to Pro to access the most recent weekly research report as soon as it's published.",
-            premiumLockedDescription:
-                "Upgrade to access weekly research reports with in-depth crypto market analysis, on-chain metrics, and AI-powered insights.",
-            upgradeTo: "Upgrade to {{plan}}",
-        },
-        trending: {
-            title: "Trending Sentiment",
-            loading: "Loading trending scores...",
-            loadError: "Failed to load trending scores",
-            loginRequired: "Login Required",
-            loginDescription: "Please log in to access trending sentiment scores.",
-            emptyTitle: "No Trending Data",
-            emptyDescription:
-                "Trending sentiment scores will appear here once data is available.",
-            news: "News Sentiment",
-            twitter: "X (Twitter) Sentiment",
-            coins: "{{count}} coins",
-            lastUpdated: "Last updated: {{value}}",
         },
     },
     sidebar: {
@@ -587,6 +483,8 @@ const en = {
         marketWorkspace: "Market charts",
         symbolTabs: "Symbols",
         studyCount: "{{count}} studies",
+        collapseWorkspace: "Collapse market charts",
+        expandWorkspace: "Expand market charts",
     },
     reportsPage: {
         sourcesAndReferences: "Sources & References",

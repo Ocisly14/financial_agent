@@ -15,7 +15,7 @@ import {
   type StrategyLifecycle,
   type ManageOp as StoreManageOp,
 } from "../../src/trading/persistence/strategyStore.ts";
-import { fetchMidPrice } from "../../src/trading/marketData.ts";
+import { fetchStockStrategyPrice } from "../../src/trading/stockStrategyMarketData.ts";
 
 let idCounter = 0;
 function newStrategyId(): string {
@@ -24,15 +24,15 @@ function newStrategyId(): string {
 
 const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
 
-// ── cex_create_strategy ──────────────────────────────────────────────────────
-export function createCexCreateStrategyTool(): RegisteredTool {
+// ── create_strategy ──────────────────────────────────────────────────────────
+export function createCreateStrategyTool(): RegisteredTool {
   return {
-    name: "cex_create_strategy",
+    name: "create_strategy",
     description:
-      "Create ONE price-driven auto-trading strategy as a DRAFT (does not run yet). " +
-      "Use this for ANY buy/sell that should fire on a FUTURE price condition — a % move within a window, crossing a price level, or a trailing stop — whether a SINGLE conditional leg ('buy $300 of BTC if it drops 5%') or a multi-phase plan (entry + take-profit + stop, DCA ladder, tiered take-profit). NOT for execute-now orders (use cex_prepare_order). " +
+      "Create ONE price-driven US stock or ETF strategy as a DRAFT (does not run yet). " +
+      "Use this for a future price condition — a percentage move within a window, crossing a price level, or a trailing stop — whether a single conditional phase or a multi-phase plan. This tool does not place immediate broker orders. " +
       "Put EVERY leg in the single phases[] array; never call this tool more than once for one plan. Use the exact field names, types and enums from the args schema below — do not rename or invent fields. " +
-      "Do not invent values the user did not give: if a required field is missing (e.g. a rolling-change window_minutes, a threshold, or an order size), finish and name the missing field instead of calling this tool. Time-based DCA (e.g. weekly buys) is not supported. Then call cex_start_strategy to request activation.",
+      "Do not invent values the user did not give: if a required field is missing (for example a rolling-change window_minutes, threshold, or action size), name the missing field instead of calling this tool. Time-based DCA is not supported. Strategies support paper and shadow evaluation only; live broker execution is unavailable. Then call start_strategy to request activation.",
     category: "trading",
     inputSchema: {
       type: "object",
@@ -41,8 +41,8 @@ export function createCexCreateStrategyTool(): RegisteredTool {
         task: { type: "string", description: "Natural-language description of the user's intent." },
         user_id: { type: "string", description: "Owner id for per-user state. Defaults to 'default'." },
         name: { type: "string", description: "Human-friendly strategy plan name." },
-        symbol: { type: "string", description: "Full Binance pair, e.g. BTCUSDT." },
-        mode: { type: "string", enum: ["paper", "shadow", "live"], description: "defaults to paper" },
+        symbol: { type: "string", description: "US stock or ETF ticker, e.g. AAPL, MSFT, SPY, or BRK.B." },
+        mode: { type: "string", enum: ["paper", "shadow"], description: "Defaults to paper. Live broker execution is not supported." },
         phases: {
           type: "array",
           description: "every leg of the plan",
@@ -117,7 +117,7 @@ export function createCexCreateStrategyTool(): RegisteredTool {
       // Creation-time level check for absolute_threshold phases (avoid surprise "active immediately").
       if (input["force"] !== true) {
         try {
-          const mid = await fetchMidPrice(dsl.symbol);
+          const mid = await fetchStockStrategyPrice(dsl.symbol);
           for (const phase of dsl.phases) {
             const t = phase.price_trigger;
             if (t.type !== "absolute_threshold") continue;
@@ -147,7 +147,7 @@ export function createCexCreateStrategyTool(): RegisteredTool {
         dsl,
       };
       await saveStrategy(strategy);
-      const summary = `Created draft strategy ${id}: ${summarizePriceStrategy(dsl)}. Call cex_start_strategy to request activation.`;
+      const summary = `Created draft strategy ${id}: ${summarizePriceStrategy(dsl)}. Call start_strategy to request activation.`;
       return {
         summary,
         generation_context: { prompt: "Confirm the draft multi-phase strategy was created and tell the user to start it when ready.", data: { strategy_id: id, status: "draft", phases: dsl.phases.length, summary: summarizePriceStrategy(dsl) } },
@@ -156,10 +156,10 @@ export function createCexCreateStrategyTool(): RegisteredTool {
   };
 }
 
-// ── cex_start_strategy ───────────────────────────────────────────────────────
-export function createCexStartStrategyTool(): RegisteredTool {
+// ── start_strategy ───────────────────────────────────────────────────────────
+export function createStartStrategyTool(): RegisteredTool {
   return {
-    name: "cex_start_strategy",
+    name: "start_strategy",
     description:
       "Request activation of a DRAFT strategy. This does NOT activate it directly — it moves " +
       "the strategy to pending_approval and returns an approval request; the user must confirm " +
@@ -207,11 +207,11 @@ export function createCexStartStrategyTool(): RegisteredTool {
   };
 }
 
-// ── cex_list_strategies ──────────────────────────────────────────────────────
-export function createCexListStrategiesTool(): RegisteredTool {
+// ── list_strategies ──────────────────────────────────────────────────────────
+export function createListStrategiesTool(): RegisteredTool {
   return {
-    name: "cex_list_strategies",
-    description: "List auto-trading strategies (optionally filtered by status), with current price and a short distance-to-trigger note where applicable.",
+    name: "list_strategies",
+    description: "List stock price strategies (optionally filtered by status), with the current price where available.",
     category: "trading",
     inputSchema: {
       type: "object",
@@ -227,7 +227,7 @@ export function createCexListStrategiesTool(): RegisteredTool {
       const rows = await Promise.all(
         all.map(async (s) => {
           let price = 0;
-          try { price = await fetchMidPrice(s.symbol); } catch { /* ignore */ }
+          try { price = await fetchStockStrategyPrice(s.symbol); } catch { /* ignore */ }
           return {
             strategy_id: s.id,
             symbol: s.symbol,
@@ -247,13 +247,13 @@ export function createCexListStrategiesTool(): RegisteredTool {
   };
 }
 
-// ── cex_manage_strategy ──────────────────────────────────────────────────────
+// ── manage_strategy ──────────────────────────────────────────────────────────
 const VALID_OPS = ["pause", "resume", "cancel", "get"] as const;
 type ManageOp = (typeof VALID_OPS)[number];
 
-export function createCexManageStrategyTool(): RegisteredTool {
+export function createManageStrategyTool(): RegisteredTool {
   return {
-    name: "cex_manage_strategy",
+    name: "manage_strategy",
     description: "Manage one strategy: op=get (details + execution history), pause, resume, or cancel. Pause/resume toggle active<->paused; cancel is terminal.",
     category: "trading",
     inputSchema: {

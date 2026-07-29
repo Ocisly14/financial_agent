@@ -110,41 +110,10 @@ const fetcher = async ({
     });
 };
 
-// ── Local agents/rooms (no backend agents/rooms API) ─────────────────────────
-// financial-agent has a single implicit agent and no rooms endpoint. We model a
-// "room" as a chat session whose id we pass as `sessionId` to POST /api/chat,
-// persisted in localStorage so the sidebar + room list work offline.
+// ── Agents/rooms ─────────────────────────────────────────────────────────────
+// The app has one implicit agent. Room metadata and transcripts are persisted
+// by the backend in the same local SQLite database.
 export const DEFAULT_AGENT_ID = "default";
-
-type LocalRoom = { id: string; name: string; createdAt: number };
-
-const roomsStorageKey = (agentId: string) => `financial-agent:rooms:${agentId}`;
-
-const readLocalRooms = (agentId: string): LocalRoom[] => {
-    if (typeof window === "undefined") return [];
-    try {
-        const raw = window.localStorage.getItem(roomsStorageKey(agentId));
-        const parsed = raw ? JSON.parse(raw) : [];
-        return Array.isArray(parsed) ? parsed : [];
-    } catch {
-        return [];
-    }
-};
-
-const writeLocalRooms = (agentId: string, rooms: LocalRoom[]) => {
-    if (typeof window === "undefined") return;
-    try {
-        window.localStorage.setItem(roomsStorageKey(agentId), JSON.stringify(rooms));
-    } catch {
-        /* localStorage unavailable — rooms just won't persist */
-    }
-};
-
-const newRoomName = () => {
-    const d = new Date();
-    const pad = (n: number) => String(n).padStart(2, "0");
-    return `Chat ${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-};
 
 export const apiClient = {
     getAgents: (): Promise<{ agents: Array<{ id: string; name: string }> }> =>
@@ -333,50 +302,46 @@ export const apiClient = {
             baseUrl: ANALYTICS_API_BASE_URL,
         }),
 
-    // Room management — localStorage-backed (no backend rooms API).
-    createRoom: (agentId: string, name?: string): Promise<{ success: boolean; room: { id: string; name: string; createdAt: number } }> => {
-        const room: LocalRoom = {
-            id: (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `room-${Date.now()}`),
-            name: name && name.trim() ? name.trim() : newRoomName(),
-            createdAt: Date.now(),
-        };
-        const rooms = readLocalRooms(agentId);
-        rooms.unshift(room);
-        writeLocalRooms(agentId, rooms);
-        return Promise.resolve({ success: true, room });
-    },
+    // Room management — backed by the server's local SQLite database.
+    createRoom: (agentId: string, name?: string): Promise<{ success: boolean; room: { id: string; name: string; createdAt: number } }> =>
+        fetcher({ url: `/api/agents/${encodeURIComponent(agentId)}/rooms`, method: "POST", body: { name } }),
 
     getRooms: (agentId: string): Promise<{ success: boolean; rooms: Array<{ id: string; name: string; createdAt: number; lastMessage: { text: string; createdAt: number } | null; messageCount: number }> }> => {
-        const rooms = readLocalRooms(agentId)
-            .sort((a, b) => b.createdAt - a.createdAt)
-            .map((r) => ({ ...r, lastMessage: null, messageCount: 0 }));
-        return Promise.resolve({ success: true, rooms });
+        return fetcher({ url: `/api/agents/${encodeURIComponent(agentId)}/rooms`, method: "GET" });
     },
 
-    deleteRoom: (agentId: string, roomId: string): Promise<{ success: boolean; message: string }> => {
-        writeLocalRooms(agentId, readLocalRooms(agentId).filter((r) => r.id !== roomId));
-        return Promise.resolve({ success: true, message: "deleted" });
-    },
+    deleteRoom: (agentId: string, roomId: string): Promise<{ success: boolean; message: string }> =>
+        fetcher({
+            url: `/api/agents/${encodeURIComponent(agentId)}/rooms/${encodeURIComponent(roomId)}`,
+            method: "DELETE",
+        }),
 
-    batchDeleteRooms: (agentId: string, roomIds: string[]): Promise<{
+    batchDeleteRooms: async (agentId: string, roomIds: string[]): Promise<{
         success: boolean;
         message: string;
         results: Array<{ roomId: string; success: boolean; error?: string }>;
     }> => {
-        const toRemove = new Set(roomIds);
-        writeLocalRooms(agentId, readLocalRooms(agentId).filter((r) => !toRemove.has(r.id)));
-        return Promise.resolve({
-            success: true,
-            message: "deleted",
-            results: roomIds.map((roomId) => ({ roomId, success: true })),
-        });
+        const results = await Promise.all(roomIds.map(async (roomId) => {
+            try {
+                await apiClient.deleteRoom(agentId, roomId);
+                return { roomId, success: true };
+            } catch (error) {
+                return { roomId, success: false, error: error instanceof Error ? error.message : String(error) };
+            }
+        }));
+        return {
+            success: results.every((result) => result.success),
+            message: results.every((result) => result.success) ? "deleted" : "some rooms could not be deleted",
+            results,
+        };
     },
 
-    renameRoom: (agentId: string, roomId: string, name: string): Promise<{ success: boolean; message: string; room: { id: string; name: string } }> => {
-        const rooms = readLocalRooms(agentId).map((r) => (r.id === roomId ? { ...r, name } : r));
-        writeLocalRooms(agentId, rooms);
-        return Promise.resolve({ success: true, message: "renamed", room: { id: roomId, name } });
-    },
+    renameRoom: (agentId: string, roomId: string, name: string): Promise<{ success: boolean; message: string; room: { id: string; name: string } }> =>
+        fetcher({
+            url: `/api/agents/${encodeURIComponent(agentId)}/rooms/${encodeURIComponent(roomId)}`,
+            method: "PUT",
+            body: { name },
+        }),
 
     getFavoriteTaskChains: (agentId: string): Promise<{ success: boolean; favorites: any[] }> =>
         fetcher({
@@ -645,11 +610,17 @@ export const apiClient = {
     getMessages: (
         agentId: string,
         roomId: string,
-        _params?: { limit?: number; before?: string }
+        params?: { limit?: number; before?: string }
     ): Promise<{ agentId?: string; roomId?: string; memories?: any[]; messages?: any[]; hasMore?: boolean; oldestId?: string }> => {
-        // No backend history store — chat transcript lives only in the live
-        // session. Return an empty transcript so loadMessageHistory is a no-op.
-        return Promise.resolve({ agentId, roomId, messages: [], memories: [], hasMore: false });
+        void agentId;
+        const query = new URLSearchParams();
+        if (params?.limit !== undefined) query.set("limit", String(params.limit));
+        if (params?.before) query.set("before", params.before);
+        const suffix = query.size > 0 ? `?${query.toString()}` : "";
+        return fetcher({
+            url: `/api/sessions/${encodeURIComponent(roomId)}/messages${suffix}`,
+            method: "GET",
+        });
     },
     getSubscriptionStatus: (email?: string): Promise<{
         success: boolean;
@@ -1462,7 +1433,7 @@ export class StreamingApiClient {
         void favoriteTaskChain; void selectedFiles; void messageClassification;
         void language; void composed;
         const body: string = JSON.stringify({ message, sessionId: roomId });
-        const headers: HeadersInit = { "Content-Type": "application/json" };
+        const headers: HeadersInit = { "Content-Type": "application/json", "X-Agent-Id": agentId };
 
         let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
         // Set true once a `final` event arrives, so a clean stream close (the

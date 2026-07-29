@@ -6,11 +6,12 @@ import { newId } from "../framework/ids.ts";
 import { attachSse } from "../infra/events/sseProjector.ts";
 import type { FinancialAgentApp } from "../agent/createApp.ts";
 import type { JsonObject, TaskResult, ToolExecutionResult } from "../framework/types.ts";
-import { binanceFetch } from "../../mcp_tools/trading/binanceClient.ts";
-import { coinbaseFetch } from "../../mcp_tools/trading/coinbaseAuth.ts";
+import { binanceFetch } from "../trading/cex/binanceClient.ts";
+import { coinbaseFetch } from "../trading/cex/coinbaseAuth.ts";
 import { reconciliationService } from "../trading/reconciliation.ts";
 import { fetchCandles } from "../trading/marketData.ts";
 import { handleStockQuote } from "./stockMarketRoutes.ts";
+import { projectChatHistory } from "./chatHistory.ts";
 import {
   killSwitchStore,
   consentStore,
@@ -78,7 +79,7 @@ function setCors(req: http.IncomingMessage, res: http.ServerResponse) {
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Credentials", "true");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Agent-Id");
 }
 
 async function readBody(req: http.IncomingMessage): Promise<string> {
@@ -252,6 +253,8 @@ async function handleChat(
   }
 
   const sessionId = body.sessionId ?? newId("sess");
+  const agentIdHeader = (req.headers["x-agent-id"] as string | undefined) ?? "default";
+  app.eventStore.ensureRoom(agentIdHeader, sessionId, defaultRoomName());
 
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
@@ -265,7 +268,6 @@ async function handleChat(
   const unsub = attachSse(await app.sessions.getOrCreate(sessionId), (frame) => sseWrite(res, frame));
 
   // Track workflow as active for the Stop-button rehydration route
-  const agentIdHeader = (req.headers["x-agent-id"] as string | undefined) ?? "default";
   activeWorkflows.set(agentIdHeader, { kind: "task_chain", startedAt: Date.now(), sessionId });
 
   try {
@@ -278,6 +280,70 @@ async function handleChat(
     activeWorkflows.delete(agentIdHeader);
     res.end();
   }
+}
+
+async function handleChatHistory(
+  res: http.ServerResponse,
+  app: FinancialAgentApp,
+  sessionId: string,
+  searchParams: URLSearchParams,
+) {
+  const events = await app.sessions.loadEvents(sessionId);
+  const allMessages = projectChatHistory(events);
+  const requestedLimit = Number.parseInt(searchParams.get("limit") ?? "200", 10);
+  const limit = Number.isFinite(requestedLimit) ? Math.min(Math.max(requestedLimit, 1), 500) : 200;
+  const before = searchParams.get("before");
+  const beforeIndex = before ? allMessages.findIndex((message) => message.id === before) : -1;
+  const end = beforeIndex >= 0 ? beforeIndex : allMessages.length;
+  const start = Math.max(0, end - limit);
+  const messages = allMessages.slice(start, end);
+  return jsonOk(res, {
+    sessionId,
+    messages,
+    hasMore: start > 0,
+    oldestId: messages[0]?.id,
+  });
+}
+
+function defaultRoomName(): string {
+  const now = new Date();
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `Chat ${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+}
+
+async function handleCreateRoom(req: http.IncomingMessage, res: http.ServerResponse, app: FinancialAgentApp, agentId: string) {
+  let body: { name?: string } = {};
+  const rawBody = await readBody(req);
+  if (rawBody) {
+    try {
+      body = JSON.parse(rawBody) as { name?: string };
+    } catch {
+      return jsonError(res, 400, "Invalid JSON body");
+    }
+  }
+  const roomId = newId("room");
+  const name = body.name?.trim() || defaultRoomName();
+  const room = app.eventStore.createRoom(agentId, roomId, name);
+  return jsonOk(res, { success: true, room });
+}
+
+async function handleRenameRoom(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  app: FinancialAgentApp,
+  agentId: string,
+  roomId: string,
+) {
+  let body: { name?: string };
+  try {
+    body = JSON.parse(await readBody(req)) as { name?: string };
+  } catch {
+    return jsonError(res, 400, "Invalid JSON body");
+  }
+  const name = body.name?.trim();
+  if (!name) return jsonError(res, 400, "name is required");
+  if (!app.eventStore.renameRoom(agentId, roomId, name)) return jsonError(res, 404, "room not found");
+  return jsonOk(res, { success: true, message: "renamed", room: { id: roomId, name } });
 }
 
 async function handleStatic(pathname: string, res: http.ServerResponse) {
@@ -794,6 +860,30 @@ export function createHttpServer(app: FinancialAgentApp): http.Server {
         return await handleChat(req, res, app);
       }
 
+      const chatHistoryMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/messages$/);
+      if (method === "GET" && chatHistoryMatch) {
+        return await handleChatHistory(res, app, decodeURIComponent(chatHistoryMatch[1]!), sp);
+      }
+
+      const roomsMatch = pathname.match(/^\/api\/agents\/([^/]+)\/rooms$/);
+      if (roomsMatch) {
+        const agentId = decodeURIComponent(roomsMatch[1]!);
+        if (method === "GET") return jsonOk(res, { success: true, rooms: app.eventStore.listRooms(agentId) });
+        if (method === "POST") return await handleCreateRoom(req, res, app, agentId);
+      }
+
+      const roomMatch = pathname.match(/^\/api\/agents\/([^/]+)\/rooms\/([^/]+)$/);
+      if (roomMatch) {
+        const agentId = decodeURIComponent(roomMatch[1]!);
+        const roomId = decodeURIComponent(roomMatch[2]!);
+        if (method === "PUT") return await handleRenameRoom(req, res, app, agentId, roomId);
+        if (method === "DELETE") {
+          if (!app.eventStore.deleteRoom(agentId, roomId)) return jsonError(res, 404, "room not found");
+          app.sessions.delete(roomId);
+          return jsonOk(res, { success: true, message: "deleted" });
+        }
+      }
+
       // ── Health ────────────────────────────────────────────────────────────
       if (method === "GET" && pathname === "/health") {
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -881,17 +971,17 @@ export function createHttpServer(app: FinancialAgentApp): http.Server {
 
       // ── Paper account  GET /user/paper/balances  GET /user/paper/orders ─────
       if (method === "GET" && pathname === "/user/paper/balances") {
-        const { getPaperBalances } = await import("../../mcp_tools/trading/paperVenue.ts");
+        const { getPaperBalances } = await import("../trading/cex/paperVenue.ts");
         const userId = sp.get("user_id") ?? "default";
         return jsonOk(res, { success: true, balances: getPaperBalances(userId) });
       }
       if (method === "GET" && pathname === "/user/paper/orders") {
-        const { getPaperOrders } = await import("../../mcp_tools/trading/paperVenue.ts");
+        const { getPaperOrders } = await import("../trading/cex/paperVenue.ts");
         const userId = sp.get("user_id") ?? "default";
         return jsonOk(res, { success: true, orders: getPaperOrders(userId) });
       }
       if (method === "POST" && pathname === "/user/paper/reset") {
-        const { resetPaperAccount } = await import("../../mcp_tools/trading/paperVenue.ts");
+        const { resetPaperAccount } = await import("../trading/cex/paperVenue.ts");
         const body = JSON.parse(await readBody(req)) as { user_id?: string };
         resetPaperAccount(body.user_id ?? "default");
         return jsonOk(res, { success: true });
@@ -925,7 +1015,7 @@ export function createHttpServer(app: FinancialAgentApp): http.Server {
         const approvalTaskId = approvalContext?.event.parent_event_id ?? undefined;
         const summary = rejected
           ? `Strategy ${id} activation rejected. Strategy returned to draft.`
-          : `Strategy ${id} activated. The monitor may now execute matching phases.`;
+          : `Strategy ${id} activated. The monitor may now evaluate and record matching paper/shadow phases.`;
         recordApprovalTaskResult(
           approvalContext,
           approvalTaskId,

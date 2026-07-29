@@ -1,5 +1,3 @@
-import type { BinanceCredentials } from "./binanceClient.ts";
-
 const FALLBACK_PRICES: Record<string, number> = {
   BTC: 105_000, ETH: 3_500, SOL: 180, BNB: 600, XRP: 0.5,
   ADA: 0.4, DOGE: 0.15, AVAX: 35, LINK: 15, DOT: 7,

@@ -8,7 +8,7 @@ import { stepConfirmation } from "./confirmation.ts";
 /**
  * Deterministic background loop: every interval it polls prices for the symbols
  * of all active strategies, evaluates each strategy's price trigger (with
- * N-sample wick confirmation), and — when confirmed — runs the execution path.
+ * N-sample wick confirmation), and — when confirmed — records the paper/shadow action.
  * Self-scheduling (setTimeout after completion) to avoid overlapping ticks.
  */
 
@@ -75,6 +75,12 @@ export async function runOnce(now: Date): Promise<void> {
 }
 
 async function evaluateStrategy(strategy: StoredStrategy, price: number, now: Date): Promise<void> {
+  if ((strategy.dsl.mode as string) === "live") {
+    strategy.status = "paused";
+    strategy.failure_reason = "Live stock broker execution is not configured; use paper or shadow mode.";
+    await saveStrategy(strategy);
+    return;
+  }
   for (const phase of strategy.dsl.phases) {
     if (strategy.status !== "active") return;
     if (phase.status !== "active") continue;

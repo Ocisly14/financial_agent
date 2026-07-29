@@ -1,6 +1,6 @@
-import { evaluate } from "../../../mcp_tools/trading/riskEngine.ts";
-import { DEFAULT_RISK_PREFERENCES } from "../../../mcp_tools/trading/riskTypes.ts";
-import type { RiskContext, RiskRuleId, TradeIntent } from "../../../mcp_tools/trading/riskTypes.ts";
+import { evaluate } from "../../../src/trading/cex/riskEngine.ts";
+import { DEFAULT_RISK_PREFERENCES } from "../../../src/trading/cex/riskTypes.ts";
+import type { RiskContext, RiskRuleId, TradeIntent } from "../../../src/trading/cex/riskTypes.ts";
 import { pct } from "../lib/metrics.ts";
 import type { EvalResult } from "../lib/report.ts";
 

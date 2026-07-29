@@ -517,6 +517,19 @@ export class SessionRegistry {
     return this.sessions.get(sessionId);
   }
 
+  /** Load the complete durable event log for chat-history projection.
+   *  Unlike SessionState.allEvents(), this still includes compacted turns. */
+  async loadEvents(sessionId: string): Promise<SessionEvent[]> {
+    if (this.store) return this.store.loadEvents(sessionId);
+    const state = await this.getOrCreate(sessionId);
+    return [...state.allEvents()];
+  }
+
+  /** Evict a deleted room so a later request cannot reuse stale in-memory events. */
+  delete(sessionId: string): void {
+    this.sessions.delete(sessionId);
+  }
+
   findPendingApproval(approvalId: string): { state: SessionState; event: SessionEvent; payload: JsonObject } | undefined {
     for (const state of this.sessions.values()) {
       const pending = state.pendingApproval(approvalId);

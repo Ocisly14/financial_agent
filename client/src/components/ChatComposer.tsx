@@ -13,6 +13,7 @@ interface ChatComposerProps {
     agentId: UUID;
     input: string;
     isProcessing: boolean;
+    isDisabled?: boolean;
     isAtBottom: boolean;
     onInputChange: (value: string) => void;
     onSend: () => void;
@@ -31,6 +32,7 @@ export function ChatComposer({
     agentId,
     input,
     isProcessing,
+    isDisabled = false,
     isAtBottom,
     onInputChange,
     onSend,
@@ -112,6 +114,7 @@ export function ChatComposer({
                             <form
                                 onSubmit={(e) => {
                                     e.preventDefault();
+                                    if (isDisabled) return;
                                     onSend();
                                 }}
                                 className={cn(
@@ -146,7 +149,7 @@ export function ChatComposer({
                                             type="button"
                                             size="sm"
                                             variant="outline"
-                                            disabled={isProcessing}
+                                            disabled={isProcessing || isDisabled}
                                             title="Compose a trade — opens the order editor; one click places the order"
                                             onClick={() => setComposeOpen(true)}
                                             className={cn("gap-0.5 h-[30px]")}
@@ -178,7 +181,7 @@ export function ChatComposer({
                                             <Button
                                                 type="submit"
                                                 size="sm"
-                                                disabled={!input.trim()}
+                                                disabled={!input.trim() || isDisabled}
                                                 className="gap-0.5 h-[30px]"
                                             >
                                                 {t("common.sendMessage")}

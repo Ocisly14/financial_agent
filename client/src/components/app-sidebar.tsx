@@ -15,18 +15,16 @@ import {
     useSidebar,
 } from "@/components/ui/sidebar";
 import { apiClient } from "@/lib/api";
-import { NavLink, useLocation, useNavigate } from "react-router";
+import { NavLink, useNavigate } from "react-router";
 import type { UUID } from "@/types/core";
 import { useSubscriptionTier } from "@/hooks/useSubscriptionTier";
-import { BarChart3, LayoutGrid, PanelLeft } from "lucide-react";
+import { BarChart3, PanelLeft } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
-import { cn } from "@/lib/utils";
 import { useTranslation } from "react-i18next";
 
 import { RoomSelector } from "./room-selector";
 
 export function AppSidebar() {
-    const location = useLocation();
     const navigate = useNavigate();
     const { tier } = useSubscriptionTier();
     const { isMobile, setOpenMobile } = useSidebar();
@@ -43,8 +41,6 @@ export function AppSidebar() {
     });
 
     const agents = query?.data?.agents;
-    const isHubActive = location.pathname === "/hub";
-
     // Get gradient class based on tier
     const getGradientClass = () => {
         if (tier === 'pro') return 'pro-gradient-border';
@@ -116,37 +112,6 @@ export function AppSidebar() {
                 </div>
             </SidebarHeader>
             <SidebarContent>
-                <SidebarGroup className="group-data-[collapsible=icon]:hidden">
-                    <SidebarGroupLabel className="text-xs font-medium px-2 mb-1">{t("common.navigation")}</SidebarGroupLabel>
-                    <SidebarGroupContent>
-                        <SidebarMenu className="space-y-0.5 px-1">
-                            <SidebarMenuItem>
-                                <SidebarMenuButton asChild>
-                                    <NavLink
-                                        id="tour-hub"
-                                        to="/hub"
-                                        className={cn(
-                                            "flex items-center gap-2 rounded-md px-2 py-1.5 transition-all border",
-                                            isHubActive
-                                                ? "border-white/40 bg-white/30 text-foreground shadow-[0_4px_6px_-1px_rgba(0,0,0,0.1),0_2px_4px_-1px_rgba(0,0,0,0.06)] supports-[backdrop-filter]:backdrop-blur-md supports-[backdrop-filter]:bg-white/20 dark:border-white/15 dark:bg-white/10 dark:supports-[backdrop-filter]:bg-white/10"
-                                                : "border-transparent [@media(hover:hover)]:hover:border-white/20 [@media(hover:hover)]:hover:bg-white/10 supports-[backdrop-filter]:[@media(hover:hover)]:hover:bg-white/10 dark:[@media(hover:hover)]:hover:bg-white/5 active:bg-white/10 dark:active:bg-white/5"
-                                        )}
-                                        onClick={(e) => {
-                                            if (isMobile) {
-                                                e.preventDefault();
-                                                navigate("/hub");
-                                                setOpenMobile(false);
-                                            }
-                                        }}
-                                    >
-                                        <LayoutGrid className="h-4 w-4" />
-                                        <span>{t("common.hub")}</span>
-                                    </NavLink>
-                                </SidebarMenuButton>
-                            </SidebarMenuItem>
-                        </SidebarMenu>
-                    </SidebarGroupContent>
-                </SidebarGroup>
                 <SidebarGroup>
                     <SidebarGroupLabel className="text-xs font-medium px-2 mb-1">{t("common.agents")}</SidebarGroupLabel>
                     <SidebarGroupContent>

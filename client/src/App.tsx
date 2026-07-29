@@ -1,15 +1,14 @@
 import "./index.css";
 import { lazy, Suspense } from "react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { AppSidebar, FloatingSidebarToggle } from "./components/app-sidebar";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { Toaster } from "./components/ui/toaster";
-import { BrowserRouter, Route, Routes } from "react-router";
+import { BrowserRouter, Navigate, Route, Routes } from "react-router";
 // Route-level code splitting — each route is its own chunk.
 const Chat = lazy(() => import("./routes/chat"));
 const Overview = lazy(() => import("./routes/overview"));
-const LandingPage = lazy(() => import("./routes/landing"));
 const Orders = lazy(() => import("./routes/orders"));
 const Strategies = lazy(() => import("./routes/strategies"));
 const StrategyFloor = lazy(() => import("./routes/strategy-floor"));
@@ -24,6 +23,7 @@ import { TableOfContentsProvider } from "./contexts/TableOfContentsContext";
 import { LanguageProvider } from "./contexts/LanguageContext";
 import { KillSwitchBanner } from "./components/cex/KillSwitchBanner";
 import { LiveTradingConsentModal } from "./components/cex/LiveTradingConsentModal";
+import { apiClient } from "./lib/api";
 
 const queryClient = new QueryClient({
     defaultOptions: {
@@ -32,6 +32,23 @@ const queryClient = new QueryClient({
         },
     },
 });
+
+/** `/` is now an entry redirect, not a standalone home page. */
+function RootRedirect() {
+    const { data, isPending, isError } = useQuery({
+        queryKey: ["agents"],
+        queryFn: () => apiClient.getAgents(),
+        staleTime: Number.POSITIVE_INFINITY,
+    });
+    const firstAgent = data?.agents?.[0];
+    if (isPending) {
+        return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">Loading…</div>;
+    }
+    if (isError || !firstAgent) {
+        return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No agents available.</div>;
+    }
+    return <Navigate to={`/chat/${firstAgent.id}`} replace />;
+}
 
 function AppShell() {
     const { theme } = useTheme();
@@ -57,7 +74,7 @@ function AppShell() {
                                     <div className="flex flex-1 flex-col min-h-0 w-full">
                                         <Suspense fallback={<div className="flex flex-1 items-center justify-center text-muted-foreground" />}>
                                             <Routes>
-                                                <Route path="/" element={<LandingPage />} />
+                                                <Route path="/" element={<RootRedirect />} />
                                                 <Route path="chat/:agentId/:roomId" element={<Chat />} />
                                                 <Route path="chat/:agentId" element={<Chat />} />
                                                 <Route path="settings/:agentId" element={<Overview />} />

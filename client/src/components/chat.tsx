@@ -56,9 +56,8 @@ type ClientInterrupt = {
 
 /**
  * MVP chat: send a message to the agent backend (POST /api/chat, SSE), stream
- * the reply, and render markdown plus declarative stock charts. Messages live
- * in the react-query cache keyed by
- * ["messages", agentId, roomId] (no server history).
+ * the reply, and render markdown plus declarative stock charts. Messages are
+ * restored from the backend's local SQLite event log into the react-query cache.
  */
 export default function Chat({ agentId, roomId }: ChatProps) {
     const queryClient = useQueryClient();
@@ -73,6 +72,7 @@ export default function Chat({ agentId, roomId }: ChatProps) {
     const [showDesktopChartWorkspace, setShowDesktopChartWorkspace] = useState(() =>
         typeof window !== "undefined" && window.matchMedia("(min-width: 1280px)").matches,
     );
+    const [chartWorkspaceCollapsed, setChartWorkspaceCollapsed] = useState(false);
     const [liveTasks, setLiveTasks] = useState<ProgressTask[]>([]);
     const tasksRef = useRef<Map<string, ProgressTask>>(new Map());
     const initialHandledRef = useRef(false);
@@ -92,11 +92,13 @@ export default function Chat({ agentId, roomId }: ChatProps) {
     const [pendingInterrupt, setPendingInterrupt] = useState<ClientInterrupt | null>(null);
 
     const queryKey = useMemo(() => ["messages", agentId, roomId], [agentId, roomId]);
-    const { data: messages = [] } = useQuery<ContentWithUser[]>({
+    const { data: messages = [], isLoading: isHistoryLoading } = useQuery<ContentWithUser[]>({
         queryKey,
-        queryFn: () => [],
-        initialData: [],
-        staleTime: Number.POSITIVE_INFINITY,
+        queryFn: async () => {
+            const result = await apiClient.getMessages(agentId, roomId, { limit: 500 });
+            return (result.messages ?? []) as ContentWithUser[];
+        },
+        refetchOnWindowFocus: false,
     });
 
     useEffect(() => {
@@ -131,7 +133,7 @@ export default function Chat({ agentId, roomId }: ChatProps) {
     const sendMessage = useCallback(
         async (text: string) => {
             const trimmed = text.trim();
-            if (!trimmed || isProcessing) return;
+            if (!trimmed || isProcessing || isHistoryLoading) return;
             const now = Date.now();
             appendMessages([
                 { id: `user-${now}`, user: "user", text: trimmed, createdAt: now } as unknown as ContentWithUser,
@@ -315,17 +317,17 @@ export default function Chat({ agentId, roomId }: ChatProps) {
                 setStreamingText("");
             }
         },
-        [agentId, roomId, isProcessing, appendMessages, streaming, queryClient, navigate]
+        [agentId, roomId, isProcessing, isHistoryLoading, appendMessages, streaming, queryClient, navigate]
     );
 
-    // Send the message the landing page passed via navigation state.
+    // Send an optional message passed by another route via navigation state.
     useEffect(() => {
         const state = location.state as { initialMessage?: string } | null;
-        if (state?.initialMessage && !initialHandledRef.current && !isProcessing) {
+        if (state?.initialMessage && !initialHandledRef.current && !isProcessing && !isHistoryLoading) {
             initialHandledRef.current = true;
             void sendMessage(state.initialMessage);
         }
-    }, [location.state, isProcessing, sendMessage]);
+    }, [location.state, isProcessing, isHistoryLoading, sendMessage]);
 
     const handleStop = () => {
         streaming.cancelStreamForAgent(agentId);
@@ -590,9 +592,11 @@ export default function Chat({ agentId, roomId }: ChatProps) {
     return (
         <>
         <div className={cn(
-            "grid h-dvh max-h-dvh w-full min-h-0 grid-cols-1 grid-rows-[minmax(0,1fr)] overflow-hidden",
+            "grid h-dvh max-h-dvh w-full min-h-0 grid-cols-1 grid-rows-[minmax(0,1fr)] overflow-hidden transition-[grid-template-columns] duration-200",
             showDesktopChartWorkspace && chartWorkspace.charts.length > 0
-                ? "xl:grid-cols-[minmax(0,1fr)_minmax(380px,440px)]"
+                ? chartWorkspaceCollapsed
+                    ? "xl:grid-cols-[48px_minmax(0,1fr)]"
+                    : "xl:grid-cols-[minmax(0,1fr)_minmax(380px,440px)]"
                 : "",
         )}>
             {showDesktopChartWorkspace && chartWorkspace.charts.length > 0 && (
@@ -601,6 +605,8 @@ export default function Chat({ agentId, roomId }: ChatProps) {
                         charts={chartWorkspace.charts}
                         focusSymbol={chartWorkspace.focusSymbol}
                         focusRevision={chartWorkspace.focusRevision}
+                        collapsed={chartWorkspaceCollapsed}
+                        onCollapsedChange={setChartWorkspaceCollapsed}
                     />
                 </div>
             )}
@@ -635,6 +641,7 @@ export default function Chat({ agentId, roomId }: ChatProps) {
                     agentId={agentId}
                     input={input}
                     isProcessing={isProcessing}
+                    isDisabled={isHistoryLoading}
                     isAtBottom={isAtBottom}
                     onInputChange={setInput}
                     onSend={() => void sendMessage(input)}

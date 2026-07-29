@@ -1,20 +1,18 @@
 import type { OhlcSample } from "../../mcp_tools/trading/strategy/priceTrigger.ts";
-import { fetchKlines, fetchMidPrice } from "./marketData.ts";
+import { fetchStockStrategyPrice, fetchStockStrategySamples } from "./stockStrategyMarketData.ts";
 
 /**
- * In-memory rolling OHLC buffer per symbol (~1h retained). Backfilled from
- * Binance klines on activation/restart so rolling-window triggers evaluate
- * immediately; appended to each poll from the live mid price.
+ * In-memory rolling OHLC buffer per stock symbol. Historical samples come from
+ * the shared local stock database; current prices come from Alpaca snapshots.
  */
 
-const RETAIN_MS = 60 * 60 * 1000; // keep ~1 hour
+const RETAIN_MS = 7 * 24 * 60 * 60 * 1000;
 const buffers = new Map<string, OhlcSample[]>();
 
 /** Replace a symbol's buffer with backfilled klines covering >= windowMinutes. */
 export async function backfill(symbol: string, windowMinutes: number): Promise<void> {
-  const limit = Math.min(Math.max(windowMinutes + 5, 10), 60);
-  const klines = await fetchKlines(symbol, "1m", limit);
-  buffers.set(symbol, klines);
+  const limit = Math.min(Math.max(windowMinutes + 5, 10), 10_000);
+  buffers.set(symbol, await fetchStockStrategySamples(symbol, limit));
 }
 
 /** Append a single price sample and prune anything older than the retention window. */
@@ -25,9 +23,9 @@ export function appendPrice(symbol: string, price: number, ts: number): void {
   buffers.set(symbol, buf.filter((s) => s.ts >= cutoff));
 }
 
-/** Poll the live mid price, append it to the buffer, and return it (0 if unavailable). */
+/** Poll the latest stock price, append it to the buffer, and return it. */
 export async function pollPrice(symbol: string, now: number): Promise<number> {
-  const price = await fetchMidPrice(symbol);
+  const price = await fetchStockStrategyPrice(symbol);
   if (price > 0) appendPrice(symbol, price, now);
   return price;
 }
