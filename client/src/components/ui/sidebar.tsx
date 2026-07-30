@@ -332,6 +332,21 @@ const SidebarHeader = React.forwardRef<
 });
 SidebarHeader.displayName = "SidebarHeader";
 
+const SidebarFooter = React.forwardRef<
+    HTMLDivElement,
+    React.ComponentProps<"div">
+>(({ className, ...props }, ref) => {
+    return (
+        <div
+            ref={ref}
+            data-sidebar="footer"
+            className={cn("flex shrink-0 flex-col gap-2 border-t border-sep p-2", className)}
+            {...props}
+        />
+    );
+});
+SidebarFooter.displayName = "SidebarFooter";
+
 const SidebarContent = React.forwardRef<
     HTMLDivElement,
     React.ComponentProps<"div">
@@ -436,7 +451,7 @@ const sidebarMenuButtonVariants = cva(
                 default:
                     "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
                 outline:
-                    "bg-background shadow-[0_0_0_1px_hsl(var(--sidebar-border))] hover:bg-sidebar-accent hover:text-sidebar-accent-foreground hover:shadow-[0_0_0_1px_hsl(var(--sidebar-accent))]",
+                    "border border-sep bg-transparent hover:bg-fill-1",
             },
             size: {
                 default: "h-8 text-sm",
@@ -557,6 +572,7 @@ SidebarMenuSkeleton.displayName = "SidebarMenuSkeleton";
 export {
     Sidebar,
     SidebarContent,
+    SidebarFooter,
     SidebarGroup,
     SidebarGroupContent,
     SidebarGroupLabel,

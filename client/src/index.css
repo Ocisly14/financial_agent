@@ -30,6 +30,77 @@
         /* Graph-paper底噪 for the app canvas and the chart workspace. */
         --grid-line: 15 23 42;
         --grid-alpha: 0.03;
+
+        /* ──────────────────────────────────────────────────────────────
+         * DESIGN LANGUAGE v1 — see docs/2026-07-30-visual-design-language.md
+         *
+         * Components pick a LEVEL from these ladders. They never invent a
+         * number. Before this existed the app carried 12 unrelated shadows
+         * and 60+ hand-rolled alpha values, which is why surfaces read as
+         * pasted on rather than lit.
+         * ────────────────────────────────────────────────────────────── */
+
+        /* Surfaces. Cool-biased (220°) to match --background above; a pure
+           neutral grey reads as inherited rather than chosen. */
+        --canvas:  #EFF1F5;
+        --surface: #F7F8FA;
+        --raised:  #FFFFFF;
+
+        /* Foreground, four steps. Everything text-coloured picks one. */
+        --label-1: rgba(11, 14, 20, 0.92);
+        --label-2: rgba(11, 14, 20, 0.60);
+        --label-3: rgba(11, 14, 20, 0.38);
+        --label-4: rgba(11, 14, 20, 0.22);
+
+        /* Fills, three steps — the only mechanism for interaction states. */
+        --fill-1: rgba(11, 14, 20, 0.05);
+        --fill-2: rgba(11, 14, 20, 0.08);
+        --fill-3: rgba(11, 14, 20, 0.12);
+
+        /* Separators, and the rim light every raised surface carries on its
+           top edge. One light source, from above. */
+        --sep:        rgba(11, 14, 20, 0.10);
+        --sep-strong: rgba(11, 14, 20, 0.18);
+        --rim:        rgba(255, 255, 255, 0.85);
+
+        /* The app's single accent. Interactive and selected — nothing else.
+           Kept as an RGB triplet so Tailwind's `/N` opacity modifier works;
+           --brand is the ready-to-use form for plain CSS. */
+        --brand-rgb: 10 108 216;
+        --brand:     rgb(var(--brand-rgb));
+        --brand-sub: rgb(var(--brand-rgb) / 0.10);
+
+        /* Semantic. Data only, never chrome. */
+        --up-rgb:   11 122 75;
+        --down-rgb: 194 43 74;
+        --hold-rgb: 168 114 12;
+        --up:   rgb(var(--up-rgb));
+        --down: rgb(var(--down-rgb));
+        --hold: rgb(var(--hold-rgb));
+
+        /* Elevation. Two-part: a tight contact shadow that pins the object
+           to the page, plus a wide ambient one. Single-layer shadows always
+           read cheap. Pair each with `inset 0 1px 0 var(--rim)`. */
+        --e1: 0 0.5px 1px rgba(11, 14, 20, 0.05), 0 1px 3px -1px rgba(11, 14, 20, 0.07);
+        --e2: 0 1px 2px rgba(11, 14, 20, 0.06), 0 8px 24px -8px rgba(11, 14, 20, 0.16);
+        --e3: 0 2px 4px rgba(11, 14, 20, 0.06), 0 28px 64px -16px rgba(11, 14, 20, 0.26);
+
+        /* Translucent material. The saturate() is the part that matters:
+           blur alone washes the backdrop grey and the material dies. Only
+           for layers with content genuinely continuing behind them. */
+        --material:    saturate(180%) blur(30px);
+        --material-bg: rgba(255, 255, 255, 0.72);
+
+        /* Radius scales with the size of the thing. Nested: inner = outer − padding. */
+        --r-xs:  5px;
+        --r-sm:  7px;
+        --r-md:  9px;
+        --r-lg:  12px;
+        --r-xl:  16px;
+        --r-2xl: 20px;
+
+        /* Motion: layers grow from their trigger. */
+        --ease-out-quick: cubic-bezier(0.2, 0.7, 0.3, 1);
         --sidebar-background: 220 15% 96%;
         --sidebar-foreground: 240 5.3% 26.1%;
         --sidebar-primary: 240 5.9% 10%;
@@ -70,6 +141,39 @@
         --sidebar-ring: 217.2 91.2% 59.8%;
         --grid-line: 255 255 255;
         --grid-alpha: 0.022;
+
+        --canvas:  #070A11;
+        --surface: #0D111A;
+        --raised:  #151A25;
+
+        --label-1: rgba(251, 252, 253, 0.94);
+        --label-2: rgba(251, 252, 253, 0.58);
+        --label-3: rgba(251, 252, 253, 0.36);
+        --label-4: rgba(251, 252, 253, 0.20);
+
+        --fill-1: rgba(255, 255, 255, 0.05);
+        --fill-2: rgba(255, 255, 255, 0.09);
+        --fill-3: rgba(255, 255, 255, 0.14);
+
+        --sep:        rgba(255, 255, 255, 0.10);
+        --sep-strong: rgba(255, 255, 255, 0.18);
+        /* On a dark ground the rim light is a faint white, not a bright one. */
+        --rim:        rgba(255, 255, 255, 0.07);
+
+        --brand-rgb: 76 157 255;
+        --brand-sub: rgb(var(--brand-rgb) / 0.14);
+
+        /* Re-picked, not brightened: on #070A11 a plain lighter green goes
+           muddy, so up shifts toward teal and down toward pink. */
+        --up-rgb:   62 207 142;
+        --down-rgb: 255 107 133;
+        --hold-rgb: 229 169 60;
+
+        --e1: 0 0.5px 1px rgba(0, 0, 0, 0.40), 0 1px 3px -1px rgba(0, 0, 0, 0.50);
+        --e2: 0 1px 2px rgba(0, 0, 0, 0.50), 0 8px 24px -8px rgba(0, 0, 0, 0.70);
+        --e3: 0 2px 4px rgba(0, 0, 0, 0.50), 0 28px 64px -16px rgba(0, 0, 0, 0.85);
+
+        --material-bg: rgba(13, 17, 26, 0.72);
     }
 }
 
@@ -118,6 +222,18 @@
     .tech-grid-fade {
         -webkit-mask-image: radial-gradient(ellipse 120% 90% at 50% 0%, #000 35%, transparent 100%);
         mask-image: radial-gradient(ellipse 120% 90% at 50% 0%, #000 35%, transparent 100%);
+    }
+
+    /*
+     * Translucent material. Used in exactly three places — the sidebar over
+     * the canvas, the composer over the message stream, and the chart panel
+     * header with content scrolling beneath it. Anywhere else there is no
+     * backdrop to see through, and the blur is pure compositing cost.
+     */
+    .material {
+        background: var(--material-bg);
+        -webkit-backdrop-filter: var(--material);
+        backdrop-filter: var(--material);
     }
 
     @keyframes fin-rule-sweep {

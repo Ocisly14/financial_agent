@@ -22,7 +22,7 @@ function statusIcon(status: ProgressTask["status"]) {
         case "in_progress":
             return <Loader2 className="size-3.5 text-blue-500 animate-spin" />;
         default:
-            return <Circle className="size-3.5 text-gray-400" />;
+            return <Circle className="size-3.5 text-label-4" />;
     }
 }
 
@@ -62,7 +62,7 @@ function groupIcon(group: ProgressAgent | "uncategorized") {
 }
 
 function groupIconClassName(group: ProgressAgent | "uncategorized") {
-    return group === "uncategorized" ? "text-gray-400" : agentMeta[group].iconClassName;
+    return group === "uncategorized" ? "text-label-4" : agentMeta[group].iconClassName;
 }
 
 function groupStatus(tasks: ProgressTask[]) {
@@ -105,7 +105,7 @@ export function ChatProgressPill({ tasks, isComplete }: { tasks: ProgressTask[];
             <button
                 type="button"
                 onClick={() => setExpanded((v) => !v)}
-                className="inline-flex max-w-full items-center gap-2 rounded-full border border-border/60 px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted/50 transition-colors"
+                className="inline-flex max-w-full items-center gap-2 rounded-full border border-sep px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted/50 transition-colors"
             >
                 {isComplete ? (
                     <CheckCircle className="size-3.5 text-green-500" />
@@ -123,7 +123,7 @@ export function ChatProgressPill({ tasks, isComplete }: { tasks: ProgressTask[];
             </button>
 
             {expanded && (
-                <div className="mt-1.5 rounded-lg border border-border/50 bg-muted/30 p-2 text-xs">
+                <div className="mt-1.5 rounded-lg border border-sep bg-muted/30 p-2 text-xs">
                     <div className="mb-2 flex max-w-full gap-1 overflow-x-auto rounded-md bg-background/60 p-1">
                         {displayedGroups.map((group) => {
                             const GroupIcon = groupIcon(group);
@@ -140,7 +140,7 @@ export function ChatProgressPill({ tasks, isComplete }: { tasks: ProgressTask[];
                                     className={cn(
                                         "inline-flex h-7 flex-shrink-0 items-center gap-1.5 rounded px-2 text-[11px] font-medium transition-colors",
                                         isActive
-                                            ? "bg-background text-foreground shadow-sm"
+                                            ? "bg-raised text-label-1 shadow-e1"
                                             : "text-muted-foreground hover:bg-muted hover:text-foreground"
                                     )}
                                 >

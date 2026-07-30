@@ -50,7 +50,7 @@ export function MarketChartWorkspace({
     if (collapsed) {
         return (
             <aside
-                className="flex h-dvh max-h-dvh items-start justify-center overflow-hidden border-r border-border/80 bg-background py-3"
+                className="flex h-dvh max-h-dvh items-start justify-center overflow-hidden border-r border-sep bg-background py-3"
                 aria-label={t("charts.marketWorkspace")}
             >
                 <button
@@ -67,8 +67,8 @@ export function MarketChartWorkspace({
     }
 
     return (
-        <section className="tech-grid flex h-dvh max-h-dvh min-h-0 flex-col overflow-hidden border-r border-border/80 bg-background" aria-label={t("charts.marketWorkspace")}>
-            <header className="shrink-0 border-b border-border/80 bg-background/60 px-4 py-3 backdrop-blur-sm">
+        <section className="tech-grid flex h-dvh max-h-dvh min-h-0 flex-col overflow-hidden border-r border-sep bg-background" aria-label={t("charts.marketWorkspace")}>
+            <header className="material shrink-0 border-b border-sep px-4 py-3">
                 <div className="flex items-center justify-between gap-3">
                     <div className="flex min-w-0 items-center gap-2">
                         <BarChart3 className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />

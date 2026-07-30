@@ -77,6 +77,9 @@ const en = {
         renamedDescription: '"{{oldName}}" has been renamed to "{{newName}}".',
         renameFailedTitle: "Failed to rename room",
         justNow: "just now",
+        newChat: "New chat",
+        selectMultiple: "Select multiple",
+        exitSelection: "Exit selection",
         createDialogTitle: "Create New Chat Room",
         createDialogDescription:
             "Create a new chat room to organize your conversations. Room name is optional.",

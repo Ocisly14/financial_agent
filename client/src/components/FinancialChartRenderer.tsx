@@ -145,12 +145,12 @@ function TechnicalStudyPane({ study }: { study: TechnicalStudy }) {
         ? [Math.min(...study.referenceLevels), Math.max(...study.referenceLevels)] as const
         : null;
     return (
-        <section className="animate-in fade-in slide-in-from-bottom-1 rounded-lg border border-border/70 bg-gradient-to-b from-muted/25 to-transparent px-3 pb-1.5 pt-2 duration-500">
+        <section className="animate-in fade-in slide-in-from-bottom-1 rounded-lg border border-sep bg-gradient-to-b from-muted/25 to-transparent px-3 pb-1.5 pt-2 duration-500">
             <header className="mb-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
                 <strong className="text-[10px] font-semibold uppercase tracking-[0.14em] text-foreground">
                     {study.indicator}
                 </strong>
-                <span className="rounded border border-border/70 px-1 py-px font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+                <span className="rounded border border-sep px-1 py-px font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
                     {study.timeframe}
                 </span>
                 {study.series.map((series, index) => {

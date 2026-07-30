@@ -173,13 +173,13 @@ function StockChartSkeleton({
 }) {
     return (
         <span className={cn(
-            "block rounded-xl border border-gray-200 bg-white p-4 dark:border-white/10 dark:bg-[hsl(229,50%,6%)]",
+            "block rounded-lg border border-sep bg-raised p-4",
             workspace ? "h-full border-0 bg-transparent dark:bg-transparent" : "my-3",
         )}>
-            <span className="block text-sm font-medium text-slate-900 dark:text-white/90">{symbol}</span>
-            <span className="mt-1 block text-xs text-slate-500 dark:text-slate-400">{note}</span>
+            <span className="block text-sm font-medium text-label-1">{symbol}</span>
+            <span className="mt-1 block text-xs text-label-2">{note}</span>
             <span
-                className="mt-3 block animate-pulse rounded-lg bg-slate-100 dark:bg-white/5"
+                className="mt-3 block animate-pulse rounded-md bg-fill-1"
                 style={{ height }}
             />
         </span>
@@ -300,7 +300,7 @@ function StockChartLive({
     if (failed) {
         return (
             <span ref={containerRef} className={cn(
-                "block rounded-xl border border-gray-200 bg-white p-4 text-sm text-slate-500 dark:border-white/10 dark:bg-[hsl(229,50%,6%)] dark:text-slate-400",
+                "block rounded-lg border border-sep bg-raised p-4 text-sm text-label-2",
                 workspace ? "h-full border-0 bg-transparent dark:bg-transparent" : "my-3",
             )}>
                 {symbol} 行情暂时不可用。
@@ -311,20 +311,20 @@ function StockChartLive({
     const candleStaleness = candlesQuery.data?.staleness;
     return (
         <span ref={containerRef} className={cn(
-            "block rounded-xl border border-gray-200 bg-white p-4 dark:border-white/10 dark:bg-[hsl(229,50%,6%)]",
+            "block rounded-lg border border-sep bg-raised p-4",
             workspace ? "h-full border-0 bg-transparent dark:bg-transparent" : "my-3",
         )}>
             <span className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                <span className="text-sm font-semibold text-slate-900 dark:text-white/90">{symbol}</span>
-                <span className="text-lg font-semibold tabular-nums text-slate-900 dark:text-white">{formatPrice(price)}</span>
+                <span className="text-sm font-semibold text-label-1">{symbol}</span>
+                <span className="fin-figure text-lg font-semibold text-label-1">{formatPrice(price)}</span>
                 <span className={cn("text-sm font-medium tabular-nums", rising ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400")}>
                     {formatChange(quote?.changePercent ?? null)}
                 </span>
-                <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-600 dark:bg-white/10 dark:text-slate-300">{SESSION_LABEL[session]}</span>
-                <span className="ml-auto text-[11px] text-slate-400 dark:text-slate-500">Alpaca (IEX)</span>
+                <span className="rounded-full bg-fill-1 px-2 py-0.5 text-[11px] text-label-2">{SESSION_LABEL[session]}</span>
+                <span className="ml-auto text-[11px] text-label-3">Alpaca (IEX)</span>
             </span>
 
-            <span className="mt-1 block text-[11px] text-slate-500 dark:text-slate-400">
+            <span className="mt-1 block text-[11px] text-label-2">
                 {disconnected
                     ? `连接中断 · 数据截至 ${formatClock(quote?.quoteTimestamp)}`
                     : candleStaleness?.reason === "previous_session"
@@ -345,8 +345,8 @@ function StockChartLive({
                         className={cn(
                             "rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
                             range === item
-                                ? "bg-slate-900 text-white dark:bg-white dark:text-slate-900"
-                                : "text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-white/10",
+                                ? "bg-primary text-primary-foreground"
+                                : "text-label-2 hover:bg-fill-1",
                         )}
                     >
                         {item}
@@ -367,7 +367,7 @@ function StockChartLive({
                         levels={priceLevels}
                     />
                 ) : (
-                    <span className="flex h-full items-center justify-center text-xs text-slate-400">暂无 K 线数据</span>
+                    <span className="flex h-full items-center justify-center text-xs text-label-3">暂无 K 线数据</span>
                 )}
             </span>
         </span>

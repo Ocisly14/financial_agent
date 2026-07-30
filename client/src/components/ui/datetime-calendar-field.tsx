@@ -112,19 +112,19 @@ export function DatetimeCalendarField({
                     type="button"
                     disabled={disabled}
                     className={cn(
-                        "flex w-full items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-left text-sm font-mono text-white/85",
+                        "fin-figure flex w-full items-center gap-2 rounded-md border border-sep bg-fill-1 px-3 py-2 text-left text-sm text-label-1",
                         "hover:border-amber-400/30 focus:outline-none focus:border-amber-400/40",
                         "disabled:cursor-not-allowed disabled:opacity-50",
                     )}
                 >
                     <Calendar className="size-4 shrink-0 text-amber-400/80" />
-                    <span className={cn(!parsed && "text-white/35")}>{label}</span>
+                    <span className={cn(!parsed && "text-label-3")}>{label}</span>
                 </button>
             </Popover.Trigger>
             <Popover.Portal>
                 <Popover.Content
                     sideOffset={8}
-                    className="z-[200] rounded-xl border border-white/10 bg-[#0b0d12] p-3 shadow-xl"
+                    className="z-[200] rounded-lg border border-sep bg-raised p-3 shadow-e2-rim"
                     align="start"
                 >
                     <div className="space-y-3">
@@ -138,15 +138,15 @@ export function DatetimeCalendarField({
                             disabled={disabledMatchers.length > 0 ? disabledMatchers : undefined}
                             classNames={{
                                 root: "rdp-root",
-                                month_caption: "text-white/90 text-sm font-medium mb-2",
-                                weekdays: "text-white/40 text-[10px]",
-                                day: "text-white/85",
+                                month_caption: "text-label-1 text-sm font-medium mb-2",
+                                weekdays: "text-label-3 text-[10px]",
+                                day: "text-label-1",
                                 selected: "bg-amber-500/30 text-amber-200 rounded-md",
                                 today: "font-bold text-amber-300",
                             }}
                         />
-                        <div className="flex items-center gap-2 border-t border-white/10 pt-3">
-                            <label className="text-[10px] uppercase tracking-wide text-white/40">Time</label>
+                        <div className="flex items-center gap-2 border-t border-sep pt-3">
+                            <label className="fin-label text-label-3">Time</label>
                             <input
                                 type="time"
                                 step={60}
@@ -156,7 +156,7 @@ export function DatetimeCalendarField({
                                     setTimeStr(next);
                                     if (selectedDay) commit(selectedDay, next);
                                 }}
-                                className="flex-1 rounded-lg border border-white/10 bg-white/5 px-2 py-1.5 text-sm font-mono text-white/85 focus:outline-none focus:border-amber-400/40"
+                                className="fin-figure flex-1 rounded-md border border-sep bg-fill-1 px-2 py-1.5 text-sm text-label-1 focus:outline-none focus:border-amber-400/40"
                             />
                         </div>
                     </div>

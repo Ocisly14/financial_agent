@@ -39,15 +39,58 @@ export default {
     				'monospace'
     			]
     		},
+    		// Radius scales with the size of the thing it wraps, and nests:
+    		// inner = outer − padding. See docs/2026-07-30-visual-design-language.md.
     		borderRadius: {
-    			lg: 'var(--radius)',
-    			md: 'calc(var(--radius) - 2px)',
-    			sm: 'calc(var(--radius) - 4px)'
+    			xs: 'var(--r-xs)',
+    			sm: 'var(--r-sm)',
+    			md: 'var(--r-md)',
+    			lg: 'var(--r-lg)',
+    			xl: 'var(--r-xl)',
+    			'2xl': 'var(--r-2xl)'
+    		},
+    		// The elevation ladder. Components pick a level; no component may
+    		// write its own shadow. Pair with `shadow-rim` for the top highlight.
+    		boxShadow: {
+    			e1: 'var(--e1)',
+    			e2: 'var(--e2)',
+    			e3: 'var(--e3)',
+    			'e1-rim': 'var(--e1), inset 0 1px 0 var(--rim)',
+    			'e2-rim': 'var(--e2), inset 0 1px 0 var(--rim)',
+    			'e3-rim': 'var(--e3), inset 0 1px 0 var(--rim)'
     		},
             container: {
                 center: true
             },
     		colors: {
+    			// Design-language tokens. These carry their own alpha, so the
+    			// `/N` opacity modifier does not apply to them by design —
+    			// picking a level IS the way to pick a strength.
+    			canvas: 'var(--canvas)',
+    			surface: 'var(--surface)',
+    			raised: 'var(--raised)',
+    			label: {
+    				1: 'var(--label-1)',
+    				2: 'var(--label-2)',
+    				3: 'var(--label-3)',
+    				4: 'var(--label-4)'
+    			},
+    			fill: {
+    				1: 'var(--fill-1)',
+    				2: 'var(--fill-2)',
+    				3: 'var(--fill-3)'
+    			},
+    			sep: {
+    				DEFAULT: 'var(--sep)',
+    				strong: 'var(--sep-strong)'
+    			},
+    			brand: {
+    				DEFAULT: 'rgb(var(--brand-rgb) / <alpha-value>)',
+    				sub: 'var(--brand-sub)'
+    			},
+    			up: 'rgb(var(--up-rgb) / <alpha-value>)',
+    			down: 'rgb(var(--down-rgb) / <alpha-value>)',
+    			hold: 'rgb(var(--hold-rgb) / <alpha-value>)',
     			background: 'hsl(var(--background))',
     			foreground: 'hsl(var(--foreground))',
     			card: {

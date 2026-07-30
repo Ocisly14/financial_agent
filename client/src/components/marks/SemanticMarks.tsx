@@ -63,7 +63,7 @@ function MetricMark({ text, extra }: { text: string; extra: string }) {
                     className={cn(
                         "fin-figure ml-1 border-l pl-1 align-[0.5px] text-[10px] font-normal leading-none",
                         direction === "flat"
-                            ? "border-border text-muted-foreground"
+                            ? "border-border text-label-2"
                             : cn(DIRECTION_CLASS[direction], "border-current/30 opacity-80"),
                     )}
                 >
@@ -76,7 +76,7 @@ function MetricMark({ text, extra }: { text: string; extra: string }) {
 
 /**
  * Price levels are structural, not directional — a support at 180 is not
- * "good news" — so they take no hue at all. The role is carried by the rule
+ *"good news" — so they take no hue at all. The role is carried by the rule
  * under (or over) the number, which reads as a chart annotation: a support
  * sits on a line, a resistance hangs beneath one, a stop is dashed, a target
  * dotted.
@@ -95,17 +95,17 @@ function LevelMark({ text, extra }: { text: string; extra: string }) {
     const label = t(`marks.${role}`);
     return (
         <span className="whitespace-nowrap" title={extra || label}>
-            {/* A bare price needs no "LEVEL" tag — the role chip only earns its
+            {/* A bare price needs no"LEVEL" tag — the role chip only earns its
                 space when it says something the number does not. */}
             {role !== "level" && (
-                <span className="fin-label mr-1 align-[1.5px] text-muted-foreground">{label}</span>
+                <span className="fin-label mr-1 align-[1.5px] text-label-2">{label}</span>
             )}
             <span className={cn("fin-figure pb-px text-foreground", LEVEL_RULE[role])}>{text}</span>
         </span>
     );
 }
 
-/** Local-midnight day delta, so "today" means today in the reader's timezone. */
+/** Local-midnight day delta, so"today" means today in the reader's timezone. */
 function daysUntil(date: Date): number {
     const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
     return Math.round((startOfDay(date) - startOfDay(new Date())) / 86_400_000);
@@ -114,7 +114,7 @@ function daysUntil(date: Date): number {
 /**
  * A dated event. The date is boxed like a calendar cell rather than tinted, and
  * anything inside the next fortnight also shows its countdown — the form an
- * analyst actually reads a catalyst in ("T-3", not "2026-08-01").
+ * analyst actually reads a catalyst in ("T-3", not"2026-08-01").
  */
 function CatalystMark({ text, extra }: { text: string; extra: string }) {
     const parsed = parseMarkDate(extra);
@@ -124,12 +124,12 @@ function CatalystMark({ text, extra }: { text: string; extra: string }) {
     if (!extra) return <span className="text-foreground">{text}</span>;
     return (
         <span className="whitespace-nowrap">
-            <span className={cn("text-foreground", past && "text-muted-foreground")}>{text}</span>
+            <span className={cn("text-foreground", past && "text-label-2")}>{text}</span>
             <span
                 className={cn(
                     "ml-1 inline-flex items-baseline gap-1 rounded-[3px] border px-1 align-[1px]",
                     "fin-figure text-[10px] leading-[1.5]",
-                    past ? "border-border/60 text-muted-foreground/60" : "border-foreground/25 text-foreground/80",
+                    past ? "border-border/60 text-label-2/60" : "border-foreground/25 text-foreground/80",
                 )}
             >
                 <span>
@@ -151,7 +151,7 @@ function CatalystMark({ text, extra }: { text: string; extra: string }) {
  * The most valuable mark and the one that must never be foldable: analysts need
  * to see which statements are grounded and which are synthesis, inline.
  *
- * Hue-free on purpose. The wave alone says "unsettled"; painting it amber put
+ * Hue-free on purpose. The wave alone says"unsettled"; painting it amber put
  * an unverified rumour in the same colour as the answer's own thesis, which is
  * exactly backwards.
  */
@@ -162,12 +162,12 @@ function UnverifiedMark({ text, extra }: { text: string; extra: string }) {
         <span
             title={reason}
             className={cn(
-                "text-muted-foreground underline decoration-wavy decoration-from-font underline-offset-4",
+                "text-label-2 underline decoration-wavy decoration-from-font underline-offset-4",
                 "decoration-muted-foreground/60 transition-colors hover:text-foreground hover:decoration-foreground/70",
             )}
         >
             {text}
-            <span aria-hidden="true" className="ml-0.5 align-super text-[9px] text-muted-foreground/80">
+            <span aria-hidden="true" className="ml-0.5 align-super text-[9px] text-label-2/80">
                 ?
             </span>
             <span className="sr-only">（{reason}）</span>
@@ -196,7 +196,7 @@ export const FreshnessNote: React.FC = () => {
         <p
             className={cn(
                 "mt-3 flex items-center gap-1.5 text-[11px]",
-                level === "stale" ? "text-amber-700 dark:text-amber-400/90" : "text-muted-foreground",
+                level === "stale" ? "text-amber-700 dark:text-amber-400/90" : "text-label-2",
             )}
         >
             <span
@@ -217,15 +217,15 @@ export const InlineMark: React.FC<{ k?: string; t?: string; x?: string }> = ({ k
     const extra = decodeMarkPayload(x ?? "");
     if (!text) return null;
     switch (k) {
-        case "metric":
+        case"metric":
             return <MetricMark text={text} extra={extra} />;
-        case "level":
+        case"level":
             return <LevelMark text={text} extra={extra} />;
-        case "catalyst":
+        case"catalyst":
             return <CatalystMark text={text} extra={extra} />;
-        case "unverified":
+        case"unverified":
             return <UnverifiedMark text={text} extra={extra} />;
-        case "cite":
+        case"cite":
             return <CitationMark text={text} extra={extra} />;
         default:
             return <>{text}</>;
@@ -258,7 +258,7 @@ const CARD_STYLE = {
     },
 } as const;
 
-export const MarkCard: React.FC<{ kind: "thesis" | "risk"; children: React.ReactNode }> = ({ kind, children }) => {
+export const MarkCard: React.FC<{ kind: "thesis" |"risk"; children: React.ReactNode }> = ({ kind, children }) => {
     const { t } = useTranslation();
     const style = CARD_STYLE[kind];
     return (

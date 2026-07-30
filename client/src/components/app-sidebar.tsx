@@ -3,8 +3,8 @@ import {
     Sidebar,
     SidebarContent,
     SidebarGroup,
+    SidebarFooter,
     SidebarGroupContent,
-    SidebarGroupLabel,
     SidebarHeader,
     SidebarMenu,
     SidebarMenuButton,
@@ -24,7 +24,6 @@ import { RoomSelector } from "./room-selector";
 export function AppSidebar() {
     const navigate = useNavigate();
     const { isMobile, setOpenMobile } = useSidebar();
-    const { t } = useTranslation();
     const query = useQuery({
         queryKey: ["agents"],
         queryFn: () => apiClient.getAgents(),
@@ -61,16 +60,11 @@ export function AppSidebar() {
                                         FA
                                     </div>
 
-                                    <div className="flex flex-col leading-tight mt-1 group-data-[collapsible=icon]:hidden">
-                                        <div className="flex items-center gap-2">
-                                            <span className="font-semibold text-lg">
-                                                Financial Agent
-                                            </span>
-                                        </div>
-                                        <span className="fin-figure text-[11px] text-muted-foreground/70">
-                                            v3.0.0
-                                        </span>
-                                    </div>
+                                    {/* Just the name. The build number is not
+                                        identity — it moved to the footer. */}
+                                    <span className="mt-1 text-[15px] font-semibold tracking-[-0.011em] group-data-[collapsible=icon]:hidden">
+                                        Financial Agent
+                                    </span>
                                 </NavLink>
                             </SidebarMenuButton>
                         </SidebarMenuItem>
@@ -86,7 +80,8 @@ export function AppSidebar() {
             </SidebarHeader>
             <SidebarContent>
                 <SidebarGroup>
-                    <SidebarGroupLabel className="fin-label px-2 mb-1 text-muted-foreground/70">{t("common.agents")}</SidebarGroupLabel>
+                    {/* No "AGENTS" label. It named a group of one, under a header
+                        that already said the same words. */}
                     <SidebarGroupContent>
                         <SidebarMenu className="space-y-0.5 px-1">
                             {query?.isPending ? (
@@ -108,6 +103,7 @@ export function AppSidebar() {
                                                     agentId={agent.id}
                                                     agentName={agent.name}
                                                     isFirstAgent={index === 0}
+                                                    showAgentHeader={(agents?.length ?? 0) > 1}
                                                 />
                                             </SidebarMenuItem>
                                         )
@@ -118,6 +114,9 @@ export function AppSidebar() {
                     </SidebarGroupContent>
                 </SidebarGroup>
             </SidebarContent>
+            <SidebarFooter className="group-data-[collapsible=icon]:hidden">
+                <span className="fin-figure px-2 pb-1 text-[10px] text-label-4">v3.0.0</span>
+            </SidebarFooter>
         </Sidebar>
     );
 }
@@ -139,7 +138,7 @@ export function FloatingSidebarToggle() {
             type="button"
             onClick={toggleSidebar}
             aria-label={t("common.toggleSidebar")}
-            className="fixed top-3 left-3 z-50 inline-flex h-9 w-9 items-center justify-center rounded-md border border-border bg-card/90 text-foreground shadow-md backdrop-blur-sm transition-colors hover:bg-accent hover:text-accent-foreground"
+            className="material fixed top-3 left-3 z-50 inline-flex h-9 w-9 items-center justify-center rounded-md border border-sep text-label-1 shadow-e2-rim transition-colors hover:bg-fill-1"
         >
             <PanelLeft className="h-4 w-4" />
             <span className="sr-only">{t("common.toggleSidebar")}</span>

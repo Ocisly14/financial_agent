@@ -31,16 +31,16 @@ function SourceCard({ item }: { item: AnswerSourceLink }) {
             rel="noopener noreferrer"
             referrerPolicy="no-referrer"
             className={cn(
-                "group flex min-w-0 items-start gap-2.5 rounded-md border border-border/60 bg-muted/20 px-2.5 py-2",
-                "no-underline transition-colors hover:border-sky-500/40 hover:bg-sky-500/[0.06]",
-                "focus-visible:border-sky-500/60 focus-visible:outline-none",
+                "group flex min-w-0 items-start gap-2.5 rounded-md border border-sep bg-fill-1 px-2.5 py-2",
+                "no-underline transition-colors hover:border-brand/40 hover:bg-brand/[0.06]",
+                "focus-visible:border-brand/60 focus-visible:outline-none",
             )}
         >
             <span
                 className={cn(
                     "fin-figure mt-px shrink-0 rounded-[3px] border px-1 py-px text-[10px] leading-[1.4]",
-                    "border-sky-600/30 text-sky-700 dark:border-sky-400/30 dark:text-sky-400",
-                    "group-hover:border-sky-500/70 group-hover:bg-sky-500/10",
+                    "border-brand/30 text-brand ",
+                    "group-hover:border-brand/70 group-hover:bg-brand/10",
                 )}
             >
                 {item.index}
@@ -52,7 +52,7 @@ function SourceCard({ item }: { item: AnswerSourceLink }) {
                 <span className="line-clamp-2 text-[13px] font-medium leading-snug text-foreground">
                     {source?.title ?? item.title}
                 </span>
-                <span className="mt-0.5 flex items-baseline gap-1.5 text-[10px] text-muted-foreground">
+                <span className="mt-0.5 flex items-baseline gap-1.5 text-[10px] text-label-2">
                     <span className="truncate">{sourceSiteLabel(item.url)}</span>
                     {published && <span className="fin-figure ml-auto shrink-0 opacity-80">{published}</span>}
                 </span>

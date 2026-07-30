@@ -12,7 +12,6 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { useTranslation } from "react-i18next";
 import {
-    ChatBubble,
     ChatBubbleMessage,
     ChatBubbleTimestamp,
 } from "@/components/ui/chat/chat-bubble";
@@ -314,63 +313,54 @@ export default function Chat({ agentId, roomId }: ChatProps) {
         m: ContentWithUser,
         opts: { isLoading?: boolean; tasks?: ProgressTask[]; tasksComplete?: boolean; streaming?: boolean } = {}
     ) => (
-        <div className="flex flex-col gap-3 max-w-full min-w-0">
-            <div className="max-w-full min-w-0">
-                <div className="py-2 max-w-full min-w-0">
-                    {/* items-start, not items-center: on a long answer the
-                        avatar was floating halfway down the message. */}
-                    <ChatBubble variant="received" className="flex flex-row items-start gap-2">
-                        <Avatar className="mt-1 hidden md:flex size-8 border rounded-full select-none shrink-0">
-                            <AvatarFallback className="rounded-full text-[10px] font-bold">FA</AvatarFallback>
-                        </Avatar>
-                        <div className="flex flex-col max-w-full min-w-0">
-                            {opts.tasks && opts.tasks.length > 0 && (
-                                <ChatProgressPill tasks={opts.tasks} isComplete={opts.tasksComplete ?? true} />
-                            )}
-                            <ChatBubbleMessage isLoading={opts.isLoading}>
-                                {/* 图表画的是当下行情，而聊天记录是持久的。把消息的发送
-                                    时间传下去，StockChart 才能标注"消息发于 N 天前"。 */}
-                                <MessageTimeContext.Provider value={m.createdAt ?? null}>
-                                    {renderAssistantContent(m, opts.streaming ?? false)}
-                                </MessageTimeContext.Provider>
-                            </ChatBubbleMessage>
-                            <div className="flex items-center gap-4 justify-between w-full mt-1">
-                                {m.text && !opts.isLoading ? (
-                                    <div className="flex items-center gap-1">
-                                        <CopyButton text={m.text} />
-                                        <ChatTtsButton agentId={agentId} text={m.text} />
-                                    </div>
-                                ) : null}
-                                <div className="flex items-center justify-between gap-4 select-none">
-                                    {m.createdAt ? (
-                                        <ChatBubbleTimestamp timestamp={moment(m.createdAt).format("LT")} />
-                                    ) : null}
-                                </div>
+        // No bubble. The answer is a document and sits on the canvas; the
+        // avatar rides in the left gutter so the prose keeps its full measure,
+        // and the actions row hangs off the bottom as a footer.
+        <article className="group/msg min-w-0 max-w-full py-3">
+            <div className="flex min-w-0 gap-3">
+                <Avatar className="mt-0.5 hidden size-7 shrink-0 select-none rounded-md border border-sep md:flex">
+                    <AvatarFallback className="fin-label rounded-md bg-fill-1 text-label-2">FA</AvatarFallback>
+                </Avatar>
+                <div className="flex min-w-0 flex-1 flex-col">
+                    {opts.tasks && opts.tasks.length > 0 && (
+                        <ChatProgressPill tasks={opts.tasks} isComplete={opts.tasksComplete ?? true} />
+                    )}
+                    <ChatBubbleMessage isLoading={opts.isLoading}>
+                        {/* 图表画的是当下行情，而聊天记录是持久的。把消息的发送
+                            时间传下去，StockChart 才能标注"消息发于 N 天前"。 */}
+                        <MessageTimeContext.Provider value={m.createdAt ?? null}>
+                            {renderAssistantContent(m, opts.streaming ?? false)}
+                        </MessageTimeContext.Provider>
+                    </ChatBubbleMessage>
+                    {/* The footer only appears on hover or keyboard focus —
+                        a finished answer should end on its last sentence. */}
+                    <div className="mt-2 flex items-center justify-between gap-4 opacity-0 transition-opacity focus-within:opacity-100 group-hover/msg:opacity-100">
+                        {m.text && !opts.isLoading ? (
+                            <div className="flex items-center gap-1">
+                                <CopyButton text={m.text} />
+                                <ChatTtsButton agentId={agentId} text={m.text} />
                             </div>
-                        </div>
-                    </ChatBubble>
+                        ) : <span />}
+                        {m.createdAt ? (
+                            <ChatBubbleTimestamp timestamp={moment(m.createdAt).format("LT")} />
+                        ) : null}
+                    </div>
                 </div>
             </div>
-        </div>
+        </article>
     );
 
     const renderUserBubble = (m: ContentWithUser) => (
-        <div className="flex flex-col gap-2 py-2 md:p-4 md:bg-muted/10 md:rounded-lg mb-4 mt-6 max-w-full min-w-0">
-            <ChatBubble variant="sent" className="flex flex-row items-center gap-2">
-                <div className="flex flex-col">
-                    <ChatBubbleMessage>{m.text}</ChatBubbleMessage>
-                    <div className="flex items-center gap-4 justify-between w-full mt-1">
-                        <div className="flex items-center gap-1">
-                            <CopyButton text={m.text} />
-                        </div>
-                        <div className="flex items-center justify-between gap-4 select-none">
-                            {m.createdAt ? (
-                                <ChatBubbleTimestamp timestamp={moment(m.createdAt).format("LT")} />
-                            ) : null}
-                        </div>
-                    </div>
-                </div>
-            </ChatBubble>
+        <div className="group/msg mb-5 mt-7 flex min-w-0 max-w-full flex-col items-end gap-1">
+            <ChatBubbleMessage variant="sent" className="max-w-[85%] whitespace-pre-wrap">
+                {m.text}
+            </ChatBubbleMessage>
+            <div className="flex items-center gap-2 opacity-0 transition-opacity focus-within:opacity-100 group-hover/msg:opacity-100">
+                <CopyButton text={m.text} />
+                {m.createdAt ? (
+                    <ChatBubbleTimestamp timestamp={moment(m.createdAt).format("LT")} />
+                ) : null}
+            </div>
         </div>
     );
 

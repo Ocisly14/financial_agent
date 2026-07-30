@@ -179,13 +179,26 @@ export function CandleScope({
         const xRight = padL + plotW;
         const yBottom = padT + plotH;
 
+        const slot = plotW / Math.max(candles.length, 30);
+        const inPlot =
+            hover !== null &&
+            hover.x >= padL && hover.x <= xRight &&
+            hover.y >= padT && hover.y <= yBottom;
+        // The candle under the cursor, needed by both the x-axis tag below and
+        // the crosshair further down.
+        const hoveredIndex = inPlot
+            ? Math.max(0, Math.min(candles.length - 1, Math.floor((hover.x - padL) / slot)))
+            : -1;
+
         // ── optional x-axis labels (StockChart supplies time/date formatting) ──
         if (formatTimestamp && candles.length > 0) {
-            const slot = plotW / Math.max(candles.length, 30);
             const labelCount = Math.min(5, candles.length);
             ctx.font = "10px 'Martian Mono', ui-monospace, monospace";
-            ctx.fillStyle = theme.axis;
             ctx.textBaseline = "top";
+            // While reading a specific candle the static ticks step back so the
+            // hovered date is the only one competing for attention.
+            ctx.globalAlpha = hoveredIndex >= 0 ? 0.35 : 1;
+            ctx.fillStyle = theme.axis;
             for (let i = 0; i < labelCount; i++) {
                 const index = labelCount === 1
                     ? 0
@@ -193,6 +206,27 @@ export function CandleScope({
                 const x = padL + slot * (index + 0.5);
                 ctx.textAlign = i === 0 ? "left" : i === labelCount - 1 ? "right" : "center";
                 ctx.fillText(formatTimestamp(candles[index]!.t), x, yBottom + 7);
+            }
+            ctx.globalAlpha = 1;
+
+            // ── hovered date, tagged on the x-axis ──
+            // The right gutter already tags the price at the cursor; without the
+            // matching tag down here you could read a level off the chart but
+            // not the date it belongs to.
+            if (hoveredIndex >= 0) {
+                const candle = candles[hoveredIndex]!;
+                const label = formatTimestamp(candle.t);
+                const tw = ctx.measureText(label).width + 12;
+                // Clamp so the tag never hangs off either end of the plot.
+                const cx = Math.max(
+                    padL + tw / 2,
+                    Math.min(xRight - tw / 2, padL + slot * (hoveredIndex + 0.5)),
+                );
+                ctx.fillStyle = theme.hoverTag;
+                ctx.fillRect(cx - tw / 2, yBottom + 4, tw, 15);
+                ctx.fillStyle = theme.ink;
+                ctx.textAlign = "center";
+                ctx.fillText(label, cx, yBottom + 7);
             }
         }
 
@@ -334,7 +368,7 @@ export function CandleScope({
         }
 
         // ── crosshair ──
-        if (hover && hover.x >= padL && hover.x <= xRight && hover.y >= padT && hover.y <= yBottom) {
+        if (hover && inPlot) {
             ctx.strokeStyle = theme.crosshair;
             ctx.setLineDash([2, 3]);
             ctx.lineWidth = 1;

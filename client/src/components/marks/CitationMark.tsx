@@ -66,32 +66,32 @@ function CitationCard({ url, title, retrieved }: { url: string; title: string; r
             rel="noopener noreferrer"
             referrerPolicy="no-referrer"
             className={cn(
-                "group/card block w-[22rem] max-w-[85vw] overflow-hidden rounded-lg border border-border/70",
-                "bg-popover text-left shadow-xl shadow-black/10 outline-none transition-colors",
-                "hover:border-sky-500/40 focus-visible:border-sky-500/60",
+                "group/card block w-[22rem] max-w-[85vw] overflow-hidden rounded-lg border border-sep",
+                "bg-raised text-left shadow-e2-rim outline-none transition-colors",
+                "hover:border-brand/40 focus-visible:border-brand/60",
             )}
         >
             {image && (
-                <span className="block h-28 w-full overflow-hidden border-b border-border/60 bg-muted/40">
+                <span className="block h-28 w-full overflow-hidden border-b border-sep bg-fill-1">
                     <img
                         src={image}
                         alt=""
                         loading="lazy"
                         referrerPolicy="no-referrer"
                         className="size-full object-cover transition-transform duration-500 group-hover/card:scale-[1.03]"
-                        onError={(event) => { event.currentTarget.parentElement!.style.display = "none"; }}
+                        onError={(event) => { event.currentTarget.parentElement!.style.display ="none"; }}
                     />
                 </span>
             )}
             <span className="block px-3 py-2.5">
                 {/* Masthead: publisher and date on one ruled line, the way a
                     clipping is filed. */}
-                <span className="flex items-baseline gap-1.5 border-b border-border/50 pb-1.5">
-                    <span className="fin-label truncate text-muted-foreground">
+                <span className="flex items-baseline gap-1.5 border-b border-sep pb-1.5">
+                    <span className="fin-label truncate text-label-2">
                         {preview.data?.siteName ?? site}
                     </span>
                     {published && (
-                        <span className="fin-figure ml-auto shrink-0 text-[10px] text-muted-foreground/80">
+                        <span className="fin-figure ml-auto shrink-0 text-[10px] text-label-3">
                             {published}
                         </span>
                     )}
@@ -100,11 +100,11 @@ function CitationCard({ url, title, retrieved }: { url: string; title: string; r
                     {retrieved?.title ?? preview.data?.title ?? title}
                 </span>
                 {snippet && (
-                    <span className="mt-1 line-clamp-3 text-[11px] leading-relaxed text-muted-foreground">
+                    <span className="mt-1 line-clamp-3 text-[11px] leading-relaxed text-label-2">
                         {snippet}
                     </span>
                 )}
-                <span className="fin-label mt-2 flex items-center gap-1 text-sky-600 dark:text-sky-400">
+                <span className="fin-label mt-2 flex items-center gap-1 text-brand">
                     {t("marks.openSource")}
                     <span aria-hidden="true" className="transition-transform group-hover/card:translate-x-0.5">↗</span>
                 </span>
@@ -163,8 +163,8 @@ export function CitationMark({ text, extra }: { text: string; extra: string }) {
                     // can still see exactly how much of the sentence is sourced.
                     className={cn(
                         "group/cite rounded-[3px] text-inherit no-underline transition-colors",
-                        "hover:bg-sky-500/10 focus-visible:bg-sky-500/10",
-                        open && "bg-sky-500/10",
+                        "hover:bg-brand/10 focus-visible:bg-brand/10",
+                        open && "bg-brand/10",
                     )}
                 >
                     {text}
@@ -174,9 +174,9 @@ export function CitationMark({ text, extra }: { text: string; extra: string }) {
                     <sup
                         className={cn(
                             "fin-figure ml-0.5 rounded-[2px] border px-[2px] py-px text-[8.5px] leading-none transition-colors",
-                            "border-sky-600/30 text-sky-700 dark:border-sky-400/30 dark:text-sky-400",
-                            "group-hover/cite:border-sky-500/70 group-hover/cite:bg-sky-500/10",
-                            open && "border-sky-500/70 bg-sky-500/10",
+                            "border-brand/30 text-brand ",
+                            "group-hover/cite:border-brand/70 group-hover/cite:bg-brand/10",
+                            open && "border-brand/70 bg-brand/10",
                         )}
                     >
                         {link.index}

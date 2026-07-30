@@ -5,6 +5,7 @@ import {
     Plus,
     MessageSquare,
     MoreVertical,
+    MoreHorizontal,
     Trash2,
     ChevronRight,
     ChevronDown,
@@ -50,9 +51,11 @@ interface RoomSelectorProps {
     agentId: string;
     agentName: string;
     isFirstAgent?: boolean;
+    /** Only true when the user actually has more than one agent to pick between. */
+    showAgentHeader?: boolean;
 }
 
-export function RoomSelector({ agentId, agentName, isFirstAgent = false }: RoomSelectorProps) {
+export function RoomSelector({ agentId, agentName, isFirstAgent = false, showAgentHeader = false }: RoomSelectorProps) {
     const { agentId: currentAgentId, roomId: currentRoomId } = useParams();
     const location = useLocation();
     const navigate = useNavigate();
@@ -335,97 +338,53 @@ export function RoomSelector({ agentId, agentName, isFirstAgent = false }: RoomS
 
     return (
         <Fragment>
-        <div className="space-y-1">
-            {/* Agent header with navigation and expand/collapse */}
-            <div className="flex items-center justify-between">
-                <div className="flex items-center w-full">
+        <div className="group/rooms space-y-1">
+            {/*
+             * The agent row only exists when there is more than one agent to
+             * choose between. With a single agent it repeated the product name
+             * a third time (header, group label, row), spent a chevron on a
+             * group that was always open, and pushed the first conversation
+             * below 200px — chrome that had nothing to say.
+             */}
+            {showAgentHeader && (
+                <div className="flex items-center">
                     <button
                         onClick={() => setIsExpanded(!isExpanded)}
-                        className="p-2 hover:bg-accent/50 rounded-md transition-colors group-data-[collapsible=icon]:hidden"
+                        className="rounded-md p-2 transition-colors hover:bg-fill-1 group-data-[collapsible=icon]:hidden"
+                        aria-expanded={isExpanded}
                     >
-                        {isExpanded ? (
-                            <ChevronDown className="h-4 w-4" />
-                        ) : (
-                            <ChevronRight className="h-4 w-4" />
-                        )}
+                        {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
                     </button>
                     <NavLink
                         to={`/chat/${agentId}`}
                         onClick={() => {
-                            // Close sidebar on mobile after navigation
-                            if (isMobile) {
-                                setOpenMobile(false);
-                            }
+                            if (isMobile) setOpenMobile(false);
                         }}
                         className={cn(
-                            "flex items-center gap-2 flex-grow p-2 rounded-md text-left transition-all border group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:hidden",
-                            isAgentHeaderActive
-                                ? "border-white/40 bg-white/30 text-foreground shadow-[0_4px_6px_-1px_rgba(0,0,0,0.1),0_2px_4px_-1px_rgba(0,0,0,0.06)] supports-[backdrop-filter]:backdrop-blur-md supports-[backdrop-filter]:bg-white/20 dark:border-white/15 dark:bg-white/10 dark:supports-[backdrop-filter]:bg-white/10"
-                                : "border-transparent hover:border-white/20 hover:bg-white/10 supports-[backdrop-filter]:hover:bg-white/10 dark:hover:bg-white/5"
+                            "flex flex-grow items-center gap-2 rounded-md p-2 text-left transition-colors group-data-[collapsible=icon]:hidden",
+                            isAgentHeaderActive ? "bg-brand-sub text-label-1" : "hover:bg-fill-1",
                         )}
                     >
                         <MessageSquare className="h-4 w-4" />
-                        <span className="flex-grow text-sm font-medium group-data-[collapsible=icon]:hidden">{agentName}</span>
+                        <span className="flex-grow text-sm font-medium">{agentName}</span>
                     </NavLink>
                 </div>
+            )}
 
-                <div className="flex items-center gap-1">
-                    {/* Auto-trading strategies */}
-                    <Button
-                        size="sm"
-                        variant="ghost"
-                        className="h-8 w-8 p-0 group-data-[collapsible=icon]:hidden"
-                        title={t("strategies.title")}
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            navigate(`/strategies/${agentId}`);
-                            if (isMobile) {
-                                setOpenMobile(false);
-                            }
-                        }}
-                    >
-                        <TrendingUp className="h-4 w-4" />
-                    </Button>
-
-                    {/* Select mode toggle button */}
-                    <Button
-                        size="sm"
-                        variant="ghost"
-                        className="h-8 w-8 p-0 group-data-[collapsible=icon]:hidden"
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            setIsSelectionMode(!isSelectionMode);
-                            if (isSelectionMode) {
-                                // Clear selection when exiting selection mode
-                                setSelectedRoomIds(new Set());
-                            }
-                        }}
-                    >
-                        {isSelectionMode ? (
-                            <X className="h-4 w-4" />
-                        ) : (
-                            <CheckSquare className="h-4 w-4" />
-                        )}
-                    </Button>
-
-                    {/* Create room button */}
-                    <Dialog
-                        open={isCreateDialogOpen}
-                        onOpenChange={setIsCreateDialogOpen}
-                    >
-                        <DialogTrigger asChild>
-                            <Button
-                                size="sm"
-                                variant="ghost"
-                                className="h-8 w-8 p-0 group-data-[collapsible=icon]:hidden"
-                                onClick={(e) => {
-                                    e.stopPropagation();
-                                    setIsCreateDialogOpen(true);
-                                }}
-                            >
-                                <Plus className="h-4 w-4" />
-                            </Button>
-                        </DialogTrigger>
+            {/* Primary actions. Both carry a word: "new chat" is the most-used
+                control in the app and was a 32px unlabelled glyph, and nobody
+                guesses that a trending-up arrow means the strategy monitor. */}
+            <div className="space-y-0.5 group-data-[collapsible=icon]:hidden">
+                <Dialog open={isCreateDialogOpen} onOpenChange={setIsCreateDialogOpen}>
+                    <DialogTrigger asChild>
+                        <button
+                            type="button"
+                            className="flex w-full items-center gap-2.5 rounded-md px-2 py-2 text-left text-sm font-medium text-label-1 transition-colors hover:bg-fill-1"
+                        >
+                            <Plus className="size-4 shrink-0 text-label-2" />
+                            {t("rooms.newChat")}
+                        </button>
+                    </DialogTrigger>
                     <DialogContent>
                         <DialogHeader>
                             <DialogTitle>{t("rooms.createDialogTitle")}</DialogTitle>
@@ -463,23 +422,74 @@ export function RoomSelector({ agentId, agentName, isFirstAgent = false }: RoomS
                         </DialogFooter>
                     </DialogContent>
                 </Dialog>
-                </div>
+
+                <NavLink
+                    to={`/strategies/${agentId}`}
+                    onClick={() => {
+                        if (isMobile) setOpenMobile(false);
+                    }}
+                    className={({ isActive }) =>
+                        cn(
+                            "flex w-full items-center gap-2.5 rounded-md px-2 py-2 text-left text-sm font-medium transition-colors",
+                            isActive ? "bg-brand-sub text-label-1" : "text-label-1 hover:bg-fill-1",
+                        )
+                    }
+                >
+                    <TrendingUp className="size-4 shrink-0 text-label-2" />
+                    {t("strategies.title")}
+                </NavLink>
             </div>
 
-            {/* Room list */}
+            {/* Room list. No left indent any more — with the agent row gone the
+                conversations are the sidebar's top-level content, not children
+                of anything. */}
             {isExpanded && (
-                <div className="ml-6 space-y-1 group-data-[collapsible=icon]:hidden">
+                <div className="space-y-1 group-data-[collapsible=icon]:hidden">
                     {isLoading ? (
-                        <div className="text-xs text-muted-foreground p-2">{t("rooms.loading")}</div>
+                        <div className="p-2 text-xs text-label-3">{t("rooms.loading")}</div>
                     ) : rooms.length === 0 ? (
-                        <div className="text-xs text-muted-foreground p-2">{t("rooms.empty")}</div>
+                        <div className="p-2 text-xs text-label-3">{t("rooms.empty")}</div>
                     ) : (
-                        roomGroups.flatMap((group) => [
+                        roomGroups.flatMap((group, groupIndex) => [
                             <div
                                 key={`group-${group.key}`}
-                                className="fin-label sticky top-0 z-10 px-2 pb-1.5 pt-3 text-muted-foreground/70 bg-[hsl(var(--sidebar-background))]/85 backdrop-blur supports-[backdrop-filter]:bg-[hsl(var(--sidebar-background))]/70"
+                                // Tinted with the sidebar's own background, not
+                                // the generic material — .material is white/72%
+                                // and floated a bright band over the list.
+                                className="sticky top-0 z-10 flex items-center gap-2 bg-card pb-1.5 pl-2 pr-1 pt-3"
                             >
-                                {group.label}
+                                <span className="fin-label flex-1 text-label-3">{group.label}</span>
+                                {/* Bulk selection is a rare, destructive-adjacent
+                                    mode — it belongs behind an overflow on the
+                                    list, not beside "new chat". */}
+                                {groupIndex === 0 && (
+                                    <DropdownMenu>
+                                        <DropdownMenuTrigger asChild>
+                                            <button
+                                                type="button"
+                                                aria-label={t("rooms.selectMultiple")}
+                                                className="rounded-sm p-1 text-label-3 opacity-0 transition-opacity hover:bg-fill-1 hover:text-label-1 focus-visible:opacity-100 group-hover/rooms:opacity-100 data-[state=open]:opacity-100"
+                                            >
+                                                <MoreHorizontal className="size-3.5" />
+                                            </button>
+                                        </DropdownMenuTrigger>
+                                        <DropdownMenuContent align="end">
+                                            <DropdownMenuItem
+                                                onClick={() => {
+                                                    setIsSelectionMode(!isSelectionMode);
+                                                    if (isSelectionMode) setSelectedRoomIds(new Set());
+                                                }}
+                                            >
+                                                {isSelectionMode ? (
+                                                    <X className="mr-2 h-4 w-4" />
+                                                ) : (
+                                                    <CheckSquare className="mr-2 h-4 w-4" />
+                                                )}
+                                                {isSelectionMode ? t("rooms.exitSelection") : t("rooms.selectMultiple")}
+                                            </DropdownMenuItem>
+                                        </DropdownMenuContent>
+                                    </DropdownMenu>
+                                )}
                             </div>,
                             ...group.rooms.map((room: Room) => {
                             const isSelected = selectedRoomIds.has(room.id);
@@ -519,8 +529,8 @@ export function RoomSelector({ agentId, agentName, isFirstAgent = false }: RoomS
                                             className={cn(
                                                 "flex-grow flex flex-col p-2 rounded-md text-left transition-all min-w-0 border cursor-pointer min-h-[44px]",
                                                 isSelected
-                                                    ? "border-emerald-200 bg-emerald-50 dark:border-emerald-900 dark:bg-emerald-950/30"
-                                                    : "border-transparent [@media(hover:hover)]:hover:border-white/20 [@media(hover:hover)]:hover:bg-white/10 supports-[backdrop-filter]:[@media(hover:hover)]:hover:bg-white/10 dark:[@media(hover:hover)]:hover:bg-white/5 active:bg-white/10 dark:active:bg-white/5"
+                                                    ? "border-transparent bg-brand-sub"
+                                                    : "border-transparent [@media(hover:hover)]:hover:bg-fill-1 active:bg-fill-2"
                                             )}
                                         >
                                             <span className="text-sm font-medium truncate">
@@ -560,8 +570,8 @@ export function RoomSelector({ agentId, agentName, isFirstAgent = false }: RoomS
                                                 // most "consumer app" detail in here.
                                                 "flex-grow flex flex-col p-2 pl-2.5 rounded-md text-left transition-colors min-w-0 border border-l-2 min-h-[44px]",
                                                 location.pathname === `/chat/${agentId}/${room.id}`
-                                                    ? "border-border/70 border-l-foreground/70 bg-foreground/[0.04] text-foreground dark:bg-white/[0.06]"
-                                                    : "border-transparent border-l-transparent [@media(hover:hover)]:hover:border-l-foreground/25 [@media(hover:hover)]:hover:bg-foreground/[0.03] dark:[@media(hover:hover)]:hover:bg-white/5"
+                                                    ? "border-transparent border-l-brand bg-brand-sub text-label-1"
+                                                    : "border-transparent border-l-transparent [@media(hover:hover)]:hover:bg-fill-1"
                                             )}
                                         >
                                             <span className="text-sm font-medium truncate">
@@ -620,7 +630,7 @@ export function RoomSelector({ agentId, agentName, isFirstAgent = false }: RoomS
 
             {/* Floating action bar for selection mode */}
             {isSelectionMode && selectedRoomIds.size > 0 && (
-                <div className="sticky bottom-0 mt-2 mx-2 p-3 rounded-lg border border-slate-200 dark:border-white/10 bg-white/80 dark:bg-slate-900/80 backdrop-blur-xl shadow-lg supports-[backdrop-filter]:bg-white/60 supports-[backdrop-filter]:dark:bg-slate-900/60 animate-in slide-in-from-bottom-5 duration-300">
+                <div className="material sticky bottom-0 mt-2 mx-2 p-3 rounded-lg border border-sep shadow-e2-rim animate-in slide-in-from-bottom-5 duration-300">
                     <div className="flex items-center justify-between gap-2">
                         <span className="text-sm font-medium">
                             {t("rooms.selectedCount", { count: selectedRoomIds.size })}
