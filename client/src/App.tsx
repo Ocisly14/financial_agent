@@ -8,17 +8,13 @@ import { Toaster } from "./components/ui/toaster";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router";
 // Route-level code splitting — each route is its own chunk.
 const Chat = lazy(() => import("./routes/chat"));
-const Orders = lazy(() => import("./routes/orders"));
 const Strategies = lazy(() => import("./routes/strategies"));
-const StrategyFloor = lazy(() => import("./routes/strategy-floor"));
 const StrategyDetail = lazy(() => import("./routes/strategy-detail"));
 import { Toaster as SonnerToaster } from "sonner";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { ThemeProvider, useTheme } from "./contexts/ThemeContext";
 import { cn } from "./lib/utils";
 import { LanguageProvider } from "./contexts/LanguageContext";
-import { KillSwitchBanner } from "./components/cex/KillSwitchBanner";
-import { LiveTradingConsentModal } from "./components/cex/LiveTradingConsentModal";
 import { apiClient } from "./lib/api";
 
 const queryClient = new QueryClient({
@@ -72,8 +68,6 @@ function AppShell() {
                                             <Route path="/" element={<RootRedirect />} />
                                             <Route path="chat/:agentId/:roomId" element={<Chat />} />
                                             <Route path="chat/:agentId" element={<Chat />} />
-                                            <Route path="orders/:agentId" element={<Orders />} />
-                                            <Route path="floor/:agentId" element={<StrategyFloor />} />
                                             <Route path="strategies/:agentId" element={<Strategies />} />
                                             <Route path="strategies/:agentId/:strategyId" element={<StrategyDetail />} />
                                         </Routes>
@@ -83,8 +77,6 @@ function AppShell() {
                         </SidebarInset>
                     </SidebarProvider>
                     <ThemeToggle />
-                    <KillSwitchBanner />
-                    <LiveTradingConsentModal />
                     <Toaster />
                     <SonnerToaster />
                 </TooltipProvider>

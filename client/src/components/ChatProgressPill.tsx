@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Loader2, CheckCircle, Circle, XCircle, ChevronDown, ChevronRight, Database, Newspaper, Wallet } from "lucide-react";
+import { Loader2, CheckCircle, Circle, XCircle, ChevronDown, ChevronRight, Database, Newspaper, ChartNoAxesCombined } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export type ProgressAgent = "market_data" | "market_research" | "trading_operations";
@@ -38,8 +38,8 @@ const agentMeta: Record<ProgressAgent, { label: string; icon: typeof Database; i
         iconClassName: "text-violet-600 dark:text-violet-300",
     },
     trading_operations: {
-        label: "Trading operations agent",
-        icon: Wallet,
+        label: "Stock strategy agent",
+        icon: ChartNoAxesCombined,
         iconClassName: "text-amber-600 dark:text-amber-300",
     },
 };

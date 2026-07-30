@@ -1,7 +1,7 @@
 import { normalizePriceStrategyInput } from "../../../mcp_tools/trading/strategy/priceStrategy.ts";
 import { McpToolRegistry } from "../../../mcp_tools/toolRegistry.ts";
-import { registerAllTools, TRADING_TOOLS } from "../../../mcp_tools/registerTools.ts";
-import { tradeSubagentPrompt } from "../../../src/agent/prompts/subagentPrompts.ts";
+import { registerAllTools, TRADING_OPERATIONS_TOOLS } from "../../../mcp_tools/registerTools.ts";
+import { tradingOperationsSubagentPrompt } from "../../../src/agent/prompts/subagentPrompts.ts";
 import { PromptRenderer } from "../../../src/framework/prompt.ts";
 import { ModelRouter } from "../../../src/infra/llm/provider.ts";
 import { resolveLlmProvider } from "../../../src/agent/createApp.ts";
@@ -49,7 +49,7 @@ export function scoreCase(generated: GenCall | null, gold: GoldDsl): {
     side: String(action["side"] ?? "") === gold.side,
     sizing_kind: String(size["type"] ?? size["kind"] ?? "") === gold.sizing_kind,
     sizing_value: Number(size["value"] ?? 0) === gold.sizing_value,
-    symbol: symbol.toUpperCase().startsWith(gold.symbol.replace(/USDT?$/i, "").toUpperCase()),
+    symbol: symbol.toUpperCase() === gold.symbol.toUpperCase(),
     recurrence_mode: String(recurrence["mode"] ?? "") === gold.recurrence_mode,
   };
   const critical = ["tool", "trigger_type", "direction", "threshold", "side", "sizing_kind", "sizing_value"];
@@ -187,7 +187,7 @@ function ensureWiring(): { allowedTools: string; renderer: PromptRenderer; route
   if (!cachedAllowedTools || !cachedRenderer || !cachedRouter) {
     const registry = new McpToolRegistry();
     registerAllTools(registry);
-    const tradingDefs = registry.list().filter((t) => (TRADING_TOOLS as readonly string[]).includes(t.name));
+    const tradingDefs = registry.list().filter((t) => (TRADING_OPERATIONS_TOOLS as readonly string[]).includes(t.name));
     cachedAllowedTools = formatAllowedTools(tradingDefs);
     cachedRenderer = new PromptRenderer();
     // Reuse the app's provider resolution so ① runs on the SAME provider the agent
@@ -199,14 +199,14 @@ function ensureWiring(): { allowedTools: string; renderer: PromptRenderer; route
 
 export async function generateStrategyCall(input: string): Promise<GenCall | null> {
   const { allowedTools, renderer, router } = ensureWiring();
-  const { system, prompt } = renderer.render(tradeSubagentPrompt, {
+  const { system, prompt } = renderer.render(tradingOperationsSubagentPrompt, {
     allowedTools,
     task: input,
     progress: "(nothing yet)",
   });
   const res = await router.generate(
     [{ role: "system", content: system }, { role: "user", content: prompt }],
-    { modelClass: "MEDIUM", temperature: 0, metadata: { mode: "subagent", agent: "trade" } },
+    { modelClass: "MEDIUM", temperature: 0, metadata: { mode: "subagent", agent: "trading_operations" } },
   );
   const calls = parseCalls(res.text);
   return calls[0] ?? null;

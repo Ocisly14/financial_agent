@@ -17,7 +17,7 @@ import {
     type CandleOverlay,
     type CandlePriceLevel,
     type CandleTheme,
-} from "./cex/CandleScope";
+} from "./charts/CandleScope";
 import { MessageTimeContext, StreamingContext } from "./stockChartContext";
 import type { TechnicalStudy } from "@/lib/chartWorkspace";
 

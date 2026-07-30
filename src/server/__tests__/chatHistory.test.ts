@@ -38,12 +38,12 @@ test("chat history projects user and assistant messages with durable UI metadata
 
 test("chat history includes non-final step replies in event order", () => {
   const state = new SessionState("room-2", "2026-07-29T00:00:00.000Z");
-  state.beginTurn("Research BTC");
+  state.beginTurn("Research AAPL");
   state.recordReply("I will research that.", false);
   state.recordReply("Done.", true);
 
   assert.deepEqual(projectChatHistory(state.allEvents()).map(({ user, text }) => ({ user, text })), [
-    { user: "user", text: "Research BTC" },
+    { user: "user", text: "Research AAPL" },
     { user: "system", text: "I will research that." },
     { user: "system", text: "Done." },
   ]);

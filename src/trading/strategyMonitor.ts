@@ -72,7 +72,7 @@ export async function runOnce(now: Date): Promise<void> {
       continue;
     }
     if (price <= 0) continue;
-    // Serial per symbol: one trigger→order→state-transition completes before the next.
+    // Serial per symbol: one trigger evaluation and simulated action completes before the next.
     for (const strategy of group) {
       await evaluateStrategy(strategy, price, now);
     }
@@ -172,7 +172,7 @@ async function fire(
   const recurrence = phase.recurrence;
   const triggerCount = recurrence?.trigger_count ?? 0;
 
-  // Transition to running (persisted before placing the order).
+  // Transition to running before recording the paper/shadow action.
   strategy.status = "running";
   phase.status = "running";
   strategy.running = { execution_id: `exec-${strategy.id}-${phase.id}-${triggerCount}`, phase_id: phase.id, started_at: now.toISOString() };
@@ -202,9 +202,9 @@ async function fire(
       phase.failure_reason = outcome.reason ?? "blocked or skipped";
     }
   } else {
-    // Order path returned an error (API failure).
+    // The simulated action path returned an error.
     phase.status = recurrence?.mode === "recurring" ? "active" : "paused";
-    phase.failure_reason = outcome.reason ?? "order placement failed";
+    phase.failure_reason = outcome.reason ?? "strategy action failed";
   }
   strategy.status = nextStrategyStatus(strategy);
   await saveStrategy(strategy);

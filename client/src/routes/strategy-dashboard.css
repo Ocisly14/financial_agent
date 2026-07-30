@@ -746,9 +746,8 @@
     .sq-phase-exec { display: none; }
 }
 
-/* ════════════════════════════  THE FLOOR  ═══════════════════════════════════
-   Live trading cockpit: a candlestick scope on the left, a column of active
-   strategy cards on the right, with a watchlist tape across the top.
+/* ════════════════════════════  CHART SURFACES  ═══════════════════════════════
+   Reusable candlestick, watchlist, and strategy-card layout primitives.
    ========================================================================== */
 .sq-shell-wide { max-width: 1480px; }
 

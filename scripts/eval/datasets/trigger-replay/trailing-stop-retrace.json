@@ -1,4 +1,4 @@
-{ "id": "trailing-stop-retrace", "symbol": "BTCUSDT", "expectedFire": true,
+{ "id": "trailing-stop-retrace", "symbol": "AAPL", "expectedFire": true,
   "label": "trailing stop fires after 10% retrace from anchor, sustained",
   "trigger": { "type": "trailing_stop", "direction": "down", "pct": 10, "reference_price": 150, "confirm_samples": 2 },
   "candles": [

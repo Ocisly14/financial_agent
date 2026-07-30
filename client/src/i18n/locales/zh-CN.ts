@@ -123,7 +123,6 @@ const zhCN = {
         executions: "执行记录",
         noExecutions: "暂无执行记录。",
         tabs: {
-            orders: "订单",
             strategies: "策略",
         },
         filters: {

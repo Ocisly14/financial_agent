@@ -21,7 +21,7 @@ for (const [i, line] of lines.entries()) {
   if (ids.has(id)) issues.push(`${id}: duplicate id`);
   ids.add(id);
   const g = c.gold ?? {};
-  if (g.tool !== "cex_create_strategy") issues.push(`${id}: gold.tool != cex_create_strategy`);
+  if (g.tool !== "create_strategy") issues.push(`${id}: gold.tool != create_strategy`);
   if (!g.symbol) issues.push(`${id}: missing symbol`);
   if (g.mode && !["paper", "shadow", "live"].includes(g.mode)) issues.push(`${id}: bad mode ${g.mode}`);
   if (g.guardrails) for (const k of Object.keys(g.guardrails)) if (!GUARD.has(k)) issues.push(`${id}: bad guardrail key '${k}'`);
@@ -37,7 +37,7 @@ for (const [i, line] of lines.entries()) {
     if (!SIZE.has(p.sizing_kind)) issues.push(`${tag}: bad sizing_kind ${p.sizing_kind}`);
     if (!["one_shot", "recurring"].includes(p.recurrence_mode)) issues.push(`${tag}: bad recurrence_mode`);
     if (typeof p.sizing_value !== "number" || p.sizing_value <= 0) issues.push(`${tag}: bad sizing_value`);
-    // Float fragility only matters for percentages (derived values like 33.33); base/quote amounts (e.g. 0.1 BTC) are exact user-stated values.
+    // Float fragility only matters for percentages (derived values like 33.33); base/quote amounts (e.g. 0.1 AAPL) are exact user-stated values.
     if ((p.sizing_kind === "pct_of_position" || p.sizing_kind === "pct_of_portfolio") && !Number.isInteger(p.sizing_value))
       issues.push(`${tag}: NON-INTEGER percentage ${p.sizing_value} (float fragility — reword to avoid compounding math)`);
     if (p.trigger_type === "rolling_change") {

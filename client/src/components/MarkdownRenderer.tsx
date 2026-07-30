@@ -345,133 +345,10 @@ const CustomTBody: React.FC<{ children: React.ReactNode }> = ({ children }) => (
     </tbody>
 );
 
-// Open-order detection per row: a likely-order-ID cell plus a status cell
-// in the OPEN family. When both are present, the renderer surfaces an
-// inline Cancel chip that dispatches `financial-agent:chat-send` with a
-// pre-filled cancel-order message. chat.tsx listens for that event.
-const OPEN_STATUS_TOKENS = new Set([
-    "NEW",
-    "OPEN",
-    "PENDING",
-    "ACTIVE",
-    "PARTIAL",
-    "PARTIALLY_FILLED",
-]);
-
-function scanRowForCancelable(children: React.ReactNode): {
-    orderId: string | null;
-    isOpen: boolean;
-    venue: string | null;
-} {
-    let orderId: string | null = null;
-    let isOpen = false;
-    let venue: string | null = null;
-    const walk = (node: React.ReactNode) => {
-        if (typeof node === "string") {
-            const trimmed = node.trim();
-            if (!trimmed) return;
-            const c = classifyCellValue(trimmed);
-            if (!orderId && (c.kind === "uuid" || c.kind === "long_id")) {
-                // Skip client_order_ids (heuristic: prefixed with bn- / cb-)
-                if (!/^(bn|cb)-/i.test(trimmed)) {
-                    orderId = c.normalized ?? null;
-                }
-            }
-            if (c.kind === "status" && c.normalized && OPEN_STATUS_TOKENS.has(c.normalized)) {
-                isOpen = true;
-            }
-            if (!venue && /^(binance|coinbase)$/i.test(trimmed)) {
-                venue = trimmed.toLowerCase();
-            }
-            return;
-        }
-        if (Array.isArray(node)) {
-            node.forEach(walk);
-            return;
-        }
-        if (React.isValidElement(node)) {
-            const props = node.props as { children?: React.ReactNode };
-            if (props.children) walk(props.children);
-        }
-    };
-    walk(children);
-    return { orderId, isOpen, venue };
-}
-
-const CancelOrderButton: React.FC<{ orderId: string; venue: string | null }> = ({
-    orderId,
-    venue,
-}) => {
-    const onClick = React.useCallback(() => {
-        const venueClause = venue ? ` on ${venue}` : "";
-        const text = `cancel order ${orderId}${venueClause}`;
-        window.dispatchEvent(
-            new CustomEvent("financial-agent:chat-send", {
-                detail: { text, source: "orders_table_cancel_chip" },
-            }),
-        );
-    }, [orderId, venue]);
-    return (
-        <button
-            type="button"
-            onClick={onClick}
-            title={`Cancel order ${orderId}${venue ? ` on ${venue}` : ""}`}
-            aria-label={`Cancel order ${orderId}`}
-            // Compact icon-style chip — sits flush against the row's
-            // right edge without bulking up the row height. Uses
-            // padding tight enough that the chip fits beside the cell
-            // value on wider viewports, and `whitespace-nowrap` on the
-            // parent flex keeps it from wrapping mid-row.
-            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-medium leading-none bg-rose-50/80 text-rose-700 hover:bg-rose-100 dark:bg-rose-900/30 dark:text-rose-300 dark:hover:bg-rose-900/50 ring-1 ring-rose-300/40 transition-colors"
-        >
-            <svg
-                viewBox="0 0 16 16"
-                width="11"
-                height="11"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
-            >
-                <path d="M3 3l10 10M13 3L3 13" />
-            </svg>
-            Cancel
-        </button>
-    );
-};
-
 const CustomTR: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-    const { orderId, isOpen, venue } = scanRowForCancelable(children);
-    const showCancel = !!orderId && isOpen;
-    
-    if (!showCancel) {
-        return (
-            <tr className="border-b border-border/40 dark:border-white/10 last:border-0 hover:bg-muted/40 dark:hover:bg-white/[0.02] transition-colors">
-                {children}
-            </tr>
-        );
-    }
-
-    // Round-5 polish: stop injecting the Cancel chip INSIDE the
-    // last data cell (which conflated the chip with whatever column
-    // happened to be last — Time-in-Force or Placed-Time in different
-    // open-orders shapes). Render the chip in its OWN trailing <td>
-    // so it has dedicated horizontal real-estate, lines up neatly on
-    // the right edge of the row, and never collides with cell values.
-    // The header row only has the original markdown columns (no
-    // matching <th> for "Action") — that asymmetry is intentional:
-    // CSS tables are forgiving when a row carries one more cell than
-    // the header, and labelling an action column as "Actions" would
-    // shift every column header right and break alignment for users
-    // who already learned the layout.
     return (
         <tr className="border-b border-border/40 dark:border-white/10 last:border-0 hover:bg-muted/40 dark:hover:bg-white/[0.02] transition-colors">
             {children}
-            <td className="px-2 py-3 text-right align-middle whitespace-nowrap">
-                <CancelOrderButton orderId={orderId!} venue={venue} />
-            </td>
         </tr>
     );
 };
@@ -496,7 +373,7 @@ const CustomTH: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     );
 };
 
-// Cell value classifiers for trading order tables. Each function inspects
+// Cell value classifiers for financial tables. Each function inspects
 // the cell's plain text and decides whether to apply pattern formatting.
 // These run on every table cell across the app; the patterns are tight
 // enough to avoid false-positives in non-trading content.
@@ -511,16 +388,15 @@ function classifyCellValue(text: string): {
     if (/^(buy|sell)$/i.test(trimmed)) {
         return { kind: "side", normalized: trimmed.toUpperCase() };
     }
-    // Order status: NEW, PARTIALLY_FILLED, FILLED, CANCELLED, REJECTED,
-    // EXPIRED, OPEN, CLOSED. Match exact tokens only.
+    // Exact status tokens only.
     if (/^(new|partially_filled|partial|filled|cancell?ed|rejected|expired|open|closed|done|active|pending)$/i.test(trimmed)) {
         return { kind: "status", normalized: trimmed.toUpperCase() };
     }
-    // UUID v4-ish (Coinbase order ID).
+    // UUID v4-ish identifiers.
     if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed)) {
         return { kind: "uuid", normalized: trimmed };
     }
-    // Long numeric (Binance order IDs — typically 10-12 digits).
+    // Long numeric identifiers.
     if (/^[0-9]{9,}$/.test(trimmed)) {
         return { kind: "long_id", normalized: trimmed };
     }

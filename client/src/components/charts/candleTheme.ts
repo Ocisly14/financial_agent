@@ -12,7 +12,7 @@ export interface CandleTheme {
     liveTagInk: string;
 }
 
-/** CandleScope 的 Strategy Floor 缺省主题；前八项保持原 COL 常量逐值不变。 */
+/** CandleScope 的默认主题。 */
 export const DEFAULT_CANDLE_THEME: CandleTheme = {
     grid: "rgba(255,255,255,0.05)",
     gridStrong: "rgba(255,255,255,0.09)",

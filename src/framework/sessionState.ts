@@ -426,11 +426,12 @@ export class SessionState {
   }
 
   private formatApprovalRequiredLine(e: SessionEvent): string {
+    const approvalId = e.payload.approval_id as string;
     const payload = e.payload.payload as JsonObject | undefined;
     const summary = payload
-      ? `${payload["side"] ?? "ORDER"} ${payload["symbol"] ?? ""} on ${payload["exchange"] ?? "exchange"}`.trim()
-      : "trade order";
-    return `[trade approval_required] approval_id=${e.payload.approval_id as string} | ${summary} is awaiting user approval; no order has been submitted yet.`;
+      ? String(payload["summary"] ?? `strategy ${String(payload["strategy_id"] ?? approvalId)}`)
+      : `strategy ${approvalId}`;
+    return `[strategy approval_required] approval_id=${approvalId} | ${summary} is awaiting user approval; the strategy has not been activated yet.`;
   }
 
   private isApprovalPendingEvent(e: SessionEvent): boolean {

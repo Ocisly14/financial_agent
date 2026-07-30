@@ -3,7 +3,6 @@ import { useQuery } from "@tanstack/react-query";
 import { NavLink, useNavigate, useParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { apiClient } from "@/lib/api";
-import { useTradingPreferences } from "@/hooks/useTradingPreferences";
 import { summarizeRecurrence, summarizeStrategy } from "@/lib/strategySummary";
 import type { StoredStrategy, StrategyLifecycle } from "@/types/core";
 import "./strategy-dashboard.css";
@@ -42,7 +41,7 @@ function StatusPill({ status }: { status: StrategyLifecycle }) {
     );
 }
 
-function ModeTag({ mode }: { mode: "paper" | "shadow" | "live" }) {
+function ModeTag({ mode }: { mode: "paper" | "shadow" }) {
     return (
         <span className="sq-mode" data-mode={mode}>
             <span className="dot" />
@@ -55,7 +54,6 @@ export default function StrategiesPage() {
     const { t } = useTranslation();
     const { agentId } = useParams<{ agentId: string }>();
     const navigate = useNavigate();
-    const prefs = useTradingPreferences();
     const [statusFilter, setStatusFilter] = useState<StrategyLifecycle | "">("");
 
     const query = useQuery({
@@ -88,7 +86,7 @@ export default function StrategiesPage() {
                         </h1>
                     </div>
                     <div className="sq-masthead-meta">
-                        <ModeTag mode={prefs.data?.default_mode ?? "paper"} />
+                        <ModeTag mode="paper" />
                         <div style={{ marginTop: 10 }}>
                             {(query.data ?? []).length} TOTAL · {activeCount} LIVE
                         </div>
@@ -96,12 +94,6 @@ export default function StrategiesPage() {
                 </header>
 
                 <nav className="sq-tabs sq-rise" style={{ animationDelay: "60ms" }}>
-                    <NavLink to={`/orders/${agentId}`} className="sq-tab">
-                        {t("strategies.tabs.orders")}
-                    </NavLink>
-                    <NavLink to={`/floor/${agentId}`} className="sq-tab">
-                        Floor
-                    </NavLink>
                     <NavLink to={`/strategies/${agentId}`} className="sq-tab" data-active="true">
                         {t("strategies.tabs.strategies")}
                     </NavLink>

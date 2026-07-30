@@ -3,12 +3,12 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast as sonnerToast } from "sonner";
 import { ChatComposer } from "@/components/ChatComposer";
-import type { UUID, cexParamDef } from "@/types/core";
+import type { UUID } from "@/types/core";
 import { apiClient, StreamingApiClient } from "@/lib/api";
-import { Dialog } from "@/components/Dialog/Dialog";
-import { type HumanInputDialogData } from "@/components/Dialog/HumanInputDialog";
-import { type StrategyApprovalDialogData } from "@/components/Dialog/StrategyApprovalDialog";
-import { detectApprovalSurface } from "@/hooks/useApprovalRouter";
+import {
+    StrategyApprovalDialog,
+    type StrategyApprovalDialogData,
+} from "@/components/Dialog/StrategyApprovalDialog";
 import { useToast } from "@/hooks/use-toast";
 import { useTranslation } from "react-i18next";
 import {
@@ -36,17 +36,7 @@ interface ChatProps {
     roomId: UUID;
 }
 
-// CEX post-PR237 — unified client-side interrupt type. The `trading_approval`
-// variant was retired; all approvals now route through `human_input` +
-// `HumanInputDialog`. The union is kept so future surfaces can register
-// their own interrupt types.
 type ClientInterrupt = {
-    type: "human_input";
-    threadId: string;
-    interruptType: string;
-    createdAtMs: number;
-    payload: HumanInputDialogData;
-} | {
     type: "strategy_approval";
     threadId: string;
     interruptType: "strategy_activation";
@@ -78,17 +68,7 @@ export default function Chat({ agentId, roomId }: ChatProps) {
     const initialHandledRef = useRef(false);
     const { scrollRef, isAtBottom, scrollToBottom, disableAutoScroll } = useAutoScroll();
 
-    // F10 — manual Trade compose dialog. When a composed payload is staged on
-    // this ref it rides alongside the NL summary message so the server can
-    // short-circuit the LLM and skip the redundant human_input_required modal.
-    const composedPayloadRef = useRef<{
-        action: string;
-        parameters: Record<string, unknown>;
-        preApproved?: boolean;
-    } | null>(null);
-
-    // Trading approval state — populated when the SSE stream emits
-    // `human_input_required` or `human_input_confirm_required`.
+    // Strategy approval state populated by the backend approval event.
     const [pendingInterrupt, setPendingInterrupt] = useState<ClientInterrupt | null>(null);
 
     const queryKey = useMemo(() => ["messages", agentId, roomId], [agentId, roomId]);
@@ -143,9 +123,6 @@ export default function Chat({ agentId, roomId }: ChatProps) {
             setStreamingText("");
             tasksRef.current = new Map();
             setLiveTasks([]);
-            // F10 — drain the composed payload ref so it rides with this request.
-            const composed = composedPayloadRef.current ?? undefined;
-            composedPayloadRef.current = null;
             try {
                 await streaming.sendMessageStream(
                     agentId,
@@ -199,69 +176,7 @@ export default function Chat({ agentId, roomId }: ChatProps) {
                             setLiveTasks(Array.from(map.values()));
                         }
 
-                        // Handle generic human-input review / final confirm
-                        if (
-                            (step?.name === "human_input_required" || step?.name === "human_input_confirm_required") &&
-                            step?.data
-                        ) {
-                            const d = step.data as {
-                                type: string;
-                                threadId: string;
-                                approvalId?: string;
-                                interruptType?: string;
-                                title: string;
-                                description?: string;
-                                confirmationsRequired?: number;
-                                confirmationLevel?: 1 | 2;
-                                fields: Record<string, unknown>;
-                                fieldSchema?: Record<string, cexParamDef> | null;
-                                summary?: Record<string, unknown>;
-                                actionName?: string;
-                                accountSnapshot?: {
-                                    baseAvailable: string;
-                                    quoteAvailable: string;
-                                    baseAsset: string;
-                                    quoteAsset: string;
-                                    feeBps?: number;
-                                } | null;
-                                // CEX post-PR237 Commit 3 — modal-enrichment
-                                market_snapshot?: HumanInputDialogData["market_snapshot"];
-                                symbol_verification?: HumanInputDialogData["symbol_verification"];
-                                // CEX post-PR237 Commit 4 — multi-step plan context
-                                plan_context?: HumanInputDialogData["plan_context"];
-                            };
-                            const interruptTypeForRouting = d.interruptType ?? d.type;
-                            // Classify the interrupt — the §7.4 detection function
-                            // distinguishes trading vs generic approvals for observability.
-                            detectApprovalSurface({
-                                interruptType: interruptTypeForRouting,
-                                actionName: d.actionName,
-                            });
-                            const humanInputData: HumanInputDialogData = {
-                                threadId: d.threadId ?? roomId,
-                                approvalId: d.approvalId,
-                                interruptType: interruptTypeForRouting,
-                                title: d.title ?? "Review required",
-                                description: d.description,
-                                confirmationsRequired: d.confirmationsRequired ?? 2,
-                                confirmationLevel: d.confirmationLevel ?? 1,
-                                fields: d.fields ?? {},
-                                fieldSchema: d.fieldSchema ?? null,
-                                summary: d.summary,
-                                actionName: d.actionName,
-                                accountSnapshot: d.accountSnapshot ?? null,
-                                market_snapshot: d.market_snapshot,
-                                symbol_verification: d.symbol_verification,
-                                plan_context: d.plan_context,
-                            };
-                            setPendingInterrupt({
-                                type: "human_input",
-                                threadId: humanInputData.threadId,
-                                interruptType: interruptTypeForRouting,
-                                createdAtMs: Date.now(),
-                                payload: humanInputData,
-                            });
-                        } else if (step?.name === "strategy_approval_required" && step?.data) {
+                        if (step?.name === "strategy_approval_required" && step?.data) {
                             const d = step.data as StrategyApprovalDialogData & {
                                 threadId?: string;
                                 approvalId?: string;
@@ -309,7 +224,6 @@ export default function Chat({ agentId, roomId }: ChatProps) {
                     undefined, // selectedFiles
                     undefined, // messageClassification
                     undefined, // language
-                    composed,  // F10 — structured manual-compose payload
                 );
             } catch {
                 setIsProcessing(false);
@@ -332,142 +246,6 @@ export default function Chat({ agentId, roomId }: ChatProps) {
         streaming.cancelStreamForAgent(agentId);
         setIsProcessing(false);
         setStreamingText("");
-    };
-
-    // F10 — called from ChatComposer when the user confirms a composed trade.
-    // Stages the structured payload on the ref so sendMessage can attach it.
-    const handleComposedSend = useCallback(
-        (
-            prompt: string,
-            composed: { action: string; parameters: Record<string, unknown>; preApproved: true }
-        ) => {
-            composedPayloadRef.current = composed;
-            const synthetic = {
-                preventDefault: () => {},
-            } as unknown as React.FormEvent<HTMLFormElement>;
-            void sendMessage(prompt);
-            void synthetic; // satisfy linter (unused but mirrors source pattern)
-        },
-        [sendMessage]
-    );
-
-    // §7.4 — Human-input approval handlers. Called from HumanInputDialog via
-    // the Dialog router. Both paths use `submitHumanInputApproval` which maps
-    // to POST /agents/:id/human-input/approval.
-
-    const handleHumanInputApprove = async (parameters: Record<string, unknown>) => {
-        if (!pendingInterrupt || pendingInterrupt.type !== "human_input") return;
-        const submitted = pendingInterrupt.payload;
-
-        // CEX post-PR237 Commit 4 — multi-step plan modal. The backend plan
-        // runner emits this modal as a visual affordance; it does NOT block on
-        // `submitHumanInputApproval` because the plan continuation flows
-        // through the chat input pipeline. Routing the Confirm click through a
-        // continuation message ("yes") keeps the existing plan-runner contract
-        // intact and avoids duplicating idempotency / risk-engine machinery.
-        if (submitted.plan_context) {
-            setPendingInterrupt((current) =>
-                current?.type === "human_input" &&
-                current.payload.threadId === submitted.threadId
-                    ? null
-                    : current,
-            );
-            window.dispatchEvent(
-                new CustomEvent("financial-agent:chat-send", {
-                    detail: { text: "yes" },
-                }),
-            );
-            return;
-        }
-
-        try {
-            await apiClient.submitHumanInputApproval(
-                agentId,
-                submitted.threadId,
-                "approved",
-                submitted.confirmationLevel ?? 1,
-                parameters,
-                submitted.approvalId
-            );
-            setPendingInterrupt((current) => {
-                if (!current || current.type !== "human_input") return current;
-                const payload = current.payload;
-                const approvalIdMatch =
-                    !payload.approvalId || !submitted.approvalId
-                        ? true
-                        : payload.approvalId === submitted.approvalId;
-                const isSameInterrupt =
-                    payload.threadId === submitted.threadId &&
-                    (payload.confirmationLevel ?? 1) === (submitted.confirmationLevel ?? 1) &&
-                    approvalIdMatch;
-                return isSameInterrupt ? null : current;
-            });
-        } catch (error: unknown) {
-            toast({
-                title: "Approval Failed",
-                description: (error as Error)?.message || "Failed to submit human input approval",
-                variant: "destructive",
-            });
-        }
-    };
-
-    /**
-     * CEX post-PR237 Commit 4 — Approve All Remaining handler for multi-step
-     * plan modals. Dismisses the interrupt and sends an APPROVE_BATCH
-     * continuation message so the plan runner flips its approval_mode flag and
-     * runs all remaining writes without further prompts.
-     */
-    const handleHumanInputApproveAllRemaining = () => {
-        if (!pendingInterrupt || pendingInterrupt.type !== "human_input") return;
-        const submitted = pendingInterrupt.payload;
-        if (!submitted.plan_context) return;
-        setPendingInterrupt((current) =>
-            current?.type === "human_input" &&
-            current.payload.threadId === submitted.threadId
-                ? null
-                : current,
-        );
-        window.dispatchEvent(
-            new CustomEvent("financial-agent:chat-send", {
-                detail: { text: "approve all remaining steps" },
-            }),
-        );
-    };
-
-    const handleHumanInputReject = async () => {
-        if (!pendingInterrupt || pendingInterrupt.type !== "human_input") return;
-        const submitted = pendingInterrupt.payload;
-        try {
-            await apiClient.submitHumanInputApproval(
-                agentId,
-                submitted.threadId,
-                "rejected",
-                submitted.confirmationLevel ?? 1,
-                undefined,
-                submitted.approvalId
-            );
-        } catch (err) {
-            console.error("[handleHumanInputReject] rejection failed", err);
-            toast({
-                title: t("chat.approvalFailedTitle"),
-                description: (err as Error)?.message || t("chat.approvalFailedFallback"),
-                variant: "destructive",
-            });
-        } finally {
-            setPendingInterrupt((current) => {
-                if (!current || current.type !== "human_input") return current;
-                const payload = current.payload;
-                const approvalIdMatch =
-                    !payload.approvalId || !submitted.approvalId
-                        ? true
-                        : payload.approvalId === submitted.approvalId;
-                const isSameInterrupt =
-                    payload.threadId === submitted.threadId &&
-                    (payload.confirmationLevel ?? 1) === (submitted.confirmationLevel ?? 1) &&
-                    approvalIdMatch;
-                return isSameInterrupt ? null : current;
-            });
-        }
     };
 
     const handleStrategyApprove = async () => {
@@ -646,37 +424,16 @@ export default function Chat({ agentId, roomId }: ChatProps) {
                     onSend={() => void sendMessage(input)}
                     onStop={handleStop}
                     onScrollToBottom={scrollToBottom}
-                    onComposedSend={handleComposedSend}
                 />
             </div>
         </div>
 
-        {/* CEX post-PR237 cleanup — `trading_approval` was retired.
-            All trading approvals now route through `human_input` +
-            `HumanInputDialog`, which embeds `TradingOrderEditor` and
-            `MarketSnapshotPanel`. */}
-        {pendingInterrupt?.type === "human_input" && (
-            <Dialog
-                id="human_input"
-                props={{
-                    isOpen: true,
-                    data: pendingInterrupt.payload,
-                    onApprove: handleHumanInputApprove,
-                    onReject: handleHumanInputReject,
-                    onApproveAllRemaining: handleHumanInputApproveAllRemaining,
-                    agentId,
-                }}
-            />
-        )}
         {pendingInterrupt?.type === "strategy_approval" && (
-            <Dialog
-                id="strategy_approval"
-                props={{
-                    isOpen: true,
-                    data: pendingInterrupt.payload,
-                    onApprove: handleStrategyApprove,
-                    onReject: handleStrategyReject,
-                }}
+            <StrategyApprovalDialog
+                isOpen
+                data={pendingInterrupt.payload}
+                onApprove={handleStrategyApprove}
+                onReject={handleStrategyReject}
             />
         )}
         </>

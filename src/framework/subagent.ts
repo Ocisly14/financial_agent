@@ -250,8 +250,8 @@ export class SubagentRuntime {
           task_id: parentEventId,
           agent: definition.name,
           status: "timeout",
-          summary: "Timed out waiting for user approval. No order was submitted.",
-          error: { code: "approval_timeout", message: "Timed out waiting for user approval. No order was submitted." },
+          summary: "Timed out waiting for user approval. The strategy was not activated.",
+          error: { code: "approval_timeout", message: "Timed out waiting for user approval. The strategy was not activated." },
         });
       }
       return;

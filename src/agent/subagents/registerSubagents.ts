@@ -23,7 +23,7 @@ export function createSubagentRegistry(): SubagentRegistry {
   registry.register({
     name: "trading_operations",
     description:
-      "Trading operations agent for order previews, approvals, balances, positions, orders, fills, PnL, and automated strategy lifecycle tasks across supported venues.",
+      "US stock and ETF strategy agent for creating, approving, monitoring, pausing, resuming, and cancelling paper/shadow strategies driven by price or technical indicators.",
     modelClass: "MEDIUM",
     defaultTools: [...TRADING_OPERATIONS_TOOLS],
     systemPrompt: tradingOperationsSubagentPrompt,

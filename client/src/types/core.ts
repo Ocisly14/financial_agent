@@ -27,14 +27,6 @@ export interface Content {
   [k: string]: any;
 }
 
-// CEX trading types — the original @elizaos/core shapes were richer than we
-// need (this UI is present-but-inert here). Keep them fully permissive so the
-// verbatim-copied trading dialogs type-check without reproducing the schema.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type cexParamDef = any;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type CEXCanonicalExchangeCapabilities = any;
-
 // Auto-trading strategy types — mirrors src/trading/persistence/strategyStore.ts
 // and mcp_tools/trading/strategy/{priceStrategy,priceTrigger}.ts. Kept minimal
 // and permissive (extra fields via [k: string]: any) since the client never
@@ -97,7 +89,7 @@ export interface StrategyRecurrence {
 export interface PriceStrategyDSL {
   name: string;
   symbol: string;
-  mode: "paper" | "shadow" | "live";
+  mode: "paper" | "shadow";
   phases: StrategyPhase[];
   guardrails?: { max_notional_usd?: number; total_budget_usd?: number };
   [k: string]: any;

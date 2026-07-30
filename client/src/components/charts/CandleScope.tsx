@@ -10,9 +10,8 @@ export { DEFAULT_CANDLE_THEME, type CandleTheme } from "./candleTheme";
  * optional live mark, and it renders a calibrated price grid, candles, a live
  * mark line, and a hover crosshair with an OHLC readout.
  *
- * NOTE ON DATA: the component is shared. Strategy Floor builds crypto candles
- * from Binance history plus live marks; StockChart supplies Alpaca OHLC bars.
- * `liveFromTs` remains optional so Strategy Floor can distinguish seeded data.
+ * StockChart supplies ordered Alpaca OHLC bars. `liveFromTs` remains optional
+ * for callers that need to distinguish seeded history from current-session data.
  */
 
 export interface Candle {
@@ -40,15 +39,15 @@ export interface CandlePriceLevel {
 interface Props {
     candles: Candle[];
     lastPrice?: number;
-    high24h?: number;
-    low24h?: number;
+    sessionHigh?: number;
+    sessionLow?: number;
     /** Candles with t < liveFromTs are seeded (drawn slightly dimmer). */
     liveFromTs?: number;
     height?: number;
     quote?: string;
-    /** 缺省保持 Strategy Floor 的 Phosphor Desk 配色。 */
+    /** 缺省使用 Financial Chart 的 Phosphor Desk 配色。 */
     theme?: CandleTheme;
-    /** 可选 x 轴标签；不传时保持 Strategy Floor 当前像素输出不变。 */
+    /** 可选 x 轴标签。 */
     formatTimestamp?: (timestampMs: number) => string;
     /** Price-scale technical lines such as SMA, EMA, Bollinger Bands, and VWAP. */
     overlays?: CandleOverlay[];
@@ -74,11 +73,11 @@ function fmtClock(ms: number): string {
 export function CandleScope({
     candles,
     lastPrice,
-    high24h,
-    low24h,
+    sessionHigh,
+    sessionLow,
     liveFromTs,
     height = 360,
-    quote = "USDT",
+    quote = "USD",
     theme = DEFAULT_CANDLE_THEME,
     formatTimestamp,
     overlays = [],
@@ -107,8 +106,7 @@ export function CandleScope({
         return () => ro.disconnect();
     }, []);
 
-    // price domain — pad the candle range, then widen to include the real
-    // 24h high/low so the y-axis reads as a calibrated session scope.
+    // Price domain padded from the visible candles and technical overlays.
     const domain = useMemo(() => {
         let lo = Infinity;
         let hi = -Infinity;
@@ -216,10 +214,10 @@ export function CandleScope({
             ctx.fillText(fmtPrice(price), xRight + 8, y);
         }
 
-        // ── 24h high / low calibration bands (real session bounds) ──
+        // ── market-session high / low calibration bands ──
         for (const [val, label, color] of [
-            [high24h, "24H H", theme.pos] as const,
-            [low24h, "24H L", theme.neg] as const,
+            [sessionHigh, "SESSION H", theme.pos] as const,
+            [sessionLow, "SESSION L", theme.neg] as const,
         ]) {
             if (typeof val !== "number") continue;
             const y = yOf(val);
@@ -359,7 +357,7 @@ export function CandleScope({
             ctx.textAlign = "left";
             ctx.fillText(tag, xRight + 8, hover.y + 0.5);
         }
-    }, [candles, width, height, domain, layout, hover, lastPrice, high24h, low24h, liveFromTs, pulse, theme, formatTimestamp, overlays, levels]);
+    }, [candles, width, height, domain, layout, hover, lastPrice, sessionHigh, sessionLow, liveFromTs, pulse, theme, formatTimestamp, overlays, levels]);
 
     // hovered candle for the OHLC readout
     const hovered = useMemo(() => {

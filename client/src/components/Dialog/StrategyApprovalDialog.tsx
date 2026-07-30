@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { AlertTriangle, Check, X } from "lucide-react";
+import { Check, X } from "lucide-react";
 import type { StoredStrategy, StrategyPhase } from "@/types/core";
 import { cn } from "@/lib/utils";
 import { summarizePhase } from "@/lib/strategySummary";
@@ -12,14 +12,13 @@ import {
     DialogHeader,
     DialogTitle,
 } from "@/components/ui/dialog";
-import { ModeBadge } from "@/components/cex/ModeBadge";
 
 export interface StrategyApprovalDialogData {
     threadId: string;
     approvalId: string;
     strategy_id: string;
     summary?: string;
-    mode?: "paper" | "shadow" | "live";
+    mode?: "paper" | "shadow";
     phases?: number;
     strategy?: StoredStrategy;
 }
@@ -35,6 +34,15 @@ function phaseTone(phase: StrategyPhase): string {
     return phase.action.side === "BUY"
         ? "border-emerald-400/25 bg-emerald-500/10 text-emerald-50"
         : "border-rose-400/25 bg-rose-500/10 text-rose-50";
+}
+
+function ModeBadge({ mode }: { mode: "paper" | "shadow" }) {
+    const label = mode === "paper" ? "Paper" : "Shadow";
+    return (
+        <span className="rounded-md border border-sky-400/25 bg-sky-500/10 px-2 py-1 text-xs font-medium uppercase tracking-wide text-sky-100">
+            {label}
+        </span>
+    );
 }
 
 export function StrategyApprovalDialog({
@@ -101,15 +109,6 @@ export function StrategyApprovalDialog({
                             </div>
                         </div>
                     </div>
-
-                    {mode === "live" && (
-                        <div className="flex gap-3 rounded-md border border-amber-400/30 bg-amber-500/10 px-3 py-3 text-amber-50">
-                            <AlertTriangle className="mt-0.5 size-4 shrink-0" />
-                            <div className="text-sm">
-                                Live activation can submit real exchange orders whenever strategy conditions are met.
-                            </div>
-                        </div>
-                    )}
 
                     {summary && (
                         <section className="rounded-md border border-white/10 bg-white/[0.03] px-3 py-3">

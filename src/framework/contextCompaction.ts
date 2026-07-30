@@ -17,7 +17,7 @@ export const COMPACTION_THRESHOLD_RATIO = envNumber("COMPACTION_THRESHOLD_RATIO"
 
 export const COMPACTION_KEEP_RECENT_TURNS = envNumber("COMPACTION_KEEP_RECENT_TURNS", 3);
 
-const COMPACTION_SYSTEM_PROMPT = `You are compacting a long conversation between a user and a crypto trading/analysis agent.
+const COMPACTION_SYSTEM_PROMPT = `You are compacting a long conversation between a user and a broad financial-market research, US stock and ETF analysis, and paper/shadow strategy agent.
 Given the existing summary (if any) and the new conversation turns below, produce an updated, concise summary.
 Focus on the user's intent, preferences, and any conclusions or decisions already established.
 Do not restate specific numeric data points (prices, indicator values, balances) — those are preserved separately.

@@ -25,8 +25,8 @@ test("stock strategy accepts a US ticker and defaults to paper mode", () => {
   }
 });
 
-test("stock strategy rejects crypto pair symbols", () => {
-  assert.equal(tryParsePriceStrategy(candidate("BTCUSDT")).ok, false);
+test("stock strategy rejects non-equity pair symbols", () => {
+  assert.equal(tryParsePriceStrategy(candidate("EURUSD")).ok, false);
 });
 
 test("live requests are rejected because no stock broker adapter exists", () => {

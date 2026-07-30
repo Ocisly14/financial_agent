@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { ArrowDown, Send, Square, TrendingUp } from "lucide-react";
+import { ArrowDown, Send, Square } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { UUID } from "@/types/core";
 import { Button } from "@/components/ui/button";
@@ -7,7 +7,6 @@ import { ChatInput } from "@/components/ui/chat/chat-input";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { AudioRecorder } from "@/components/audio-recorder";
 import { cn } from "@/lib/utils";
-import { ManualComposeDialog } from "@/components/cex/ManualComposeDialog";
 
 interface ChatComposerProps {
     agentId: UUID;
@@ -19,13 +18,6 @@ interface ChatComposerProps {
     onSend: () => void;
     onStop: () => void;
     onScrollToBottom: () => void;
-    /** F10 — called when the user confirms a pre-composed trade order.
-     *  The parent (chat.tsx) stages `composed` on its ref and fires the
-     *  normal send path with `prompt` as the transcript message. */
-    onComposedSend?: (
-        prompt: string,
-        composed: { action: string; parameters: Record<string, unknown>; preApproved: true }
-    ) => void;
 }
 
 export function ChatComposer({
@@ -38,14 +30,10 @@ export function ChatComposer({
     onSend,
     onStop,
     onScrollToBottom,
-    onComposedSend,
 }: ChatComposerProps) {
     const { t } = useTranslation();
     const [isInputCollapsed, setIsInputCollapsed] = useState(false);
     const collapseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-    // F10 — manual Trade compose dialog state.
-    const [composeOpen, setComposeOpen] = useState(false);
 
     const handleMouseEnter = () => {
         if (collapseTimeoutRef.current) {
@@ -71,7 +59,6 @@ export function ChatComposer({
     };
 
     return (
-        <>
         <div className="flex-shrink-0 z-30 px-2 sm:px-0 pb-[env(safe-area-inset-bottom,0px)] w-full">
             <div
                 onMouseEnter={handleMouseEnter}
@@ -135,30 +122,6 @@ export function ChatComposer({
                                         onChange={(newInput) => onInputChange(newInput)}
                                     />
                                     <div className="ml-auto flex items-center gap-1.5">
-                                        {/* F10 — manual Trade compose entry.
-                                            Prefills the chat input with a
-                                            templated NL trade prompt so the
-                                            existing CEX workflow opens the
-                                            order editor with accountSnapshot
-                                            pre-fetched. The user reviews +
-                                            edits the line, then presses Send.
-                                            Lightweight scaffold; a richer
-                                            in-place form is tracked as F10
-                                            follow-up. */}
-                                        <Button
-                                            type="button"
-                                            size="sm"
-                                            variant="outline"
-                                            disabled={isProcessing || isDisabled}
-                                            title="Compose a trade — opens the order editor; one click places the order"
-                                            onClick={() => setComposeOpen(true)}
-                                            className={cn("gap-0.5 h-[30px]")}
-                                            data-tour="chat-trade"
-                                            data-testid="chat-trade-compose"
-                                        >
-                                            <TrendingUp className="size-3.5" />
-                                            Trade
-                                        </Button>
                                         {isProcessing ? (
                                             <Tooltip>
                                                 <TooltipTrigger asChild>
@@ -197,21 +160,5 @@ export function ChatComposer({
             </div>
         </div>
 
-        {/* F10.2 — Manual Trade compose dialog. Confirming inside the
-            dialog stages the pre-approved composed payload on the ref
-            and immediately fires the standard send path with the NL
-            summary as the transcript message. The server honors
-            `preApproved` and skips the redundant human_input_required
-            modal while keeping every risk gate in place. */}
-        <ManualComposeDialog
-            open={composeOpen}
-            onOpenChange={setComposeOpen}
-            agentId={agentId}
-            onConfirm={(prompt, composed) => {
-                setComposeOpen(false);
-                onComposedSend?.(prompt, composed);
-            }}
-        />
-    </>
     );
 }

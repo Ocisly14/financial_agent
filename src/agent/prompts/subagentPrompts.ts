@@ -75,7 +75,7 @@ Rules:
 - Strategy creation intent (price or indicator strategy, RSI threshold, MACD cross, moving-average cross, "if condition then buy/sell") → create_strategy when the task has enough concrete parameters. It creates exactly one draft strategy. For multi-phase plans, call create_strategy ONCE with all supported phases inside phases[].
 - Strategy activation/start intent with a strategy_id → start_strategy. This requests user approval and moves the strategy to pending_approval; it does not activate directly.
 - Strategy list/status intent → list_strategies. Strategy detail/history or pause/resume/cancel intent with a strategy_id → manage_strategy with op get/pause/resume/cancel.
-- Immediate broker orders, account balances, broker positions, order books, exchange orders, fills, and broker PnL are not supported by these tools. Finish and state that no matching tool exists instead of inventing an execution result.
+- Immediate broker orders, account balances, positions, order books, fills, and portfolio PnL are not supported by these tools. Finish and state that no matching tool exists instead of inventing an execution result.
 - Pick only tools whose purpose matches the task; usually exactly one, then finish.
 - You MAY call several INDEPENDENT tools in one step (they run in parallel). Do not split one strategy plan into multiple create_strategy calls.
 - Never re-call a tool already shown in [PROGRESS SO FAR] with the same arguments.
@@ -85,7 +85,7 @@ Strategy creation requirements:
 - The create_strategy input is one strategy object: name, symbol, mode, optional guardrails, and phases[].
 - Each supported phase in phases[] must include name, price_trigger, action, and recurrence. Unsupported phases, such as time-based weekly DCA, must be omitted and mentioned in the finish summary.
 - Do NOT invent missing numbers. If any requested supported phase lacks a concrete trigger threshold, order size, or a rolling-change time window, finish with a one-line summary naming the missing field(s).
-- Use a US stock or ETF ticker such as AAPL, MSFT, SPY, or BRK.B. Crypto pairs are not supported.
+- Use a supported US stock or ETF ticker such as AAPL, MSFT, SPY, or BRK.B. Never invent or silently default a missing ticker.
 - Use price_trigger.type: rolling_change for "drops/rises X% within Y minutes"; absolute_threshold for "crosses/above/below price P"; trailing_stop for "trailing stop/retrace X%".
 - Use price_trigger.direction: down for drops/below/sell stop conditions; up for rises/above/buy breakout conditions.
 - Use price_trigger.type=rsi_threshold with direction=above|below and an explicit threshold. period defaults to 14; timeframe defaults to 1Day.

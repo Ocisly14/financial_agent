@@ -187,69 +187,6 @@ export const apiClient = {
             method: "GET",
         });
     },
-    submitHumanInputApproval: (
-        agentId: string,
-        threadId: string,
-        decision: "approved" | "rejected",
-        confirmationLevel: 1 | 2,
-        parameters?: Record<string, unknown>,
-        approvalId?: string
-    ): Promise<{ success: boolean }> =>
-        fetcher({
-            url: `/agents/${agentId}/human-input/approval`,
-            method: "POST",
-            body: { threadId, approvalId, decision, confirmationLevel, parameters },
-        }),
-
-    // §7.1 — fetch the user's trading preferences (mode badge + risk limits source of truth).
-    getTradingPreferences: (): Promise<{
-        success: boolean;
-        preferences:
-            | (Record<string, unknown> & {
-                  default_mode?: "live" | "paper" | "shadow";
-                  kill_switch_active?: boolean;
-              })
-            | null;
-    }> =>
-        fetcher({
-            url: `/user/trading/preferences`,
-        }),
-
-    // §7.3 — patch trading preferences.
-    setTradingPreferences: (
-        patch: Record<string, unknown>,
-    ): Promise<{ success: boolean; code?: string; message?: string }> =>
-        fetcher({
-            url: `/user/trading/preferences`,
-            method: "PUT",
-            body: patch,
-        }),
-
-    // §7.2 — kill-switch toggle.
-    setKillSwitch: (
-        active: boolean,
-        reason?: string,
-    ): Promise<{ success: boolean; kill_switch_active: boolean }> =>
-        fetcher({
-            url: `/user/trading/kill-switch`,
-            method: "PUT",
-            body: { active, reason },
-        }),
-
-    // §7.6 — list a user's orders.
-    listOrders: (params?: {
-        limit?: number;
-        venue?: string;
-        state?: string;
-    }): Promise<{ success: boolean; orders: Array<Record<string, unknown>> }> => {
-        const qs = new URLSearchParams();
-        if (params?.limit) qs.set("limit", String(params.limit));
-        if (params?.venue) qs.set("venue", params.venue);
-        if (params?.state) qs.set("state", params.state);
-        const q = qs.toString();
-        return fetcher({ url: `/user/orders${q ? `?${q}` : ""}` });
-    },
-
     // §7.7 — list strategies.
     listStrategies: (): Promise<{
         success: boolean;
@@ -284,208 +221,6 @@ export const apiClient = {
             body: { op },
         }),
 
-    // §7.8 — consent.
-    getConsent: (
-        consentType: string,
-        version = "v1",
-    ): Promise<{ success: boolean; consent: Record<string, unknown> | null }> =>
-        fetcher({
-            url: `/user/consent/${consentType}?version=${encodeURIComponent(version)}`,
-        }),
-
-    recordConsent: (
-        consentType: string,
-        version = "v1",
-    ): Promise<{ success: boolean }> =>
-        fetcher({
-            url: `/user/consent`,
-            method: "POST",
-            body: { consent_type: consentType, version, accepted: true },
-        }),
-
-    /**
-     * Refresh the order-editor account snapshot for a pair the user
-     * just typed in. The server re-derives `baseAsset`/`quoteAsset` from
-     * the query so the response always matches the requested pair.
-     * Returns `null` on 503 (no credentials, rate-limited, or no
-     * provider) — caller should fall back to hiding the Avbl/Max block.
-     */
-    getCexAccountSnapshot: async (
-        agentId: string,
-        params: { venue: string; base: string; quote: string },
-    ): Promise<{
-        baseAvailable: string;
-        quoteAvailable: string;
-        baseAsset: string;
-        quoteAsset: string;
-        feeBps?: number;
-    } | null> => {
-        const qs = new URLSearchParams({
-            venue: params.venue,
-            base: params.base,
-            quote: params.quote,
-        });
-        try {
-            const r = (await fetcher({
-                url: `/agents/${agentId}/cex/account-snapshot?${qs.toString()}`,
-                method: "GET",
-            })) as { snapshot?: {
-                baseAvailable: string;
-                quoteAvailable: string;
-                baseAsset: string;
-                quoteAsset: string;
-                feeBps?: number;
-            }; error?: string };
-            return r.snapshot ?? null;
-        } catch {
-            return null;
-        }
-    },
-
-    /**
-     * F10.3 — live market snapshot for a symbol. Returns the same
-     * `{ market_snapshot?, symbol_verification }` shape the approval
-     * modal already consumes via the SSE `human_input_required`
-     * payload, plus an `est_fill_price` / `slippage_vs_limit_bps` pair
-     * when `side` + `limit_price` are supplied. Polled by
-     * `useMarketSnapshot` every 5 s while a dialog is open so bid /
-     * ask / 24 h stats / depth stay live. Returns `null` on any error
-     * so the panel falls back to hiding the block rather than blocking
-     * the user.
-     */
-    getMarketSnapshot: async (
-        agentId: string,
-        params: {
-            symbol: string;
-            venue?: string;
-            side?: "BUY" | "SELL";
-            limit_price?: string;
-            action_name?: string;
-        },
-    ): Promise<{
-        market_snapshot?: {
-            symbol: string;
-            bid?: string;
-            bid_qty?: string;
-            ask?: string;
-            ask_qty?: string;
-            spread_bps?: number;
-            price_change_pct?: string;
-            high_24h?: string;
-            low_24h?: string;
-            volume_24h?: string;
-            quote_volume_24h?: string;
-            depth_bids?: Array<{ price: string; qty: string }>;
-            depth_asks?: Array<{ price: string; qty: string }>;
-            est_fill_price?: number;
-            slippage_vs_limit_bps?: number;
-            fetched_at_ms: number;
-        };
-        symbol_verification: {
-            matches: boolean;
-            extracted_symbol: string;
-            user_text_asset_mentions: string[];
-            quote_currency_mismatch?: boolean;
-            reason?: string;
-        };
-    } | null> => {
-        const qs = new URLSearchParams({ symbol: params.symbol });
-        if (params.venue) qs.set("venue", params.venue);
-        if (params.side) qs.set("side", params.side);
-        if (params.limit_price) qs.set("limit_price", params.limit_price);
-        if (params.action_name) qs.set("action_name", params.action_name);
-        try {
-            const r = await fetcher({
-                url: `/agents/${agentId}/cex/market-snapshot?${qs.toString()}`,
-                method: "GET",
-            });
-            return r as {
-                market_snapshot?: {
-                    symbol: string;
-                    bid?: string;
-                    bid_qty?: string;
-                    ask?: string;
-                    ask_qty?: string;
-                    spread_bps?: number;
-                    price_change_pct?: string;
-                    high_24h?: string;
-                    low_24h?: string;
-                    volume_24h?: string;
-                    quote_volume_24h?: string;
-                    depth_bids?: Array<{ price: string; qty: string }>;
-                    depth_asks?: Array<{ price: string; qty: string }>;
-                    est_fill_price?: number;
-                    slippage_vs_limit_bps?: number;
-                    fetched_at_ms: number;
-                };
-                symbol_verification: {
-                    matches: boolean;
-                    extracted_symbol: string;
-                    user_text_asset_mentions: string[];
-                    quote_currency_mismatch?: boolean;
-                    reason?: string;
-                };
-            };
-        } catch {
-            return null;
-        }
-    },
-
-    /**
-     * Real historical OHLCV candles for `symbol` (full Binance pair, e.g.
-     * "BTCUSDT") at `interval`. Backs the Strategy Floor candlestick scope so
-     * it opens with genuine history. Returns `[]` on any upstream error so the
-     * chart degrades to the forward-only live tape rather than blocking.
-     */
-    getKlines: async (
-        agentId: string,
-        symbol: string,
-        interval: string,
-        limit = 200,
-    ): Promise<Array<{ t: number; o: number; h: number; l: number; c: number; v: number }>> => {
-        const qs = new URLSearchParams({ symbol, interval, limit: String(limit) });
-        try {
-            const r = (await fetcher({
-                url: `/agents/${agentId}/cex/klines?${qs.toString()}`,
-            })) as { candles?: Array<{ t: number; o: number; h: number; l: number; c: number; v: number }> };
-            return r.candles ?? [];
-        } catch {
-            return [];
-        }
-    },
-
-    /**
-     * List of tradable spot products on `venue` (USDT/USDC/USD-quoted).
-     * Backs the Pair combobox in the order editor; client should
-     * SWR-cache for ~5 min. Returns `null` if the upstream public
-     * endpoint is unavailable — caller falls back to the free-text
-     * Pair input.
-     */
-    getCexTradableProducts: async (
-        agentId: string,
-        venue: string,
-        marginType?: "cross" | "isolated",
-    ): Promise<{
-        venue: string;
-        products: Array<{ product_id: string; base_asset: string; quote_asset: string }>;
-        fetched_at_ms: number;
-    } | null> => {
-        const qs = new URLSearchParams({ venue });
-        if (marginType) qs.set("marginType", marginType);
-        try {
-            return (await fetcher({
-                url: `/agents/${agentId}/cex/products?${qs.toString()}`,
-                method: "GET",
-            })) as {
-                venue: string;
-                products: Array<{ product_id: string; base_asset: string; quote_asset: string }>;
-                fetched_at_ms: number;
-            };
-        } catch {
-            return null;
-        }
-    },
-
 };
 
 /** True when the browser/proxy tore down a fetch in a way typical of user abort or HTTP/2 reset. */
@@ -502,54 +237,6 @@ function isLikelyStreamAbortError(err: unknown): boolean {
     if (msg.includes("load failed")) return true;
     if (msg.includes("http2") || msg.includes("err_http2")) return true;
     return false;
-}
-
-/**
- * Translate the flat order params from `cex_prepare_order`'s approval
- * payload (`order_type`, `base_size`/`quote_size`, `limit_price`) into the
- * `order_configuration` JSON + `product_id` that `TradingOrderEditor` reads.
- * Without this, the subagent's price/amount/order-type are dropped and the
- * editor renders the order form blank/defaulted.
- */
-function buildOrderConfigFromApproval(payload: Record<string, unknown>): {
-    order_configuration: string;
-    product_id: string;
-} {
-    const exchange = String(payload.exchange ?? "binance").toLowerCase();
-    const symbol = String(payload.symbol ?? "").toUpperCase();
-    const side = String(payload.side ?? "").toUpperCase();
-    const orderType = String(payload.order_type ?? "market").toLowerCase();
-    const baseSize = typeof payload.base_size === "number" ? payload.base_size : undefined;
-    const quoteSize = typeof payload.quote_size === "number" ? payload.quote_size : undefined;
-    const limitPrice = typeof payload.limit_price === "number" ? payload.limit_price : undefined;
-
-    const quote = exchange === "coinbase" ? "USD" : "USDT";
-    const product_id = symbol ? `${symbol}-${quote}` : "";
-
-    let variantKey: string;
-    const inner: Record<string, string> = {};
-
-    if (orderType === "limit" || orderType === "stop_limit") {
-        variantKey = orderType === "stop_limit" ? "stop_limit_stop_limit_gtc" : "limit_limit_gtc";
-        if (limitPrice !== undefined) inner.limit_price = String(limitPrice);
-        // Both variants only accept base_size — convert a quote-denominated
-        // amount using the given limit price.
-        if (baseSize !== undefined) {
-            inner.base_size = String(baseSize);
-        } else if (quoteSize !== undefined && limitPrice) {
-            inner.base_size = String(quoteSize / limitPrice);
-        }
-        if (orderType === "stop_limit") {
-            if (limitPrice !== undefined) inner.stop_price = String(limitPrice);
-            inner.stop_direction = side === "BUY" ? "STOP_DIRECTION_STOP_UP" : "STOP_DIRECTION_STOP_DOWN";
-        }
-    } else {
-        variantKey = "market_market_ioc";
-        if (quoteSize !== undefined) inner.quote_size = String(quoteSize);
-        else if (baseSize !== undefined) inner.base_size = String(baseSize);
-    }
-
-    return { order_configuration: JSON.stringify({ [variantKey]: inner }), product_id };
 }
 
 // File/URL artifact emitted by the financial-agent backend `final` event.
@@ -672,12 +359,6 @@ export class StreamingApiClient {
         selectedFiles?: File[],
         messageClassification?: "TASK_CHAIN_MESSAGE",
         language?: string,
-        /**
-         * F10 — structured manual-compose payload. When set, the server's
-         * CEX workflow handler short-circuits the LLM and uses these
-         * parameters verbatim (still subject to risk gates + approval).
-         */
-        composed?: { action: string; parameters: Record<string, unknown> },
         retryCount = 0,
     ) {
         // Create a unique key for request deduplication.
@@ -711,12 +392,9 @@ export class StreamingApiClient {
         
         // financial-agent's POST /api/chat takes a plain JSON { message, sessionId }.
         // The room id doubles as the session id (the backend reuses it and echoes
-        // it back via X-Session-Id). File uploads / composed
-        // trade payloads aren't supported by this backend, so they are ignored
-        // here (the params remain in the signature for call-site compatibility
-        // and are still threaded through the retry path below).
+        // it back via X-Session-Id). File uploads are not supported by this backend.
         void selectedFiles; void messageClassification;
-        void language; void composed;
+        void language;
         const body: string = JSON.stringify({ message, sessionId: roomId });
         const headers: HeadersInit = { "Content-Type": "application/json", "X-Agent-Id": agentId };
 
@@ -853,9 +531,6 @@ export class StreamingApiClient {
                         ]);
                         break;
                     case 'approval_required': {
-                        // Backend CEX preview tool emits this when an order needs
-                        // human confirmation. Translate into the human_input_required
-                        // step shape that chat.tsx uses to open HumanInputDialog.
                         const { approval_id, payload = {} } = parsed as {
                             approval_id: string;
                             payload: Record<string, unknown>;
@@ -876,31 +551,7 @@ export class StreamingApiClient {
                             });
                             break;
                         }
-                        const { exchange, symbol, side, order_type, base_size, quote_size, limit_price, ...rest } = payload as Record<string, unknown>;
-                        const sizeStr = base_size !== undefined
-                            ? String(base_size)
-                            : quote_size !== undefined ? `$${quote_size}` : '';
-                        const { order_configuration, product_id } = buildOrderConfigFromApproval(payload as Record<string, unknown>);
-                        onStep({
-                            id: approval_id,
-                            name: 'human_input_required',
-                            status: 'in_progress',
-                            message: 'Order approval required',
-                            timestamp: Date.now(),
-                            data: {
-                                type: 'trading_order',
-                                threadId: roomId,
-                                approvalId: approval_id,
-                                interruptType: 'trading_order',
-                                title: `Review ${String(side ?? '').toUpperCase()} order${sizeStr ? ` — ${sizeStr} ${symbol ?? ''}` : ''}`,
-                                confirmationLevel: 1,
-                                confirmationsRequired: 2,
-                                actionName: 'create_order',
-                                fields: { exchange, symbol, side, order_type, base_size, quote_size, limit_price, product_id, order_configuration, ...rest },
-                                fieldSchema: null,
-                                accountSnapshot: null,
-                            },
-                        });
+                        onError('Unsupported approval request received.');
                         break;
                     }
                     case 'error':
@@ -1032,7 +683,6 @@ export class StreamingApiClient {
                         selectedFiles,
                         messageClassification,
                         language,
-                        composed,
                         retryCount + 1,
                     );
                 }, delay);

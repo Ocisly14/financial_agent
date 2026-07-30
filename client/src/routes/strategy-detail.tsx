@@ -61,7 +61,7 @@ function StatusPill({ status }: { status: StrategyLifecycle }) {
     );
 }
 
-function ModeTag({ mode }: { mode: "paper" | "shadow" | "live" }) {
+function ModeTag({ mode }: { mode: "paper" | "shadow" }) {
     return (
         <span className="sq-mode" data-mode={mode}>
             <span className="dot" />

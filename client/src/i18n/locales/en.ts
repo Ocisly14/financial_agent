@@ -125,7 +125,6 @@ const en = {
         executions: "Executions",
         noExecutions: "No executions yet.",
         tabs: {
-            orders: "Orders",
             strategies: "Strategies",
         },
         filters: {

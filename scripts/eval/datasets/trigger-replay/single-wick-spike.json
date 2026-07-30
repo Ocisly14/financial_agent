@@ -1,4 +1,4 @@
-{ "id": "single-wick-spike", "symbol": "BTCUSDT", "expectedFire": false,
+{ "id": "single-wick-spike", "symbol": "AAPL", "expectedFire": false,
   "label": "one-bar dip below threshold then recovers (confirm gate must hold)",
   "trigger": { "type": "rolling_change", "direction": "down", "pct": 5, "window_minutes": 10, "confirm_samples": 2 },
   "candles": [

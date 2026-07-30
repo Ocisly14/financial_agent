@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { DEFAULT_CANDLE_THEME } from "../../components/cex/candleTheme.ts";
+import { DEFAULT_CANDLE_THEME } from "../../components/charts/candleTheme.ts";
 
-test("CandleScope 默认主题保留原 Phosphor COL 配色", () => {
+test("CandleScope 默认主题使用 Financial Chart 的 Phosphor COL 配色", () => {
   assert.deepEqual(
     {
       grid: DEFAULT_CANDLE_THEME.grid,
