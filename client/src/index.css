@@ -23,7 +23,13 @@
         --border: 220 13% 88%;
         --input: 220 13% 90%;
         --ring: 240 5.9% 10%;
-        --radius: 1rem;
+        /* 1rem read as a consumer chat app. Instruments have tighter corners —
+           this single token pulls every card, button, input and badge in with
+           it, and is the largest part of the "tech, not toy" pass. */
+        --radius: 0.625rem;
+        /* Graph-paper底噪 for the app canvas and the chart workspace. */
+        --grid-line: 15 23 42;
+        --grid-alpha: 0.03;
         --sidebar-background: 220 15% 96%;
         --sidebar-foreground: 240 5.3% 26.1%;
         --sidebar-primary: 240 5.9% 10%;
@@ -62,10 +68,63 @@
         --sidebar-accent-foreground: 240 4.8% 95.9%;
         --sidebar-border: 240 3.7% 15.9%;
         --sidebar-ring: 217.2 91.2% 59.8%;
+        --grid-line: 255 255 255;
+        --grid-alpha: 0.022;
     }
 }
 
 @layer base {
+    /*
+     * TEARSHEET TYPOGRAPHY
+     *
+     * No webfont ships with this app, so figures earn their character from
+     * OpenType features rather than from a typeface: tabular figures so a
+     * column of prices lines up at the decimal, and a slashed zero — the
+     * classic terminal tell that separates 0 from O in a price. Applied to
+     * every marked figure, table number, and axis label.
+     */
+    .fin-figure {
+        font-family: theme("fontFamily.mono");
+        font-variant-numeric: tabular-nums slashed-zero;
+        font-feature-settings: "tnum" 1, "zero" 1, "ss01" 1, "cv01" 1;
+        letter-spacing: -0.01em;
+    }
+
+    /* Small caps for mark labels: wide tracking, optical size bump. */
+    .fin-label {
+        font-size: 9.5px;
+        line-height: 1;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.16em;
+        font-variant-numeric: tabular-nums;
+    }
+
+    /*
+     * Graph paper. A 32px rule grid at ~4% alpha plus a radial falloff, so the
+     * surface has the texture of chart paper without ever competing with what
+     * is drawn on it. Deliberately below the threshold where you would call it
+     * a pattern — you notice it only when it is removed.
+     */
+    .tech-grid {
+        background-image:
+            linear-gradient(to right, rgb(var(--grid-line) / var(--grid-alpha)) 1px, transparent 1px),
+            linear-gradient(to bottom, rgb(var(--grid-line) / var(--grid-alpha)) 1px, transparent 1px);
+        background-size: 32px 32px;
+        background-position: center center;
+    }
+
+    /* Softens the grid toward the edges so panels do not end on a hard ruling. */
+    .tech-grid-fade {
+        -webkit-mask-image: radial-gradient(ellipse 120% 90% at 50% 0%, #000 35%, transparent 100%);
+        mask-image: radial-gradient(ellipse 120% 90% at 50% 0%, #000 35%, transparent 100%);
+    }
+
+    @keyframes fin-rule-sweep {
+        from { transform: scaleX(0); }
+        to { transform: scaleX(1); }
+    }
+
     * {
         @apply border-border;
     }

@@ -7,15 +7,36 @@ export default {
     theme: {
     	extend: {
     		fontFamily: {
+    			// Inter was declared here but never loaded — no @font-face, no link
+    			// tag — so every render already fell through to the platform UI
+    			// face. Stating that honestly, with the CJK faces named explicitly
+    			// so a Chinese answer picks the right one instead of a random
+    			// installed fallback.
     			sans: [
-    				'Inter',
     				'ui-sans-serif',
     				'system-ui',
+    				'-apple-system',
+    				'Segoe UI',
+    				'PingFang SC',
+    				'Hiragino Sans GB',
+    				'Microsoft YaHei',
     				'sans-serif',
     				'Apple Color Emoji',
     				'Segoe UI Emoji',
     				'Segoe UI Symbol',
     				'Noto Color Emoji'
+    			],
+    			// Figures. SF Mono / Cascadia / JetBrains both carry a slashed zero
+    			// and true tabular figures, which is what .fin-figure switches on.
+    			mono: [
+    				'ui-monospace',
+    				'SF Mono',
+    				'SFMono-Regular',
+    				'Menlo',
+    				'Cascadia Mono',
+    				'JetBrains Mono',
+    				'Consolas',
+    				'monospace'
     			]
     		},
     		borderRadius: {

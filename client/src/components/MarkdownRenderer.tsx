@@ -4,14 +4,17 @@ import { cn } from "@/lib/utils";
 import { stripIncompleteTrailingTag } from "@/lib/stockChart";
 import StockChartBlock from "./StockChart";
 import { StreamingContext } from "./stockChartContext";
-import { InlineMark, MarkCard } from "./marks/SemanticMarks";
+import { FreshnessNote, InlineMark, MarkCard } from "./marks/SemanticMarks";
 import {
     BLOCK_TAG,
     INLINE_TAG,
+    SOURCE_LIST_TAG,
     decodeMarkPayload,
     parseAnswerSources,
     rewriteSemanticMarks,
+    rewriteSourceList,
 } from "@/lib/semanticMarks";
+import { SourceListBlock } from "./marks/SourceList";
 import { AnswerSourcesContext, type MessageSource } from "./marks/citationContext";
 
 /**
@@ -202,10 +205,11 @@ export function normalizeMarkdownAtxHeadingIndent(text: string): string {
     return out.join("\n");
 }
 
-// Custom paragraph component with moderate line spacing
+// Body copy. With a real reading measure (see the chat grid) the line height
+// has to come up with it — 1.75 is what keeps a 60-character line tracking.
 const CustomParagraph: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     return (
-        <p className="mb-2 leading-relaxed text-foreground">
+        <p className="mb-3 leading-[1.75] text-foreground">
             {children}
         </p>
     );
@@ -264,23 +268,29 @@ const CustomH6: React.FC<{ children: React.ReactNode }> = ({ children }) => (
 // item text on the next line. With `list-outside`, the marker sits in the
 // padded gutter and the block content flows beside it.
 const CustomUL: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-    <ul className="list-disc list-outside pl-6 mb-2 mt-2 text-foreground [&>li>p]:my-0">{children}</ul>
+    <ul className="mb-3 mt-2 list-outside list-disc pl-5 text-foreground marker:text-muted-foreground/50 [&>li>p]:my-0">
+        {children}
+    </ul>
 );
 
 const CustomOL: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-    <ol className="list-decimal list-outside pl-6 mb-2 mt-2 text-foreground [&>li>p]:my-0">{children}</ol>
+    <ol className="mb-3 mt-2 list-outside list-decimal pl-5 text-foreground marker:font-mono marker:text-[11px] marker:text-muted-foreground [&>li>p]:my-0">
+        {children}
+    </ol>
 );
 
 const CustomLI: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-    <li className="mb-1 text-foreground">{children}</li>
+    <li className="mb-1.5 pl-1 leading-[1.7] text-foreground">{children}</li>
 );
 
-// Custom link component
+// Custom link component. Sky is the provenance hue in the mark colour contract
+// (see marks/SemanticMarks.tsx) — an outbound link and an inline citation point
+// at the same kind of thing, so they share it.
 const CustomLink: React.FC<{ children: React.ReactNode; href: string }> = ({ children, href }) => (
-    <a 
-        href={href} 
-        className="text-blue-600 dark:text-blue-400 hover:underline"
-        target="_blank" 
+    <a
+        href={href}
+        className="text-sky-700 underline decoration-sky-600/30 underline-offset-2 transition-colors hover:decoration-sky-500 dark:text-sky-400 dark:decoration-sky-400/30"
+        target="_blank"
         rel="noopener noreferrer"
     >
         {children}
@@ -310,9 +320,14 @@ const CustomPre: React.FC<{ children: React.ReactNode }> = ({ children }) => (
     </pre>
 );
 
-// Custom blockquote component
+// Custom blockquote component.
+//
+// No `italic`: the orchestrator prompt sends risk notes here, and those are
+// usually Chinese. CJK has no true italic, so the browser synthesises an oblique
+// by shearing the glyphs — it looks broken rather than emphatic. Weight and the
+// rule carry the emphasis instead.
 const CustomBlockquote: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-    <blockquote className="border-l-4 border-muted pl-4 mb-4 mt-4 italic text-muted-foreground">
+    <blockquote className="mb-4 mt-4 border-l-2 border-border pl-4 text-muted-foreground">
         {children}
     </blockquote>
 );
@@ -405,8 +420,10 @@ function classifyCellValue(text: string): {
     if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed)) {
         return { kind: "uuid", normalized: trimmed };
     }
-    // Long numeric identifiers.
-    if (/^[0-9]{9,}$/.test(trimmed)) {
+    // Long numeric identifiers. Exchange order ids are 15+ digits; 9–14 digits
+    // is the range share volume and market cap live in, and rendering a
+    // 412000000 volume as a click-to-copy "id" chip was plain wrong.
+    if (/^[0-9]{15,}$/.test(trimmed)) {
         return { kind: "long_id", normalized: trimmed };
     }
     // Long alphanumeric (client_order_ids etc.).
@@ -523,11 +540,7 @@ const CustomTD: React.FC<{ children: React.ReactNode }> = ({ children }) => {
         inner = <TruncatedId value={cls.normalized} />;
     } else if (isNumeric) {
         const pretty = formatTradingNumber(text);
-        inner = (
-            <span className="font-mono text-[13px] tabular-nums">
-                {pretty ?? children}
-            </span>
-        );
+        inner = <span className="fin-figure text-[13px]">{pretty ?? children}</span>;
     }
     // Round-6: numeric cells right-align so columns of decimals line
     // up at the decimal point; status/side badges stay left-aligned so
@@ -594,25 +607,30 @@ const baseMarkdownOverrides = {
     // 语义标记：主 agent 写 [[metric:…]] / :::risk，预处理把它们降解成这两个标签。
     [INLINE_TAG]: InlineMark,
     [BLOCK_TAG]: MarkBlockCard,
+    [SOURCE_LIST_TAG]: SourceListBlock,
 };
 
 // Markdown component overrides generator for minimal spacing with optional anchor prefixes
 export const markdownOptions = (anchorPrefix = "") => ({
     overrides: {
         ...baseMarkdownOverrides,
+        // Section hierarchy. Previously h2 and a bold lead-in like "**Revenue:**"
+        // carried nearly the same weight, so a long answer read as one flat
+        // slab. h2 now gets a hairline rule and real air above it — the section
+        // break on a printed note — and h3 sits clearly under it without one.
         h1: createHeadingComponent(
             "h1",
-            "text-2xl font-semibold mb-4 mt-4 text-foreground scroll-mt-4",
+            "scroll-mt-4 mb-4 mt-5 text-[22px] font-semibold tracking-tight text-foreground",
             anchorPrefix
         ),
         h2: createHeadingComponent(
             "h2",
-            "text-xl font-semibold mb-2 mt-4 text-foreground scroll-mt-4",
+            "scroll-mt-4 mb-3 mt-7 border-b border-border/70 pb-1.5 text-[17px] font-semibold tracking-tight text-foreground first:mt-0",
             anchorPrefix
         ),
         h3: createHeadingComponent(
             "h3",
-            "text-lg font-semibold mb-2 mt-2 text-foreground scroll-mt-4",
+            "scroll-mt-4 mb-2 mt-5 text-[15px] font-semibold tracking-tight text-foreground",
             anchorPrefix
         ),
     },
@@ -648,8 +666,11 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
     );
     const normalized = useMemo(() => {
         const source = streaming ? stripIncompleteTrailingTag(children) : children;
-        return rewriteSemanticMarks(
-            normalizeOrderedListItemBreak(normalizeMarkdownAtxHeadingIndent(source)),
+        return rewriteSourceList(
+            rewriteSemanticMarks(
+                normalizeOrderedListItemBreak(normalizeMarkdownAtxHeadingIndent(source)),
+                { streaming },
+            ),
             { streaming },
         );
     }, [children, streaming]);
@@ -666,6 +687,9 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
                     <Markdown options={options}>
                         {normalized}
                     </Markdown>
+                    {/* Only answers that actually carry figures get a staleness
+                        footer — a chat reply about nothing numeric does not. */}
+                    {normalized.includes(`<${INLINE_TAG}`) && <FreshnessNote />}
                 </AnswerSourcesContext.Provider>
             </StreamingContext.Provider>
         </div>

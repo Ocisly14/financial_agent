@@ -64,7 +64,10 @@ export function ChatComposer({
                 onMouseEnter={handleMouseEnter}
                 onMouseLeave={handleMouseLeave}
                 className={cn(
-                    "mx-auto w-full px-4 sm:px-0 pointer-events-auto rounded-3xl border border-white/30 dark:border-white/20 backdrop-blur-md shadow-[0_5px_13px_rgba(15,23,42,0.55)]",
+                    // Hairline + a shallow shadow instead of the old 13px/55%
+                    // drop: depth should come from the border, not from a cloud
+                    // under the control.
+                    "mx-auto w-full px-4 sm:px-0 pointer-events-auto rounded-2xl border border-border/60 backdrop-blur-md shadow-[0_2px_10px_rgba(15,23,42,0.10)] dark:shadow-[0_2px_14px_rgba(0,0,0,0.45)]",
                     "ease-in-out",
                     isInputCollapsed
                         ? "max-w-[160px] max-h-6 overflow-hidden mb-3 [transition:max-height_0.5s_ease-in-out,max-width_1s_ease-in-out_0.5s]"
@@ -84,7 +87,7 @@ export function ChatComposer({
                         <div className="relative">
                             <div
                                 aria-hidden
-                                className="pointer-events-none absolute inset-x-6 bottom-[-40px] h-24 rounded-full bg-slate-500/10 blur-3xl dark:bg-slate-900/60"
+                                className="pointer-events-none absolute inset-x-6 bottom-[-40px] h-24 rounded-full bg-slate-500/[0.06] blur-3xl dark:bg-slate-900/40"
                             />
                             {!isAtBottom && (
                                 <Button
@@ -105,7 +108,10 @@ export function ChatComposer({
                                     onSend();
                                 }}
                                 className={cn(
-                                    "relative z-10 overflow-hidden rounded-2xl border border-white/50 shadow-[0_6px_15px_rgba(15,23,42,0.25)] transition-all duration-300 ease-in-out",
+                                    "relative z-10 overflow-hidden rounded-xl border border-border/70 transition-all duration-200",
+                                    // The instrument lights up on focus rather
+                                    // than sitting permanently raised.
+                                    "focus-within:border-sky-500/50 focus-within:ring-1 focus-within:ring-sky-500/20",
                                     "bg-white/80 dark:bg-slate-950/60 supports-[backdrop-filter]:bg-white/55 supports-[backdrop-filter]:backdrop-blur-2xl dark:supports-[backdrop-filter]:bg-slate-900/40"
                                 )}
                             >

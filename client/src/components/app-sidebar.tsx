@@ -67,7 +67,7 @@ export function AppSidebar() {
                                                 Financial Agent
                                             </span>
                                         </div>
-                                        <span className="text-sm text-muted-foreground">
+                                        <span className="fin-figure text-[11px] text-muted-foreground/70">
                                             v3.0.0
                                         </span>
                                     </div>
@@ -86,7 +86,7 @@ export function AppSidebar() {
             </SidebarHeader>
             <SidebarContent>
                 <SidebarGroup>
-                    <SidebarGroupLabel className="text-xs font-medium px-2 mb-1">{t("common.agents")}</SidebarGroupLabel>
+                    <SidebarGroupLabel className="fin-label px-2 mb-1 text-muted-foreground/70">{t("common.agents")}</SidebarGroupLabel>
                     <SidebarGroupContent>
                         <SidebarMenu className="space-y-0.5 px-1">
                             {query?.isPending ? (

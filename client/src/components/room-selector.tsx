@@ -34,6 +34,7 @@ import { Checkbox } from "./ui/checkbox";
 import { apiClient } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
+import { markdownPreviewText } from "@/lib/semanticMarks";
 import { useSidebar } from "./ui/sidebar";
 import { useTranslation } from "react-i18next";
 
@@ -476,7 +477,7 @@ export function RoomSelector({ agentId, agentName, isFirstAgent = false }: RoomS
                         roomGroups.flatMap((group) => [
                             <div
                                 key={`group-${group.key}`}
-                                className="sticky top-0 z-10 px-2 pt-2 pb-1 text-[11px] md:text-[10px] font-semibold uppercase tracking-wider text-muted-foreground bg-[hsl(var(--sidebar-background))]/85 backdrop-blur supports-[backdrop-filter]:bg-[hsl(var(--sidebar-background))]/70"
+                                className="fin-label sticky top-0 z-10 px-2 pb-1.5 pt-3 text-muted-foreground/70 bg-[hsl(var(--sidebar-background))]/85 backdrop-blur supports-[backdrop-filter]:bg-[hsl(var(--sidebar-background))]/70"
                             >
                                 {group.label}
                             </div>,
@@ -528,8 +529,8 @@ export function RoomSelector({ agentId, agentName, isFirstAgent = false }: RoomS
                                             {room.lastMessage && (
                                                 <div className="flex items-center gap-2 mt-1">
                                                     <span className="text-xs text-muted-foreground truncate flex-grow">
-                                                        {room.lastMessage.text.substring(0, 50)}
-                                                        {room.lastMessage.text.length > 50 ? "..." : ""}
+                                                        {markdownPreviewText(room.lastMessage.text).substring(0, 50)}
+                                                        {markdownPreviewText(room.lastMessage.text).length > 50 ? "…" : ""}
                                                     </span>
                                                     <span className="text-xs text-muted-foreground shrink-0">
                                                         {formatTimestamp(room.lastMessage.createdAt)}
@@ -553,10 +554,14 @@ export function RoomSelector({ agentId, agentName, isFirstAgent = false }: RoomS
                                                 }
                                             }}
                                             className={cn(
-                                                "flex-grow flex flex-col p-2 rounded-md text-left transition-all min-w-0 border min-h-[44px]",
+                                                // Selection is marked by a rule in the
+                                                // gutter, not by lifting the row off the
+                                                // page — the drop shadow was the single
+                                                // most "consumer app" detail in here.
+                                                "flex-grow flex flex-col p-2 pl-2.5 rounded-md text-left transition-colors min-w-0 border border-l-2 min-h-[44px]",
                                                 location.pathname === `/chat/${agentId}/${room.id}`
-                                                    ? "border-white/40 bg-white/30 text-foreground shadow-[0_4px_6px_-1px_rgba(0,0,0,0.1),0_2px_4px_-1px_rgba(0,0,0,0.06)] supports-[backdrop-filter]:backdrop-blur-md supports-[backdrop-filter]:bg-white/20 dark:border-white/15 dark:bg-white/10 dark:supports-[backdrop-filter]:bg-white/10"
-                                                    : "border-transparent [@media(hover:hover)]:hover:border-white/20 [@media(hover:hover)]:hover:bg-white/10 supports-[backdrop-filter]:[@media(hover:hover)]:hover:bg-white/10 dark:[@media(hover:hover)]:hover:bg-white/5 active:bg-white/10 dark:active:bg-white/5"
+                                                    ? "border-border/70 border-l-foreground/70 bg-foreground/[0.04] text-foreground dark:bg-white/[0.06]"
+                                                    : "border-transparent border-l-transparent [@media(hover:hover)]:hover:border-l-foreground/25 [@media(hover:hover)]:hover:bg-foreground/[0.03] dark:[@media(hover:hover)]:hover:bg-white/5"
                                             )}
                                         >
                                             <span className="text-sm font-medium truncate">
@@ -565,8 +570,8 @@ export function RoomSelector({ agentId, agentName, isFirstAgent = false }: RoomS
                                             {room.lastMessage && (
                                                 <div className="flex items-center gap-2 mt-1">
                                                     <span className="text-xs text-muted-foreground truncate flex-grow">
-                                                        {room.lastMessage.text.substring(0, 50)}
-                                                        {room.lastMessage.text.length > 50 ? "..." : ""}
+                                                        {markdownPreviewText(room.lastMessage.text).substring(0, 50)}
+                                                        {markdownPreviewText(room.lastMessage.text).length > 50 ? "…" : ""}
                                                     </span>
                                                     <span className="text-xs text-muted-foreground shrink-0">
                                                         {formatTimestamp(room.lastMessage.createdAt)}

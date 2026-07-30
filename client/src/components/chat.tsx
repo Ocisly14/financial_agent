@@ -317,8 +317,10 @@ export default function Chat({ agentId, roomId }: ChatProps) {
         <div className="flex flex-col gap-3 max-w-full min-w-0">
             <div className="max-w-full min-w-0">
                 <div className="py-2 max-w-full min-w-0">
-                    <ChatBubble variant="received" className="flex flex-row items-center gap-2">
-                        <Avatar className="hidden md:flex size-8 border rounded-full select-none">
+                    {/* items-start, not items-center: on a long answer the
+                        avatar was floating halfway down the message. */}
+                    <ChatBubble variant="received" className="flex flex-row items-start gap-2">
+                        <Avatar className="mt-1 hidden md:flex size-8 border rounded-full select-none shrink-0">
                             <AvatarFallback className="rounded-full text-[10px] font-bold">FA</AvatarFallback>
                         </Avatar>
                         <div className="flex flex-col max-w-full min-w-0">
@@ -379,7 +381,12 @@ export default function Chat({ agentId, roomId }: ChatProps) {
             showDesktopChartWorkspace && chartWorkspace.charts.length > 0
                 ? chartWorkspaceCollapsed
                     ? "xl:grid-cols-[48px_minmax(0,1fr)]"
-                    : "xl:grid-cols-[minmax(0,1fr)_minmax(380px,440px)]"
+                    // The answer is the product; the charts support it. At
+                    // 440px the prose ran ~30 characters a line and wrapped
+                    // every sentence four times, which is what made a research
+                    // note read as a cramped chat log. 520–680px is a real
+                    // reading measure; the workspace takes whatever is left.
+                    : "xl:grid-cols-[minmax(0,1fr)_minmax(520px,600px)] 2xl:grid-cols-[minmax(0,1fr)_minmax(560px,680px)]"
                 : "",
         )}>
             {showDesktopChartWorkspace && chartWorkspace.charts.length > 0 && (

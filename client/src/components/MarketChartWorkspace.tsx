@@ -67,16 +67,16 @@ export function MarketChartWorkspace({
     }
 
     return (
-        <section className="flex h-dvh max-h-dvh min-h-0 flex-col overflow-hidden border-r border-border/80 bg-background" aria-label={t("charts.marketWorkspace")}>
-            <header className="shrink-0 border-b border-border/80 px-4 py-3">
+        <section className="tech-grid flex h-dvh max-h-dvh min-h-0 flex-col overflow-hidden border-r border-border/80 bg-background" aria-label={t("charts.marketWorkspace")}>
+            <header className="shrink-0 border-b border-border/80 bg-background/60 px-4 py-3 backdrop-blur-sm">
                 <div className="flex items-center justify-between gap-3">
                     <div className="flex min-w-0 items-center gap-2">
-                        <BarChart3 className="size-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
-                        <h2 className="truncate text-sm font-semibold">{t("charts.marketWorkspace")}</h2>
+                        <BarChart3 className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                        <h2 className="fin-label truncate text-foreground/80">{t("charts.marketWorkspace")}</h2>
                     </div>
                     <div className="flex shrink-0 items-center gap-2">
-                        <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
-                            <Layers3 className="size-3.5" />
+                        <div className="fin-label flex items-center gap-1 text-muted-foreground">
+                            <Layers3 className="size-3" />
                             {t("charts.studyCount", { count: active.studies.length })}
                         </div>
                         <button
@@ -99,11 +99,13 @@ export function MarketChartWorkspace({
                             role="tab"
                             aria-selected={active.symbol === chart.symbol}
                             onClick={() => setActiveSymbol(chart.symbol)}
+                            // Tickers are data, so they get the figure face and a
+                            // square-ish chip rather than a pill.
                             className={cn(
-                                "shrink-0 rounded-md border px-3 py-1 text-xs font-semibold transition-colors",
+                                "fin-figure shrink-0 rounded-[5px] border px-2.5 py-1 text-xs font-semibold tracking-wide transition-colors",
                                 active.symbol === chart.symbol
                                     ? "border-foreground/20 bg-foreground text-background"
-                                    : "border-border bg-muted/30 text-muted-foreground hover:bg-muted hover:text-foreground",
+                                    : "border-border bg-muted/30 text-muted-foreground hover:border-foreground/25 hover:bg-muted hover:text-foreground",
                             )}
                         >
                             {chart.symbol}

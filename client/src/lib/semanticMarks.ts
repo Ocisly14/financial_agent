@@ -288,6 +288,69 @@ export function parseAnswerSources(markdown: string): Map<number, AnswerSourceLi
     return byIndex;
 }
 
+/**
+ * One-line plain text for places that show a message outside the markdown
+ * pipeline — the sidebar's last-message preview, notifications, tooltips.
+ * Without it those surfaces leak raw syntax: every research answer opens with
+ * `:::thesis`, so the room list read as a column of ":::thesis Tesla (TSL…".
+ */
+export function markdownPreviewText(source: string): string {
+    return source
+        .replace(/^[ \t]*:{3}[a-z]*[ \t]*$/gim, " ")
+        .replace(INLINE_PATTERN, (_match, _kind, text: string) => text)
+        .replace(/<[A-Za-z][^>]*\/?>/g, " ")
+        .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+        .replace(/[*_`#>|]/g, "")
+        .replace(/\s+/g, " ")
+        .trim();
+}
+
+export const SOURCE_LIST_TAG = "SourceList";
+
+/** `**Sources**`, `## Sources`, `### 来源`, `参考资料：` … */
+const SOURCE_HEADING = /^[ \t]*(?:#{1,6}[ \t]*)?\**[ \t]*(sources?|references?|来源|参考(?:资料|文献)?)[ \t]*\**[ \t]*[:：]?[ \t]*$/i;
+const SOURCE_ITEM = /^[ \t]*(\d{1,2})[.)][ \t]*\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)[ \t]*\.?[ \t]*$/;
+
+/**
+ * Lower the answer's trailing Sources list onto a `<SourceList />` tag so the
+ * client can set it as compact cards instead of six wrapped blue links.
+ *
+ * Deliberately narrow: it only fires on a run of numbered link-only lines that
+ * directly follows a Sources heading, so a numbered list that merely happens to
+ * contain a link is left alone. Skipped while streaming — a half-arrived
+ * `1. [Title](htt` would otherwise flash as a card pointing nowhere.
+ */
+export function rewriteSourceList(source: string, options: RewriteOptions = {}): string {
+    if (options.streaming) return source;
+    const lines = source.split("\n");
+    const out: string[] = [];
+
+    for (let i = 0; i < lines.length; i++) {
+        if (!SOURCE_HEADING.test(lines[i]!)) {
+            out.push(lines[i]!);
+            continue;
+        }
+        // Scan forward past blank lines for a run of source items.
+        let j = i + 1;
+        while (j < lines.length && lines[j]!.trim() === "") j++;
+        const items: AnswerSourceLink[] = [];
+        while (j < lines.length) {
+            const match = SOURCE_ITEM.exec(lines[j]!);
+            if (!match) break;
+            items.push({ index: Number(match[1]), title: match[2]!.trim(), url: match[3]! });
+            j++;
+        }
+        if (items.length === 0) {
+            out.push(lines[i]!);
+            continue;
+        }
+        out.push(lines[i]!, "", `<${SOURCE_LIST_TAG} items="${encodeMarkPayload(JSON.stringify(items))}" />`, "");
+        i = j - 1;
+    }
+
+    return out.join("\n");
+}
+
 /** Host without "www.", for the card's site label. */
 export function sourceSiteLabel(url: string): string {
     try {

@@ -9,6 +9,8 @@ import {
   parseMarkDate,
   sourceSiteLabel,
   rewriteSemanticMarks,
+  rewriteSourceList,
+  markdownPreviewText,
 } from "../semanticMarks.ts";
 
 function payloads(rewritten: string, attribute = "t"): string[] {
@@ -214,4 +216,56 @@ test("a citation pointing at a missing source still degrades to readable text", 
   const sources = parseAnswerSources("没有来源列表的答案");
   assert.equal(sources.size, 0);
   assert.match(rewriteSemanticMarks("见 [[cite:某个说法|7]]"), /<Mark k="cite"/);
+});
+
+test("rewriteSourceList lowers a trailing Sources list onto one tag", () => {
+  const rewritten = rewriteSourceList(
+    "正文。\n\n**Sources**\n\n1. [Tesla Q2 earnings](https://reuters.com/a)\n2. [Musk pay package](https://wsj.com/b)\n",
+  );
+  const items = JSON.parse(payloads(rewritten, "items")[0]!);
+  assert.equal(items.length, 2);
+  assert.deepEqual(items[1], { index: 2, title: "Musk pay package", url: "https://wsj.com/b" });
+  // The heading stays; only the list itself is replaced.
+  assert.match(rewritten, /\*\*Sources\*\*/);
+  assert.doesNotMatch(rewritten, /reuters\.com\/a\)/);
+});
+
+test("rewriteSourceList accepts markdown and Chinese headings", () => {
+  for (const heading of ["## Sources", "### 来源", "参考资料：", "References"]) {
+    const rewritten = rewriteSourceList(`${heading}\n1. [T](https://a.com/x)\n`);
+    assert.match(rewritten, /<SourceList items=/, heading);
+  }
+});
+
+test("rewriteSourceList leaves a numbered list that merely contains a link", () => {
+  const source = "步骤：\n\n1. [打开页面](https://a.com/x) 然后确认\n2. 收工\n";
+  assert.equal(rewriteSourceList(source), source);
+});
+
+test("rewriteSourceList leaves a Sources heading with no list under it", () => {
+  const source = "**Sources**\n\n本轮未使用外部来源。\n";
+  assert.equal(rewriteSourceList(source), source);
+});
+
+test("rewriteSourceList is a no-op while streaming", () => {
+  const source = "**Sources**\n\n1. [T](https://a.com/x)\n";
+  assert.equal(rewriteSourceList(source, { streaming: true }), source);
+});
+
+test("rewriteSourceList indexes survive out-of-order or gapped numbering", () => {
+  const rewritten = rewriteSourceList("**Sources**\n\n2. [B](https://b.com/1)\n5. [E](https://e.com/1)\n");
+  const items = JSON.parse(payloads(rewritten, "items")[0]!);
+  assert.deepEqual(items.map((item: { index: number }) => item.index), [2, 5]);
+});
+
+test("markdownPreviewText strips the syntax sidebar previews used to leak", () => {
+  const source = ":::thesis\nTesla (TSLA) 当前 [[metric:307.51|+3.18%]] 见 **支撑**\n:::";
+  assert.equal(markdownPreviewText(source), "Tesla (TSLA) 当前 307.51 见 支撑");
+});
+
+test("markdownPreviewText drops tags, links and images", () => {
+  assert.equal(
+    markdownPreviewText('看图 <StockChart symbol="AAPL" /> 和 [来源](https://a.com) 与 ![](https://i/x.png)'),
+    "看图 和 来源 与",
+  );
 });

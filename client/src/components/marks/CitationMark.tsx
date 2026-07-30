@@ -65,7 +65,11 @@ function CitationCard({ url, title, retrieved }: { url: string; title: string; r
             target="_blank"
             rel="noopener noreferrer"
             referrerPolicy="no-referrer"
-            className="block w-[22rem] max-w-[85vw] overflow-hidden rounded-lg border border-border/70 bg-popover text-left shadow-lg outline-none transition-colors hover:border-amber-500/40 focus-visible:border-amber-500/60"
+            className={cn(
+                "group/card block w-[22rem] max-w-[85vw] overflow-hidden rounded-lg border border-border/70",
+                "bg-popover text-left shadow-xl shadow-black/10 outline-none transition-colors",
+                "hover:border-sky-500/40 focus-visible:border-sky-500/60",
+            )}
         >
             {image && (
                 <span className="block h-28 w-full overflow-hidden border-b border-border/60 bg-muted/40">
@@ -74,26 +78,35 @@ function CitationCard({ url, title, retrieved }: { url: string; title: string; r
                         alt=""
                         loading="lazy"
                         referrerPolicy="no-referrer"
-                        className="size-full object-cover"
+                        className="size-full object-cover transition-transform duration-500 group-hover/card:scale-[1.03]"
                         onError={(event) => { event.currentTarget.parentElement!.style.display = "none"; }}
                     />
                 </span>
             )}
-            <span className="block px-3 py-2">
-                <span className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
-                    <span className="truncate">{preview.data?.siteName ?? site}</span>
-                    {published && <span className="shrink-0 font-mono tabular-nums">· {published}</span>}
+            <span className="block px-3 py-2.5">
+                {/* Masthead: publisher and date on one ruled line, the way a
+                    clipping is filed. */}
+                <span className="flex items-baseline gap-1.5 border-b border-border/50 pb-1.5">
+                    <span className="fin-label truncate text-muted-foreground">
+                        {preview.data?.siteName ?? site}
+                    </span>
+                    {published && (
+                        <span className="fin-figure ml-auto shrink-0 text-[10px] text-muted-foreground/80">
+                            {published}
+                        </span>
+                    )}
                 </span>
-                <span className="mt-1 block text-[13px] font-medium leading-snug text-foreground line-clamp-2">
+                <span className="mt-1.5 line-clamp-2 text-[13px] font-semibold leading-snug text-foreground">
                     {retrieved?.title ?? preview.data?.title ?? title}
                 </span>
                 {snippet && (
-                    <span className="mt-1 block text-[11px] leading-relaxed text-muted-foreground line-clamp-3">
+                    <span className="mt-1 line-clamp-3 text-[11px] leading-relaxed text-muted-foreground">
                         {snippet}
                     </span>
                 )}
-                <span className="mt-2 block text-[10px] uppercase tracking-wider text-amber-600 dark:text-amber-400">
-                    {t("marks.openSource")} ↗
+                <span className="fin-label mt-2 flex items-center gap-1 text-sky-600 dark:text-sky-400">
+                    {t("marks.openSource")}
+                    <span aria-hidden="true" className="transition-transform group-hover/card:translate-x-0.5">↗</span>
                 </span>
             </span>
         </a>
@@ -142,13 +155,30 @@ export function CitationMark({ text, extra }: { text: string; extra: string }) {
                             setOpen(true);
                         }
                     }}
+                    // No underline on the cited phrase. The prompt asks the model
+                    // to cite every claim it took from search, and it complies —
+                    // which meant an answer where nearly every clause carried a
+                    // dotted rule and the prose drowned. The marker alone is the
+                    // affordance; hovering tints the span it belongs to, so you
+                    // can still see exactly how much of the sentence is sourced.
                     className={cn(
-                        "underline decoration-dotted decoration-muted-foreground/60 underline-offset-4",
-                        "hover:decoration-amber-500 focus-visible:decoration-amber-500",
+                        "group/cite rounded-[3px] text-inherit no-underline transition-colors",
+                        "hover:bg-sky-500/10 focus-visible:bg-sky-500/10",
+                        open && "bg-sky-500/10",
                     )}
                 >
                     {text}
-                    <sup className="ml-0.5 font-mono text-[9px] tabular-nums text-amber-600 dark:text-amber-400">
+                    {/* A ruled numeral rather than a bare superscript: it reads as
+                        a footnote marker you can hit, and it holds its shape next
+                        to a metric that is already set in figures. */}
+                    <sup
+                        className={cn(
+                            "fin-figure ml-0.5 rounded-[2px] border px-[2px] py-px text-[8.5px] leading-none transition-colors",
+                            "border-sky-600/30 text-sky-700 dark:border-sky-400/30 dark:text-sky-400",
+                            "group-hover/cite:border-sky-500/70 group-hover/cite:bg-sky-500/10",
+                            open && "border-sky-500/70 bg-sky-500/10",
+                        )}
+                    >
                         {link.index}
                     </sup>
                     <span className="sr-only">（{t("marks.source")}: {source?.title ?? link.title}）</span>
