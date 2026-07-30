@@ -8,18 +8,14 @@ import { Toaster } from "./components/ui/toaster";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router";
 // Route-level code splitting — each route is its own chunk.
 const Chat = lazy(() => import("./routes/chat"));
-const Overview = lazy(() => import("./routes/overview"));
 const Orders = lazy(() => import("./routes/orders"));
 const Strategies = lazy(() => import("./routes/strategies"));
 const StrategyFloor = lazy(() => import("./routes/strategy-floor"));
 const StrategyDetail = lazy(() => import("./routes/strategy-detail"));
-import { ThinkingBubbleProvider } from "./contexts/ThinkingBubbleContext";
-import { AuthProvider } from "./contexts/AuthContext";
 import { Toaster as SonnerToaster } from "sonner";
-import { UserButton } from "./components/UserButton";
+import { ThemeToggle } from "./components/ThemeToggle";
 import { ThemeProvider, useTheme } from "./contexts/ThemeContext";
 import { cn } from "./lib/utils";
-import { TableOfContentsProvider } from "./contexts/TableOfContentsContext";
 import { LanguageProvider } from "./contexts/LanguageContext";
 import { KillSwitchBanner } from "./components/cex/KillSwitchBanner";
 import { LiveTradingConsentModal } from "./components/cex/LiveTradingConsentModal";
@@ -66,30 +62,27 @@ function AppShell() {
             <BrowserRouter>
                 <TooltipProvider delayDuration={0}>
                     <SidebarProvider>
-                        <TableOfContentsProvider>
-                            <AppSidebar />
-                            <FloatingSidebarToggle />
-                            <SidebarInset className="pl-[20px]">
-                                <div className="flex flex-1 flex-col h-dvh w-full">
-                                    <div className="flex flex-1 flex-col min-h-0 w-full">
-                                        <Suspense fallback={<div className="flex flex-1 items-center justify-center text-muted-foreground" />}>
-                                            <Routes>
-                                                <Route path="/" element={<RootRedirect />} />
-                                                <Route path="chat/:agentId/:roomId" element={<Chat />} />
-                                                <Route path="chat/:agentId" element={<Chat />} />
-                                                <Route path="settings/:agentId" element={<Overview />} />
-                                                <Route path="orders/:agentId" element={<Orders />} />
-                                                <Route path="floor/:agentId" element={<StrategyFloor />} />
-                                                <Route path="strategies/:agentId" element={<Strategies />} />
-                                                <Route path="strategies/:agentId/:strategyId" element={<StrategyDetail />} />
-                                            </Routes>
-                                        </Suspense>
+                        <AppSidebar />
+                        <FloatingSidebarToggle />
+                        <SidebarInset className="pl-[20px]">
+                            <div className="flex flex-1 flex-col h-dvh w-full">
+                                <div className="flex flex-1 flex-col min-h-0 w-full">
+                                    <Suspense fallback={<div className="flex flex-1 items-center justify-center text-muted-foreground" />}>
+                                        <Routes>
+                                            <Route path="/" element={<RootRedirect />} />
+                                            <Route path="chat/:agentId/:roomId" element={<Chat />} />
+                                            <Route path="chat/:agentId" element={<Chat />} />
+                                            <Route path="orders/:agentId" element={<Orders />} />
+                                            <Route path="floor/:agentId" element={<StrategyFloor />} />
+                                            <Route path="strategies/:agentId" element={<Strategies />} />
+                                            <Route path="strategies/:agentId/:strategyId" element={<StrategyDetail />} />
+                                        </Routes>
+                                    </Suspense>
                                     </div>
                                 </div>
-                            </SidebarInset>
-                        </TableOfContentsProvider>
+                        </SidebarInset>
                     </SidebarProvider>
-                    <UserButton />
+                    <ThemeToggle />
                     <KillSwitchBanner />
                     <LiveTradingConsentModal />
                     <Toaster />
@@ -103,15 +96,11 @@ function AppShell() {
 function App() {
     return (
         <QueryClientProvider client={queryClient}>
-            <AuthProvider>
-                <LanguageProvider>
-                    <ThemeProvider>
-                        <ThinkingBubbleProvider>
-                            <AppShell />
-                        </ThinkingBubbleProvider>
-                    </ThemeProvider>
-                </LanguageProvider>
-            </AuthProvider>
+            <LanguageProvider>
+                <ThemeProvider>
+                    <AppShell />
+                </ThemeProvider>
+            </LanguageProvider>
         </QueryClientProvider>
     );
 }

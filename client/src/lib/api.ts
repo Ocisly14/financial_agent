@@ -1,26 +1,19 @@
-import type { UUID, Character, StoredStrategy, ExecutionLogEntry } from "@/types/core";
-import type { ProcessingStep, ResearchReport } from "../types";
+import type { StoredStrategy, ExecutionLogEntry } from "@/types/core";
 
-export type FavoriteTaskChainPayload = {
-    favoriteId?: string;
-    id?: string;
-    name?: string;
-    originalName?: string;
-    description?: string;
-    taskChain?: unknown;
-    createdAt?: number;
-    lastUsedAt?: number;
-    [key: string]: unknown;
+export type ProcessingStep = {
+    id: string;
+    name: string;
+    status: "pending" | "in_progress" | "completed" | "error";
+    message: string;
+    timestamp: number;
+    data?: unknown;
+    error?: string;
 };
 
 const BASE_URL =
     import.meta.env.VITE_SERVER_BASE_URL ||
     window.location.origin;
 export const API_BASE_URL = BASE_URL;
-const LOCAL_ANALYTICS_BASE_URL =
-    import.meta.env.VITE_ANALYTICS_BASE_URL ||
-    BASE_URL;
-export const ANALYTICS_API_BASE_URL = LOCAL_ANALYTICS_BASE_URL;
 
 // financial-agent has no auth backend — no Bearer tokens, no CSRF, no cookies.
 const fetcher = async ({
@@ -28,13 +21,11 @@ const fetcher = async ({
     method,
     body,
     headers,
-    baseUrl,
 }: {
     url: string;
     method?: "GET" | "POST" | "PUT" | "DELETE" | "PATCH";
     body?: object | FormData;
     headers?: HeadersInit;
-    baseUrl?: string;
 }) => {
     const requestHeaders: HeadersInit = headers
         ? headers
@@ -64,8 +55,7 @@ const fetcher = async ({
         }
     }
 
-    const requestBaseUrl = baseUrl || BASE_URL;
-    return fetch(`${requestBaseUrl}${url}`, options).then(async (resp) => {
+    return fetch(`${BASE_URL}${url}`, options).then(async (resp) => {
         const contentType = resp.headers.get("Content-Type");
         if (contentType === "audio/mpeg") {
             return await resp.blob();
@@ -118,8 +108,6 @@ export const DEFAULT_AGENT_ID = "default";
 export const apiClient = {
     getAgents: (): Promise<{ agents: Array<{ id: string; name: string }> }> =>
         Promise.resolve({ agents: [{ id: DEFAULT_AGENT_ID, name: "Financial Agent" }] }),
-    getAgent: (agentId: string): Promise<{ id: UUID; character: Character }> =>
-        fetcher({ url: `/agents/${agentId}` }),
     tts: (agentId: string, text: string) =>
         fetcher({
             url: `/${agentId}/tts`,
@@ -142,166 +130,6 @@ export const apiClient = {
             body: formData,
         });
     },
-    getReportUrl: (reportPath: string) => {
-        // Remove leading slash and convert to server URL
-        let relativePath = reportPath.replace(/^\/+/, '');
-        // Replace backslashes with forward slashes for web URLs
-        relativePath = relativePath.replace(/\\/g, '/');
-
-        // Remove 'saved_data/' prefix since /reports serves saved_data/ directory
-        if (relativePath.startsWith('saved_data/')) {
-            relativePath = relativePath.substring('saved_data/'.length);
-        }
-
-        const origin =
-            typeof window !== "undefined" && typeof window.location?.origin === "string"
-                ? window.location.origin
-                : BASE_URL;
-        return `${origin}/reports/${relativePath}`;
-    },
-    getWeeklyReports: async (): Promise<{ success: boolean; reports: ResearchReport[] }> => {
-        const response = (await fetcher({
-            url: "/research-reports",
-        })) as { success: boolean; reports?: ResearchReport[] };
-
-        const reports = (response.reports ?? []).map((report) => {
-            const normalizedPath = report.downloadPath?.startsWith("/")
-                ? report.downloadPath
-                : `/${report.downloadPath ?? ""}`;
-
-            return {
-                ...report,
-                downloadUrl: report.downloadUrl || `${BASE_URL}${normalizedPath}`,
-            };
-        });
-
-        return { success: response.success, reports };
-    },
-		    deleteFile: (filePath: string, agentId?: string, roomId?: string): Promise<{ success: boolean; message: string }> =>
-		        fetcher({
-		            url: "/files",
-		            method: "DELETE",
-            body: { filePath, agentId, roomId },
-        }),
-    stopProcessing: (agentId: string): Promise<{ success: boolean; message: string }> =>
-        fetcher({
-            url: `/agents/${agentId}/stop`,
-            method: "POST",
-            body: {},
-        }),
-    getAnalyticsSummary: (): Promise<{
-        success: boolean;
-        generatedAt: number;
-        dailyLabels: string[];
-        totals: {
-            usage: { activeUsers: number; messageCount: number };
-            usageSegments: {
-                anonymous: { activeUsers: number; messageCount: number };
-                free: { activeUsers: number; messageCount: number };
-                plus: { activeUsers: number; messageCount: number };
-                pro: { activeUsers: number; messageCount: number };
-            };
-            main: { sessions: number; visitors: number; avgDurationMs: number };
-            signup: { sessions: number; visitors: number; avgDurationMs: number };
-            register: { sessions: number; visitors: number; avgDurationMs: number };
-            mainAnonymousVisitors: { visitors: number };
-            registerAnonymousVisitors: { visitors: number };
-            registrations: { registrations: number };
-            signupLinkSends: { linkSends: number };
-            mainAuth: {
-                loggedInVisitors: number;
-                loggedInAvgDurationMs: number;
-                anonymousVisitors: number;
-                anonymousAvgDurationMs: number;
-            };
-        };
-        usage: Array<{ day: string; activeUsers: number; messageCount: number }>;
-        usageSegments: {
-            anonymous: Array<{ day: string; activeUsers: number; messageCount: number }>;
-            free: Array<{ day: string; activeUsers: number; messageCount: number }>;
-            plus: Array<{ day: string; activeUsers: number; messageCount: number }>;
-            pro: Array<{ day: string; activeUsers: number; messageCount: number }>;
-        };
-        main: Array<{ day: string; sessions: number; visitors: number; avgDurationMs: number }>;
-        signup: Array<{ day: string; sessions: number; visitors: number; avgDurationMs: number }>;
-        register: Array<{ day: string; sessions: number; visitors: number; avgDurationMs: number }>;
-        mainAnonymousVisitors: Array<{ day: string; visitors: number }>;
-        registerAnonymousVisitors: Array<{ day: string; visitors: number }>;
-        loggedInVisitors: Array<{ day: string; visitors: number }>;
-        registrations: Array<{ day: string; registrations: number }>;
-        signupLinkSends: Array<{ day: string; linkSends: number }>;
-        mainAuth: Array<{
-            day: string;
-            loggedInVisitors: number;
-            loggedInAvgDurationMs: number;
-            anonymousVisitors: number;
-            anonymousAvgDurationMs: number;
-        }>;
-        hourlyMain: Array<{ hour: string; sessions: number; visitors: number; avgDurationMs: number }>;
-    }> =>
-        fetcher({
-            url: "/analytics/summary",
-            baseUrl: ANALYTICS_API_BASE_URL,
-        }),
-    sendPageSession: (payload: {
-        path: string;
-        referrer?: string | null;
-        durationMs: number;
-        clickCount: number;
-        startedAt: number;
-        isAuthenticated?: boolean;
-        userId?: string | null;
-        userEmail?: string | null;
-        userName?: string | null;
-    }): Promise<{ success: boolean }> =>
-        fetcher({
-            url: "/analytics/page-session",
-            method: "POST",
-            body: payload,
-            baseUrl: ANALYTICS_API_BASE_URL,
-        }),
-    getReferralCodesToday: (): Promise<{
-        success: boolean;
-        generatedAt: number;
-        date: string;
-        summary: {
-            totalCodes: number;
-            totalPending: number;
-            totalCompleted: number;
-        };
-        data: Array<{
-            referralCode: string;
-            pendingCount: number;
-            completedCount: number;
-        }>;
-    }> =>
-        fetcher({
-            url: "/analytics/referral-codes-today",
-            baseUrl: ANALYTICS_API_BASE_URL,
-        }),
-    getReferralCodesLast30Days: (): Promise<{
-        success: boolean;
-        generatedAt: number;
-        range: {
-            from: string;
-            to: string;
-        };
-        summary: {
-            totalCodes: number;
-            totalPending: number;
-            totalCompleted: number;
-        };
-        data: Array<{
-            referralCode: string;
-            pendingCount: number;
-            completedCount: number;
-        }>;
-    }> =>
-        fetcher({
-            url: "/analytics/referral-codes-last-30-days",
-            baseUrl: ANALYTICS_API_BASE_URL,
-        }),
-
     // Room management — backed by the server's local SQLite database.
     createRoom: (agentId: string, name?: string): Promise<{ success: boolean; room: { id: string; name: string; createdAt: number } }> =>
         fetcher({ url: `/api/agents/${encodeURIComponent(agentId)}/rooms`, method: "POST", body: { name } }),
@@ -343,269 +171,6 @@ export const apiClient = {
             body: { name },
         }),
 
-    getFavoriteTaskChains: (agentId: string): Promise<{ success: boolean; favorites: any[] }> =>
-        fetcher({
-            url: `/agents/${agentId}/favorite-taskchains`,
-            method: "GET",
-        }),
-
-    addFavoriteTaskChain: (
-        agentId: string,
-        payload: {
-            chainId: string;
-            name: string;
-            originalName?: string;
-            description?: string;
-            taskChain: unknown;
-            isPublic?: boolean;
-        }
-    ): Promise<{ success: boolean; favorite: any }> =>
-        fetcher({
-            url: `/agents/${agentId}/favorite-taskchains`,
-            method: "POST",
-            body: payload,
-        }),
-
-    updateFavoriteTaskChainVisibility: (
-        agentId: string,
-        favoriteId: string,
-        isPublic: boolean
-    ): Promise<{ success: boolean; favorite: any }> =>
-        fetcher({
-            url: `/agents/${agentId}/favorite-taskchains/${favoriteId}/visibility`,
-            method: "PATCH",
-            body: { isPublic },
-        }),
-
-    deleteFavoriteTaskChain: (
-        agentId: string,
-        favoriteId: string
-    ): Promise<{ success: boolean }> =>
-        fetcher({
-            url: `/agents/${agentId}/favorite-taskchains/${favoriteId}`,
-            method: "DELETE",
-        }),
-
-    updateFavoriteTaskChainName: (
-        agentId: string,
-        favoriteId: string,
-        name: string
-    ): Promise<{ success: boolean; favoriteId: string; name: string }> =>
-        fetcher({
-            url: `/agents/${agentId}/favorite-taskchains/${favoriteId}`,
-            method: "PATCH",
-            body: { name },
-        }),
-
-    markFavoriteTaskChainUsed: (
-        agentId: string,
-        favoriteId: string,
-        timestamp?: number
-    ): Promise<{ success: boolean; favoriteId: string; lastUsedAt: number }> =>
-        fetcher({
-            url: `/agents/${agentId}/favorite-taskchains/${favoriteId}/use`,
-            method: "POST",
-            body: { timestamp },
-        }),
-
-    shareFavoriteTaskChain: (
-        agentId: string,
-        favoriteId: string,
-    ): Promise<{ success: boolean; share: any }> =>
-        fetcher({
-            url: `/agents/${agentId}/favorite-taskchains/${favoriteId}/share`,
-            method: "POST",
-        }),
-
-    getSharedTaskChainByCode: (
-        shareCode: string
-    ): Promise<{ success: boolean; share: any }> =>
-        fetcher({
-            url: `/shared-taskchains/${shareCode}`,
-            method: "GET",
-        }),
-
-    createSharedChat: (
-        agentId: string,
-        roomId: string,
-    ): Promise<{ success: boolean; share: { shareCode: string } }> =>
-        fetcher({
-            url: `/agents/${agentId}/rooms/${roomId}/shared-chat`,
-            method: "POST",
-        }),
-
-    getShareSummary: (
-        agentId: string,
-        roomId: string,
-    ): Promise<{ success: boolean; title?: string; summary: string }> =>
-        fetcher({
-            url: `/agents/${agentId}/rooms/${roomId}/share-summary`,
-            method: "POST",
-        }),
-
-    getSharedChatByCode: (
-        shareCode: string
-    ): Promise<{
-        success: boolean;
-        share: { shareCode: string; agentId: string; roomId: string; createdAt: number };
-        memories: Array<{
-            id: string;
-            userId: string;
-            agentId: string;
-            createdAt: number;
-            content: {
-                text: string;
-                action?: unknown;
-                source?: unknown;
-                url?: unknown;
-                inReplyTo?: unknown;
-                metadata?: unknown;
-                actionData?: unknown;
-                actionResults?: unknown;
-                attachments?: Array<{
-                    id?: string;
-                    url: string;
-                    title?: string;
-                    source?: string;
-                    description?: string;
-                    text?: string;
-                    contentType?: string;
-                }>;
-            };
-            roomId: string;
-        }>;
-    }> =>
-        fetcher({
-            url: `/shared-chats/${shareCode}`,
-            method: "GET",
-        }),
-
-    getSharedRoom: (
-        agentId: string,
-        roomId: string
-    ): Promise<{
-        success: boolean;
-        agentId: string;
-        roomId: string;
-        room?: { id: string; name?: string; createdAt?: string | number | null } | null;
-        shareAgentId?: string;
-        memories: Array<{
-            id: string;
-            userId: string;
-            agentId: string;
-            createdAt: number;
-            content: {
-                text: string;
-                action?: unknown;
-                source?: unknown;
-                url?: unknown;
-                inReplyTo?: unknown;
-                metadata?: unknown;
-                actionData?: unknown;
-                actionResults?: unknown;
-                attachments?: Array<{
-                    id?: string;
-                    url: string;
-                    title?: string;
-                    source?: string;
-                    description?: string;
-                    text?: string;
-                    contentType?: string;
-                }>;
-            };
-            roomId: string;
-        }>;
-    }> =>
-        fetcher({
-            url: `/shared-rooms/${agentId}/${roomId}`,
-            method: "GET",
-        }),
-
-    // Authentication endpoints
-    login: (email: string, password: string): Promise<{ user?: any; message?: string }> =>
-        fetcher({
-            url: "/authentication/validation/",
-            method: "POST",
-            body: { email, password },
-            headers: {
-                Accept: "application/json",
-                "Content-Type": "application/json",
-                credentials: "include",
-            },
-        }),
-    sendSignUpToken: (email: string): Promise<{ message: string }> =>
-        fetcher({
-            url: "/authentication/enrollment/token/",
-            method: "POST",
-            body: { email },
-            headers: {
-                Accept: "application/json",
-                "Content-Type": "application/json",
-                credentials: "include",
-            },
-        }),
-    createAccount: (regToken: string, formData: object): Promise<{ message: string }> =>
-        fetcher({
-            url: `/authentication/creation/${regToken}/`,
-            method: "POST",
-            body: formData,
-            headers: {
-                Accept: "application/json",
-                "Content-Type": "application/json",
-                credentials: "include",
-            },
-        }),
-    validateToken: (regToken: string): Promise<any> =>
-        fetcher({
-            url: `/authentication/creation/${regToken}/`,
-            method: "GET",
-            headers: {
-                Accept: "application/json",
-                "Content-Type": "application/json",
-                credentials: "include",
-            },
-        }),
-    logout: (): Promise<{ message: string }> =>
-        fetcher({
-            url: "/authentication/logout/",
-            method: "POST",
-            body: {},
-            headers: {
-                Accept: "application/json",
-                "Content-Type": "application/json",
-                credentials: "include",
-            },
-        }),
-    refreshToken: (): Promise<{ user?: any }> =>
-        fetcher({
-            url: "/authentication/refresh/",
-            method: "POST",
-            body: {},
-            headers: {
-                Accept: "application/json",
-                "Content-Type": "application/json",
-                credentials: "include",
-            },
-        }),
-    getMe: (): Promise<{ user: any }> =>
-        fetcher({
-            url: "/authentication/me/",
-            method: "GET",
-            headers: {
-                Accept: "application/json",
-                credentials: "include",
-            },
-        }),
-    getReferralCode: (): Promise<{ referralCode: string; referralLink: string; totalInvites: number }> =>
-        fetcher({
-            url: "/authentication/referral-code/",
-            method: "GET",
-            headers: {
-                Accept: "application/json",
-                credentials: "include",
-            },
-        }),
-
     // Get historical messages for a room
     getMessages: (
         agentId: string,
@@ -622,229 +187,6 @@ export const apiClient = {
             method: "GET",
         });
     },
-    getSubscriptionStatus: (email?: string): Promise<{
-        success: boolean;
-        email: string;
-        planName: "Plus" | "Pro" | "Enterprise" | null;
-        // Canonical tier field for all user classification logic.
-        resolvedTier: "free" | "plus" | "pro" | "enterprise";
-        primarySubscriptionId: string | null;
-        primarySubscriptionNickname: string | null;
-        primarySubscription: {
-            id: string;
-            status: string;
-            cancelAtPeriodEnd: boolean;
-            currentPeriodStart: number | null;
-            currentPeriodEnd: number | null;
-            items: Array<{
-                id: string;
-                priceId: string | null;
-                productId: string | null;
-                nickname: string | null;
-                currency: string | null;
-                unitAmount: number | null;
-                interval: string | null;
-                intervalCount: number | null;
-            }>;
-            latestInvoiceId: string | null;
-        } | null;
-        customers: Array<{
-            customerId: string;
-            customerEmail: string | null;
-            subscriptions: Array<{
-                id: string;
-                status: string;
-                cancelAtPeriodEnd: boolean;
-                currentPeriodStart: number | null;
-                currentPeriodEnd: number | null;
-                items: Array<{
-                    id: string;
-                    priceId: string | null;
-                    productId: string | null;
-                    nickname: string | null;
-                    currency: string | null;
-                    unitAmount: number | null;
-                    interval: string | null;
-                    intervalCount: number | null;
-                }>;
-                latestInvoiceId: string | null;
-            }>;
-        }>;
-    }> =>
-        fetcher({
-            url:
-                email && email.trim().length > 0
-                    ? `/billing/subscription?email=${encodeURIComponent(email.trim())}`
-                    : "/billing/subscription",
-            method: "GET",
-        }),
-    clearAnonymousHistory: (options?: { force?: boolean }): Promise<{ success: boolean; cleaned: boolean }> =>
-        fetcher({
-            url: "/anonymous/cleanup",
-            method: "POST",
-            body: options ?? {},
-        }),
-    submitFeedback: (feedback: string): Promise<{ success: boolean; message: string }> =>
-        fetcher({
-            url: "/feedback",
-            method: "POST",
-            body: { feedback },
-        }),
-    submitChainApproval: (
-        agentId: string,
-        threadId: string,
-        decision: 'approved' | 'rejected',
-        taskChain: unknown,
-        feedback?: string
-    ): Promise<{ success: boolean; message: string; chainId: string; chainName: string }> =>
-        fetcher({
-            url: `/agents/${agentId}/task-chain/approval`,
-            method: "POST",
-            body: { threadId, decision, feedback, taskChain },
-        }),
-    getQuotaStatus: (agentId: string): Promise<{
-        success: boolean;
-        isUnlimited: boolean;
-        isFreeUser: boolean;
-        isLimitedUser?: boolean;
-        quotaTier?: "free" | "plus" | "unlimited";
-        quotaStatus?: {
-            inputTokens: number;
-            outputTokens: number;
-            totalTokens: number;
-            inputLimit: number;
-            outputLimit: number;
-            inputPercentage: number;
-            outputPercentage: number;
-            isQuotaExceeded: boolean;
-            warningLevel: "none" | "warning" | "critical" | "exceeded";
-            percentageTier: number;
-            resetDate: string;
-            daysUntilReset: number;
-        };
-        error?: string;
-    }> => fetcher({ url: `/${agentId}/quota/status`, method: "GET" }),
-    // Exchange registry (list of supported CEX exchanges).
-    getExchanges: () =>
-        fetcher({
-            url: `/trading/exchanges`,
-            method: "GET",
-        }) as Promise<{
-            success: boolean;
-            exchanges: Array<{
-                id: string;
-                name: string;
-                defaultAuthType: string | null;
-                authTypes: Array<{
-                    type: string;
-                    fields: Array<{
-                        id: string;
-                        label: string;
-                        type: "string" | "secret";
-                        required: boolean;
-                        description?: string;
-                        placeholder?: string;
-                    }>;
-                }>;
-            }>;
-        }>,
-    // Exchange credential storage (user-specific auths). Matches client-direct API:
-    // GET with no authType returns full exchangeAuths for that exchange (all auth types).
-    // GET with authType returns single auth type's fieldPresent/fieldPreview/updatedAt.
-    getExchangeAuths: (exchangeId: string, authType?: string) =>
-        fetcher({
-            url: `/user/exchange-auths/${encodeURIComponent(exchangeId)}${authType != null && authType !== "" ? `?authType=${encodeURIComponent(authType)}` : ""}`,
-            method: "GET",
-        }) as Promise<
-            | {
-                  success: boolean;
-                  exchangeId: string;
-                  isDefault?: boolean;
-                  exchangeAuths: Record<
-                      string,
-                      {
-                          fieldPresent: Record<string, boolean>;
-                          fieldPreview: Record<string, string | null>;
-                          updatedAt: number | null;
-                      }
-                  >;
-              }
-            | {
-                  success: boolean;
-                  exchangeId: string;
-                  fieldPresent: Record<string, boolean>;
-                  fieldPreview: Record<string, string | null>;
-                  updatedAt: number | null;
-                  isDefault?: boolean;
-              }
-        >,
-    // PUT body: exchangeAuths array; each entry must have authType and field id -> value.
-    // If server returns "No valid fields provided" (legacy server expecting flat body), retry with flat body for single entry.
-    setExchangeAuths: async (
-        exchangeId: string,
-        exchangeAuths: Array<{ authType: string; [fieldId: string]: string | undefined }>
-    ): Promise<{ success: boolean }> => {
-        try {
-            return await fetcher({
-                url: `/user/exchange-auths/${encodeURIComponent(exchangeId)}`,
-                method: "PUT",
-                body: { exchangeAuths },
-            }) as Promise<{ success: boolean }>;
-        } catch (firstErr) {
-            const msg = (firstErr as Error)?.message ?? "";
-            const isLegacyError = typeof msg === "string" && msg.includes("No valid fields provided");
-            if (isLegacyError && exchangeAuths.length === 1) {
-                const entry = exchangeAuths[0];
-                const flatBody: Record<string, string> = { authType: entry.authType };
-                for (const [k, v] of Object.entries(entry)) {
-                    if (k !== "authType" && typeof v === "string" && v.trim() !== "") flatBody[k] = v;
-                }
-                return await fetcher({
-                    url: `/user/exchange-auths/${encodeURIComponent(exchangeId)}`,
-                    method: "PUT",
-                    body: flatBody,
-                }) as Promise<{ success: boolean }>;
-            }
-            throw firstErr;
-        }
-    },
-    // Optional authType: delete only that auth type for the exchange; else delete entire exchange auth.
-    deleteExchangeAuths: (exchangeId: string, authType?: string) =>
-        fetcher({
-            url: `/user/exchange-auths/${encodeURIComponent(exchangeId)}${authType != null && authType !== "" ? `?authType=${encodeURIComponent(authType)}` : ""}`,
-            method: "DELETE",
-            body: {},
-        }) as Promise<{ success: boolean }>,
-    setDefaultExchange: (exchangeId: string) =>
-        fetcher({
-            url: `/user/exchange-auths/${encodeURIComponent(exchangeId)}/default`,
-            method: "PUT",
-            body: {},
-        }) as Promise<{ success: boolean }>,
-    getTradingEnabled: () =>
-        fetcher({
-            url: "/user/trading/enabled",
-            method: "GET",
-        }) as Promise<{ success: boolean; enabled: boolean }>,
-    setTradingEnabled: (enableTrading: boolean) =>
-        fetcher({
-            url: "/user/trading/enabled",
-            method: "PUT",
-            body: { enableTrading },
-        }) as Promise<{ success: boolean; enabled: boolean }>,
-    submitCEXWorkflowApproval: (
-        agentId: string,
-        threadId: string,
-        decision: 'approved' | 'rejected',
-        confirmationLevel: 1 | 2,
-        parameters?: Record<string, unknown>,
-        approvalId?: string
-    ): Promise<{ success: boolean }> =>
-        fetcher({
-            url: `/agents/${agentId}/cex-workflow/approval`,
-            method: "POST",
-            body: { threadId, approvalId, decision, confirmationLevel, parameters },
-        }),
     submitHumanInputApproval: (
         agentId: string,
         threadId: string,
@@ -959,26 +301,6 @@ export const apiClient = {
             url: `/user/consent`,
             method: "POST",
             body: { consent_type: consentType, version, accepted: true },
-        }),
-
-    // §7.9 — notifications.
-    listNotifications: (params?: {
-        limit?: number;
-        unreadOnly?: boolean;
-    }): Promise<{
-        success: boolean;
-        notifications: Array<Record<string, unknown>>;
-    }> => {
-        const qs = new URLSearchParams();
-        if (params?.limit) qs.set("limit", String(params.limit));
-        if (params?.unreadOnly) qs.set("unreadOnly", "true");
-        const q = qs.toString();
-        return fetcher({ url: `/user/notifications${q ? `?${q}` : ""}` });
-    },
-    markNotificationRead: (id: string): Promise<{ success: boolean }> =>
-        fetcher({
-            url: `/user/notifications/${id}/read`,
-            method: "POST",
         }),
 
     /**
@@ -1164,34 +486,6 @@ export const apiClient = {
         }
     },
 
-    /**
-     * CEX exchange registry listing — returns all registered exchanges.
-     * Alias for `getExchanges` under the CEX-prefixed naming convention
-     * used by the trading components.
-     */
-    getCexExchanges: () =>
-        fetcher({
-            url: `/trading/exchanges`,
-            method: "GET",
-        }) as Promise<{
-            success: boolean;
-            exchanges: Array<{
-                id: string;
-                name: string;
-                defaultAuthType: string | null;
-                authTypes: Array<{
-                    type: string;
-                    fields: Array<{
-                        id: string;
-                        label: string;
-                        type: "string" | "secret";
-                        required: boolean;
-                        description?: string;
-                        placeholder?: string;
-                    }>;
-                }>;
-            }>;
-        }>,
 };
 
 /** True when the browser/proxy tore down a fetch in a way typical of user abort or HTTP/2 reset. */
@@ -1375,7 +669,6 @@ export class StreamingApiClient {
          * paint a ghost bubble that grows as the model streams.
          */
         onStreamingUpdate?: (params: { key: string; text: string }) => void,
-        favoriteTaskChain?: FavoriteTaskChainPayload,
         selectedFiles?: File[],
         messageClassification?: "TASK_CHAIN_MESSAGE",
         language?: string,
@@ -1387,17 +680,9 @@ export class StreamingApiClient {
         composed?: { action: string; parameters: Record<string, unknown> },
         retryCount = 0,
     ) {
-        // Create unique key for request deduplication (userId determined server-side from auth/IP)
-        const favoriteKeySegment = favoriteTaskChain
-            ? String(
-                  favoriteTaskChain.favoriteId
-                      ?? favoriteTaskChain.id
-                      ?? favoriteTaskChain.name
-                      ?? ""
-              ).substring(0, 50)
-            : "";
+        // Create a unique key for request deduplication.
         const classificationKeySegment = messageClassification ?? "";
-        const requestKey = `${agentId}-${roomId}-${message.substring(0, 50)}-${favoriteKeySegment}-${classificationKeySegment}`;
+        const requestKey = `${agentId}-${roomId}-${message.substring(0, 50)}-${classificationKeySegment}`;
         
         // Cancel any existing request with the same key
         if (this.activeStreams.has(requestKey)) {
@@ -1426,11 +711,11 @@ export class StreamingApiClient {
         
         // financial-agent's POST /api/chat takes a plain JSON { message, sessionId }.
         // The room id doubles as the session id (the backend reuses it and echoes
-        // it back via X-Session-Id). File uploads / favorite chains / composed
+        // it back via X-Session-Id). File uploads / composed
         // trade payloads aren't supported by this backend, so they are ignored
         // here (the params remain in the signature for call-site compatibility
         // and are still threaded through the retry path below).
-        void favoriteTaskChain; void selectedFiles; void messageClassification;
+        void selectedFiles; void messageClassification;
         void language; void composed;
         const body: string = JSON.stringify({ message, sessionId: roomId });
         const headers: HeadersInit = { "Content-Type": "application/json", "X-Agent-Id": agentId };
@@ -1744,7 +1029,6 @@ export class StreamingApiClient {
                         onError,
                         onComplete,
                         onStreamingUpdate,
-                        favoriteTaskChain,
                         selectedFiles,
                         messageClassification,
                         language,

@@ -48,16 +48,16 @@ export default function AgentRoute() {
                 console.error("Failed to create room:", result);
                 toast({
                     variant: "destructive",
-                    title: t("home.createRoomFailedTitle"),
-                    description: t("home.createRoomFailedDescription"),
+                    title: t("chat.createRoomFailedTitle"),
+                    description: t("chat.createRoomFailedDescription"),
                 });
             }
         } catch (error) {
             console.error("Failed to create room:", error);
             toast({
                 variant: "destructive",
-                title: t("home.createRoomFailedTitle"),
-                description: error instanceof Error ? error.message : t("home.unexpectedError"),
+                title: t("chat.createRoomFailedTitle"),
+                description: error instanceof Error ? error.message : t("common.unexpectedError"),
             });
         } finally {
             setIsCreatingRoom(false);

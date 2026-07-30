@@ -2,11 +2,20 @@ import type { PriceStrategyDSL, StrategyPhase } from "@/types/core";
 
 function phaseTrigger(phase: StrategyPhase): string {
     const t = phase.price_trigger;
-    return t.type === "rolling_change"
-        ? `${t.direction === "down" ? "drops" : "rises"} ${t.pct}% within ${t.window_minutes}m`
-        : t.type === "absolute_threshold"
-            ? `price ${t.direction === "down" ? "<" : ">"} ${t.price}`
-            : `trailing ${t.direction === "down" ? "stop" : "rebound"} ${t.pct}%`;
+    switch (t.type) {
+        case "rolling_change":
+            return `${t.direction === "down" ? "drops" : "rises"} ${t.pct}% within ${t.window_minutes}m`;
+        case "absolute_threshold":
+            return `price ${t.direction === "down" ? "<" : ">"} ${t.price}`;
+        case "trailing_stop":
+            return `trailing ${t.direction === "down" ? "stop" : "rebound"} ${t.pct}%`;
+        case "rsi_threshold":
+            return `${t.timeframe} RSI(${t.period}) ${t.direction === "below" ? "<" : ">"} ${t.threshold}`;
+        case "macd_cross":
+            return `${t.timeframe} MACD(${t.fast_period},${t.slow_period},${t.signal_period}) ${t.direction} cross`;
+        case "moving_average_cross":
+            return `${t.timeframe} ${t.average_type?.toUpperCase()}(${t.fast_period},${t.slow_period}) ${t.direction} cross`;
+    }
 }
 
 function phaseSize(phase: StrategyPhase): string {

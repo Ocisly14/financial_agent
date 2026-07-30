@@ -2,7 +2,6 @@ import { useQuery } from "@tanstack/react-query";
 import {
     Sidebar,
     SidebarContent,
-    SidebarFooter,
     SidebarGroup,
     SidebarGroupContent,
     SidebarGroupLabel,
@@ -17,18 +16,14 @@ import {
 import { apiClient } from "@/lib/api";
 import { NavLink, useNavigate } from "react-router";
 import type { UUID } from "@/types/core";
-import { useSubscriptionTier } from "@/hooks/useSubscriptionTier";
-import { BarChart3, PanelLeft } from "lucide-react";
-import { useAuth } from "@/contexts/AuthContext";
+import { PanelLeft } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { RoomSelector } from "./room-selector";
 
 export function AppSidebar() {
     const navigate = useNavigate();
-    const { tier } = useSubscriptionTier();
     const { isMobile, setOpenMobile } = useSidebar();
-    const { isAdmin } = useAuth();
     const { t } = useTranslation();
     const query = useQuery({
         queryKey: ["agents"],
@@ -41,16 +36,8 @@ export function AppSidebar() {
     });
 
     const agents = query?.data?.agents;
-    // Get gradient class based on tier
-    const getGradientClass = () => {
-        if (tier === 'pro') return 'pro-gradient-border';
-        if (tier === 'plus') return 'plus-gradient-border';
-        if (tier === 'enterprise') return 'enterprise-gradient-border';
-        return '';
-    };
-
     return (
-        <Sidebar collapsible="icon" className={getGradientClass()}>
+        <Sidebar collapsible="icon">
             <SidebarHeader className="pb-4">
                 <div className="flex items-center gap-2 group-data-[collapsible=icon]:justify-center">
                     <SidebarMenu className="flex-1 group-data-[collapsible=icon]:flex-none">
@@ -79,20 +66,6 @@ export function AppSidebar() {
                                             <span className="font-semibold text-lg">
                                                 Financial Agent
                                             </span>
-                                            {tier && tier !== 'free' && (
-                                                <span
-                                                    className="px-2 py-0.5 text-xs font-semibold rounded-full text-white"
-                                                    style={{
-                                                        background: tier === 'pro'
-                                                            ? 'linear-gradient(135deg, #ff9db0 0%, #d89fd8 50%, #a8c5e8 100%)'
-                                                            : tier === 'plus'
-                                                            ? 'linear-gradient(135deg, #10b981 0%, #14b8a6 50%, #06b6d4 100%)'
-                                                            : 'linear-gradient(135deg, #3b82f6 0%, #6366f1 50%, #8b5cf6 100%)'
-                                                    }}
-                                                >
-                                                    {tier.toUpperCase()}
-                                                </span>
-                                            )}
                                         </div>
                                         <span className="text-sm text-muted-foreground">
                                             v3.0.0
@@ -145,28 +118,6 @@ export function AppSidebar() {
                     </SidebarGroupContent>
                 </SidebarGroup>
             </SidebarContent>
-            <SidebarFooter>
-                <SidebarMenu>
-                    {isAdmin && (
-                        <SidebarMenuItem>
-                            <SidebarMenuButton asChild>
-                                <NavLink
-                                    to="/admin/analytics"
-                                    className="flex items-center gap-2"
-                                    onClick={() => {
-                                        if (isMobile) {
-                                            setOpenMobile(false);
-                                        }
-                                    }}
-                                >
-                                    <BarChart3 className="h-4 w-4" />
-                                    <span>{t("common.adminAnalytics")}</span>
-                                </NavLink>
-                            </SidebarMenuButton>
-                        </SidebarMenuItem>
-                    )}
-                </SidebarMenu>
-            </SidebarFooter>
         </Sidebar>
     );
 }

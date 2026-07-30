@@ -1,9 +1,14 @@
 import { listStrategies, saveStrategy, type StoredStrategy } from "./persistence/strategyStore.ts";
-import { evaluatePriceTrigger } from "../../mcp_tools/trading/strategy/priceTrigger.ts";
+import {
+  evaluatePriceTrigger,
+  isTechnicalTrigger,
+  technicalTriggerHistoryBars,
+} from "../../mcp_tools/trading/strategy/priceTrigger.ts";
 import type { StrategyPhase } from "../../mcp_tools/trading/strategy/priceStrategy.ts";
 import { backfill, pollPrice, windowSamples, isArmed } from "./priceHistory.ts";
 import { executeTrigger } from "./strategyExecutor.ts";
 import { stepConfirmation } from "./confirmation.ts";
+import { fetchStockTechnicalStrategySamples } from "./stockStrategyMarketData.ts";
 
 /**
  * Deterministic background loop: every interval it polls prices for the symbols
@@ -114,11 +119,31 @@ async function evaluatePhase(strategy: StoredStrategy, phase: StrategyPhase, pri
     }
   }
 
-  const samples = windowSamples(strategy.symbol, trigger.window_minutes ?? 0, nowMs);
+  let samples;
+  if (isTechnicalTrigger(trigger)) {
+    try {
+      samples = await fetchStockTechnicalStrategySamples(
+        strategy.symbol,
+        trigger,
+        technicalTriggerHistoryBars(trigger),
+        price,
+      );
+    } catch (err) {
+      console.warn(`[strategyMonitor] technical data failed for ${strategy.symbol}/${trigger.type}:`, err);
+      return;
+    }
+  } else {
+    const windowMinutes = trigger.type === "rolling_change" ? trigger.window_minutes : 0;
+    samples = windowSamples(strategy.symbol, windowMinutes, nowMs);
+  }
   const result = evaluatePriceTrigger(trigger, samples, price);
 
   // Persist a raised trailing-stop anchor immediately (so a restart never gives back gains).
-  if (result.nextReferencePrice !== undefined && result.nextReferencePrice !== trigger.reference_price) {
+  if (
+    trigger.type === "trailing_stop" &&
+    result.nextReferencePrice !== undefined &&
+    result.nextReferencePrice !== trigger.reference_price
+  ) {
     trigger.reference_price = result.nextReferencePrice;
     await saveStrategy(strategy);
   }
@@ -131,11 +156,17 @@ async function evaluatePhase(strategy: StoredStrategy, phase: StrategyPhase, pri
   );
   confirmCounts.set(phaseKey, stepped.state.count);
   if (stepped.fired) {
-    await fire(strategy, phase, price, now);
+    await fire(strategy, phase, price, now, result.observed);
   }
 }
 
-async function fire(strategy: StoredStrategy, phase: StrategyPhase, price: number, now: Date): Promise<void> {
+async function fire(
+  strategy: StoredStrategy,
+  phase: StrategyPhase,
+  price: number,
+  now: Date,
+  observed?: Record<string, number | string>,
+): Promise<void> {
   const phaseKey = `${strategy.id}:${phase.id}`;
   confirmCounts.set(phaseKey, 0);
   const recurrence = phase.recurrence;
@@ -147,7 +178,7 @@ async function fire(strategy: StoredStrategy, phase: StrategyPhase, price: numbe
   strategy.running = { execution_id: `exec-${strategy.id}-${phase.id}-${triggerCount}`, phase_id: phase.id, started_at: now.toISOString() };
   await saveStrategy(strategy);
 
-  const outcome = await executeTrigger(strategy, phase, price, now);
+  const outcome = await executeTrigger(strategy, phase, price, now, observed);
   delete strategy.running;
 
   if (outcome.placed) {
@@ -155,7 +186,9 @@ async function fire(strategy: StoredStrategy, phase: StrategyPhase, price: numbe
     if (recurrence && recurrence.mode === "recurring") {
       const newCount = triggerCount + 1;
       recurrence.trigger_count = newCount;
-      if (recurrence.reanchor) delete phase.price_trigger.reference_price;
+      if (recurrence.reanchor && phase.price_trigger.type === "trailing_stop") {
+        delete phase.price_trigger.reference_price;
+      }
       const reachedMax = recurrence.max_triggers !== undefined && newCount >= recurrence.max_triggers;
       phase.status = reachedMax ? "completed" : "active";
     } else {

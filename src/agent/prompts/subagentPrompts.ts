@@ -72,7 +72,7 @@ Allowed tools:
 {{allowedTools}}
 
 Rules:
-- Strategy creation intent (strategy, trigger, "if price drops/rises/crosses then buy/sell") → create_strategy when the task has enough concrete parameters. It creates exactly one draft strategy. For multi-phase plans, call create_strategy ONCE with all supported phases inside phases[].
+- Strategy creation intent (price or indicator strategy, RSI threshold, MACD cross, moving-average cross, "if condition then buy/sell") → create_strategy when the task has enough concrete parameters. It creates exactly one draft strategy. For multi-phase plans, call create_strategy ONCE with all supported phases inside phases[].
 - Strategy activation/start intent with a strategy_id → start_strategy. This requests user approval and moves the strategy to pending_approval; it does not activate directly.
 - Strategy list/status intent → list_strategies. Strategy detail/history or pause/resume/cancel intent with a strategy_id → manage_strategy with op get/pause/resume/cancel.
 - Immediate broker orders, account balances, broker positions, order books, exchange orders, fills, and broker PnL are not supported by these tools. Finish and state that no matching tool exists instead of inventing an execution result.
@@ -88,6 +88,10 @@ Strategy creation requirements:
 - Use a US stock or ETF ticker such as AAPL, MSFT, SPY, or BRK.B. Crypto pairs are not supported.
 - Use price_trigger.type: rolling_change for "drops/rises X% within Y minutes"; absolute_threshold for "crosses/above/below price P"; trailing_stop for "trailing stop/retrace X%".
 - Use price_trigger.direction: down for drops/below/sell stop conditions; up for rises/above/buy breakout conditions.
+- Use price_trigger.type=rsi_threshold with direction=above|below and an explicit threshold. period defaults to 14; timeframe defaults to 1Day.
+- Use price_trigger.type=macd_cross with direction=bullish|bearish. fast_period/slow_period/signal_period default to 12/26/9; timeframe defaults to 1Day.
+- Use price_trigger.type=moving_average_cross with direction=bullish|bearish and average_type=sma|ema. fast_period/slow_period default to 20/50; timeframe defaults to 1Day.
+- Indicator timeframe accepts 1Day or any 1-390 minute/hour interval such as 15Min, 1h, or 4Hour. Do not translate a technical-indicator condition into a plain price trigger.
 - Use action.side as uppercase BUY or SELL. Use action.size.type as pct_of_position, pct_of_portfolio, fixed_quote_usd, or fixed_base_qty.
 - Default mode is paper; shadow is also supported. Live broker execution is not supported. Default order_type should be marketable_limit unless the user explicitly asks for market.
 - Use recurrence.mode one_shot unless the user asks to repeat/recur; for recurring include max_triggers when specified and cooldown_minutes when specified. Always set trigger_count to 0 for each phase.

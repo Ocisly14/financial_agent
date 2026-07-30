@@ -30,7 +30,7 @@ export function createCreateStrategyTool(): RegisteredTool {
     name: "create_strategy",
     description:
       "Create ONE price-driven US stock or ETF strategy as a DRAFT (does not run yet). " +
-      "Use this for a future price condition — a percentage move within a window, crossing a price level, or a trailing stop — whether a single conditional phase or a multi-phase plan. This tool does not place immediate broker orders. " +
+      "Use this for a future price or technical-indicator condition — a percentage move, price level, trailing stop, RSI threshold, MACD cross, or SMA/EMA cross — whether a single conditional phase or a multi-phase plan. This tool does not place immediate broker orders. " +
       "Put EVERY leg in the single phases[] array; never call this tool more than once for one plan. Use the exact field names, types and enums from the args schema below — do not rename or invent fields. " +
       "Do not invent values the user did not give: if a required field is missing (for example a rolling-change window_minutes, threshold, or action size), name the missing field instead of calling this tool. Time-based DCA is not supported. Strategies support paper and shadow evaluation only; live broker execution is unavailable. Then call start_strategy to request activation.",
     category: "trading",
@@ -55,12 +55,23 @@ export function createCreateStrategyTool(): RegisteredTool {
                 type: "object",
                 required: ["type", "direction"],
                 properties: {
-                  type: { type: "string", enum: ["rolling_change", "absolute_threshold", "trailing_stop"] },
-                  direction: { type: "string", enum: ["up", "down"] },
+                  type: { type: "string", enum: ["rolling_change", "absolute_threshold", "trailing_stop", "rsi_threshold", "macd_cross", "moving_average_cross"] },
+                  direction: {
+                    type: "string",
+                    enum: ["up", "down", "above", "below", "bullish", "bearish"],
+                    description: "up/down for price triggers; above/below for RSI; bullish/bearish for MACD or moving-average crosses",
+                  },
                   pct: { type: "number", description: "required for rolling_change & trailing_stop" },
                   window_minutes: { type: "integer", description: "required for rolling_change" },
                   price: { type: "number", description: "required for absolute_threshold" },
                   reference_price: { type: "number", description: "optional anchor for trailing_stop" },
+                  threshold: { type: "number", description: "required RSI threshold from 0 to 100" },
+                  period: { type: "integer", description: "RSI period; defaults to 14" },
+                  fast_period: { type: "integer", description: "fast MACD or moving-average period; defaults to 12 for MACD and 20 for moving averages" },
+                  slow_period: { type: "integer", description: "slow MACD or moving-average period; defaults to 26 for MACD and 50 for moving averages" },
+                  signal_period: { type: "integer", description: "MACD signal period; defaults to 9" },
+                  average_type: { type: "string", enum: ["sma", "ema"], description: "moving-average type; defaults to sma" },
+                  timeframe: { type: "string", description: "1Day or any 1-390 minute/hour interval such as 15Min, 1h, or 4Hour; defaults to 1Day" },
                   confirm_samples: { type: "integer", description: "default 2" },
                 },
               },

@@ -91,23 +91,6 @@ export function RoomSelector({ agentId, agentName, isFirstAgent = false }: RoomS
         queryClient.invalidateQueries({ queryKey: ["rooms", agentId] });
     }, [agentId, queryClient]);
 
-    useEffect(() => {
-        const refresh = () => {
-            queryClient.removeQueries({ queryKey: ["messages"] });
-            queryClient.invalidateQueries({ queryKey: ["rooms", agentId] });
-        };
-
-        if (typeof window !== "undefined") {
-            window.addEventListener("financial-agent:auth-changed", refresh);
-        }
-
-        return () => {
-            if (typeof window !== "undefined") {
-                window.removeEventListener("financial-agent:auth-changed", refresh);
-            }
-        };
-    }, [agentId, queryClient]);
-
     // Fetch rooms for this agent
     const { data: roomsData, isLoading } = useQuery({
         queryKey: ["rooms", agentId],
@@ -191,7 +174,7 @@ export function RoomSelector({ agentId, agentName, isFirstAgent = false }: RoomS
             toast({
                 variant: "destructive",
                 title: t("rooms.createFailedTitle"),
-                description: error instanceof Error ? error.message : t("home.unexpectedError"),
+                description: error instanceof Error ? error.message : t("common.unexpectedError"),
             });
             setIsCreateDialogOpen(false);
         }
@@ -221,7 +204,7 @@ export function RoomSelector({ agentId, agentName, isFirstAgent = false }: RoomS
             toast({
                 variant: "destructive",
                 title: t("rooms.deleteFailedTitle"),
-                description: error instanceof Error ? error.message : t("home.unexpectedError"),
+                description: error instanceof Error ? error.message : t("common.unexpectedError"),
             });
         }
     };
@@ -287,7 +270,7 @@ export function RoomSelector({ agentId, agentName, isFirstAgent = false }: RoomS
             toast({
                 variant: "destructive",
                 title: t("rooms.deleteManyFailedTitle"),
-                description: error instanceof Error ? error.message : t("home.unexpectedError"),
+                description: error instanceof Error ? error.message : t("common.unexpectedError"),
             });
             setIsDeleteDialogOpen(false);
         }
@@ -333,7 +316,7 @@ export function RoomSelector({ agentId, agentName, isFirstAgent = false }: RoomS
             toast({
                 variant: "destructive",
                 title: t("rooms.renameFailedTitle"),
-                description: error instanceof Error ? error.message : t("home.unexpectedError"),
+                description: error instanceof Error ? error.message : t("common.unexpectedError"),
             });
         }
     };

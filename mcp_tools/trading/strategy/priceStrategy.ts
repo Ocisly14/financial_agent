@@ -83,7 +83,8 @@ function normalizeTrigger(raw: unknown): Record<string, unknown> {
   let direction = str(src["direction"]).toLowerCase();
   const pct = firstNum(src, ["pct", "percentage", "percent", "change_percent", "percentage_change", "retrace_pct", "drawdown_pct", "change"]);
   const win = firstNum(src, ["window_minutes", "window", "minutes", "window_min", "time_window_minutes"]);
-  const price = firstNum(src, ["price", "level", "threshold", "target_price", "price_level"]);
+  const price = firstNum(src, ["price", "level", "target_price", "price_level"]);
+  const threshold = firstNum(src, ["threshold", "rsi_threshold", "level"]);
   if (pct !== undefined) {
     out["pct"] = Math.abs(pct);
     if (!direction && pct < 0) direction = "down";
@@ -91,7 +92,23 @@ function normalizeTrigger(raw: unknown): Record<string, unknown> {
   }
   if (win !== undefined) out["window_minutes"] = win;
   if (price !== undefined) out["price"] = price;
-  if (direction === "up" || direction === "down") out["direction"] = direction;
+  if (threshold !== undefined) {
+    if (type === "absolute_threshold" && price === undefined) out["price"] = threshold;
+    else out["threshold"] = threshold;
+  }
+  if (["up", "down", "above", "below", "bullish", "bearish"].includes(direction)) out["direction"] = direction;
+  const timeframe = str(src["timeframe"] || src["time_frame"] || src["interval"]);
+  if (timeframe) out["timeframe"] = timeframe;
+  const period = firstNum(src, ["period", "rsi_period"]);
+  const fastPeriod = firstNum(src, ["fast_period", "fast"]);
+  const slowPeriod = firstNum(src, ["slow_period", "slow"]);
+  const signalPeriod = firstNum(src, ["signal_period", "signal"]);
+  if (period !== undefined) out["period"] = period;
+  if (fastPeriod !== undefined) out["fast_period"] = fastPeriod;
+  if (slowPeriod !== undefined) out["slow_period"] = slowPeriod;
+  if (signalPeriod !== undefined) out["signal_period"] = signalPeriod;
+  const averageType = str(src["average_type"] || src["ma_type"]).toLowerCase();
+  if (averageType) out["average_type"] = averageType;
   const cs = firstNum(src, ["confirm_samples", "confirmations", "confirm"]);
   out["confirm_samples"] = cs ?? 2;
   return out;
@@ -179,11 +196,20 @@ export function normalizePriceStrategyInput(input: Record<string, unknown>): Rec
 }
 
 function summarizeTrigger(t: StrategyPhase["price_trigger"]): string {
-  return t.type === "rolling_change"
-    ? `${t.direction === "down" ? "drops" : "rises"} ${t.pct}% within ${t.window_minutes}m`
-    : t.type === "absolute_threshold"
-      ? `price ${t.direction === "down" ? "<" : ">"} ${t.price}`
-      : `trailing ${t.direction === "down" ? "stop" : "rebound"} ${t.pct}%`;
+  switch (t.type) {
+    case "rolling_change":
+      return `${t.direction === "down" ? "drops" : "rises"} ${t.pct}% within ${t.window_minutes}m`;
+    case "absolute_threshold":
+      return `price ${t.direction === "down" ? "<" : ">"} ${t.price}`;
+    case "trailing_stop":
+      return `trailing ${t.direction === "down" ? "stop" : "rebound"} ${t.pct}%`;
+    case "rsi_threshold":
+      return `${t.timeframe} RSI(${t.period}) ${t.direction === "below" ? "<" : ">"} ${t.threshold}`;
+    case "macd_cross":
+      return `${t.timeframe} MACD(${t.fast_period},${t.slow_period},${t.signal_period}) ${t.direction} cross`;
+    case "moving_average_cross":
+      return `${t.timeframe} ${t.average_type.toUpperCase()}(${t.fast_period},${t.slow_period}) ${t.direction} cross`;
+  }
 }
 
 function summarizeSize(phase: StrategyPhase, symbol: string): string {

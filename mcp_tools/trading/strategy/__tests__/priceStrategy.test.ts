@@ -32,3 +32,25 @@ test("stock strategy rejects crypto pair symbols", () => {
 test("live requests are rejected because no stock broker adapter exists", () => {
   assert.equal(tryParsePriceStrategy(candidate("MSFT", "live")).ok, false);
 });
+
+test("normalizes an RSI strategy phase with indicator parameters", () => {
+  const input = candidate("NVDA");
+  const phase = (input["phases"] as Record<string, unknown>[])[0]!;
+  phase["price_trigger"] = {
+    type: "rsi_threshold",
+    direction: "below",
+    threshold: 28,
+    period: 10,
+    timeframe: "30Min",
+  };
+  const parsed = tryParsePriceStrategy(input);
+  assert.equal(parsed.ok, true);
+  if (parsed.ok) {
+    const trigger = parsed.value.phases[0]!.price_trigger;
+    assert.equal(trigger.type, "rsi_threshold");
+    if (trigger.type === "rsi_threshold") {
+      assert.equal(trigger.threshold, 28);
+      assert.equal(trigger.timeframe, "30Min");
+    }
+  }
+});

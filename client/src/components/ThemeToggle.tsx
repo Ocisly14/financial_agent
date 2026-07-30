@@ -2,8 +2,7 @@ import { Sun, Moon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useTheme } from "@/contexts/ThemeContext";
 
-/** MVP: a minimal floating theme toggle (account/settings/sharing removed). */
-export function UserButton() {
+export function ThemeToggle() {
   const { theme, setTheme } = useTheme();
   const isDark = theme === "dark";
 

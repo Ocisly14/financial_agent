@@ -51,12 +51,25 @@ export type StrategyLifecycle =
   | "failed";
 
 export interface PriceTrigger {
-  type: "rolling_change" | "absolute_threshold" | "trailing_stop";
-  direction: "up" | "down";
+  type:
+    | "rolling_change"
+    | "absolute_threshold"
+    | "trailing_stop"
+    | "rsi_threshold"
+    | "macd_cross"
+    | "moving_average_cross";
+  direction: "up" | "down" | "above" | "below" | "bullish" | "bearish";
   pct?: number;
   window_minutes?: number;
   price?: number;
   reference_price?: number;
+  threshold?: number;
+  period?: number;
+  fast_period?: number;
+  slow_period?: number;
+  signal_period?: number;
+  average_type?: "sma" | "ema";
+  timeframe?: string;
   confirm_samples?: number;
   [k: string]: any;
 }

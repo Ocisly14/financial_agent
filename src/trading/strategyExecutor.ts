@@ -58,6 +58,7 @@ export async function executeTrigger(
   phase: StrategyPhase,
   currentPrice: number,
   now: Date,
+  triggerObserved?: Record<string, number | string>,
 ): Promise<ExecutionOutcome> {
   const executionId = `exec-${randomUUID()}`;
   const context = await portfolioContext(strategy.symbol, currentPrice);
@@ -119,7 +120,13 @@ export async function executeTrigger(
     phase_id: phase.id,
     phase_name: phase.name,
     execution_id: executionId,
-    trigger_snapshot: { price: currentPrice, symbol: strategy.symbol, quantity: sized.qty },
+    trigger_snapshot: {
+      price: currentPrice,
+      symbol: strategy.symbol,
+      trigger_type: phase.price_trigger.type,
+      quantity: sized.qty,
+      ...(triggerObserved ?? {}),
+    },
     order_result: {
       mode: strategy.dsl.mode,
       simulated: true,

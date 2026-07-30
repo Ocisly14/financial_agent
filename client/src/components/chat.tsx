@@ -306,7 +306,6 @@ export default function Chat({ agentId, roomId }: ChatProps) {
                         setStreamingText("");
                     },
                     ({ text: streamed }) => setStreamingText(streamed),
-                    undefined, // favoriteTaskChain
                     undefined, // selectedFiles
                     undefined, // messageClassification
                     undefined, // language

@@ -10,11 +10,20 @@ import "./strategy-dashboard.css";
 
 /** One-line trigger summary for a collapsed phase row. */
 function phaseTriggerText(t: StrategyPhase["price_trigger"]): string {
-    if (t.type === "rolling_change")
-        return `${t.direction === "down" ? "drops" : "rises"} ${t.pct}% / ${t.window_minutes}m`;
-    if (t.type === "absolute_threshold")
-        return `price ${t.direction === "down" ? "≤" : "≥"} ${t.price}`;
-    return `trailing ${t.direction === "down" ? "stop" : "rebound"} ${t.pct}%`;
+    switch (t.type) {
+        case "rolling_change":
+            return `${t.direction === "down" ? "drops" : "rises"} ${t.pct}% / ${t.window_minutes}m`;
+        case "absolute_threshold":
+            return `price ${t.direction === "down" ? "≤" : "≥"} ${t.price}`;
+        case "trailing_stop":
+            return `trailing ${t.direction === "down" ? "stop" : "rebound"} ${t.pct}%`;
+        case "rsi_threshold":
+            return `${t.timeframe} RSI(${t.period}) ${t.direction === "below" ? "<" : ">"} ${t.threshold}`;
+        case "macd_cross":
+            return `${t.timeframe} MACD ${t.direction} cross`;
+        case "moving_average_cross":
+            return `${t.timeframe} ${t.average_type?.toUpperCase()} ${t.fast_period}/${t.slow_period} ${t.direction} cross`;
+    }
 }
 
 /** Compact action-size label for a collapsed phase row. */
@@ -242,6 +251,27 @@ export default function StrategyDetailPage() {
                                             )}
                                             {trigger.reference_price !== undefined && (
                                                 <Readout k={t("strategies.config.referencePrice", "Ref price")} v={trigger.reference_price} />
+                                            )}
+                                            {trigger.threshold !== undefined && (
+                                                <Readout k="Threshold" v={trigger.threshold} tone="amber" />
+                                            )}
+                                            {trigger.timeframe !== undefined && (
+                                                <Readout k="Timeframe" v={trigger.timeframe} />
+                                            )}
+                                            {trigger.period !== undefined && (
+                                                <Readout k="Period" v={trigger.period} />
+                                            )}
+                                            {trigger.average_type !== undefined && (
+                                                <Readout k="Average" v={trigger.average_type.toUpperCase()} />
+                                            )}
+                                            {trigger.fast_period !== undefined && (
+                                                <Readout k="Fast period" v={trigger.fast_period} />
+                                            )}
+                                            {trigger.slow_period !== undefined && (
+                                                <Readout k="Slow period" v={trigger.slow_period} />
+                                            )}
+                                            {trigger.signal_period !== undefined && (
+                                                <Readout k="Signal period" v={trigger.signal_period} />
                                             )}
                                             <Readout k={t("strategies.config.confirmSamples")} v={trigger.confirm_samples ?? 2} />
                                             <Readout k={t("strategies.config.side")} v={action.side} tone={sideTone} />
