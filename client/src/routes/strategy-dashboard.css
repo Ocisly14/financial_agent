@@ -672,10 +672,12 @@
 .sq-phase-status .led { width: 5px; height: 5px; border-radius: 50%; background: currentColor; box-shadow: 0 0 7px currentColor; }
 .sq-phase-status[data-status="active"]    { color: var(--sq-pos); background: var(--sq-pos-soft); }
 .sq-phase-status[data-status="active"] .led { animation: sq-pulse 1.6s infinite; }
+.sq-phase-status[data-status="waiting"]   { color: #aab2c0; background: rgba(170, 178, 192, 0.1); }
 .sq-phase-status[data-status="running"]   { color: var(--sq-amber); background: var(--sq-amber-soft); }
 .sq-phase-status[data-status="running"] .led { animation: sq-pulse 1.4s infinite; }
 .sq-phase-status[data-status="completed"] { color: var(--sq-info); background: rgba(116, 169, 255, 0.1); }
 .sq-phase-status[data-status="paused"]    { color: #aab2c0; background: rgba(170, 178, 192, 0.1); }
+.sq-phase-status[data-status="cancelled"] { color: #7f8794; background: rgba(127, 135, 148, 0.1); }
 .sq-phase-status[data-status="failed"]    { color: var(--sq-neg); background: var(--sq-neg-soft); }
 
 .sq-phase-exec {

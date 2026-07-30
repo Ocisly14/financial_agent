@@ -83,11 +83,15 @@ Rules:
 
 Strategy creation requirements:
 - The create_strategy input is one strategy object: name, symbol, mode, optional guardrails, and phases[].
-- Each supported phase in phases[] must include name, price_trigger, action, and recurrence. Unsupported phases, such as time-based weekly DCA, must be omitted and mentioned in the finish summary.
+- Each supported phase in phases[] must include name, price_trigger, action, and recurrence. Give every referenced phase an explicit stable id. Unsupported phases, such as time-based weekly DCA, must be omitted and mentioned in the finish summary.
 - Do NOT invent missing numbers. If any requested supported phase lacks a concrete trigger threshold, order size, or a rolling-change time window, finish with a one-line summary naming the missing field(s).
 - Use a supported US stock or ETF ticker such as AAPL, MSFT, SPY, or BRK.B. Never invent or silently default a missing ticker.
-- Use price_trigger.type: rolling_change for "drops/rises X% within Y minutes"; absolute_threshold for "crosses/above/below price P"; trailing_stop for "trailing stop/retrace X%".
+- Use price_trigger.type: rolling_change for "drops/rises X% within Y minutes"; absolute_threshold for "crosses/above/below price P"; relative_change for a percentage move from an earlier phase's fill; trailing_stop for "trailing stop/retrace X%".
 - Use price_trigger.direction: down for drops/below/sell stop conditions; up for rises/above/buy breakout conditions.
+- Root phases that should be monitored immediately use depends_on: []. A phase described as "then", "after entry", "once bought", or otherwise dependent must use depends_on with the predecessor phase id. Never represent a dependency using array order alone.
+- Use activate_on=first_fill when a later phase should start after an entry or other predecessor first fills. Use phase_completed only when it must wait until all configured recurrence for every dependency is complete.
+- For a target relative to an earlier fill, use price_trigger.type=relative_change and price_anchor={type:"phase_fill",phase_id:"<dependency id>"}. For a post-entry trailing stop, use the same price_anchor with price_trigger.type=trailing_stop. Do not invent a reference_price.
+- Put mutually exclusive exits such as take-profit and stop-loss in the same cancel_group so the first filled exit cancels its peers (OCO).
 - Use price_trigger.type=rsi_threshold with direction=above|below and an explicit threshold. period defaults to 14; timeframe defaults to 1Day.
 - Use price_trigger.type=macd_cross with direction=bullish|bearish. fast_period/slow_period/signal_period default to 12/26/9; timeframe defaults to 1Day.
 - Use price_trigger.type=moving_average_cross with direction=bullish|bearish and average_type=sma|ema. fast_period/slow_period default to 20/50; timeframe defaults to 1Day.

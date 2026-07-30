@@ -9,6 +9,12 @@ import { backfill, pollPrice, windowSamples, isArmed } from "./priceHistory.ts";
 import { executeTrigger } from "./strategyExecutor.ts";
 import { stepConfirmation } from "./confirmation.ts";
 import { fetchStockTechnicalStrategySamples } from "./stockStrategyMarketData.ts";
+import {
+  activateEligiblePhases,
+  cancelOcoPeers,
+  nextStrategyStatus,
+  recordPhaseFill,
+} from "./strategyWorkflow.ts";
 
 /**
  * Deterministic background loop: every interval it polls prices for the symbols
@@ -86,6 +92,7 @@ async function evaluateStrategy(strategy: StoredStrategy, price: number, now: Da
     await saveStrategy(strategy);
     return;
   }
+  if (activateEligiblePhases(strategy).length > 0) await saveStrategy(strategy);
   for (const phase of strategy.dsl.phases) {
     if (strategy.status !== "active") return;
     if (phase.status !== "active") continue;
@@ -194,6 +201,23 @@ async function fire(
     } else {
       phase.status = "completed";
     }
+    if (outcome.fill_price === undefined || outcome.quantity === undefined) {
+      phase.status = "paused";
+      phase.failure_reason = "simulated fill did not return a price and quantity";
+    } else {
+      recordPhaseFill(phase, {
+        execution_id: outcome.execution_id,
+        price: outcome.fill_price,
+        quantity: outcome.quantity,
+        side: phase.action.side,
+        at: now.toISOString(),
+      });
+      const cancelled = cancelOcoPeers(strategy, phase);
+      for (const cancelledPhaseId of cancelled) {
+        confirmCounts.delete(`${strategy.id}:${cancelledPhaseId}`);
+      }
+      activateEligiblePhases(strategy);
+    }
   } else if (outcome.blocked || outcome.skipped) {
     if (recurrence?.mode === "recurring") {
       phase.status = "active";
@@ -208,10 +232,4 @@ async function fire(
   }
   strategy.status = nextStrategyStatus(strategy);
   await saveStrategy(strategy);
-}
-
-function nextStrategyStatus(strategy: StoredStrategy): StoredStrategy["status"] {
-  if (strategy.dsl.phases.some((phase) => phase.status === "active" || phase.status === "running")) return "active";
-  if (strategy.dsl.phases.some((phase) => phase.status === "paused" || phase.status === "failed")) return "paused";
-  return "completed";
 }

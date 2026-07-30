@@ -132,3 +132,23 @@ test("multi: wrong guardrail budget → not intentMatch even if phases match", (
   assert.equal(r.guardrailsMatch, false);
   assert.equal(r.intentMatch, false);
 });
+
+test("multi: checks workflow dependencies, fill anchors and OCO groups", () => {
+  const workflowGold: GoldMultiDsl = {
+    tool: "create_strategy",
+    symbol: "AAPL",
+    phases: [
+      { id: "entry", depends_on: [], trigger_type: "absolute_threshold", direction: "down", price: 180, side: "BUY", sizing_kind: "fixed_quote_usd", sizing_value: 500, recurrence_mode: "one_shot" },
+      { id: "take-profit", depends_on: ["entry"], activate_on: "first_fill", price_anchor_phase_id: "entry", cancel_group: "exit", trigger_type: "relative_change", direction: "up", pct: 10, side: "SELL", sizing_kind: "pct_of_position", sizing_value: 100, recurrence_mode: "one_shot" },
+    ],
+  };
+  const good = { tool: "create_strategy", input: { symbol: "AAPL", phases: [
+    { id: "model-entry-id", name: "Entry", depends_on: [], price_trigger: { type: "absolute_threshold", direction: "down", price: 180 }, action: { side: "BUY", size: { type: "fixed_quote_usd", value: 500 } }, recurrence: { mode: "one_shot" } },
+    { id: "model-profit-id", name: "Take profit", depends_on: ["model-entry-id"], activate_on: "first_fill", price_anchor: { type: "phase_fill", phase_id: "model-entry-id" }, cancel_group: "model-exit-group", price_trigger: { type: "relative_change", direction: "up", pct: 10 }, action: { side: "SELL", size: { type: "pct_of_position", value: 100 } }, recurrence: { mode: "one_shot" } },
+  ] } };
+  assert.equal(scoreMultiCase(good, workflowGold).intentMatch, true);
+
+  const missingDependency = structuredClone(good);
+  delete (missingDependency.input.phases[1] as Record<string, unknown>)["depends_on"];
+  assert.equal(scoreMultiCase(missingDependency, workflowGold).intentMatch, false);
+});

@@ -22,6 +22,7 @@ import { Avatar, AvatarFallback } from "./ui/avatar";
 import CopyButton from "./copy-button";
 import ChatTtsButton from "./ui/chat/chat-tts-button";
 import { MarkdownRenderer } from "./MarkdownRenderer";
+import type { MessageSource } from "./marks/citationContext";
 import { MessageTimeContext } from "./stockChartContext";
 import { MarketChartWorkspace } from "./MarketChartWorkspace";
 import type { ContentWithUser } from "./chat/types";
@@ -301,7 +302,12 @@ export default function Chat({ agentId, roomId }: ChatProps) {
     };
 
     const renderAssistantContent = (m: ContentWithUser, streaming: boolean) => {
-        return <MarkdownRenderer streaming={streaming}>{m.text ?? ""}</MarkdownRenderer>;
+        // Retrieved search hits ride along the message so inline citations can
+        // show a source card without another round trip.
+        const metadata = (m as { content?: { metadata?: Record<string, unknown> }; metadata?: Record<string, unknown> })
+            .content?.metadata ?? (m as { metadata?: Record<string, unknown> }).metadata;
+        const sources = Array.isArray(metadata?.sources) ? (metadata.sources as MessageSource[]) : [];
+        return <MarkdownRenderer streaming={streaming} sources={sources}>{m.text ?? ""}</MarkdownRenderer>;
     };
 
     const renderAssistantBubble = (

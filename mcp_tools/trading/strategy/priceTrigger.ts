@@ -31,6 +31,14 @@ const trailingStopTriggerSchema = z.object({
   confirm_samples: confirmations,
 });
 
+const relativeChangeTriggerSchema = z.object({
+  type: z.literal("relative_change"),
+  direction: z.enum(["up", "down"]),
+  pct: z.number().positive(),
+  reference_price: z.number().positive().optional(),
+  confirm_samples: confirmations,
+});
+
 const rsiThresholdTriggerSchema = z.object({
   type: z.literal("rsi_threshold"),
   direction: z.enum(["above", "below"]),
@@ -80,6 +88,7 @@ export const priceTriggerSchema = z.union([
   rollingChangeTriggerSchema,
   absoluteThresholdTriggerSchema,
   trailingStopTriggerSchema,
+  relativeChangeTriggerSchema,
   rsiThresholdTriggerSchema,
   macdCrossTriggerSchema,
   movingAverageCrossTriggerSchema,
@@ -153,6 +162,17 @@ export function evaluatePriceTrigger(
       const low = Math.min(currentPrice, ...buffer.map((sample) => sample.low));
       const changePct = low > 0 ? ((currentPrice - low) / low) * 100 : 0;
       return { conditionMet: changePct >= trigger.pct, observed: { change_pct: changePct } };
+    }
+    case "relative_change": {
+      const referencePrice = trigger.reference_price;
+      if (referencePrice === undefined) return { conditionMet: false };
+      const changePct = trigger.direction === "down"
+        ? ((referencePrice - currentPrice) / referencePrice) * 100
+        : ((currentPrice - referencePrice) / referencePrice) * 100;
+      return {
+        conditionMet: changePct >= trigger.pct,
+        observed: { change_pct: changePct, reference_price: referencePrice },
+      };
     }
     case "trailing_stop": {
       if (trigger.direction === "down") {

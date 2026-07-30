@@ -1,6 +1,7 @@
 import { createLogger } from "../logger/logger.ts";
 import type { SessionEvent, SessionState } from "../../framework/sessionState.ts";
 import type { AgentKind, ArtifactRef, JsonObject, JsonValue, SSEEvent } from "../../framework/types.ts";
+import { collectTurnSources } from "../../framework/citationSources.ts";
 
 const log = createLogger("orchestrator");
 
@@ -92,7 +93,14 @@ function buildFinal(event: SessionEvent, state: SessionState): SSEEvent {
       artifacts.push({ n: n++, type: a.type, ref: a.ref, label: a.label ?? "" });
     }
   }
-  return { type: "final", sessionId: state.session_id, response: event.payload.content as string, artifacts, visualizations };
+  return {
+    type: "final",
+    sessionId: state.session_id,
+    response: event.payload.content as string,
+    artifacts,
+    visualizations,
+    sources: collectTurnSources(state.allEvents(), event.turn),
+  };
 }
 
 /**

@@ -15,6 +15,8 @@ function phaseTriggerText(t: StrategyPhase["price_trigger"]): string {
             return `${t.direction === "down" ? "drops" : "rises"} ${t.pct}% / ${t.window_minutes}m`;
         case "absolute_threshold":
             return `price ${t.direction === "down" ? "≤" : "≥"} ${t.price}`;
+        case "relative_change":
+            return `${t.direction === "down" ? "falls" : "rises"} ${t.pct}% from anchor`;
         case "trailing_stop":
             return `trailing ${t.direction === "down" ? "stop" : "rebound"} ${t.pct}%`;
         case "rsi_threshold":
@@ -287,6 +289,17 @@ export default function StrategyDetailPage() {
                                                 v={`${recurrence.trigger_count ?? 0}${recurrence.max_triggers ? ` / ${recurrence.max_triggers}` : ""}`}
                                                 tone="amber"
                                             />
+                                            {phase.depends_on.length > 0 && (
+                                                <Readout k="Depends on" v={`${phase.depends_on.join(", ")} · ${phase.activate_on}`} />
+                                            )}
+                                            {phase.price_anchor && (
+                                                <Readout k="Price anchor" v={`fill from ${phase.price_anchor.phase_id}`} />
+                                            )}
+                                            {phase.cancel_group && <Readout k="OCO group" v={phase.cancel_group} />}
+                                            {phase.last_fill && (
+                                                <Readout k="Last fill" v={`${phase.last_fill.quantity} @ ${phase.last_fill.price}`} tone="amber" />
+                                            )}
+                                            {phase.cancel_reason && <Readout k="Cancelled" v={phase.cancel_reason} />}
                                             {phase.failure_reason && <Readout k="Failure" v={phase.failure_reason} tone="amber" />}
                                         </div>
                                     </div>

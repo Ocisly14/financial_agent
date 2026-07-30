@@ -7,6 +7,8 @@ function phaseTrigger(phase: StrategyPhase): string {
             return `${t.direction === "down" ? "drops" : "rises"} ${t.pct}% within ${t.window_minutes}m`;
         case "absolute_threshold":
             return `price ${t.direction === "down" ? "<" : ">"} ${t.price}`;
+        case "relative_change":
+            return `${t.direction === "down" ? "falls" : "rises"} ${t.pct}% from anchor`;
         case "trailing_stop":
             return `trailing ${t.direction === "down" ? "stop" : "rebound"} ${t.pct}%`;
         case "rsi_threshold":
@@ -30,7 +32,11 @@ function phaseSize(phase: StrategyPhase): string {
 }
 
 export function summarizePhase(phase: StrategyPhase): string {
-    return `${phase.name}: ${phaseTrigger(phase)} -> ${phase.action.side} ${phaseSize(phase)}`;
+    const dependency = phase.depends_on.length > 0
+        ? ` after ${phase.depends_on.join("+")} ${phase.activate_on === "first_fill" ? "fills" : "completes"}`
+        : "";
+    const oco = phase.cancel_group ? ` [OCO ${phase.cancel_group}]` : "";
+    return `${phase.name}${dependency}: ${phaseTrigger(phase)} -> ${phase.action.side} ${phaseSize(phase)}${oco}`;
 }
 
 export function summarizeStrategy(dsl: PriceStrategyDSL): string {

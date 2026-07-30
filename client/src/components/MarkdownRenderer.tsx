@@ -4,6 +4,15 @@ import { cn } from "@/lib/utils";
 import { stripIncompleteTrailingTag } from "@/lib/stockChart";
 import StockChartBlock from "./StockChart";
 import { StreamingContext } from "./stockChartContext";
+import { InlineMark, MarkCard } from "./marks/SemanticMarks";
+import {
+    BLOCK_TAG,
+    INLINE_TAG,
+    decodeMarkPayload,
+    parseAnswerSources,
+    rewriteSemanticMarks,
+} from "@/lib/semanticMarks";
+import { AnswerSourcesContext, type MessageSource } from "./marks/citationContext";
 
 /**
  * Extracts plain text from React children (recursively)
@@ -544,6 +553,16 @@ const CustomImg: React.FC<React.ImgHTMLAttributes<HTMLImageElement>> = (props) =
     <img loading="lazy" decoding="async" {...props} />
 );
 
+// Thesis / risk cards. The body arrives URI-encoded in an attribute (see
+// rewriteSemanticMarks) and is rendered back through this same pipeline, so a
+// card may hold lists, tables, and inline marks of its own.
+function MarkBlockCard({ k, body }: { k?: string; body?: string }) {
+    const markdown = decodeMarkPayload(body ?? "");
+    if (!markdown) return null;
+    const inner = <Markdown options={markdownOptions()}>{markdown}</Markdown>;
+    return k === "thesis" || k === "risk" ? <MarkCard kind={k}>{inner}</MarkCard> : inner;
+}
+
 // Reusable overrides that do not depend on anchor prefixes
 const baseMarkdownOverrides = {
     p: CustomParagraph,
@@ -572,6 +591,9 @@ const baseMarkdownOverrides = {
     // 写 <StockChart symbol="AAPL" range="1Y" /> 就能内嵌一块实时图表。不发明新
     // 语法、不写解析器、不碰 SSE。
     StockChart: StockChartBlock,
+    // 语义标记：主 agent 写 [[metric:…]] / :::risk，预处理把它们降解成这两个标签。
+    [INLINE_TAG]: InlineMark,
+    [BLOCK_TAG]: MarkBlockCard,
 };
 
 // Markdown component overrides generator for minimal spacing with optional anchor prefixes
@@ -607,6 +629,8 @@ interface MarkdownRendererProps {
      * 且 `<StockChart />` 只渲染占位骨架、不发请求。
      */
     streaming?: boolean;
+    /** Search hits the backend attached to this message, matched to citations by URL. */
+    sources?: MessageSource[];
 }
 
 export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
@@ -614,11 +638,20 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
     className = "",
     anchorPrefix = "",
     streaming = false,
+    sources = [],
 }) => {
     const options = useMemo(() => markdownOptions(anchorPrefix), [anchorPrefix]);
+    // [[cite:…|n]] points at the answer's own numbered Sources list.
+    const answerSources = useMemo(
+        () => ({ links: parseAnswerSources(children), retrieved: sources }),
+        [children, sources],
+    );
     const normalized = useMemo(() => {
         const source = streaming ? stripIncompleteTrailingTag(children) : children;
-        return normalizeOrderedListItemBreak(normalizeMarkdownAtxHeadingIndent(source));
+        return rewriteSemanticMarks(
+            normalizeOrderedListItemBreak(normalizeMarkdownAtxHeadingIndent(source)),
+            { streaming },
+        );
     }, [children, streaming]);
 
     return (
@@ -629,9 +662,11 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
             )}
         >
             <StreamingContext.Provider value={streaming}>
-                <Markdown options={options}>
-                    {normalized}
-                </Markdown>
+                <AnswerSourcesContext.Provider value={answerSources}>
+                    <Markdown options={options}>
+                        {normalized}
+                    </Markdown>
+                </AnswerSourcesContext.Provider>
             </StreamingContext.Provider>
         </div>
     );

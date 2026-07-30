@@ -11,7 +11,7 @@
     "start:client": "pnpm --prefix client dev",
     "start": "node --env-file=.env --experimental-strip-types --experimental-sqlite src/server.ts",
     "dev": "node --env-file=.env --experimental-strip-types --experimental-sqlite --watch src/server.ts",
-    "test": "node --env-file=.env --experimental-strip-types --experimental-sqlite --test \"src/data/**/__tests__/*.test.ts\" \"src/infra/**/__tests__/*.test.ts\" \"mcp_tools/**/__tests__/*.test.ts\" \"src/server/__tests__/*.test.ts\" \"client/src/lib/__tests__/*.test.ts\"",
+    "test": "node --env-file=.env --experimental-strip-types --experimental-sqlite --test \"src/data/**/__tests__/*.test.ts\" \"src/infra/**/__tests__/*.test.ts\" \"src/trading/**/__tests__/*.test.ts\" \"mcp_tools/**/__tests__/*.test.ts\" \"src/server/__tests__/*.test.ts\" \"client/src/lib/__tests__/*.test.ts\"",
     "eval": "node --env-file=.env --experimental-strip-types --experimental-sqlite scripts/eval/run.ts",
     "eval:nl-dsl": "node --env-file=.env --experimental-strip-types --experimental-sqlite scripts/eval/nl-dsl.ts"
   },

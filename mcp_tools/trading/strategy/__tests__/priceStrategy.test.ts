@@ -54,3 +54,63 @@ test("normalizes an RSI strategy phase with indicator parameters", () => {
     }
   }
 });
+
+test("normalizes dependent phases as waiting and validates a fill-relative trigger", () => {
+  const input = normalizePriceStrategyInput({
+    name: "Entry with exits",
+    symbol: "AAPL",
+    phases: [
+      {
+        id: "entry",
+        name: "Entry",
+        price_trigger: { type: "absolute_threshold", direction: "down", price: 180 },
+        action: { side: "BUY", size: { type: "fixed_quote_usd", value: 500 } },
+        recurrence: { mode: "one_shot" },
+      },
+      {
+        id: "take-profit",
+        name: "Take profit",
+        depends_on: ["entry"],
+        activate_on: "first_fill",
+        price_anchor: { type: "phase_fill", phase_id: "entry" },
+        cancel_group: "exit",
+        price_trigger: { type: "relative_change", direction: "up", pct: 10 },
+        action: { side: "SELL", size: { type: "pct_of_position", value: 100 } },
+        recurrence: { mode: "one_shot" },
+      },
+    ],
+  });
+  const parsed = tryParsePriceStrategy(input);
+  assert.equal(parsed.ok, true);
+  if (parsed.ok) {
+    assert.equal(parsed.value.phases[0]!.status, "active");
+    assert.equal(parsed.value.phases[1]!.status, "waiting");
+    assert.deepEqual(parsed.value.phases[1]!.depends_on, ["entry"]);
+  }
+});
+
+test("rejects unknown and cyclic phase dependencies", () => {
+  const unknown = normalizePriceStrategyInput({
+    name: "Unknown dependency",
+    symbol: "MSFT",
+    phases: [{
+      id: "exit",
+      name: "Exit",
+      depends_on: ["missing"],
+      price_trigger: { type: "absolute_threshold", direction: "up", price: 500 },
+      action: { side: "SELL", size: { type: "pct_of_position", value: 100 } },
+      recurrence: { mode: "one_shot" },
+    }],
+  });
+  assert.equal(tryParsePriceStrategy(unknown).ok, false);
+
+  const cycle = normalizePriceStrategyInput({
+    name: "Cycle",
+    symbol: "MSFT",
+    phases: [
+      { id: "a", name: "A", depends_on: ["b"], price_trigger: { type: "absolute_threshold", direction: "up", price: 500 }, action: { side: "BUY", size: { type: "fixed_base_qty", value: 1 } }, recurrence: { mode: "one_shot" } },
+      { id: "b", name: "B", depends_on: ["a"], price_trigger: { type: "absolute_threshold", direction: "down", price: 400 }, action: { side: "SELL", size: { type: "fixed_base_qty", value: 1 } }, recurrence: { mode: "one_shot" } },
+    ],
+  });
+  assert.equal(tryParsePriceStrategy(cycle).ok, false);
+});

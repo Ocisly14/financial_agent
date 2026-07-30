@@ -7,6 +7,7 @@ import { attachSse } from "../infra/events/sseProjector.ts";
 import type { FinancialAgentApp } from "../agent/createApp.ts";
 import type { TaskResult } from "../framework/types.ts";
 import { handleStockQuote } from "./stockMarketRoutes.ts";
+import { handleLinkPreview } from "./linkPreview.ts";
 import { projectChatHistory } from "./chatHistory.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -313,6 +314,10 @@ export function createHttpServer(app: FinancialAgentApp): http.Server {
       const stockQuoteMatch = pathname.match(/^\/market\/stocks\/([^/?]+)$/);
       if (method === "GET" && stockQuoteMatch) {
         return await handleStockQuote(stockQuoteMatch[1]!, searchParams, res);
+      }
+
+      if (method === "GET" && pathname === "/link-preview") {
+        return await handleLinkPreview(searchParams, res);
       }
 
       const workflowMatch = pathname.match(/^\/agents\/([^/]+)\/active-workflow$/);

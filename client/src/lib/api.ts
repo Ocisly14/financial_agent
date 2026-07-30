@@ -252,6 +252,7 @@ function buildAssistantResponse(
     response: string,
     artifacts: ChatArtifact[],
     visualizations: Record<string, unknown>[] = [],
+    sources: Record<string, unknown>[] = [],
 ) {
     const byN = new Map(artifacts.map((a) => [a.n, a]));
     const text = response
@@ -275,6 +276,7 @@ function buildAssistantResponse(
             metadata: {
                 artifacts,
                 visualizations,
+                sources,
             },
         },
     };
@@ -527,6 +529,7 @@ export class StreamingApiClient {
                                 parsed.response ?? '',
                                 parsed.artifacts ?? [],
                                 parsed.visualizations ?? [],
+                                parsed.sources ?? [],
                             ),
                         ]);
                         break;

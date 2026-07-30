@@ -12,6 +12,7 @@ export interface ExecutionOutcome {
   reason?: string;
   execution_id: string;
   fill_price?: number;
+  quantity?: number;
   realized_pnl?: number;
 }
 
@@ -36,15 +37,29 @@ export function quantityFromSize(
   }
 }
 
-async function portfolioContext(symbol: string, currentPrice: number): Promise<{ positionQty: number; portfolioUsd: number }> {
+async function portfolioContext(strategy: StoredStrategy, currentPrice: number): Promise<{ positionQty: number; portfolioUsd: number }> {
   const positions = await loadCostBasis();
-  const positionQty = positions[symbol]?.qty ?? 0;
+  let positionQty = positions[strategy.symbol]?.qty ?? 0;
+  if (strategy.dsl.mode === "shadow") {
+    const executions = await listExecutions(strategy.id);
+    positionQty = executions.reduce((quantity, entry) => {
+      const result = entry.order_result;
+      const side = result?.["side"];
+      const filled = result?.["quantity"];
+      if (typeof filled !== "number") return quantity;
+      if (side === "BUY") return quantity + filled;
+      if (side === "SELL") return Math.max(0, quantity - filled);
+      return quantity;
+    }, positionQty);
+  }
   let portfolioUsd = 0;
   for (const [ticker, position] of Object.entries(positions)) {
-    if (position.qty <= 0) continue;
-    const price = ticker === symbol ? currentPrice : position.avg_cost_usd;
-    portfolioUsd += position.qty * price;
+    const quantity = ticker === strategy.symbol ? positionQty : position.qty;
+    if (quantity <= 0) continue;
+    const price = ticker === strategy.symbol ? currentPrice : position.avg_cost_usd;
+    portfolioUsd += quantity * price;
   }
+  if (!positions[strategy.symbol] && positionQty > 0) portfolioUsd += positionQty * currentPrice;
   return { positionQty, portfolioUsd };
 }
 
@@ -61,7 +76,7 @@ export async function executeTrigger(
   triggerObserved?: Record<string, number | string>,
 ): Promise<ExecutionOutcome> {
   const executionId = `exec-${randomUUID()}`;
-  const context = await portfolioContext(strategy.symbol, currentPrice);
+  const context = await portfolioContext(strategy, currentPrice);
   const sized = quantityFromSize(phase.action.size, currentPrice, context);
   if (sized.reason || sized.qty <= 0) {
     return { execution_id: executionId, placed: false, skipped: true, reason: sized.reason ?? "computed quantity is zero" };
@@ -142,6 +157,7 @@ export async function executeTrigger(
     execution_id: executionId,
     placed: true,
     fill_price: fillPrice,
+    quantity: sized.qty,
     realized_pnl: realizedPnl,
   };
 }

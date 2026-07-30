@@ -1,3 +1,4 @@
+import type { CitationSource } from "./citationSources.ts";
 export type AgentKind = "market_data" | "market_research" | "trading_operations";
 
 export type TaskStatus = "ok" | "failed" | "timeout";
@@ -112,5 +113,5 @@ export type SSEEvent =
   | { type: "artifact"; task_id: string; artifact: ArtifactRef }
   | { type: "approval_required"; approval_id: string; payload: JsonObject }
   | { type: "error"; scope: "main" | "task"; task_id?: string; message: string }
-  | { type: "final"; sessionId: string; response: string; artifacts: { n: number; type: "file" | "url"; ref: string; label: string }[]; visualizations: JsonObject[] }
+  | { type: "final"; sessionId: string; response: string; artifacts: { n: number; type: "file" | "url"; ref: string; label: string }[]; visualizations: JsonObject[]; sources: CitationSource[] }
   | { type: "done"; reason: "complete" | "stopped" | "disconnected" };

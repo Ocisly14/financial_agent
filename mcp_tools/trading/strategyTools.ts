@@ -30,8 +30,8 @@ export function createCreateStrategyTool(): RegisteredTool {
     name: "create_strategy",
     description:
       "Create ONE price-driven US stock or ETF strategy as a DRAFT (does not run yet). " +
-      "Use this for a future price or technical-indicator condition — a percentage move, price level, trailing stop, RSI threshold, MACD cross, or SMA/EMA cross — whether a single conditional phase or a multi-phase plan. This tool does not place immediate broker orders. " +
-      "Put EVERY leg in the single phases[] array; never call this tool more than once for one plan. Use the exact field names, types and enums from the args schema below — do not rename or invent fields. " +
+      "Use this for a future price or technical-indicator condition — a percentage move, price level, fill-relative move, trailing stop, RSI threshold, MACD cross, or SMA/EMA cross — whether a single conditional phase or a dependency-driven multi-phase plan. This tool does not place immediate broker orders. " +
+      "Put EVERY leg in the single phases[] array; use depends_on for phases that must wait for earlier fills/completion and cancel_group for mutually exclusive exits. Never call this tool more than once for one plan. Use the exact field names, types and enums from the args schema below — do not rename or invent fields. " +
       "Do not invent values the user did not give: if a required field is missing (for example a rolling-change window_minutes, threshold, or action size), name the missing field instead of calling this tool. Time-based DCA is not supported. Strategies support paper and shadow evaluation only; live broker execution is unavailable. Then call start_strategy to request activation.",
     category: "trading",
     inputSchema: {
@@ -45,26 +45,50 @@ export function createCreateStrategyTool(): RegisteredTool {
         mode: { type: "string", enum: ["paper", "shadow"], description: "Defaults to paper. Live broker execution is not supported." },
         phases: {
           type: "array",
-          description: "every leg of the plan",
+          description: "Every leg of the plan. Root phases without dependencies monitor in parallel; dependent phases wait until their dependencies are satisfied.",
           items: {
             type: "object",
             required: ["name", "price_trigger", "action", "recurrence"],
             properties: {
+              id: { type: "string", description: "Stable phase id. Required in practice when another phase refers to this phase." },
               name: { type: "string" },
+              depends_on: {
+                type: "array",
+                items: { type: "string" },
+                description: "Phase ids that must satisfy activate_on before this phase becomes active. Omit or use [] for an immediately active root phase.",
+              },
+              activate_on: {
+                type: "string",
+                enum: ["first_fill", "phase_completed"],
+                description: "How every dependency is satisfied. Use first_fill for entry→exit workflows; defaults to phase_completed.",
+              },
+              price_anchor: {
+                type: "object",
+                required: ["type", "phase_id"],
+                description: "Seed a relative_change or trailing_stop trigger from an earlier phase's actual simulated fill price.",
+                properties: {
+                  type: { type: "string", enum: ["phase_fill"] },
+                  phase_id: { type: "string", description: "The dependency phase whose latest fill supplies the anchor." },
+                },
+              },
+              cancel_group: {
+                type: "string",
+                description: "OCO group name. When this phase fills, other non-terminal phases in the same group are cancelled.",
+              },
               price_trigger: {
                 type: "object",
                 required: ["type", "direction"],
                 properties: {
-                  type: { type: "string", enum: ["rolling_change", "absolute_threshold", "trailing_stop", "rsi_threshold", "macd_cross", "moving_average_cross"] },
+                  type: { type: "string", enum: ["rolling_change", "absolute_threshold", "relative_change", "trailing_stop", "rsi_threshold", "macd_cross", "moving_average_cross"] },
                   direction: {
                     type: "string",
                     enum: ["up", "down", "above", "below", "bullish", "bearish"],
                     description: "up/down for price triggers; above/below for RSI; bullish/bearish for MACD or moving-average crosses",
                   },
-                  pct: { type: "number", description: "required for rolling_change & trailing_stop" },
+                  pct: { type: "number", description: "required for rolling_change, relative_change & trailing_stop" },
                   window_minutes: { type: "integer", description: "required for rolling_change" },
                   price: { type: "number", description: "required for absolute_threshold" },
-                  reference_price: { type: "number", description: "optional anchor for trailing_stop" },
+                  reference_price: { type: "number", description: "Explicit anchor for relative_change or trailing_stop. Omit when price_anchor supplies a phase fill." },
                   threshold: { type: "number", description: "required RSI threshold from 0 to 100" },
                   period: { type: "integer", description: "RSI period; defaults to 14" },
                   fast_period: { type: "integer", description: "fast MACD or moving-average period; defaults to 12 for MACD and 20 for moving averages" },
@@ -130,6 +154,7 @@ export function createCreateStrategyTool(): RegisteredTool {
         try {
           const mid = await fetchStockStrategyPrice(dsl.symbol);
           for (const phase of dsl.phases) {
+            if (phase.status !== "active") continue;
             const t = phase.price_trigger;
             if (t.type !== "absolute_threshold") continue;
             const already =

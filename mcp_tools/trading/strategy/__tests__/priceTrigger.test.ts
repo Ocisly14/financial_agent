@@ -36,6 +36,14 @@ test("absolute_threshold down: level comparison", () => {
   assert.equal(evaluatePriceTrigger(trigger, [], 60001).conditionMet, false);
 });
 
+test("relative_change measures movement from a fixed fill anchor", () => {
+  const trigger: PriceTrigger = { type: "relative_change", direction: "up", pct: 10, reference_price: 100, confirm_samples: 1 };
+  assert.equal(evaluatePriceTrigger(trigger, [], 109).conditionMet, false);
+  const result = evaluatePriceTrigger(trigger, [], 111);
+  assert.equal(result.conditionMet, true);
+  assert.equal(result.observed?.["reference_price"], 100);
+});
+
 test("trailing_stop down: maintains high-water and fires on retrace", () => {
   const trigger: PriceTrigger = { type: "trailing_stop", direction: "down", pct: 10, reference_price: 150, confirm_samples: 1 };
   const r = evaluatePriceTrigger(trigger, [], 135);

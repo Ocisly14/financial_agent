@@ -1,5 +1,6 @@
 import type { SessionEvent } from "../framework/sessionState.ts";
 import type { ArtifactRef, JsonObject } from "../framework/types.ts";
+import { collectTurnSources, type CitationSource } from "../framework/citationSources.ts";
 
 type ProgressTask = {
   taskId: string;
@@ -22,6 +23,7 @@ export type ChatHistoryMessage = {
     metadata?: {
       artifacts: Array<ArtifactRef & { n: number }>;
       visualizations: JsonObject[];
+      sources: CitationSource[];
     };
   };
   progressTasks?: ProgressTask[];
@@ -52,7 +54,7 @@ function turnDetails(events: readonly SessionEvent[], turn: number) {
     if (typeof result?.payload.summary === "string") task.summary = result.payload.summary;
     progressTasks.push(task);
   }
-  return { artifacts, visualizations, progressTasks };
+  return { artifacts, visualizations, progressTasks, sources: collectTurnSources(events, turn) };
 }
 
 function replaceArtifactMarkers(text: string, artifacts: Array<ArtifactRef & { n: number }>): string {
@@ -96,6 +98,7 @@ export function projectChatHistory(events: readonly SessionEvent[]): ChatHistory
         metadata: {
           artifacts: details.artifacts,
           visualizations: details.visualizations,
+          sources: details.sources,
         },
       },
     };

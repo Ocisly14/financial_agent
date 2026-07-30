@@ -48,3 +48,46 @@ test("chat history includes non-final step replies in event order", () => {
     { user: "system", text: "Done." },
   ]);
 });
+
+test("chat history carries retrieved sources so citations can be rendered inline", () => {
+  const state = new SessionState("room-3", "2026-07-30T00:00:00.000Z");
+  state.beginTurn("NVDA 有什么传闻");
+  const dispatch = state.recordDispatch("market_research", "Search NVDA rumours");
+  // A subagent's own tool call lands as a sidechain tool_result.
+  state.record("market_research", "tool_result", {
+    task_id: dispatch.event_id,
+    name: "financial_search",
+    summary: "returned 2 results",
+    generation_context: {
+      data: {
+        results: [
+          {
+            title: "Nvidia Reportedly Moves to Backstop $250 Billion",
+            url: "https://finance.yahoo.com/a",
+            content: "Nvidia is reportedly in talks to backstop financing…",
+            publishedDate: "2026-07-27",
+            score: 0.9,
+          },
+          { title: "Duplicate", url: "https://finance.yahoo.com/a", content: "dupe" },
+          { title: "No url", content: "dropped" },
+        ],
+      },
+    },
+  }, { parent: dispatch.event_id, isSidechain: true });
+  state.recordTaskResult("market_research", dispatch.event_id, {
+    task_id: dispatch.event_id,
+    agent: "market_research",
+    status: "ok",
+    summary: "done",
+  });
+  state.recordReply("传闻见 [[cite:2500 亿担保|1]]。", true);
+
+  const sources = projectChatHistory(state.allEvents()).at(-1)?.content?.metadata?.sources;
+  assert.equal(sources?.length, 1, "deduped by url, entries without a url dropped");
+  assert.deepEqual(sources?.[0], {
+    url: "https://finance.yahoo.com/a",
+    title: "Nvidia Reportedly Moves to Backstop $250 Billion",
+    snippet: "Nvidia is reportedly in talks to backstop financing…",
+    publishedDate: "2026-07-27",
+  });
+});

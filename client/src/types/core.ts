@@ -46,6 +46,7 @@ export interface PriceTrigger {
   type:
     | "rolling_change"
     | "absolute_threshold"
+    | "relative_change"
     | "trailing_stop"
     | "rsi_threshold"
     | "macd_cross"
@@ -98,10 +99,16 @@ export interface PriceStrategyDSL {
 export interface StrategyPhase {
   id: string;
   name: string;
-  status: "active" | "running" | "completed" | "paused" | "failed";
+  status: "waiting" | "active" | "running" | "completed" | "paused" | "cancelled" | "failed";
+  depends_on: string[];
+  activate_on: "first_fill" | "phase_completed";
+  price_anchor?: { type: "phase_fill"; phase_id: string };
+  cancel_group?: string;
   price_trigger: PriceTrigger;
   action: StrategyAction;
   recurrence: StrategyRecurrence;
+  last_fill?: { execution_id: string; price: number; quantity: number; side: "BUY" | "SELL"; at: string };
+  cancel_reason?: string;
   failure_reason?: string;
   [k: string]: any;
 }
