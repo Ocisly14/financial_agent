@@ -1,5 +1,7 @@
 import { useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { API_BASE_URL } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import {
@@ -55,12 +57,18 @@ interface StockQuoteResponse {
     fetchedAtMs: number;
 }
 
-const SESSION_LABEL: Record<MarketSession, string> = {
-    "pre-market": "盘前",
-    regular: "盘中",
-    "after-hours": "盘后",
-    closed: "休市",
-};
+function sessionLabel(t: TFunction, session: MarketSession): string {
+    switch (session) {
+        case "pre-market":
+            return t("charts.session.preMarket");
+        case "regular":
+            return t("charts.session.regular");
+        case "after-hours":
+            return t("charts.session.afterHours");
+        case "closed":
+            return t("charts.session.closed");
+    }
+}
 
 const LIGHT_CANDLE_THEME: CandleTheme = {
     grid: "rgba(100,116,139,0.14)",
@@ -150,14 +158,14 @@ function formatClock(iso: string | undefined): string {
         : date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 }
 
-function formatMessageAge(sentAtMs: number, nowMs: number): string | null {
+function formatMessageAge(t: TFunction, sentAtMs: number, nowMs: number): string | null {
     const minutes = Math.floor((nowMs - sentAtMs) / 60_000);
     if (minutes < 10) return null;
     const hours = Math.floor(minutes / 60);
     const days = Math.floor(hours / 24);
-    if (days >= 1) return `消息发于 ${days} 天前`;
-    if (hours >= 1) return `消息发于 ${hours} 小时前`;
-    return `消息发于 ${minutes} 分钟前`;
+    if (days >= 1) return t("charts.messageSentDaysAgo", { count: days });
+    if (hours >= 1) return t("charts.messageSentHoursAgo", { count: hours });
+    return t("charts.messageSentMinutesAgo", { count: minutes });
 }
 
 function StockChartSkeleton({
@@ -199,6 +207,7 @@ function StockChartLive({
     workspace?: boolean;
     studies?: TechnicalStudy[];
 }) {
+    const { t } = useTranslation();
     const [range, setRange] = useState<StockRange>(initialRange);
     const containerRef = useRef<HTMLSpanElement | null>(null);
     const isVisible = useIsVisible(containerRef);
@@ -277,8 +286,8 @@ function StockChartLive({
     const price = quote?.price ?? rawCandles.at(-1)?.c ?? null;
     const rising = price !== null && prevClose !== null ? price >= prevClose : true;
     const messageAge = useMemo(
-        () => (sentAtMs === null ? null : formatMessageAge(sentAtMs, Date.now())),
-        [sentAtMs],
+        () => (sentAtMs === null ? null : formatMessageAge(t, sentAtMs, Date.now())),
+        [t, sentAtMs],
     );
     const loading = quoteQuery.isPending && candlesQuery.isPending;
     const disconnected = quoteQuery.isError && quoteQuery.data !== undefined;
@@ -293,7 +302,7 @@ function StockChartLive({
     if (loading) {
         return (
             <span ref={containerRef} className="block h-full">
-                <StockChartSkeleton symbol={symbol} note="加载行情…" height={height} workspace={workspace} />
+                <StockChartSkeleton symbol={symbol} note={t("charts.loadingQuote")} height={height} workspace={workspace} />
             </span>
         );
     }
@@ -303,7 +312,7 @@ function StockChartLive({
                 "block rounded-lg border border-sep bg-raised p-4 text-sm text-label-2",
                 workspace ? "h-full border-0 bg-transparent dark:bg-transparent" : "my-3",
             )}>
-                {symbol} 行情暂时不可用。
+                {t("charts.quoteUnavailable", { symbol })}
             </span>
         );
     }
@@ -320,22 +329,22 @@ function StockChartLive({
                 <span className={cn("text-sm font-medium tabular-nums", rising ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400")}>
                     {formatChange(quote?.changePercent ?? null)}
                 </span>
-                <span className="rounded-full bg-fill-1 px-2 py-0.5 text-[11px] text-label-2">{SESSION_LABEL[session]}</span>
+                <span className="rounded-full bg-fill-1 px-2 py-0.5 text-[11px] text-label-2">{sessionLabel(t, session)}</span>
                 <span className="ml-auto text-[11px] text-label-3">Alpaca (IEX)</span>
             </span>
 
             <span className="mt-1 block text-[11px] text-label-2">
                 {disconnected
-                    ? `连接中断 · 数据截至 ${formatClock(quote?.quoteTimestamp)}`
+                    ? t("charts.connectionLost", { time: formatClock(quote?.quoteTimestamp) })
                     : candleStaleness?.reason === "previous_session"
-                      ? `上一交易日 · ${candleStaleness.asOf}`
+                      ? t("charts.previousTradingDay", { asOf: candleStaleness.asOf })
                       : quoteQuery.data?.staleness
-                        ? `实时报价不可用 · 数据截至 ${quoteQuery.data.staleness.asOf}`
-                        : "实时数据"}
+                        ? t("charts.liveQuoteUnavailable", { asOf: quoteQuery.data.staleness.asOf })
+                        : t("charts.liveData")}
                 {messageAge ? ` · ${messageAge}` : ""}
             </span>
 
-            <span className="mt-3 flex gap-1" role="group" aria-label="图表区间">
+            <span className="mt-3 flex gap-1" role="group" aria-label={t("charts.chartRange")}>
                 {STOCK_RANGES.map((item) => (
                     <button
                         key={item}
@@ -367,7 +376,7 @@ function StockChartLive({
                         levels={priceLevels}
                     />
                 ) : (
-                    <span className="flex h-full items-center justify-center text-xs text-label-3">暂无 K 线数据</span>
+                    <span className="flex h-full items-center justify-center text-xs text-label-3">{t("charts.noCandleData")}</span>
                 )}
             </span>
         </span>
@@ -387,9 +396,10 @@ export function StockChartView({
     workspace?: boolean;
     studies?: TechnicalStudy[];
 }) {
+    const { t } = useTranslation();
     const parsed = parseStockChartProps({ symbol, range });
     if ("error" in parsed) {
-        return <span className="text-sm text-red-600 dark:text-red-400">无效的股票代码：{parsed.error}</span>;
+        return <span className="text-sm text-red-600 dark:text-red-400">{t("charts.invalidTickerSymbol", { error: parsed.error })}</span>;
     }
     return (
         <StockChartLive
@@ -403,13 +413,14 @@ export function StockChartView({
 }
 
 export default function StockChartBlock(props: { symbol?: unknown; range?: unknown }) {
+    const { t } = useTranslation();
     const streaming = useContext(StreamingContext);
     const parsed = parseStockChartProps(props);
     if ("error" in parsed) {
-        return <span className="text-sm text-red-600 dark:text-red-400">无效的股票代码：{parsed.error}</span>;
+        return <span className="text-sm text-red-600 dark:text-red-400">{t("charts.invalidTickerSymbol", { error: parsed.error })}</span>;
     }
     if (streaming) {
-        return <StockChartSkeleton symbol={parsed.symbol} note="图表将在回答完成后显示" />;
+        return <StockChartSkeleton symbol={parsed.symbol} note={t("charts.chartWillDisplay")} />;
     }
     return <StockChartLive symbol={parsed.symbol} initialRange={parsed.range} />;
 }

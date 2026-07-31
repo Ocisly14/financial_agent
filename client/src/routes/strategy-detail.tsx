@@ -4,9 +4,11 @@ import { NavLink, useParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { apiClient } from "@/lib/api";
+import { cn } from "@/lib/utils";
 import LineChart from "@/components/admin/line-chart";
 import type { ExecutionLogEntry, StrategyLifecycle, StrategyPhase } from "@/types/core";
-import "./strategy-dashboard.css";
+import { Button } from "@/components/ui/button";
+import { ModeChip } from "@/components/workspace/ModeChip";
 
 /** One-line trigger summary for a collapsed phase row. */
 function phaseTriggerText(t: StrategyPhase["price_trigger"]): string {
@@ -42,6 +44,7 @@ function phaseSizeText(s: StrategyPhase["action"]["size"]): string {
     }
 }
 
+/** Lifecycle → status-pill tone. Tones are rendered by TONE_CLASSES below. */
 const STATUS_TONE: Record<StrategyLifecycle, string> = {
     draft: "dead",
     pending_approval: "wait",
@@ -53,30 +56,67 @@ const STATUS_TONE: Record<StrategyLifecycle, string> = {
     failed: "fail",
 };
 
+/** Phase status → the same tone vocabulary as STATUS_TONE. */
+const PHASE_STATUS_TONE: Record<StrategyPhase["status"], string> = {
+    waiting: "hold",
+    active: "live",
+    running: "wait",
+    completed: "done",
+    paused: "hold",
+    cancelled: "dead",
+    failed: "fail",
+};
+
+/** Tone → design-token classes for a status pill and its dot. */
+const TONE_CLASSES: Record<string, { pill: string; dot: string }> = {
+    live: { pill: "border-up/40 bg-up/10 text-up", dot: "bg-up" },
+    wait: { pill: "border-hold/40 bg-hold/10 text-hold", dot: "bg-hold" },
+    hold: { pill: "border-sep-strong bg-fill-2 text-label-2", dot: "bg-label-2" },
+    done: { pill: "border-sep bg-fill-1 text-label-3", dot: "bg-label-3" },
+    dead: { pill: "border-sep bg-fill-1 text-label-4", dot: "bg-label-4" },
+    fail: { pill: "border-down/40 bg-down/10 text-down", dot: "bg-down" },
+};
+
 function StatusPill({ status }: { status: StrategyLifecycle }) {
     const { t } = useTranslation();
+    const tone = TONE_CLASSES[STATUS_TONE[status] ?? "dead"];
     return (
-        <span className="sq-status" data-tone={STATUS_TONE[status] ?? "dead"}>
-            <span className="led" />
+        <span className={cn("fin-label inline-flex items-center gap-1.5 rounded-[4px] border px-1.5 py-1", tone.pill)}>
+            <span className={cn("size-1.5 shrink-0 rounded-full", tone.dot)} aria-hidden="true" />
             {t(`strategies.status.${status}`)}
         </span>
     );
 }
 
-function ModeTag({ mode }: { mode: "paper" | "shadow" }) {
+function PhaseStatusPill({ status }: { status: StrategyPhase["status"] }) {
+    const tone = TONE_CLASSES[PHASE_STATUS_TONE[status] ?? "dead"];
     return (
-        <span className="sq-mode" data-mode={mode}>
-            <span className="dot" />
-            {mode}
+        <span
+            className={cn(
+                "fin-label inline-flex w-fit items-center gap-1.5 rounded-[4px] border px-1.5 py-0.5 text-[9px]",
+                tone.pill,
+            )}
+        >
+            <span className={cn("size-1 shrink-0 rounded-full", tone.dot)} aria-hidden="true" />
+            {status}
         </span>
     );
 }
 
 function Readout({ k, v, tone }: { k: string; v: React.ReactNode; tone?: "buy" | "sell" | "amber" }) {
     return (
-        <div className="sq-readout">
-            <span className="k">{k}</span>
-            <span className={tone ? `v ${tone}` : "v"}>{v}</span>
+        <div className="flex items-baseline justify-between gap-4 border-b border-sep py-2 last:border-0">
+            <span className="fin-label text-label-3">{k}</span>
+            <span
+                className={cn(
+                    "fin-figure text-right text-sm text-label-1",
+                    tone === "buy" && "text-up",
+                    tone === "sell" && "text-down",
+                    tone === "amber" && "text-hold",
+                )}
+            >
+                {v}
+            </span>
         </div>
     );
 }
@@ -87,7 +127,7 @@ function CopyId({ value }: { value: string }) {
     return (
         <button
             type="button"
-            className="sq-copy"
+            className="fin-figure text-xs text-label-3 transition-colors hover:text-label-1"
             title={`Copy ${value}`}
             onClick={() => {
                 void navigator.clipboard?.writeText(value);
@@ -162,9 +202,9 @@ export default function StrategyDetailPage() {
 
     if (query.isLoading) {
         return (
-            <div className="sq-root">
-                <div className="sq-shell">
-                    <p className="sq-note">{t("strategies.loading")}</p>
+            <div className="min-h-dvh bg-background">
+                <div className="mx-auto max-w-6xl px-6 py-8">
+                    <p className="text-sm text-label-2">{t("strategies.loading")}</p>
                 </div>
             </div>
         );
@@ -172,12 +212,12 @@ export default function StrategyDetailPage() {
 
     if (!strategy) {
         return (
-            <div className="sq-root">
-                <div className="sq-shell">
-                    <NavLink to={`/strategies/${agentId}`} className="sq-back">
+            <div className="min-h-dvh bg-background">
+                <div className="mx-auto max-w-6xl px-6 py-8">
+                    <NavLink to={`/strategies/${agentId}`} className="mb-6 inline-block text-sm text-label-2 hover:text-label-1">
                         {t("strategies.backToList")}
                     </NavLink>
-                    <p className="sq-note">{t("strategies.notFound")}</p>
+                    <p className="text-sm text-label-2">{t("strategies.notFound")}</p>
                 </div>
             </div>
         );
@@ -187,24 +227,24 @@ export default function StrategyDetailPage() {
     const phaseById = new Map(dsl.phases.map((phase) => [phase.id, phase]));
 
     return (
-        <div className="sq-root">
-            <div className="sq-shell">
-                <NavLink to={`/strategies/${agentId}`} className="sq-back sq-rise">
+        <div className="min-h-dvh bg-background">
+            <div className="mx-auto max-w-6xl px-6 py-8">
+                <NavLink to={`/strategies/${agentId}`} className="mb-6 inline-block text-sm text-label-2 hover:text-label-1">
                     {t("strategies.backToList")}
                 </NavLink>
 
-                <header className="sq-hero sq-rise" style={{ animationDelay: "40ms" }}>
-                    <h1 className="sq-hero-symbol">{dsl.name || strategy.symbol}</h1>
+                <header className="mb-6 flex flex-wrap items-center gap-3 border-b border-sep pb-6">
+                    <h1 className="text-2xl font-semibold tracking-[-0.02em]">{dsl.name || strategy.symbol}</h1>
                     <StatusPill status={strategy.status} />
-                    <ModeTag mode={dsl.mode} />
+                    <ModeChip mode={dsl.mode} />
                 </header>
 
-                <div className="sq-phases sq-rise" style={{ animationDelay: "90ms" }}>
-                    <div className="sq-phases-head">
-                        <span>#</span>
-                        <span>{t("strategies.config.phase", "Phase")}</span>
-                        <span>{t("strategies.columns.status")}</span>
-                        <span>{t("strategies.config.execution", "Execution")}</span>
+                <div className="material mb-6 overflow-hidden rounded-lg border border-sep shadow-e2-rim">
+                    <div className="grid grid-cols-[42px_minmax(110px,1.1fr)_128px_minmax(180px,1.7fr)_26px] items-center gap-3.5 border-b border-sep px-4 py-3">
+                        <span className="fin-label text-label-3">#</span>
+                        <span className="fin-label text-label-3">{t("strategies.config.phase", "Phase")}</span>
+                        <span className="fin-label text-label-3">{t("strategies.columns.status")}</span>
+                        <span className="fin-label text-label-3">{t("strategies.config.execution", "Execution")}</span>
                         <span />
                     </div>
 
@@ -215,31 +255,42 @@ export default function StrategyDetailPage() {
                         const sideTone = action.side === "BUY" ? "buy" : "sell";
                         const isOpen = openPhases.has(phase.id);
                         return (
-                            <section className="sq-phase-row" key={phase.id} data-open={isOpen} data-testid="phase-row">
+                            <section
+                                className={cn("border-b border-sep last:border-0", isOpen && "bg-hold/5")}
+                                key={phase.id}
+                                data-testid="phase-row"
+                            >
                                 <button
                                     type="button"
-                                    className="sq-phase-head"
+                                    className="grid w-full grid-cols-[42px_minmax(110px,1.1fr)_128px_minmax(180px,1.7fr)_26px] items-center gap-3.5 px-4 py-3.5 text-left transition-colors hover:bg-fill-1"
                                     onClick={() => togglePhase(phase.id)}
                                     aria-expanded={isOpen}
                                 >
-                                    <span className="sq-phase-idx">{String(index + 1).padStart(2, "0")}</span>
-                                    <span className="sq-phase-name">{phase.name}</span>
-                                    <span className="sq-phase-status" data-status={phase.status}>
-                                        <span className="led" />
-                                        {phase.status}
+                                    <span className="fin-figure text-xs text-label-3">{String(index + 1).padStart(2, "0")}</span>
+                                    <span className="truncate text-sm font-semibold text-label-1">{phase.name}</span>
+                                    <PhaseStatusPill status={phase.status} />
+                                    <span className="fin-figure flex min-w-0 items-center gap-2 text-xs text-label-2">
+                                        <span className="truncate">{phaseTriggerText(trigger)}</span>
+                                        <span className="text-label-3">→</span>
+                                        <span className={cn("font-semibold", sideTone === "buy" ? "text-up" : "text-down")}>
+                                            {action.side}
+                                        </span>
+                                        <span className="whitespace-nowrap text-label-1">{phaseSizeText(action.size)}</span>
                                     </span>
-                                    <span className="sq-phase-exec">
-                                        <span className="t">{phaseTriggerText(trigger)}</span>
-                                        <span className="arrow">→</span>
-                                        <span className={`side ${sideTone}`}>{action.side}</span>
-                                        <span className="sz">{phaseSizeText(action.size)}</span>
+                                    <span
+                                        className={cn(
+                                            "justify-self-end text-xs text-label-3 transition-transform",
+                                            isOpen && "rotate-180 text-label-1",
+                                        )}
+                                        aria-hidden
+                                    >
+                                        ▾
                                     </span>
-                                    <span className="sq-chevron" aria-hidden>▾</span>
                                 </button>
 
                                 {isOpen && (
-                                    <div className="sq-phase-body">
-                                        <div className="sq-phase-grid">
+                                    <div className="px-4 pb-4">
+                                        <div className="grid grid-cols-[repeat(auto-fit,minmax(190px,1fr))] gap-x-6 border-t border-sep pt-1">
                                             <Readout k={t("strategies.config.triggerType")} v={trigger.type} />
                                             <Readout k={t("strategies.config.direction")} v={trigger.direction} />
                                             {trigger.pct !== undefined && (
@@ -309,16 +360,16 @@ export default function StrategyDetailPage() {
                     })}
 
                     {(dsl.guardrails?.max_notional_usd !== undefined || dsl.guardrails?.total_budget_usd !== undefined) && (
-                        <div className="sq-guardrails">
-                            <span className="sq-guardrails-k">{t("strategies.config.guardrails")}</span>
+                        <div className="flex flex-wrap items-center gap-4 border-t border-sep bg-fill-1 px-4 py-3">
+                            <span className="fin-label text-label-3">{t("strategies.config.guardrails")}</span>
                             {dsl.guardrails.max_notional_usd !== undefined && (
-                                <span className="sq-guardrails-v">
-                                    {t("strategies.config.maxNotional")} <b>${dsl.guardrails.max_notional_usd}</b>
+                                <span className="fin-figure text-xs text-label-2">
+                                    {t("strategies.config.maxNotional")} <b className="font-semibold text-hold">${dsl.guardrails.max_notional_usd}</b>
                                 </span>
                             )}
                             {dsl.guardrails.total_budget_usd !== undefined && (
-                                <span className="sq-guardrails-v">
-                                    Total budget <b>${dsl.guardrails.total_budget_usd}</b>
+                                <span className="fin-figure text-xs text-label-2">
+                                    Total budget <b className="font-semibold text-hold">${dsl.guardrails.total_budget_usd}</b>
                                 </span>
                             )}
                         </div>
@@ -328,110 +379,120 @@ export default function StrategyDetailPage() {
                 {(strategy.status === "pending_approval" ||
                     strategy.status === "active" ||
                     strategy.status === "paused") && (
-                    <div className="sq-actions sq-rise" style={{ animationDelay: "140ms" }}>
+                    <div className="mb-8 flex flex-wrap gap-2">
                         {strategy.status === "pending_approval" && (
                             <>
-                                <button
+                                <Button
                                     type="button"
-                                    className="sq-key"
-                                    data-variant="primary"
                                     onClick={() => activate.mutate("approve")}
                                     disabled={activate.isPending}
                                 >
                                     {t("strategies.actions.approve")}
-                                </button>
-                                <button
+                                </Button>
+                                <Button
                                     type="button"
-                                    className="sq-key"
+                                    variant="outline"
                                     onClick={() => activate.mutate("reject")}
                                     disabled={activate.isPending}
                                 >
                                     {t("strategies.actions.reject")}
-                                </button>
+                                </Button>
                             </>
                         )}
                         {strategy.status === "active" && (
                             <>
-                                <button
+                                <Button
                                     type="button"
-                                    className="sq-key"
+                                    variant="outline"
                                     onClick={() => setStatus.mutate("pause")}
                                     disabled={setStatus.isPending}
                                 >
                                     {t("strategies.actions.pause")}
-                                </button>
-                                <button
+                                </Button>
+                                <Button
                                     type="button"
-                                    className="sq-key"
-                                    data-variant="danger"
+                                    variant="destructive"
                                     onClick={() => setStatus.mutate("cancel")}
                                     disabled={setStatus.isPending}
                                 >
                                     {t("strategies.actions.cancel")}
-                                </button>
+                                </Button>
                             </>
                         )}
                         {strategy.status === "paused" && (
                             <>
-                                <button
+                                <Button
                                     type="button"
-                                    className="sq-key"
-                                    data-variant="primary"
                                     onClick={() => setStatus.mutate("resume")}
                                     disabled={setStatus.isPending}
                                 >
                                     {t("strategies.actions.resume")}
-                                </button>
-                                <button
+                                </Button>
+                                <Button
                                     type="button"
-                                    className="sq-key"
-                                    data-variant="danger"
+                                    variant="destructive"
                                     onClick={() => setStatus.mutate("cancel")}
                                     disabled={setStatus.isPending}
                                 >
                                     {t("strategies.actions.cancel")}
-                                </button>
+                                </Button>
                             </>
                         )}
                     </div>
                 )}
 
-                <div className="sq-rise" style={{ animationDelay: "180ms" }}>
-                    <h2 className="sq-section-label">{t("strategies.pnlChart")}</h2>
+                <div className="mb-8">
+                    <h2 className="fin-label mb-3 flex items-center gap-3 text-label-3">
+                        <span>{t("strategies.pnlChart")}</span>
+                        <span className="h-px flex-1 bg-sep" />
+                    </h2>
                     {pnlChart ? (
-                        <div className="sq-scope">
+                        <div className="relative mb-2 h-[220px] rounded-lg border border-sep bg-fill-1 p-4">
                             <LineChart
                                 labels={pnlChart.labels}
                                 datasets={[
                                     {
                                         label: t("strategies.pnlChart"),
                                         data: pnlChart.data,
-                                        borderColor: "#4ade80",
-                                        backgroundColor: "rgba(74, 222, 128, 0.14)",
+                                        borderColor: "rgb(var(--up-rgb))",
+                                        backgroundColor: "rgb(var(--up-rgb) / 0.14)",
                                     },
                                 ]}
                                 beginAtZero={false}
                             />
                         </div>
                     ) : (
-                        <p className="sq-note">{t("strategies.pnlChartEmpty")}</p>
+                        <p className="text-sm text-label-2">{t("strategies.pnlChartEmpty")}</p>
                     )}
                 </div>
 
-                <div className="sq-rise" style={{ animationDelay: "220ms" }}>
-                    <h2 className="sq-section-label">{t("strategies.executions")}</h2>
+                <div>
+                    <h2 className="fin-label mb-3 flex items-center gap-3 text-label-3">
+                        <span>{t("strategies.executions")}</span>
+                        <span className="h-px flex-1 bg-sep" />
+                    </h2>
                     {executions.length === 0 ? (
-                        <p className="sq-note">{t("strategies.noExecutions")}</p>
+                        <p className="text-sm text-label-2">{t("strategies.noExecutions")}</p>
                     ) : (
-                        <div className="sq-ledger">
-                            <table className="sq-table">
+                        <div className="material overflow-hidden rounded-lg border border-sep shadow-e2-rim">
+                            <table className="w-full text-sm">
                                 <thead>
                                     <tr>
-                                        <th>{t("strategies.columns.time")}</th>
-                                        <th>{t("strategies.config.side")}</th>
-                                        <th>{t("strategies.columns.fillPrice")}</th>
-                                        <th>{t("strategies.columns.realizedPnl")}</th>
-                                        <th>{t("strategies.columns.orderId")}</th>
+                                        <th className="fin-label border-b border-sep px-4 py-3 text-left text-label-3">
+                                            {t("strategies.columns.time")}
+                                        </th>
+                                        <th className="fin-label border-b border-sep px-4 py-3 text-left text-label-3">
+                                            {t("strategies.config.side")}
+                                        </th>
+                                        <th className="fin-label border-b border-sep px-4 py-3 text-left text-label-3">
+                                            {t("strategies.columns.fillPrice")}
+                                        </th>
+                                        <th className="fin-label border-b border-sep px-4 py-3 text-left text-label-3">
+                                            {t("strategies.columns.realizedPnl")}
+                                        </th>
+                                        <th className="fin-label border-b border-sep px-4 py-3 text-left text-label-3">
+                                            {t("strategies.columns.orderId")}
+                                        </th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -442,18 +503,21 @@ export default function StrategyDetailPage() {
                                         const pnl = e.realized_pnl ?? 0;
                                         const phase = phaseById.get(e.phase_id);
                                         return (
-                                            <tr key={e.execution_id} style={{ cursor: "default" }}>
-                                                <td className="sq-cell-faint">{new Date(e.ts).toLocaleString()}</td>
-                                                <td className="sq-cell-mono">{phase?.action.side ?? "—"}</td>
-                                                <td className="sq-cell-mono">{fillPrice ?? "—"}</td>
+                                            <tr key={e.execution_id} className="border-b border-sep last:border-0">
+                                                <td className="px-4 py-3 align-middle text-label-3">{new Date(e.ts).toLocaleString()}</td>
+                                                <td className="fin-figure px-4 py-3 align-middle text-label-2">{phase?.action.side ?? "—"}</td>
+                                                <td className="fin-figure px-4 py-3 align-middle text-label-2">{fillPrice ?? "—"}</td>
                                                 <td
-                                                    className={
-                                                        pnl > 0 ? "sq-cell-mono sq-pnl-pos" : pnl < 0 ? "sq-cell-mono sq-pnl-neg" : "sq-cell-mono"
-                                                    }
+                                                    className={cn(
+                                                        "fin-figure px-4 py-3 align-middle",
+                                                        pnl > 0 ? "text-up" : pnl < 0 ? "text-down" : "text-label-2",
+                                                    )}
                                                 >
                                                     {pnl > 0 ? `+${pnl}` : pnl}
                                                 </td>
-                                                <td>{e.order_id ? <CopyId value={e.order_id} /> : <span className="sq-cell-faint">—</span>}</td>
+                                                <td className="px-4 py-3 align-middle">
+                                                    {e.order_id ? <CopyId value={e.order_id} /> : <span className="text-label-3">—</span>}
+                                                </td>
                                             </tr>
                                         );
                                     })}

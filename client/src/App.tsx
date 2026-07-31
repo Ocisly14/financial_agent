@@ -1,17 +1,15 @@
 import "./index.css";
 import { lazy, Suspense } from "react";
 import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
-import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
-import { AppSidebar, FloatingSidebarToggle } from "./components/app-sidebar";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { Toaster } from "./components/ui/toaster";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router";
 // Route-level code splitting — each route is its own chunk.
-const Chat = lazy(() => import("./routes/chat"));
+const Topic = lazy(() => import("./routes/topic"));
+const Research = lazy(() => import("./routes/research"));
 const Strategies = lazy(() => import("./routes/strategies"));
 const StrategyDetail = lazy(() => import("./routes/strategy-detail"));
 import { Toaster as SonnerToaster } from "sonner";
-import { ThemeToggle } from "./components/ThemeToggle";
 import { ThemeProvider, useTheme } from "./contexts/ThemeContext";
 import { cn } from "./lib/utils";
 import { LanguageProvider } from "./contexts/LanguageContext";
@@ -39,7 +37,7 @@ function RootRedirect() {
     if (isError || !firstAgent) {
         return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No agents available.</div>;
     }
-    return <Navigate to={`/chat/${firstAgent.id}`} replace />;
+    return <Navigate to={`/topic/${firstAgent.id}`} replace />;
 }
 
 function AppShell() {
@@ -57,26 +55,20 @@ function AppShell() {
         >
             <BrowserRouter>
                 <TooltipProvider delayDuration={0}>
-                    <SidebarProvider>
-                        <AppSidebar />
-                        <FloatingSidebarToggle />
-                        <SidebarInset className="pl-[20px]">
-                            <div className="flex flex-1 flex-col h-dvh w-full">
-                                <div className="flex flex-1 flex-col min-h-0 w-full">
-                                    <Suspense fallback={<div className="flex flex-1 items-center justify-center text-muted-foreground" />}>
-                                        <Routes>
-                                            <Route path="/" element={<RootRedirect />} />
-                                            <Route path="chat/:agentId/:roomId" element={<Chat />} />
-                                            <Route path="chat/:agentId" element={<Chat />} />
-                                            <Route path="strategies/:agentId" element={<Strategies />} />
-                                            <Route path="strategies/:agentId/:strategyId" element={<StrategyDetail />} />
-                                        </Routes>
-                                    </Suspense>
-                                    </div>
-                                </div>
-                        </SidebarInset>
-                    </SidebarProvider>
-                    <ThemeToggle />
+                    {/* No sidebar shell: TopicWorkspace owns its own columns. */}
+                    <div className="flex h-dvh min-h-0 w-full flex-col">
+                        <Suspense fallback={<div className="flex flex-1 items-center justify-center text-muted-foreground" />}>
+                            <Routes>
+                                <Route path="/" element={<RootRedirect />} />
+                                <Route path="topic/:agentId/:topicId" element={<Topic />} />
+                                <Route path="topic/:agentId" element={<Topic />} />
+                                {/* Spec §7.9 — the focused member is deliberately absent. */}
+                                <Route path="research/:agentId/:researchId" element={<Research />} />
+                                <Route path="strategies/:agentId" element={<Strategies />} />
+                                <Route path="strategies/:agentId/:strategyId" element={<StrategyDetail />} />
+                            </Routes>
+                        </Suspense>
+                    </div>
                     <Toaster />
                     <SonnerToaster />
                 </TooltipProvider>

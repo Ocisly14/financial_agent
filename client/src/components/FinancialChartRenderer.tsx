@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
 import type { StockRange } from "@/lib/stockChart";
 import type { TechnicalStudy } from "@/lib/chartWorkspace";
@@ -75,6 +76,7 @@ const PANE_VIEW = { width: 960, height: 145 };
 const PANE_PLOT = { left: 10, right: 876, top: 14, bottom: 126 };
 
 function TechnicalStudyPane({ study }: { study: TechnicalStudy }) {
+    const { t } = useTranslation();
     const [hoverIndex, setHoverIndex] = useState<number | null>(null);
     const geometry = useMemo(() => {
         const seriesPoints = study.series.map((series) => series.points
@@ -172,7 +174,7 @@ function TechnicalStudyPane({ study }: { study: TechnicalStudy }) {
                     "ml-auto font-mono text-[9px] uppercase tracking-wider transition-colors",
                     hovering ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground/70",
                 )}>
-                    {hoverTimestamp === null ? "最新" : formatStudyTimestamp(hoverTimestamp, dateOnly)}
+                    {hoverTimestamp === null ? t("charts.latest") : formatStudyTimestamp(hoverTimestamp, dateOnly)}
                 </span>
             </header>
             <svg

@@ -4,11 +4,11 @@ import { DEFAULT_CANDLE_THEME, type CandleTheme } from "./candleTheme";
 export { DEFAULT_CANDLE_THEME, type CandleTheme } from "./candleTheme";
 
 /**
- * CandleScope — a hand-drawn canvas candlestick chart in the "Phosphor Desk"
- * aesthetic (see strategy-dashboard.css). It is deliberately self-contained and
- * data-source-agnostic: feed it an ordered array of {t,o,h,l,c} candles plus an
- * optional live mark, and it renders a calibrated price grid, candles, a live
- * mark line, and a hover crosshair with an OHLC readout.
+ * CandleScope — a hand-drawn canvas candlestick chart. It is deliberately
+ * self-contained and data-source-agnostic: feed it an ordered array of
+ * {t,o,h,l,c} candles plus an optional live mark, and it renders a calibrated
+ * price grid, candles, a live mark line, and a hover crosshair with an OHLC
+ * readout.
  *
  * StockChart supplies ordered Alpaca OHLC bars. `liveFromTs` remains optional
  * for callers that need to distinguish seeded history from current-session data.
@@ -45,9 +45,9 @@ interface Props {
     liveFromTs?: number;
     height?: number;
     quote?: string;
-    /** 缺省使用 Financial Chart 的 Phosphor Desk 配色。 */
+    /** Defaults to the Financial Chart Phosphor Desk color scheme. */
     theme?: CandleTheme;
-    /** 可选 x 轴标签。 */
+    /** Optional x-axis label. */
     formatTimestamp?: (timestampMs: number) => string;
     /** Price-scale technical lines such as SMA, EMA, Bollinger Bands, and VWAP. */
     overlays?: CandleOverlay[];
@@ -407,48 +407,71 @@ export function CandleScope({
 
     return (
         <span
-            className="sq-scope-canvas block"
+            className="relative block w-full"
             ref={wrapRef}
-            style={theme === DEFAULT_CANDLE_THEME ? undefined : {
-                position: "relative",
-                width: "100%",
-                height,
-            }}
+            style={theme === DEFAULT_CANDLE_THEME ? undefined : { height }}
         >
             {readout && (
                 <span
-                    className="sq-ohlc"
+                    className="fin-figure pointer-events-none absolute left-3.5 top-2.5 z-[2] flex flex-wrap items-baseline gap-x-3 gap-y-1 text-[11px] text-label-3"
                     data-dir={up ? "up" : "down"}
-                    style={theme === DEFAULT_CANDLE_THEME ? undefined : {
-                        position: "absolute",
-                        top: 10,
-                        left: 14,
-                        zIndex: 2,
-                        color: theme.inkDim,
-                        display: "flex",
-                        flexWrap: "wrap",
-                        gap: "4px 12px",
-                        fontSize: 11,
-                        fontVariantNumeric: "tabular-nums",
-                        pointerEvents: "none",
-                    }}
+                    style={theme === DEFAULT_CANDLE_THEME ? undefined : { color: theme.inkDim }}
                 >
-                    <span>O <b style={theme === DEFAULT_CANDLE_THEME ? undefined : { color: up ? theme.pos : theme.neg }}>{fmtPrice(readout.o)}</b></span>
-                    <span>H <b style={theme === DEFAULT_CANDLE_THEME ? undefined : { color: up ? theme.pos : theme.neg }}>{fmtPrice(readout.h)}</b></span>
-                    <span>L <b style={theme === DEFAULT_CANDLE_THEME ? undefined : { color: up ? theme.pos : theme.neg }}>{fmtPrice(readout.l)}</b></span>
-                    <span>C <b style={theme === DEFAULT_CANDLE_THEME ? undefined : { color: up ? theme.pos : theme.neg }}>{fmtPrice(readout.c)}</b></span>
-                    {hovered && <span className="sq-ohlc-t" style={theme === DEFAULT_CANDLE_THEME ? undefined : { color: theme.amber }}>{fmtClock(hovered.t)}</span>}
-                    <span className="sq-ohlc-q" style={theme === DEFAULT_CANDLE_THEME ? undefined : { color: theme.axis }}>{quote}</span>
+                    <span>
+                        O{" "}
+                        <b
+                            className={up ? "font-semibold text-up" : "font-semibold text-down"}
+                            style={theme === DEFAULT_CANDLE_THEME ? undefined : { color: up ? theme.pos : theme.neg }}
+                        >
+                            {fmtPrice(readout.o)}
+                        </b>
+                    </span>
+                    <span>
+                        H{" "}
+                        <b
+                            className={up ? "font-semibold text-up" : "font-semibold text-down"}
+                            style={theme === DEFAULT_CANDLE_THEME ? undefined : { color: up ? theme.pos : theme.neg }}
+                        >
+                            {fmtPrice(readout.h)}
+                        </b>
+                    </span>
+                    <span>
+                        L{" "}
+                        <b
+                            className={up ? "font-semibold text-up" : "font-semibold text-down"}
+                            style={theme === DEFAULT_CANDLE_THEME ? undefined : { color: up ? theme.pos : theme.neg }}
+                        >
+                            {fmtPrice(readout.l)}
+                        </b>
+                    </span>
+                    <span>
+                        C{" "}
+                        <b
+                            className={up ? "font-semibold text-up" : "font-semibold text-down"}
+                            style={theme === DEFAULT_CANDLE_THEME ? undefined : { color: up ? theme.pos : theme.neg }}
+                        >
+                            {fmtPrice(readout.c)}
+                        </b>
+                    </span>
+                    {hovered && (
+                        <span
+                            className="text-hold"
+                            style={theme === DEFAULT_CANDLE_THEME ? undefined : { color: theme.amber }}
+                        >
+                            {fmtClock(hovered.t)}
+                        </span>
+                    )}
+                    <span
+                        className="text-label-3"
+                        style={theme === DEFAULT_CANDLE_THEME ? undefined : { color: theme.axis }}
+                    >
+                        {quote}
+                    </span>
                 </span>
             )}
             <canvas
                 ref={canvasRef}
-                className="sq-scope-c"
-                style={theme === DEFAULT_CANDLE_THEME ? undefined : {
-                    display: "block",
-                    width: "100%",
-                    cursor: "crosshair",
-                }}
+                className="block w-full cursor-crosshair"
                 onMouseMove={(e) => {
                     const r = e.currentTarget.getBoundingClientRect();
                     setHover({ x: e.clientX - r.left, y: e.clientY - r.top });
