@@ -15,9 +15,9 @@ export type Coverage = {
 export interface BarStore {
   getCoverage(symbol: string, timeframe: Timeframe): Promise<Coverage | undefined>;
   putCoverage(coverage: Coverage): Promise<void>;
-  /** 最近 limit 根，按日期升序（最旧在前）。 */
+  /** The most recent `limit` bars, ascending by date (oldest first). */
   getBars(symbol: string, timeframe: Timeframe, limit: number): Promise<DailyBar[]>;
-  /** fromDate 起（含）的全部 bar，按日期升序。 */
+  /** All bars from fromDate onward (inclusive), ascending by date. */
   getBarsOnOrAfter(symbol: string, timeframe: Timeframe, fromDate: string): Promise<DailyBar[]>;
   putBars(symbol: string, timeframe: Timeframe, bars: DailyBar[]): Promise<void>;
   clearSymbol(symbol: string, timeframe: Timeframe): Promise<void>;
@@ -58,10 +58,11 @@ function hasLegacySchema(db: DatabaseSync, table: string): boolean {
 }
 
 /**
- * SQLite 实现。日 K 是单机、只增不改、按 (symbol, date) 主键查的表格数据，
- * 用嵌入式库比外部数据库服务更合适：无需部署，无需连接管理。
+ * SQLite implementation. Daily bars are single-machine, append-only, tabular data queried by
+ * a (symbol, date) primary key, which suits an embedded library better than an external
+ * database service: no deployment, no connection management.
  *
- * 需要 Node 的 --experimental-sqlite 标志（见 package.json 的 scripts）。
+ * Requires Node's --experimental-sqlite flag (see package.json scripts).
  */
 export class SqliteBarStore implements BarStore {
   private readonly db: DatabaseSync;
@@ -70,7 +71,7 @@ export class SqliteBarStore implements BarStore {
     this.db = db;
   }
 
-  /** path 为 ":memory:" 时建内存库，供测试使用。 */
+  /** Builds an in-memory database when path is ":memory:", for use in tests. */
   static open(path: string): SqliteBarStore {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     const db = new DatabaseSync(path);
@@ -147,7 +148,7 @@ export class SqliteBarStore implements BarStore {
          o = excluded.o, h = excluded.h, l = excluded.l, c = excluded.c,
          v = excluded.v, vw = excluded.vw, updated_at = excluded.updated_at`,
     );
-    // 一次事务写入，5 年回补（约 1260 根）也只有一次 fsync
+    // Single transactional write — even a 5-year backfill (~1260 bars) costs only one fsync
     this.db.exec("BEGIN");
     try {
       for (const bar of bars) {

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { DEFAULT_CANDLE_THEME } from "../../components/charts/candleTheme.ts";
 
-test("CandleScope 默认主题使用 Financial Chart 的 Phosphor COL 配色", () => {
+test("CandleScope's default theme uses the Financial Chart Phosphor COL color scheme", () => {
   assert.deepEqual(
     {
       grid: DEFAULT_CANDLE_THEME.grid,

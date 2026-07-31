@@ -27,7 +27,7 @@
            this single token pulls every card, button, input and badge in with
            it, and is the largest part of the "tech, not toy" pass. */
         --radius: 0.625rem;
-        /* Graph-paper底噪 for the app canvas and the chart workspace. */
+        /* Graph-paper background noise for the app canvas and the chart workspace. */
         --grid-line: 15 23 42;
         --grid-alpha: 0.03;
 

@@ -9,7 +9,7 @@ import {
   stripIncompleteTrailingTag,
 } from "../stockChart.ts";
 
-// 10. pollIntervalForSession —— 四个时段
+// 10. pollIntervalForSession — the four sessions
 test("pollIntervalForSession maps each session to its interval", () => {
   assert.equal(pollIntervalForSession("regular"), 5_000);
   assert.equal(pollIntervalForSession("pre-market"), 30_000);
@@ -79,7 +79,7 @@ test("stripIncompleteTrailingTag leaves complete tags and plain text alone", () 
 });
 
 test("stripIncompleteTrailingTag keeps a closed angle bracket earlier in the text", () => {
-  // `<` 后面还有 `>` 的不受影响，只有"到末尾都没闭合"的才砍。
+  // A `<` that has a later `>` is unaffected; only one left unclosed all the way to the end gets cut.
   assert.equal(stripIncompleteTrailingTag("a < b > c"), "a < b > c");
 });
 

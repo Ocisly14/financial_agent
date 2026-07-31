@@ -49,7 +49,7 @@ function makeDeps(over?: Partial<StockChartDataDeps> & { candles?: DailyBar[] })
   });
 }
 
-test("range=1D 返回 1Min candles", async () => {
+test("range=1D returns 1Min candles", async () => {
   const deps = makeDeps({ candles: [bar("2026-07-28T13:30:00Z", 338)] });
   const { status, body } = await buildStockChartDataResponse("AAPL", "1D", deps);
   const payload = body as { range: string; timeframe: string; candles: DailyBar[] };
@@ -60,7 +60,7 @@ test("range=1D 返回 1Min candles", async () => {
   assert.deepEqual(deps.repositoryCalls[0], { symbol: "AAPL", timeframe: "1Min", count: 390 });
 });
 
-test("1M / 3M / 1Y 共用日线并按各自上限取数", async () => {
+test("1M / 3M / 1Y share daily bars and fetch up to their own limits", async () => {
   const all = Array.from({ length: 300 }, (_, i) => bar(`2026-${String(i).padStart(3, "0")}`, i));
   for (const [range, count] of [["1M", 21], ["3M", 63], ["1Y", 252]] as const) {
     const deps = makeDeps({ candles: all });
@@ -72,7 +72,7 @@ test("1M / 3M / 1Y 共用日线并按各自上限取数", async () => {
   }
 });
 
-test("range=none 只返回报价，不访问 repository", async () => {
+test("range=none returns only the quote, without accessing the repository", async () => {
   const deps = makeDeps();
   const { status, body } = await buildStockChartDataResponse("AAPL", "none", deps);
   assert.equal(status, 200);
@@ -81,7 +81,7 @@ test("range=none 只返回报价，不访问 repository", async () => {
   assert.equal(deps.repositoryCalls.length, 0);
 });
 
-test("非法、空和缺失 range 都回退 1D", async () => {
+test("invalid, empty, and missing range all fall back to 1D", async () => {
   for (const range of ["7D", "abc", "", null]) {
     const { status, body } = await buildStockChartDataResponse("AAPL", range, makeDeps());
     assert.equal(status, 200);
@@ -90,7 +90,7 @@ test("非法、空和缺失 range 都回退 1D", async () => {
   }
 });
 
-test("当日无分钟线时标注 previous_session", async () => {
+test("labels previous_session when today has no minute bars", async () => {
   const deps = makeDeps({ candles: [
     bar("2026-07-27T13:30:00Z", 336),
     bar("2026-07-27T13:31:00Z", 337),
@@ -101,7 +101,7 @@ test("当日无分钟线时标注 previous_session", async () => {
   });
 });
 
-test("拒绝非法 symbol 且不访问数据源", async () => {
+test("rejects an invalid symbol without accessing the data source", async () => {
   const deps = makeDeps();
   const { status, body } = await buildStockChartDataResponse("../etc", "1D", deps);
   assert.equal(status, 400);
@@ -110,7 +110,7 @@ test("拒绝非法 symbol 且不访问数据源", async () => {
   assert.equal(deps.snapshotCalls, 0);
 });
 
-test("snapshot 失败但 candles 可用时降级为 200", async () => {
+test("degrades to 200 when snapshot fails but candles are available", async () => {
   const deps = makeDeps({
     loadSnapshot: async () => { throw new Error("Alpaca 500"); },
     candles: [bar("2026-07-27", 336.93)],
@@ -121,7 +121,7 @@ test("snapshot 失败但 candles 可用时降级为 200", async () => {
   assert.equal((body as { staleness: { reason: string } }).staleness.reason, "quote_unavailable");
 });
 
-test("snapshot 与 candles 都失败时返回 502，404 保持映射", async () => {
+test("returns 502 when both snapshot and candles fail, while 404 stays mapped", async () => {
   for (const [message, expected] of [["Alpaca 500", 502], ["Alpaca 404: no", 404]] as const) {
     const deps = makeDeps({
       loadSnapshot: async () => { throw new Error(message); },
@@ -131,7 +131,7 @@ test("snapshot 与 candles 都失败时返回 502，404 保持映射", async () 
   }
 });
 
-test("限流器和 symbol/range 纯函数保持边界行为", async () => {
+test("rate limiter and symbol/range pure functions preserve boundary behavior", async () => {
   let clock = 1_000_000;
   const allow = createRateLimiter(2, 60_000, () => clock);
   assert.equal(allow(), true);

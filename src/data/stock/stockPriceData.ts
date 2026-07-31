@@ -55,8 +55,9 @@ function pct(current: number, base: number): number | null {
 }
 
 /**
- * 股票行情用例。负责本地历史库、Alpaca 降级、快照与分时数据的完整组装，
- * 上层 MCP/HTTP adapter 不需要知道数据来自网络还是 SQLite。
+ * Stock quote use case. Handles the full assembly of the local history store, Alpaca fallback,
+ * snapshot, and intraday data, so the upstream MCP/HTTP adapters don't need to know whether the
+ * data came from the network or from SQLite.
  */
 export async function loadStockPriceData(
   query: StockPriceQuery,
@@ -74,7 +75,7 @@ export async function loadStockPriceData(
     if (repository) {
       dailyBars = await repository.getBars(query.symbol, "1Day", query.historyDays);
     } else {
-      // SQLite 不可用时退化为纯 API 模式；多取自然日以覆盖所需交易日。
+      // Falls back to pure-API mode when SQLite is unavailable; over-fetches calendar days to cover the needed trading days.
       const from = new Date(current);
       from.setUTCDate(from.getUTCDate() - Math.ceil(query.historyDays * 1.5) - 5);
       const fetched = await loadDailyBars(

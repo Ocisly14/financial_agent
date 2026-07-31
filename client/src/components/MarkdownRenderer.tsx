@@ -601,11 +601,11 @@ const baseMarkdownOverrides = {
     th: CustomTH,
     td: CustomTD,
     img: CustomImg,
-    // markdown-to-jsx 的 overrides 原生支持正文里的自定义标签，所以主 agent 只需
-    // 写 <StockChart symbol="AAPL" range="1Y" /> 就能内嵌一块实时图表。不发明新
-    // 语法、不写解析器、不碰 SSE。
+    // markdown-to-jsx's overrides natively support custom tags in the body, so the main agent
+    // only needs to write <StockChart symbol="AAPL" range="1Y" /> to embed a live chart. No new
+    // syntax to invent, no parser to write, no touching SSE.
     StockChart: StockChartBlock,
-    // 语义标记：主 agent 写 [[metric:…]] / :::risk，预处理把它们降解成这两个标签。
+    // Semantic marks: the main agent writes [[metric:…]] / :::risk, and preprocessing lowers them into these two tags.
     [INLINE_TAG]: InlineMark,
     [BLOCK_TAG]: MarkBlockCard,
     [SOURCE_LIST_TAG]: SourceListBlock,
@@ -643,9 +643,10 @@ interface MarkdownRendererProps {
     className?: string;
     anchorPrefix?: string;
     /**
-     * 正文仍在 SSE 流式增长时置为 true。此时末尾未闭合的 `<...` 会被砍掉
-     * （否则 markdown-to-jsx 会把半截标签转义成字面文本闪现出来），
-     * 且 `<StockChart />` 只渲染占位骨架、不发请求。
+     * True while the body is still growing via SSE streaming. While true, a trailing unclosed
+     * `<...` gets cut off (otherwise markdown-to-jsx would briefly flash the half-formed tag as
+     * escaped literal text), and `<StockChart />` renders only a placeholder skeleton without
+     * sending a request.
      */
     streaming?: boolean;
     /** Search hits the backend attached to this message, matched to citations by URL. */

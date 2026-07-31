@@ -9,7 +9,7 @@ function bar(t: string, c: number): DailyBar {
 
 const TF = "1Day" as const;
 
-test("putBars 去重且按日期升序返回", async () => {
+test("putBars dedupes and returns ascending by date", async () => {
   const store = new InMemoryBarStore();
   await store.putBars("AAPL", TF, [bar("2026-07-03", 103), bar("2026-07-01", 101)]);
   await store.putBars("AAPL", TF, [bar("2026-07-02", 102)]);
@@ -17,7 +17,7 @@ test("putBars 去重且按日期升序返回", async () => {
   assert.deepEqual(bars.map((b) => b.t), ["2026-07-01", "2026-07-02", "2026-07-03"]);
 });
 
-test("putBars 同一日期覆盖旧值", async () => {
+test("putBars overwrites the old value for the same date", async () => {
   const store = new InMemoryBarStore();
   await store.putBars("AAPL", TF, [bar("2026-07-01", 101)]);
   await store.putBars("AAPL", TF, [bar("2026-07-01", 50.5)]);
@@ -26,21 +26,21 @@ test("putBars 同一日期覆盖旧值", async () => {
   assert.equal(bars[0]!.c, 50.5);
 });
 
-test("getBars 取最近 N 根，仍按升序", async () => {
+test("getBars takes the most recent N bars, still ascending", async () => {
   const store = new InMemoryBarStore();
   await store.putBars("AAPL", TF, [bar("2026-07-01", 1), bar("2026-07-02", 2), bar("2026-07-03", 3)]);
   const bars = await store.getBars("AAPL", TF, 2);
   assert.deepEqual(bars.map((b) => b.t), ["2026-07-02", "2026-07-03"]);
 });
 
-test("getBarsOnOrAfter 是闭区间起点", async () => {
+test("getBarsOnOrAfter treats fromDate as inclusive", async () => {
   const store = new InMemoryBarStore();
   await store.putBars("AAPL", TF, [bar("2026-07-01", 1), bar("2026-07-02", 2), bar("2026-07-03", 3)]);
   const bars = await store.getBarsOnOrAfter("AAPL", TF, "2026-07-02");
   assert.deepEqual(bars.map((b) => b.t), ["2026-07-02", "2026-07-03"]);
 });
 
-test("symbol 之间互不干扰", async () => {
+test("symbols don't interfere with each other", async () => {
   const store = new InMemoryBarStore();
   await store.putBars("AAPL", TF, [bar("2026-07-01", 1)]);
   await store.putBars("MSFT", TF, [bar("2026-07-01", 400)]);
@@ -48,7 +48,7 @@ test("symbol 之间互不干扰", async () => {
   assert.equal((await store.getBars("MSFT", TF, 10))[0]!.c, 400);
 });
 
-test("clearSymbol 清空该 symbol 的 bars 与 coverage", async () => {
+test("clearSymbol clears that symbol's bars and coverage", async () => {
   const store = new InMemoryBarStore();
   await store.putBars("AAPL", TF, [bar("2026-07-01", 1)]);
   await store.putCoverage({
@@ -60,7 +60,7 @@ test("clearSymbol 清空该 symbol 的 bars 与 coverage", async () => {
   assert.equal(await store.getCoverage("AAPL", TF), undefined);
 });
 
-test("coverage 可写入并读回", async () => {
+test("coverage can be written and read back", async () => {
   const store = new InMemoryBarStore();
   await store.putCoverage({
     symbol: "AAPL", timeframe: TF, firstDate: "2021-07-28", lastDate: "2026-07-27",

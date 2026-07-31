@@ -22,7 +22,7 @@ const SNAPSHOT: Snapshot = {
   quoteTimestamp: "2026-07-28T18:00:00Z",
 };
 
-test("组装本地日线与 Alpaca snapshot，并计算涨跌幅", async () => {
+test("assembles local daily bars with Alpaca snapshot and computes change percent", async () => {
   const result = await loadStockPriceData(
     { symbol: "AAPL", historyDays: 60, includeIntraday: false },
     {
@@ -40,7 +40,7 @@ test("组装本地日线与 Alpaca snapshot，并计算涨跌幅", async () => {
   assert.equal(result.data.marketSession, "regular");
 });
 
-test("本地库显式不可用时由数据层直接回退 Alpaca 日线", async () => {
+test("data layer falls back directly to Alpaca daily bars when the local store is explicitly unavailable", async () => {
   const calls: Array<{ from: string; to: string }> = [];
   const result = await loadStockPriceData(
     { symbol: "AAPL", historyDays: 2, includeIntraday: true },
@@ -63,7 +63,7 @@ test("本地库显式不可用时由数据层直接回退 Alpaca 日线", async 
   assert.equal(calls[0]?.to, "2026-07-28");
 });
 
-test("snapshot 不可用时由数据层返回最新收盘价与陈旧标记", async () => {
+test("data layer returns the latest close price and a staleness marker when snapshot is unavailable", async () => {
   const result = await loadStockPriceData(
     { symbol: "AAPL", historyDays: 60, includeIntraday: false },
     {

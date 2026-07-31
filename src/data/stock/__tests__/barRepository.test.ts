@@ -30,7 +30,7 @@ function fakeClient(script: DailyBar[][]) {
 const NOW = new Date("2026-07-28T14:00:00Z");
 const fixedNow = (): Date => NOW;
 
-test("首次日线请求使用五年全量回补窗口", async () => {
+test("first daily request uses the five-year full backfill window", async () => {
   const store = new InMemoryBarStore();
   const { client, calls } = fakeClient([[bar("2026-07-24", 100), bar("2026-07-27", 101)]]);
   const repo = createBarRepository({ store, client, now: fixedNow });
@@ -44,7 +44,7 @@ test("首次日线请求使用五年全量回补窗口", async () => {
   assert.equal((await store.getCoverage("AAPL", "1Day"))?.timeframe, "1Day");
 });
 
-test("不同 timeframe 使用各自的全量回补窗口", async () => {
+test("different timeframes use their own full backfill windows", async () => {
   const store = new InMemoryBarStore();
   const { client, calls } = fakeClient([
     [bar("2026-07-28T13:30:00Z", 100)],
@@ -59,7 +59,7 @@ test("不同 timeframe 使用各自的全量回补窗口", async () => {
   assert.equal(calls[1]!.from, "2026-07-18");
 });
 
-test("库数据新鲜时不请求上游", async () => {
+test("does not request upstream when store data is fresh", async () => {
   const store = new InMemoryBarStore();
   await store.putBars("AAPL", "1Day", [bar("2026-07-27", 101)]);
   await store.putCoverage({
@@ -73,7 +73,7 @@ test("库数据新鲜时不请求上游", async () => {
   assert.equal(calls.length, 0);
 });
 
-test("日线增量只从末根前十天拉取", async () => {
+test("daily incremental fetch only goes back ten days before the last bar", async () => {
   const store = new InMemoryBarStore();
   await store.putBars("AAPL", "1Day", [bar("2026-07-20", 95), bar("2026-07-24", 100)]);
   await store.putCoverage({
@@ -91,7 +91,7 @@ test("日线增量只从末根前十天拉取", async () => {
   assert.deepEqual(bars.map((b) => b.t), ["2026-07-20", "2026-07-24", "2026-07-27"]);
 });
 
-test("分钟线增量从末根时间戳前五分钟拉取", async () => {
+test("minute incremental fetch goes back five minutes before the last bar's timestamp", async () => {
   const store = new InMemoryBarStore();
   await store.putBars("AAPL", "1Min", [bar("2026-07-28T13:40:00.000Z", 100)]);
   await store.putCoverage({
@@ -107,7 +107,7 @@ test("分钟线增量从末根时间戳前五分钟拉取", async () => {
   assert.equal(calls[0]!.from, "2026-07-28T13:35:00.000Z");
 });
 
-test("拆股价格漂移只清空对应 timeframe 并全量重拉", async () => {
+test("split price divergence clears only the affected timeframe and does a full refetch", async () => {
   class TrackingStore extends InMemoryBarStore {
     clears: Array<[string, Timeframe]> = [];
     override async clearSymbol(symbol: string, timeframe: Timeframe): Promise<void> {
@@ -134,7 +134,7 @@ test("拆股价格漂移只清空对应 timeframe 并全量重拉", async () => 
   assert.deepEqual(bars.map((b) => b.c), [95, 100, 102]);
 });
 
-test("1Min 首次回补覆盖 180 天以支持任意分钟聚合", async () => {
+test("first 1Min backfill covers 180 days to support arbitrary minute aggregation", async () => {
   const store = new InMemoryBarStore();
   const { client, calls } = fakeClient([
     [bar("2026-07-27T13:30:00Z", 100), bar("2026-07-27T13:31:00Z", 101)],
@@ -148,7 +148,7 @@ test("1Min 首次回补覆盖 180 天以支持任意分钟聚合", async () => {
   assert.equal(bars.length, 2);
 });
 
-test("count 限制返回根数且空回补不写 coverage", async () => {
+test("count limits the number of bars returned and an empty backfill does not write coverage", async () => {
   const store = new InMemoryBarStore();
   const { client } = fakeClient([[bar("2026-07-20", 1), bar("2026-07-24", 2), bar("2026-07-27", 3)], []]);
   const repo = createBarRepository({ store, client, now: fixedNow });

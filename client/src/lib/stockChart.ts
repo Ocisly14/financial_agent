@@ -1,15 +1,15 @@
 /**
- * `<StockChart />` 的纯逻辑。
+ * Pure logic for `<StockChart />`.
  *
- * 这个文件刻意不 import React、不用 JSX、不走 `@/` 路径别名——仓库的客户端
- * 没有测试运行器，把纯函数留在这里，根目录的 `node --test` 才能直接覆盖它们
- * （见 client/src/lib/__tests__/stockChart.test.ts）。
+ * This file deliberately avoids importing React, using JSX, or going through the `@/` path
+ * alias — the client repo has no test runner, so pure functions are kept here where the root
+ * `node --test` can cover them directly (see client/src/lib/__tests__/stockChart.test.ts).
  */
 
-/** 与后端 marketHours.ts 的 MarketSession 同构，刻意重复声明而非跨 client/server 边界 import。 */
+/** Structurally identical to the backend's marketHours.ts MarketSession; deliberately redeclared here rather than imported across the client/server boundary. */
 export type MarketSession = "pre-market" | "regular" | "after-hours" | "closed";
 
-/** 与后端 stockMarketRoutes.ts 的 SYMBOL_RE 同规则，各自实现。 */
+/** Same rule as the backend's stockMarketRoutes.ts SYMBOL_RE; each side implements its own. */
 const SYMBOL_RE = /^[A-Z][A-Z.-]{0,5}$/;
 
 export const STOCK_RANGES = ["1D", "5D", "1M", "3M", "1Y"] as const;
@@ -43,8 +43,8 @@ export function extractStockCharts(text: string): StockChartProps[] {
 }
 
 /**
- * symbol 会被拼进请求 URL，而它来自模型生成的文本——这是本组件唯一的新风险面。
- * 不合法就不发请求。
+ * symbol gets interpolated into the request URL, and it comes from model-generated text — this
+ * is this component's one new risk surface. If it's invalid, no request is sent.
  */
 export function parseStockChartProps(input: {
   symbol?: unknown;
@@ -68,9 +68,11 @@ export function shouldPollCandles(range: StockRange): boolean {
 }
 
 /**
- * 轮询间隔。判定逻辑只存在于后端 marketHours.ts 一处，这里只做映射。
+ * Polling interval. The decision logic lives in exactly one place — the backend's
+ * marketHours.ts — this function only maps from it.
  *
- * 5 秒与 alpacaClient.ts 的 snapshot 缓存 TTL 相等——轮询快过缓存拿不到更新的数据。
+ * 5 seconds equals alpacaClient.ts's snapshot cache TTL — polling faster than the cache
+ * wouldn't get fresher data.
  */
 export function pollIntervalForSession(session: MarketSession): number | false {
   switch (session) {
@@ -85,14 +87,16 @@ export function pollIntervalForSession(session: MarketSession): number | false {
 }
 
 /**
- * 砍掉末尾未闭合的 `<...` 片段。
+ * Cuts off a trailing unclosed `<...` fragment.
  *
- * 流式渲染时正文逐 token 增长，`<StockChart symb` 这类中间态会被 markdown-to-jsx
- * 转义成字面文本渲染出来（实测：它不会吞掉后续正文，只是把 `<` 转义为 `&lt;`）。
- * 用户因此会看到半截原始标记一闪而过，这里把它藏掉。
+ * During streaming render the body grows token by token, and intermediate states like
+ * `<StockChart symb` get escaped by markdown-to-jsx into literal rendered text (verified
+ * empirically: it doesn't swallow the following text, it just escapes `<` to `&lt;`). Users would
+ * otherwise see a flash of the raw half-formed tag, which this hides.
  *
- * 已知取舍：正文里的 `a < b` 若恰好在末尾也会被砍掉。可接受——下一个 token
- * 就会把它补回来，且只影响流式预览态，定稿的消息不走这个函数。
+ * Known tradeoff: an `a < b` in the body that happens to land at the very end also gets cut.
+ * Acceptable — the next token restores it, and this only affects the streaming preview state;
+ * the finalized message never goes through this function.
  */
 export function stripIncompleteTrailingTag(text: string): string {
   return text.replace(/<[^>]*$/, "");

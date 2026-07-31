@@ -120,7 +120,7 @@ export function createGetStockPriceTool(overrides?: {
           : "N/A";
       const priceStr = data.price !== null ? `$${data.price}` : "N/A";
       const suffix = data.staleness
-        ? ` | 数据截至 ${data.dailyBars[data.dailyBars.length - 1]?.t}`
+        ? ` | data as of ${data.dailyBars[data.dailyBars.length - 1]?.t}`
         : ` | ${data.marketSession}`;
 
       return {

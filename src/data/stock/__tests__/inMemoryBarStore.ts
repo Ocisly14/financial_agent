@@ -1,7 +1,7 @@
 import type { DailyBar, Timeframe } from "../alpacaClient.ts";
 import type { BarStore, Coverage } from "../barStore.ts";
 
-/** BarStore 的内存实现，供单测使用。语义须与 MongoBarStore 一致。 */
+/** In-memory implementation of BarStore, for use in unit tests. Semantics must match MongoBarStore. */
 export class InMemoryBarStore implements BarStore {
   private readonly bars = new Map<string, Map<string, DailyBar>>();
   private readonly coverage = new Map<string, Coverage>();

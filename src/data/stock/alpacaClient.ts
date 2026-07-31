@@ -8,7 +8,7 @@ function requiredEnv(key: string): string {
 }
 
 export type DailyBar = {
-  t: string;   // 交易日 "2026-07-27"（日线）或完整 ISO 时刻（分钟线）
+  t: string;   // Trading day "2026-07-27" (daily bar) or full ISO timestamp (minute bar)
   o: number;
   h: number;
   l: number;
@@ -96,7 +96,7 @@ async function fetchBarsPaged(path: string, dateOnly: boolean): Promise<DailyBar
   return bars;
 }
 
-/** 任意受支持 timeframe 的 K 线。一律取复权后价。 */
+/** Bars for any supported timeframe. Always uses adjusted prices. */
 export async function fetchBars(
   symbol: string,
   timeframe: Timeframe,
@@ -107,12 +107,12 @@ export async function fetchBars(
   return fetchBarsPaged(`/stocks/${encodeURIComponent(symbol)}/bars?${qs}`, timeframe === "1Day");
 }
 
-/** 日 K。from/to 为 "YYYY-MM-DD"，闭区间。保留供 get_stock_price 调用。 */
+/** Daily bars. from/to are "YYYY-MM-DD", inclusive range. Kept for get_stock_price to call. */
 export async function fetchDailyBars(symbol: string, from: string, to: string): Promise<DailyBar[]> {
   return fetchBars(symbol, "1Day", from, to);
 }
 
-/** 指定交易日的分钟线。day 为 "YYYY-MM-DD"。 */
+/** Minute bars for a given trading day. day is "YYYY-MM-DD". */
 export async function fetchIntradayBars(symbol: string, day: string): Promise<DailyBar[]> {
   return fetchBars(symbol, "1Min", day, day);
 }
@@ -144,8 +144,8 @@ export async function fetchSnapshot(symbol: string): Promise<Snapshot> {
 }
 
 /**
- * 按 key 缓存 load 的结果 ttlMs 毫秒。nowMs 由调用方传入，便于测试。
- * loader 抛错时不写缓存。
+ * Caches load's result per key for ttlMs milliseconds. nowMs is supplied by the caller, to keep this testable.
+ * Nothing is cached when loader throws.
  */
 export function createTtlCache<T>(
   load: (key: string) => Promise<T>,
@@ -162,9 +162,10 @@ export function createTtlCache<T>(
 }
 
 /**
- * 实时报价缓存：5 秒 TTL。
+ * Live quote cache: 5 second TTL.
  *
- * 与 `StockChart` 组件的 5 秒轮询间隔相等（见 inline-stock-chart spec §5）。
- * 缓存比轮询慢会让一半的轮询拿回同样的数据，快则纯属浪费上游配额。
+ * Equal to the `StockChart` component's 5 second polling interval (see inline-stock-chart spec §5).
+ * A cache slower than the polling would make half the polls return the same stale data; faster
+ * would purely waste upstream quota.
  */
 export const getSnapshotCached = createTtlCache(fetchSnapshot, 5_000);

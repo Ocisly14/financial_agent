@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createTtlCache, fetchBars } from "../alpacaClient.ts";
 
-test("fetchBars 泛化 timeframe 并保留日线/分钟线时间格式", async () => {
+test("fetchBars generalizes timeframe and preserves daily/minute timestamp format", async () => {
   const originalFetch = globalThis.fetch;
   const urls: string[] = [];
   globalThis.fetch = async (input) => {
@@ -25,7 +25,7 @@ test("fetchBars 泛化 timeframe 并保留日线/分钟线时间格式", async (
   }
 });
 
-test("TTL 内命中缓存，不重复调用 loader", async () => {
+test("cache hit within TTL does not call loader again", async () => {
   let calls = 0;
   const cached = createTtlCache(async (key: string) => { calls++; return `${key}-${calls}`; }, 10_000);
   assert.equal(await cached("AAPL", 1_000), "AAPL-1");
@@ -33,7 +33,7 @@ test("TTL 内命中缓存，不重复调用 loader", async () => {
   assert.equal(calls, 1);
 });
 
-test("TTL 过期后重新调用 loader", async () => {
+test("loader is called again after TTL expires", async () => {
   let calls = 0;
   const cached = createTtlCache(async (key: string) => { calls++; return `${key}-${calls}`; }, 10_000);
   await cached("AAPL", 1_000);
@@ -41,7 +41,7 @@ test("TTL 过期后重新调用 loader", async () => {
   assert.equal(calls, 2);
 });
 
-test("不同 key 各自独立缓存", async () => {
+test("different keys are cached independently", async () => {
   let calls = 0;
   const cached = createTtlCache(async (key: string) => { calls++; return `${key}-${calls}`; }, 10_000);
   await cached("AAPL", 1_000);
@@ -51,7 +51,7 @@ test("不同 key 各自独立缓存", async () => {
   assert.equal(calls, 2);
 });
 
-test("loader 抛错时不缓存失败结果", async () => {
+test("failed result is not cached when loader throws", async () => {
   let calls = 0;
   const cached = createTtlCache(async () => {
     calls++;

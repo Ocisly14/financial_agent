@@ -9,7 +9,7 @@ const DAILY_OVERLAP_DAYS = 10;
 const INTRADAY_OVERLAP_MINUTES = 5;
 const ONE_MIN_BACKFILL_DAYS = 180;
 const FIVE_MIN_BACKFILL_DAYS = 10;
-/** 重叠区收盘价相对偏差阈值；超过即判定发生拆股/分红。 */
+/** Relative close-price deviation threshold in the overlap window; exceeding it means a split or dividend occurred. */
 const SPLIT_EPSILON = 0.0001;
 
 export type BarRepository = {
@@ -21,7 +21,7 @@ export type BarRepositoryDeps = {
   client: BarFetcher;
   now?: () => Date;
   backfillYears?: number;
-  /** 测试覆写；生产按 timeframe 使用 1m / 5m / 30m。 */
+  /** Test override; production uses 1m / 5m / 30m depending on timeframe. */
   freshnessMs?: number;
 };
 
@@ -65,7 +65,7 @@ function incrementalFrom(timeframe: Timeframe, lastBarTs: string): string {
     : shiftMinutes(lastBarTs, -INTRADAY_OVERLAP_MINUTES);
 }
 
-/** 重叠区任一 bar 的收盘价偏差超过阈值即为 true。 */
+/** True if any bar's close price in the overlap window deviates past the threshold. */
 function hasSplitDivergence(stored: DailyBar[], fetched: DailyBar[]): boolean {
   const fetchedByTimestamp = new Map(fetched.map((bar) => [bar.t, bar]));
   for (const old of stored) {
@@ -81,7 +81,7 @@ export function createBarRepository(deps: BarRepositoryDeps): BarRepository {
   const now = deps.now ?? ((): Date => new Date());
   const backfillYears = deps.backfillYears ?? DEFAULT_BACKFILL_YEARS;
 
-  /** 全量回补。分钟线保留足够历史，以支持任意分钟周期的本地聚合。 */
+  /** Full backfill. Minute bars keep enough history to support local aggregation into any minute period. */
   async function backfill(
     symbol: string,
     timeframe: Timeframe,

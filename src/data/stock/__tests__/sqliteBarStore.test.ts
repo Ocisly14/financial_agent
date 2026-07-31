@@ -17,7 +17,7 @@ function store(): SqliteBarStore {
 
 const TF = "1Day" as const;
 
-test("sqlite: putBars 去重且按日期升序返回", async () => {
+test("sqlite: putBars dedupes and returns ascending by date", async () => {
   const s = store();
   await s.putBars("AAPL", TF, [bar("2026-07-03", 103), bar("2026-07-01", 101)]);
   await s.putBars("AAPL", TF, [bar("2026-07-02", 102)]);
@@ -26,7 +26,7 @@ test("sqlite: putBars 去重且按日期升序返回", async () => {
   s.close();
 });
 
-test("sqlite: 同一日期 upsert 覆盖旧值（拆股重拉依赖此行为）", async () => {
+test("sqlite: upsert for the same date overwrites the old value (split refetch depends on this)", async () => {
   const s = store();
   await s.putBars("AAPL", TF, [bar("2026-07-01", 101)]);
   await s.putBars("AAPL", TF, [bar("2026-07-01", 50.5)]);
@@ -36,14 +36,14 @@ test("sqlite: 同一日期 upsert 覆盖旧值（拆股重拉依赖此行为）"
   s.close();
 });
 
-test("sqlite: getBars 取最近 N 根，仍按升序", async () => {
+test("sqlite: getBars takes the most recent N bars, still ascending", async () => {
   const s = store();
   await s.putBars("AAPL", TF, [bar("2026-07-01", 1), bar("2026-07-02", 2), bar("2026-07-03", 3)]);
   assert.deepEqual((await s.getBars("AAPL", TF, 2)).map((b) => b.t), ["2026-07-02", "2026-07-03"]);
   s.close();
 });
 
-test("sqlite: getBarsOnOrAfter 是闭区间起点", async () => {
+test("sqlite: getBarsOnOrAfter treats fromDate as inclusive", async () => {
   const s = store();
   await s.putBars("AAPL", TF, [bar("2026-07-01", 1), bar("2026-07-02", 2), bar("2026-07-03", 3)]);
   assert.deepEqual(
@@ -53,7 +53,7 @@ test("sqlite: getBarsOnOrAfter 是闭区间起点", async () => {
   s.close();
 });
 
-test("sqlite: symbol 之间互不干扰", async () => {
+test("sqlite: symbols don't interfere with each other", async () => {
   const s = store();
   await s.putBars("AAPL", TF, [bar("2026-07-01", 1)]);
   await s.putBars("MSFT", TF, [bar("2026-07-01", 400)]);
@@ -62,7 +62,7 @@ test("sqlite: symbol 之间互不干扰", async () => {
   s.close();
 });
 
-test("sqlite: clearSymbol 清空该 symbol 的 bars 与 coverage", async () => {
+test("sqlite: clearSymbol clears that symbol's bars and coverage", async () => {
   const s = store();
   await s.putBars("AAPL", TF, [bar("2026-07-01", 1)]);
   await s.putBars("MSFT", TF, [bar("2026-07-01", 400)]);
@@ -73,11 +73,11 @@ test("sqlite: clearSymbol 清空该 symbol 的 bars 与 coverage", async () => {
   await s.clearSymbol("AAPL", TF);
   assert.deepEqual(await s.getBars("AAPL", TF, 10), []);
   assert.equal(await s.getCoverage("AAPL", TF), undefined);
-  assert.equal((await s.getBars("MSFT", TF, 10)).length, 1); // 未误删其他 symbol
+  assert.equal((await s.getBars("MSFT", TF, 10)).length, 1); // did not mistakenly delete other symbols
   s.close();
 });
 
-test("sqlite: coverage 可写入、读回并覆盖更新", async () => {
+test("sqlite: coverage can be written, read back, and overwritten with updates", async () => {
   const s = store();
   await s.putCoverage({
     symbol: "AAPL", timeframe: TF, firstDate: "2021-07-28", lastDate: "2026-07-27",
@@ -95,7 +95,7 @@ test("sqlite: coverage 可写入、读回并覆盖更新", async () => {
   s.close();
 });
 
-test("sqlite: 批量写入 1260 根（5 年回补规模）", async () => {
+test("sqlite: bulk write of 1260 bars (5-year backfill scale)", async () => {
   const s = store();
   const bars: DailyBar[] = [];
   for (let i = 0; i < 1260; i++) {
@@ -107,7 +107,7 @@ test("sqlite: 批量写入 1260 根（5 年回补规模）", async () => {
   s.close();
 });
 
-test("sqlite: timeframe 之间互不干扰", async () => {
+test("sqlite: timeframes don't interfere with each other", async () => {
   const s = store();
   await s.putBars("AAPL", "1Day", [bar("2026-07-01", 100)]);
   await s.putBars("AAPL", "1Min", [bar("2026-07-01T13:30:00Z", 101)]);
@@ -116,7 +116,7 @@ test("sqlite: timeframe 之间互不干扰", async () => {
   s.close();
 });
 
-test("sqlite: 旧 schema 启动时丢弃并重建", async () => {
+test("sqlite: legacy schema is dropped and rebuilt on startup", async () => {
   const dir = mkdtempSync(join(tmpdir(), "stock-store-"));
   const path = join(dir, "legacy.db");
   const legacy = new DatabaseSync(path);
