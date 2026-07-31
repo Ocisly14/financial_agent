@@ -14,6 +14,8 @@ import { SessionRegistry } from "../framework/sessionState.ts";
 import { SqliteEventStore } from "../infra/db/sqliteEventStore.ts";
 import { orchestratorPrompt } from "./prompts/orchestratorPrompt.ts";
 import { createSubagentRegistry } from "./subagents/registerSubagents.ts";
+import { ResearchRuntime } from "./research/researchRuntime.ts";
+import { researchPrompt } from "./research/researchPrompt.ts";
 
 export type FinancialAgentApp = Awaited<ReturnType<typeof createFinancialAgentApp>>;
 
@@ -42,6 +44,17 @@ export async function createFinancialAgentApp() {
     sessions,
   );
 
+  // The Research controller (spec §4). It sits BESIDE the orchestrator, not
+  // above it: `ask_topic` calls `orchestrator.run` — the same method a human
+  // turn goes through — so the Topic agent never learns who is asking.
+  const researchRuntime = new ResearchRuntime({
+    prompt: researchPrompt,
+    modelRouter,
+    store: eventStore,
+    sessions,
+    topicOrchestrator: orchestrator,
+  });
+
   return {
     eventStore,
     sessions,
@@ -50,6 +63,7 @@ export async function createFinancialAgentApp() {
     subagents,
     skills,
     orchestrator,
+    researchRuntime,
     createDispatcher: dispatcherFactory,
   };
 }
