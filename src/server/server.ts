@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { newId } from "../framework/ids.ts";
 import { attachSse } from "../infra/events/sseProjector.ts";
 import type { FinancialAgentApp } from "../agent/createApp.ts";
+import type { TopicChartPreferenceRow } from "../infra/db/sqliteEventStore.ts";
 import type { TaskResult } from "../framework/types.ts";
 import { handleStockQuote } from "./stockMarketRoutes.ts";
 import { handleLinkPreview } from "./linkPreview.ts";
@@ -114,7 +115,15 @@ async function handleChat(
 
   const sessionId = body.sessionId ?? newId("sess");
   const agentId = (req.headers["x-agent-id"] as string | undefined) ?? "default";
-  app.eventStore.ensureRoom(agentId, sessionId, defaultRoomName());
+
+  // A Research id is also its session id (spec §3), exactly like a Topic id.
+  // So the ONE thing that decides which runtime handles this turn is whether a
+  // `researches` row exists for it. Critically, a Research session must NOT go
+  // through `ensureTopic`: that would insert a phantom `chat_rooms` row with
+  // the same id, and the Research would then show up in the Topic sidebar and
+  // shadow itself.
+  const research = app.eventStore.getResearch(agentId, sessionId);
+  if (!research) app.eventStore.ensureTopic(agentId, sessionId, defaultRoomName());
 
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
@@ -129,7 +138,23 @@ async function handleChat(
   activeWorkflows.set(agentId, { kind: "task_chain", startedAt: Date.now(), sessionId });
 
   try {
-    await app.orchestrator.run({ sessionId, userMessage: message });
+    if (research) {
+      await app.researchRuntime.run({
+        agentId,
+        researchId: sessionId,
+        researchName: research.name,
+        userMessage: message,
+        // §4.5: the driven Topic's own dispatch / tool_call / task_done frames
+        // are never forwarded here — they belong to that Topic's stream. What
+        // reaches this stream is the one compressed line the toolset emits.
+        emit: (frame) => sseWrite(res, { type: frame.name, ...frame.data }),
+      });
+      // `appendEvent` bumps `chat_rooms.updated_at`, which a Research has no row
+      // in; without this the sidebar would order Researches by creation only.
+      app.eventStore.renameResearch(agentId, sessionId, research.name);
+    } else {
+      await app.orchestrator.run({ sessionId, userMessage: message });
+    }
   } catch (error) {
     sseWrite(res, { type: "error", scope: "main", message: String(error) });
   } finally {
@@ -163,7 +188,7 @@ function defaultRoomName(): string {
   return `Chat ${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
 }
 
-async function handleCreateRoom(
+async function handleCreateTopic(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   app: FinancialAgentApp,
@@ -178,28 +203,178 @@ async function handleCreateRoom(
       return jsonError(res, 400, "Invalid JSON body");
     }
   }
-  const roomId = newId("room");
-  const room = app.eventStore.createRoom(agentId, roomId, body.name?.trim() || defaultRoomName());
-  jsonOk(res, { success: true, room });
+  const topicId = newId("room");
+  const topic = app.eventStore.createTopic(agentId, topicId, body.name?.trim() || defaultRoomName());
+  jsonOk(res, { success: true, topic });
 }
 
-async function handleRenameRoom(
+async function handleUpdateTopic(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   app: FinancialAgentApp,
   agentId: string,
-  roomId: string,
+  topicId: string,
+): Promise<void> {
+  let body: { name?: string };
+  try {
+    body = JSON.parse(await readBody(req));
+  } catch {
+    return jsonError(res, 400, "invalid json");
+  }
+
+  const patch: { name?: string } = {};
+  if (body.name !== undefined) {
+    const name = body.name.trim();
+    if (!name) return jsonError(res, 400, "name must not be empty");
+    patch.name = name;
+  }
+
+  if (!app.eventStore.updateTopic(agentId, topicId, patch)) {
+    return jsonError(res, 404, "topic not found");
+  }
+  jsonOk(res, { success: true, topic: { id: topicId, ...patch } });
+}
+
+async function handleReplaceTopicCharts(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  app: FinancialAgentApp,
+  topicId: string,
+): Promise<void> {
+  let body: { charts?: unknown };
+  try {
+    body = JSON.parse(await readBody(req));
+  } catch {
+    return jsonError(res, 400, "invalid json");
+  }
+  if (!Array.isArray(body.charts)) return jsonError(res, 400, "charts must be an array");
+
+  const rows: TopicChartPreferenceRow[] = [];
+  for (const [index, candidate] of body.charts.entries()) {
+    const item = candidate as Record<string, unknown>;
+    const symbol = typeof item?.symbol === "string" ? item.symbol.trim().toUpperCase() : "";
+    if (!/^[A-Z][A-Z.-]{0,5}$/.test(symbol)) return jsonError(res, 400, `invalid symbol at index ${index}`);
+    rows.push({
+      symbol,
+      range: typeof item.range === "string" ? item.range : null,
+      hidden: item.hidden === true,
+      sortOrder: typeof item.sortOrder === "number" ? item.sortOrder : index,
+    });
+  }
+
+  app.eventStore.replaceTopicCharts(topicId, rows);
+  jsonOk(res, { success: true, charts: app.eventStore.listTopicCharts(topicId) });
+}
+
+// ── Research routes (spec §8) ──────────────────────────────────────────────
+//
+// A Research groups several Topics and compares them. Its id is also its
+// session id, so `POST /api/chat` with a research id talks to the controller
+// (see handleChat). Membership is always written as a WHOLE SET — the client
+// sends the list it wants, the store keeps each surviving member's digest and
+// seen marker so a membership edit never re-bills a model call.
+
+/** Members resolved to the same TopicSummary shape the Topic routes return,
+ *  in membership order. A member whose Topic was deleted is skipped rather
+ *  than returned as a hole. */
+function researchMembers(app: FinancialAgentApp, agentId: string, researchId: string) {
+  const topics = new Map(app.eventStore.listTopics(agentId).map((topic) => [topic.id, topic]));
+  return app.eventStore
+    .listResearchMembers(researchId)
+    .map((member) => topics.get(member.topicId))
+    .filter((topic): topic is NonNullable<typeof topic> => topic !== undefined);
+}
+
+/** §7.4: an unnamed Research is named after what it compares. */
+function defaultResearchName(app: FinancialAgentApp, agentId: string, topicIds: string[]): string {
+  const topics = new Map(app.eventStore.listTopics(agentId).map((topic) => [topic.id, topic]));
+  const labels = topicIds
+    .map((topicId) => topics.get(topicId))
+    .filter((topic): topic is NonNullable<typeof topic> => topic !== undefined)
+    .map((topic) => topic.leadSymbol ?? topic.name);
+  return labels.length ? labels.join(" · ") : "New Research";
+}
+
+async function handleCreateResearch(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  app: FinancialAgentApp,
+  agentId: string,
+): Promise<void> {
+  let body: { name?: string; topicIds?: unknown } = {};
+  const rawBody = await readBody(req);
+  if (rawBody) {
+    try {
+      body = JSON.parse(rawBody) as { name?: string; topicIds?: unknown };
+    } catch {
+      return jsonError(res, 400, "invalid json");
+    }
+  }
+  const topicIds = Array.isArray(body.topicIds)
+    ? body.topicIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+    : [];
+
+  const researchId = newId("research");
+  const name = body.name?.trim() || defaultResearchName(app, agentId, topicIds);
+  const research = app.eventStore.createResearch(agentId, researchId, name);
+  if (topicIds.length) app.eventStore.replaceResearchMembers(researchId, topicIds);
+
+  jsonOk(res, {
+    success: true,
+    research: { ...research, memberCount: topicIds.length },
+    members: researchMembers(app, agentId, researchId),
+  });
+}
+
+async function handleUpdateResearch(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  app: FinancialAgentApp,
+  agentId: string,
+  researchId: string,
 ): Promise<void> {
   let body: { name?: string };
   try {
     body = JSON.parse(await readBody(req)) as { name?: string };
   } catch {
-    return jsonError(res, 400, "Invalid JSON body");
+    return jsonError(res, 400, "invalid json");
   }
-  const name = body.name?.trim();
-  if (!name) return jsonError(res, 400, "name is required");
-  if (!app.eventStore.renameRoom(agentId, roomId, name)) return jsonError(res, 404, "room not found");
-  jsonOk(res, { success: true, message: "renamed", room: { id: roomId, name } });
+  if (body.name === undefined) return jsonError(res, 400, "name is required");
+  const name = body.name.trim();
+  if (!name) return jsonError(res, 400, "name must not be empty");
+  if (!app.eventStore.renameResearch(agentId, researchId, name)) {
+    return jsonError(res, 404, "research not found");
+  }
+  jsonOk(res, { success: true, research: app.eventStore.getResearch(agentId, researchId) });
+}
+
+async function handleReplaceResearchMembers(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  app: FinancialAgentApp,
+  agentId: string,
+  researchId: string,
+): Promise<void> {
+  if (!app.eventStore.getResearch(agentId, researchId)) return jsonError(res, 404, "research not found");
+
+  let body: { topicIds?: unknown };
+  try {
+    body = JSON.parse(await readBody(req)) as { topicIds?: unknown };
+  } catch {
+    return jsonError(res, 400, "invalid json");
+  }
+  if (!Array.isArray(body.topicIds)) return jsonError(res, 400, "topicIds must be an array");
+
+  // Only Topics that actually belong to this agent, de-duplicated, order kept.
+  const known = new Set(app.eventStore.listTopics(agentId).map((topic) => topic.id));
+  const topicIds: string[] = [];
+  for (const candidate of body.topicIds) {
+    if (typeof candidate !== "string" || !known.has(candidate) || topicIds.includes(candidate)) continue;
+    topicIds.push(candidate);
+  }
+
+  app.eventStore.replaceResearchMembers(researchId, topicIds);
+  jsonOk(res, { success: true, members: researchMembers(app, agentId, researchId) });
 }
 
 async function handleStatic(pathname: string, res: http.ServerResponse): Promise<void> {
@@ -290,21 +465,68 @@ export function createHttpServer(app: FinancialAgentApp): http.Server {
         return await handleChatHistory(res, app, decodeURIComponent(historyMatch[1]!), searchParams);
       }
 
-      const roomsMatch = pathname.match(/^\/api\/agents\/([^/]+)\/rooms$/);
-      if (roomsMatch) {
-        const agentId = decodeURIComponent(roomsMatch[1]!);
-        if (method === "GET") return jsonOk(res, { success: true, rooms: app.eventStore.listRooms(agentId) });
-        if (method === "POST") return await handleCreateRoom(req, res, app, agentId);
+      const topicsMatch = pathname.match(/^\/api\/agents\/([^/]+)\/topics$/);
+      if (topicsMatch) {
+        const agentId = decodeURIComponent(topicsMatch[1]!);
+        if (method === "GET") return jsonOk(res, { success: true, topics: app.eventStore.listTopics(agentId) });
+        if (method === "POST") return await handleCreateTopic(req, res, app, agentId);
       }
 
-      const roomMatch = pathname.match(/^\/api\/agents\/([^/]+)\/rooms\/([^/]+)$/);
-      if (roomMatch) {
-        const agentId = decodeURIComponent(roomMatch[1]!);
-        const roomId = decodeURIComponent(roomMatch[2]!);
-        if (method === "PUT") return await handleRenameRoom(req, res, app, agentId, roomId);
+      const topicChartsMatch = pathname.match(/^\/api\/agents\/([^/]+)\/topics\/([^/]+)\/charts$/);
+      if (topicChartsMatch) {
+        const topicId = decodeURIComponent(topicChartsMatch[2]!);
+        if (method === "GET") {
+          return jsonOk(res, { success: true, charts: app.eventStore.listTopicCharts(topicId) });
+        }
+        if (method === "PUT") return await handleReplaceTopicCharts(req, res, app, topicId);
+      }
+
+      const topicMatch = pathname.match(/^\/api\/agents\/([^/]+)\/topics\/([^/]+)$/);
+      if (topicMatch) {
+        const agentId = decodeURIComponent(topicMatch[1]!);
+        const topicId = decodeURIComponent(topicMatch[2]!);
+        if (method === "PUT") return await handleUpdateTopic(req, res, app, agentId, topicId);
         if (method === "DELETE") {
-          if (!app.eventStore.deleteRoom(agentId, roomId)) return jsonError(res, 404, "room not found");
-          app.sessions.delete(roomId);
+          if (!app.eventStore.deleteTopic(agentId, topicId)) return jsonError(res, 404, "topic not found");
+          app.sessions.delete(topicId);
+          return jsonOk(res, { success: true, message: "deleted" });
+        }
+      }
+
+      const researchesMatch = pathname.match(/^\/api\/agents\/([^/]+)\/researches$/);
+      if (researchesMatch) {
+        const agentId = decodeURIComponent(researchesMatch[1]!);
+        if (method === "GET") return jsonOk(res, { success: true, researches: app.eventStore.listResearches(agentId) });
+        if (method === "POST") return await handleCreateResearch(req, res, app, agentId);
+      }
+
+      // Matched before the bare /researches/:id route below, which would
+      // otherwise swallow "/members" as part of the id.
+      const researchMembersMatch = pathname.match(/^\/api\/agents\/([^/]+)\/researches\/([^/]+)\/members$/);
+      if (researchMembersMatch) {
+        const agentId = decodeURIComponent(researchMembersMatch[1]!);
+        const researchId = decodeURIComponent(researchMembersMatch[2]!);
+        if (method === "GET") {
+          if (!app.eventStore.getResearch(agentId, researchId)) return jsonError(res, 404, "research not found");
+          return jsonOk(res, { success: true, members: researchMembers(app, agentId, researchId) });
+        }
+        if (method === "PUT") return await handleReplaceResearchMembers(req, res, app, agentId, researchId);
+      }
+
+      const researchMatch = pathname.match(/^\/api\/agents\/([^/]+)\/researches\/([^/]+)$/);
+      if (researchMatch) {
+        const agentId = decodeURIComponent(researchMatch[1]!);
+        const researchId = decodeURIComponent(researchMatch[2]!);
+        if (method === "GET") {
+          const research = app.eventStore.getResearch(agentId, researchId);
+          if (!research) return jsonError(res, 404, "research not found");
+          return jsonOk(res, { success: true, research, members: researchMembers(app, agentId, researchId) });
+        }
+        if (method === "PUT") return await handleUpdateResearch(req, res, app, agentId, researchId);
+        if (method === "DELETE") {
+          if (!app.eventStore.deleteResearch(agentId, researchId)) return jsonError(res, 404, "research not found");
+          // Members are NOT deleted: a Topic outlives any Research it is in (§3).
+          app.sessions.delete(researchId);
           return jsonOk(res, { success: true, message: "deleted" });
         }
       }

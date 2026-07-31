@@ -16,6 +16,10 @@ export type ChatHistoryMessage = {
   userId?: string;
   text: string;
   createdAt: number;
+  /** Present when a Research controller sent this message on the user's behalf
+   *  rather than the user typing it. The client labels those turns so a reader
+   *  months later can tell what they asked from what was asked for them. */
+  origin?: { researchId: string; researchName: string };
   source?: "regular_message";
   content?: {
     text: string;
@@ -71,11 +75,13 @@ export function projectChatHistory(events: readonly SessionEvent[]): ChatHistory
   for (const event of events) {
     const createdAt = Date.parse(event.timestamp);
     if (event.kind === "user_message") {
+      const origin = event.payload.origin as ChatHistoryMessage["origin"] | undefined;
       messages.push({
         id: event.event_id,
         user: "user",
         text: String(event.payload.content ?? ""),
         createdAt: Number.isFinite(createdAt) ? createdAt : 0,
+        ...(origin?.researchId ? { origin } : {}),
       });
       continue;
     }
