@@ -17,6 +17,6 @@ export const formatAgentName = (name: string) => {
     return name.substring(0, 2);
 };
 
-export const generateChatRoomName = () => {
+export const generateTopicName = () => {
     return `Chat ${dayjs().format("YYYY-MM-DD HH:mm")}`;
 };

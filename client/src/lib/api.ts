@@ -1,4 +1,11 @@
-import type { StoredStrategy, ExecutionLogEntry } from "@/types/core";
+import type {
+    StoredStrategy,
+    ExecutionLogEntry,
+    TopicSummary,
+    TopicChartPreference,
+    ResearchSummary,
+    ResearchMember,
+} from "@/types/core";
 
 export type ProcessingStep = {
     id: string;
@@ -100,8 +107,8 @@ const fetcher = async ({
     });
 };
 
-// ── Agents/rooms ─────────────────────────────────────────────────────────────
-// The app has one implicit agent. Room metadata and transcripts are persisted
+// ── Agents/topics ─────────────────────────────────────────────────────────────
+// The app has one implicit agent. Topic metadata and transcripts are persisted
 // by the backend in the same local SQLite database.
 export const DEFAULT_AGENT_ID = "default";
 
@@ -130,60 +137,129 @@ export const apiClient = {
             body: formData,
         });
     },
-    // Room management — backed by the server's local SQLite database.
-    createRoom: (agentId: string, name?: string): Promise<{ success: boolean; room: { id: string; name: string; createdAt: number } }> =>
-        fetcher({ url: `/api/agents/${encodeURIComponent(agentId)}/rooms`, method: "POST", body: { name } }),
+    // Topic management — backed by the server's local SQLite database.
+    createTopic: (agentId: string, name?: string): Promise<{ success: boolean; topic: TopicSummary }> =>
+        fetcher({ url: `/api/agents/${encodeURIComponent(agentId)}/topics`, method: "POST", body: { name } }),
 
-    getRooms: (agentId: string): Promise<{ success: boolean; rooms: Array<{ id: string; name: string; createdAt: number; lastMessage: { text: string; createdAt: number } | null; messageCount: number }> }> => {
-        return fetcher({ url: `/api/agents/${encodeURIComponent(agentId)}/rooms`, method: "GET" });
-    },
+    getTopics: (agentId: string): Promise<{ success: boolean; topics: TopicSummary[] }> =>
+        fetcher({ url: `/api/agents/${encodeURIComponent(agentId)}/topics` }),
 
-    deleteRoom: (agentId: string, roomId: string): Promise<{ success: boolean; message: string }> =>
+    updateTopic: (
+        agentId: string,
+        topicId: string,
+        patch: { name?: string },
+    ): Promise<{ success: boolean }> =>
         fetcher({
-            url: `/api/agents/${encodeURIComponent(agentId)}/rooms/${encodeURIComponent(roomId)}`,
+            url: `/api/agents/${encodeURIComponent(agentId)}/topics/${encodeURIComponent(topicId)}`,
+            method: "PUT",
+            body: patch,
+        }),
+
+    deleteTopic: (agentId: string, topicId: string): Promise<{ success: boolean; message: string }> =>
+        fetcher({
+            url: `/api/agents/${encodeURIComponent(agentId)}/topics/${encodeURIComponent(topicId)}`,
             method: "DELETE",
         }),
 
-    batchDeleteRooms: async (agentId: string, roomIds: string[]): Promise<{
-        success: boolean;
-        message: string;
-        results: Array<{ roomId: string; success: boolean; error?: string }>;
-    }> => {
-        const results = await Promise.all(roomIds.map(async (roomId) => {
-            try {
-                await apiClient.deleteRoom(agentId, roomId);
-                return { roomId, success: true };
-            } catch (error) {
-                return { roomId, success: false, error: error instanceof Error ? error.message : String(error) };
-            }
-        }));
+    batchDeleteTopics: async (agentId: string, topicIds: string[]) => {
+        const results = await Promise.all(topicIds.map((topicId) => apiClient.deleteTopic(agentId, topicId)));
         return {
             success: results.every((result) => result.success),
-            message: results.every((result) => result.success) ? "deleted" : "some rooms could not be deleted",
-            results,
+            message: results.every((result) => result.success) ? "deleted" : "some topics could not be deleted",
         };
     },
 
-    renameRoom: (agentId: string, roomId: string, name: string): Promise<{ success: boolean; message: string; room: { id: string; name: string } }> =>
+    getTopicCharts: (agentId: string, topicId: string): Promise<{ success: boolean; charts: TopicChartPreference[] }> =>
+        fetcher({ url: `/api/agents/${encodeURIComponent(agentId)}/topics/${encodeURIComponent(topicId)}/charts` }),
+
+    setTopicCharts: (
+        agentId: string,
+        topicId: string,
+        charts: TopicChartPreference[],
+    ): Promise<{ success: boolean; charts: TopicChartPreference[] }> =>
         fetcher({
-            url: `/api/agents/${encodeURIComponent(agentId)}/rooms/${encodeURIComponent(roomId)}`,
+            url: `/api/agents/${encodeURIComponent(agentId)}/topics/${encodeURIComponent(topicId)}/charts`,
             method: "PUT",
-            body: { name },
+            body: { charts },
         }),
 
-    // Get historical messages for a room
+    // Research management (spec §8) — a Research groups several Topics under
+    // one controller agent. Its id doubles as its chat session id, same trick
+    // as a Topic. See src/server/server.ts for the routes as actually built.
+    getResearches: (agentId: string): Promise<{ success: boolean; researches: ResearchSummary[] }> =>
+        fetcher({ url: `/api/agents/${encodeURIComponent(agentId)}/researches` }),
+
+    createResearch: (
+        agentId: string,
+        body: { name?: string; topicIds: string[] },
+    ): Promise<{ success: boolean; research: ResearchSummary; members: ResearchMember[] }> =>
+        fetcher({ url: `/api/agents/${encodeURIComponent(agentId)}/researches`, method: "POST", body }),
+
+    // Not in spec §8's route list, but the server implements it (GET
+    // /api/agents/:agentId/researches/:id) and the client needs it to render
+    // a single Research plus its member row without listing every Research.
+    getResearch: (
+        agentId: string,
+        researchId: string,
+    ): Promise<{ success: boolean; research: ResearchSummary; members: ResearchMember[] }> =>
+        fetcher({
+            url: `/api/agents/${encodeURIComponent(agentId)}/researches/${encodeURIComponent(researchId)}`,
+        }),
+
+    updateResearch: (
+        agentId: string,
+        researchId: string,
+        patch: { name: string },
+    ): Promise<{ success: boolean; research: ResearchSummary }> =>
+        fetcher({
+            url: `/api/agents/${encodeURIComponent(agentId)}/researches/${encodeURIComponent(researchId)}`,
+            method: "PUT",
+            body: patch,
+        }),
+
+    deleteResearch: (agentId: string, researchId: string): Promise<{ success: boolean; message: string }> =>
+        fetcher({
+            url: `/api/agents/${encodeURIComponent(agentId)}/researches/${encodeURIComponent(researchId)}`,
+            method: "DELETE",
+        }),
+
+    // Also not in spec §8's route list but implemented server-side (GET
+    // .../researches/:id/members) — lets the member row refresh independently
+    // of the parent Research fetch.
+    getResearchMembers: (
+        agentId: string,
+        researchId: string,
+    ): Promise<{ success: boolean; members: ResearchMember[] }> =>
+        fetcher({
+            url: `/api/agents/${encodeURIComponent(agentId)}/researches/${encodeURIComponent(researchId)}/members`,
+        }),
+
+    // Whole-set replace — the client always sends the full membership list it
+    // wants; the server preserves each surviving member's digest/seen marker.
+    setResearchMembers: (
+        agentId: string,
+        researchId: string,
+        topicIds: string[],
+    ): Promise<{ success: boolean; members: ResearchMember[] }> =>
+        fetcher({
+            url: `/api/agents/${encodeURIComponent(agentId)}/researches/${encodeURIComponent(researchId)}/members`,
+            method: "PUT",
+            body: { topicIds },
+        }),
+
+    // Get historical messages for a topic (topic.id === session id)
     getMessages: (
         agentId: string,
-        roomId: string,
+        topicId: string,
         params?: { limit?: number; before?: string }
-    ): Promise<{ agentId?: string; roomId?: string; memories?: any[]; messages?: any[]; hasMore?: boolean; oldestId?: string }> => {
+    ): Promise<{ agentId?: string; memories?: any[]; messages?: any[]; hasMore?: boolean; oldestId?: string }> => {
         void agentId;
         const query = new URLSearchParams();
         if (params?.limit !== undefined) query.set("limit", String(params.limit));
         if (params?.before) query.set("before", params.before);
         const suffix = query.size > 0 ? `?${query.toString()}` : "";
         return fetcher({
-            url: `/api/sessions/${encodeURIComponent(roomId)}/messages${suffix}`,
+            url: `/api/sessions/${encodeURIComponent(topicId)}/messages${suffix}`,
             method: "GET",
         });
     },
@@ -343,12 +419,12 @@ export class StreamingApiClient {
     async sendMessageStream(
         agentId: string,
         message: string,
-        roomId: string,
+        topicId: string,
         onStep: (step: ProcessingStep) => void,
         onActionResponse: (response: any) => void,
         onIntermediateResponse: (response: any) => void,
         onFinalResponse: (responses: any[]) => void,
-        onRoomUpdate: ((room: { id: string; name: string }) => void) | undefined,
+        onTopicUpdate: ((topic: { id: string; name: string }) => void) | undefined,
         onError: (error: string | { code?: string; message?: string }) => void,
         onComplete?: () => void,
         /**
@@ -365,7 +441,7 @@ export class StreamingApiClient {
     ) {
         // Create a unique key for request deduplication.
         const classificationKeySegment = messageClassification ?? "";
-        const requestKey = `${agentId}-${roomId}-${message.substring(0, 50)}-${classificationKeySegment}`;
+        const requestKey = `${agentId}-${topicId}-${message.substring(0, 50)}-${classificationKeySegment}`;
         
         // Cancel any existing request with the same key
         if (this.activeStreams.has(requestKey)) {
@@ -393,11 +469,11 @@ export class StreamingApiClient {
         };
         
         // financial-agent's POST /api/chat takes a plain JSON { message, sessionId }.
-        // The room id doubles as the session id (the backend reuses it and echoes
+        // The topic id doubles as the session id (the backend reuses it and echoes
         // it back via X-Session-Id). File uploads are not supported by this backend.
         void selectedFiles; void messageClassification;
         void language;
-        const body: string = JSON.stringify({ message, sessionId: roomId });
+        const body: string = JSON.stringify({ message, sessionId: topicId });
         const headers: HeadersInit = { "Content-Type": "application/json", "X-Agent-Id": agentId };
 
         let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
@@ -436,11 +512,11 @@ export class StreamingApiClient {
                 throw new Error(`HTTP ${response.status}: ${response.statusText}`);
             }
 
-            // The backend mints/echoes the session id; keep the room in sync if
-            // it differs from the room id we passed as sessionId.
+            // The backend mints/echoes the session id; keep the topic in sync if
+            // it differs from the topic id we passed as sessionId.
             const headerSessionId = response.headers?.get?.('X-Session-Id');
-            if (headerSessionId && headerSessionId !== roomId) {
-                onRoomUpdate?.({ id: headerSessionId, name: '' });
+            if (headerSessionId && headerSessionId !== topicId) {
+                onTopicUpdate?.({ id: headerSessionId, name: '' });
             }
 
             reader = response.body.getReader();
@@ -484,6 +560,71 @@ export class StreamingApiClient {
                             timestamp: Date.now(),
                         });
                         break;
+                    case 'topic_dispatch':
+                        // Research-layer frame (docs/superpowers/specs/2026-07-30-research-layer-design.md §4.5):
+                        // the controller dispatching a sub-task to one of its member
+                        // Topics. The driven Topic's own dispatch/tool_call frames are
+                        // NOT forwarded — this is the only signal for that hop, so it
+                        // rides the existing step list rather than a new callback.
+                        onStep({
+                            id: parsed.topicId,
+                            name: 'topic_dispatch',
+                            status:
+                                parsed.status === 'ok'
+                                    ? 'completed'
+                                    : parsed.status === 'running'
+                                        ? 'in_progress'
+                                        : 'error',
+                            message: `${parsed.topicName ?? ''}: ${parsed.task ?? ''}`.trim(),
+                            timestamp: Date.now(),
+                            data: {
+                                topicId: parsed.topicId,
+                                topicName: parsed.topicName,
+                                task: parsed.task,
+                                status: parsed.status,
+                            },
+                        });
+                        break;
+                    case 'topic_focus':
+                        // Research-layer transient frame (spec §4.5 / §7.5): the
+                        // controller moved the member focus. Nothing is written
+                        // server-side, so there is nothing to undo and nothing to
+                        // refetch — the Research view only replays a one-shot ring
+                        // on that member's chip. It rides `onStep` like
+                        // `topic_dispatch` rather than getting its own callback,
+                        // and `useTopicStream` peels it off before the task
+                        // aggregation so it never becomes a progress row.
+                        onStep({
+                            id: String(parsed.topicId ?? ''),
+                            name: 'topic_focus',
+                            status: 'completed',
+                            message: '',
+                            timestamp: Date.now(),
+                            data: { topicId: parsed.topicId, symbol: parsed.symbol },
+                        });
+                        break;
+                    case 'layout_changed':
+                        // Research-layer persistent frame (spec §6): the controller
+                        // wrote a tab or membership change. `previous`/`next` carry
+                        // the full before/after state so a single-level undo can be
+                        // offered; `source` is only ever on the frame (there is no
+                        // `source` column), which is why the undo is session-live.
+                        onStep({
+                            id: `layout-${parsed.scope ?? ''}-${parsed.topicId ?? parsed.researchId ?? ''}`,
+                            name: 'layout_changed',
+                            status: 'completed',
+                            message: '',
+                            timestamp: Date.now(),
+                            data: {
+                                scope: parsed.scope,
+                                researchId: parsed.researchId,
+                                topicId: parsed.topicId,
+                                source: parsed.source,
+                                previous: parsed.previous,
+                                next: parsed.next,
+                            },
+                        });
+                        break;
                     case 'strategy_created':
                         onStep({
                             id: parsed.strategy_id,
@@ -520,8 +661,8 @@ export class StreamingApiClient {
                     case 'final':
                         finalReceived = true;
                         this.userStoppedAgentIds.delete(agentId);
-                        if (parsed.sessionId && parsed.sessionId !== roomId) {
-                            onRoomUpdate?.({ id: parsed.sessionId, name: '' });
+                        if (parsed.sessionId && parsed.sessionId !== topicId) {
+                            onTopicUpdate?.({ id: parsed.sessionId, name: '' });
                         }
                         onFinalResponse([
                             buildAssistantResponse(
@@ -547,7 +688,7 @@ export class StreamingApiClient {
                                 timestamp: Date.now(),
                                 data: {
                                     type: 'strategy_activation',
-                                    threadId: roomId,
+                                    threadId: topicId,
                                     approvalId: approval_id,
                                     ...payload,
                                 },
@@ -674,12 +815,12 @@ export class StreamingApiClient {
                     this.sendMessageStream(
                         agentId,
                         message,
-                        roomId,
+                        topicId,
                         onStep,
                         onActionResponse,
                         onIntermediateResponse,
                         onFinalResponse,
-                        onRoomUpdate,
+                        onTopicUpdate,
                         onError,
                         onComplete,
                         onStreamingUpdate,

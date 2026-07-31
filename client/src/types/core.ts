@@ -125,6 +125,44 @@ export interface StoredStrategy {
   [k: string]: any;
 }
 
+export type TopicSummary = {
+  id: string;
+  name: string;
+  /** Derived from the topic's charts — the first visible chart (lowest sort order). Never written directly. */
+  leadSymbol: string | null;
+  createdAt: number;
+  lastMessage: { text: string; createdAt: number } | null;
+  messageCount: number;
+};
+
+/** The user's intent for the chart-tab set. Does not include study content — that's derived from messages. */
+export type TopicChartPreference = {
+  symbol: string;
+  /** null means follow the range derived from the messages. */
+  range: string | null;
+  hidden: boolean;
+  sortOrder: number;
+};
+
+// ── Research (phase 2 research layer, docs/superpowers/specs/2026-07-30-research-layer-design.md) ──
+// A Research groups several Topics under one controller agent that can ask
+// them questions and compare them. Its id doubles as its chat session id,
+// exactly like a Topic (see src/server/server.ts).
+
+export type ResearchSummary = {
+  id: string;
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+  memberCount: number;
+};
+
+/** A Research's member, resolved server-side to the same shape the Topic
+ *  routes return (GET/PUT .../researches/:id/members). A member whose Topic
+ *  was deleted is silently skipped rather than returned as a hole — see
+ *  `researchMembers()` in src/server/server.ts. */
+export type ResearchMember = TopicSummary;
+
 export interface ExecutionLogEntry {
   ts: string;
   strategy_id: string;
