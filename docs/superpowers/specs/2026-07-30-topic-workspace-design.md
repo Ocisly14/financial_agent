@@ -49,9 +49,26 @@
 
 最小研究单元。一个 Topic 有：
 
-- **主题**（identity）：一个标的（`kind='instrument'`，带 `symbol`）或一个宏观面（`kind='macro'`，`symbol` 为 NULL）
+- **一个名字**
 - **一条持久的对话**（即现有 session，`topic.id === session_id`）
 - **一个图表 tab 集合**（见 §3.2）
+
+**Topic 不存「主标的」，也不存「类型」。**这两个字段在初稿里存在过，是设计错误：
+
+- `kind` 永远等于 `symbol ? 'instrument' : 'macro'`，是同一事实的两份拷贝，只会不同步。
+- `symbol` 与 `topic_charts` 冗余 —— 「这个 topic 是关于 AAPL 的」这句话，`topic_charts`
+  里那一行已经说了。保留它等于给同一个事实开两个入口，而两个入口可以互相矛盾：
+  你可以把 topic 绑定到 AAPL，同时 tab 栏里只有 NVDA。
+
+更要命的是它在界面上也是两套动作：「绑定标的」和「＋ 加一个 tab」表达的是同一个意图。
+删掉 `symbol` 就把两个动作合成一个。
+
+**「宏观 topic」不需要枚举来表达 —— 它就是没有图表 tab 的 topic。**
+
+侧栏和状态栏需要的 ticker 徽标是**派生**的，不是存储的：`listTopics` 用一次 LEFT JOIN
+取该 topic 的首个可见图表（按 `pinned DESC, sort_order ASC`），以 `leadSymbol` 之名返回。
+命名刻意与 `symbol` 区分，读到的人一眼能看出它不可写。没有 tab 的 topic 就没有徽标，
+只显示名字 —— 这是对的，宏观 topic 本来也没有 ticker。
 
 Topic 之间没有层级。第二阶段的 Research 会在其上叠加一层成员关系，
 **原有 Topic 保持独立可访问**，不被 Research 吞掉。
@@ -75,13 +92,12 @@ Topic 之间没有层级。第二阶段的 Research 会在其上叠加一层成�
 
 ### 4.1 Schema
 
-`chat_rooms` 增列（`SqliteEventStore` 的 `SCHEMA` 常量，用 `ALTER TABLE … ADD COLUMN` 幂等迁移）：
+`chat_rooms` 直接在 `SqliteEventStore` 的 `SCHEMA` 常量里加一列 `archived_at INTEGER`。
+只有这一列 —— 见 §3.1，`symbol` 与 `kind` 是被否决的设计。
 
-```sql
-ALTER TABLE chat_rooms ADD COLUMN symbol      TEXT;     -- 主标的，宏观为 NULL
-ALTER TABLE chat_rooms ADD COLUMN kind        TEXT NOT NULL DEFAULT 'macro';
-ALTER TABLE chat_rooms ADD COLUMN archived_at INTEGER;
-```
+**不写迁移。**项目仍处于 demo 阶段，没有需要保全的数据，所以不引入
+`ALTER TABLE` 的幂等辅助 —— 列直接写进 `CREATE TABLE`，本地已存在的开发库删掉重建即可。
+一套只服务于假想数据的迁移机制，是纯粹的维护负担。
 
 新表：
 
@@ -118,17 +134,28 @@ CREATE TABLE IF NOT EXISTS topic_charts (
 | `DELETE …/rooms/:roomId` | `DELETE …/topics/:topicId` |
 | — | `PUT …/topics/:topicId/charts`（tab 集合的用户意志，整体覆盖写） |
 
-`PUT /topics/:topicId` 的 body 扩展为 `{ name?, symbol?, kind? }`，不再只接受 `name`。
+`PUT /topics/:topicId` 的 body 仍然只接受 `{ name }`。标的不在这里表达 —— 它是
+`PUT /topics/:topicId/charts` 的事。后端因此**不需要** ticker 校验：合法的 ticker
+由 charts 端点把关，那里本来就要校验。
 
-`listTopics`（即现 `SqliteEventStore:186` 的 `listRooms`）的返回值增加 `symbol` 与 `kind`
-—— 侧栏要为每行渲染标的徽标，不能为此对每个 topic 再发一次请求。
+`listTopics`（即现 `SqliteEventStore:186` 的 `listRooms`）的返回值增加派生字段 `leadSymbol`：
+
+```sql
+LEFT JOIN (
+  SELECT topic_id, symbol,
+         ROW_NUMBER() OVER (PARTITION BY topic_id ORDER BY pinned DESC, sort_order ASC) AS rn
+  FROM topic_charts WHERE hidden = 0
+) lead ON lead.topic_id = chat_rooms.id AND lead.rn = 1
+```
+
+侧栏要为每行渲染徽标，不能为此对每个 topic 再发一次请求。
 排序沿用现有的 `updated_at DESC, created_at DESC`，「最近活跃的 topic」即该排序的第一行。
 
 ### 4.3 迁移
 
-现存 room 直接成为 Topic：`kind='macro'`、`symbol=NULL`、保留原名。
-**不做符号推断** —— 从历史消息猜标的会产生错误绑定，而错误绑定比没有绑定更难发现。
-用户改名和绑定标的是一次点击的事。
+Demo 阶段，无需迁移：本地开发库删掉重建。现存 room 若保留则直接是 Topic，没有图表 tab。
+**不做符号推断** —— 从历史消息猜标的会产生错误的 tab，而错误的 tab 比空 tab 栏更难发现。
+用户改名、往 tab 栏加一个标的，都是一次点击的事。
 
 ## 5. 路由
 
@@ -194,7 +221,7 @@ lib/
 只放**真实信号**，宁缺毋滥：
 
 - SSE 连接状态（来自 `useTopicStream`）
-- 当前 topic 的标的与 `kind`
+- 当前 topic 的名字与 `leadSymbol`（没有 tab 时只显示名字）
 - paper / live 模式（来自策略数据，而非硬编码字符串 —— 现有 `strategies.tsx` 里的 `<ModeTag mode="paper" />` 是写死的，这是个 bug）
 - 主题切换（`ThemeToggle` 从浮动按钮收进这里）与语言切换
 

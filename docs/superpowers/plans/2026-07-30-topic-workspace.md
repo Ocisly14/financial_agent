@@ -18,7 +18,10 @@
 - **命名**：代码中一律用 `topic`，不留 `room`。唯一例外是数据库表名 `chat_rooms` 保持不变（避免数据迁移风险），在 `SqliteEventStore` 内注明是历史遗留。
 - **设计 token**：组件只引用等级（`--e2`、`--label-2`、`--fill-1`、`--sep` 等，见 `client/src/index.css`），不写死数值、不写 `white/N`、`slate-N`。
 - **文案**：所有用户可见字符串走 i18n，`client/src/i18n/locales/en.ts` 与 `zh-CN.ts` 必须同步增删。
-- **提交**：每个任务至少一次提交，信息用英文，结尾附 `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`。
+- **不要提交。** 每个任务只改代码、跑测试，把改动留在工作区。全部 12 个任务完成、
+  用户审核通过之后，由用户决定如何提交。各任务末尾的 `git commit` 步骤保留下来只作为
+  **提交信息草稿**，不要执行 —— 需要执行的是它之前的验证步骤。
+  任务之间的审查边界靠 `.superpowers/sdd/2026-07-30-topic-workspace/` 下的 diff 快照维持。
 
 ---
 
