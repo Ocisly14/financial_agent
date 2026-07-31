@@ -32,16 +32,52 @@ CREATE TABLE IF NOT EXISTS session_compaction (
   updated_at              TEXT NOT NULL
 );
 
+-- The table name chat_rooms is a legacy holdover. These rows are called Topic
+-- everywhere in the code: a topic's id is its session_id (see the ensureTopic
+-- call in server.ts).
 CREATE TABLE IF NOT EXISTS chat_rooms (
+  id          TEXT PRIMARY KEY,
+  agent_id    TEXT NOT NULL,
+  name        TEXT NOT NULL,
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL,
+  archived_at INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_rooms_agent_updated
+  ON chat_rooms (agent_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS topic_charts (
+  topic_id   TEXT NOT NULL,
+  symbol     TEXT NOT NULL,
+  range      TEXT,
+  hidden     INTEGER NOT NULL DEFAULT 0,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (topic_id, symbol)
+);
+
+-- researches.id doubles as its session_id, reusing the same trick as topic.
+CREATE TABLE IF NOT EXISTS researches (
   id         TEXT PRIMARY KEY,
   agent_id   TEXT NOT NULL,
   name       TEXT NOT NULL,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_researches_agent_updated
+  ON researches (agent_id, updated_at DESC);
 
-CREATE INDEX IF NOT EXISTS idx_chat_rooms_agent_updated
-  ON chat_rooms (agent_id, updated_at DESC);
+CREATE TABLE IF NOT EXISTS research_members (
+  research_id         TEXT NOT NULL,
+  topic_id            TEXT NOT NULL,
+  sort_order          INTEGER NOT NULL DEFAULT 0,
+  digest              TEXT,
+  digest_through_turn INTEGER NOT NULL DEFAULT 0,
+  seen_through_turn   INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (research_id, topic_id)
+);
+CREATE INDEX IF NOT EXISTS idx_research_members_topic
+  ON research_members (topic_id);
 `;
 
 type EventRow = {
@@ -62,16 +98,50 @@ type CompactionRow = {
   preserved_data_json: string;
 };
 
-export type ChatRoomSummary = {
+export type TopicSummary = {
   id: string;
   name: string;
+  /** Derived from `topic_charts` — the first visible chart (sort_order ASC). Never written directly. */
+  leadSymbol: string | null;
   createdAt: number;
   lastMessage: { text: string; createdAt: number } | null;
   messageCount: number;
 };
 
-type RoomRow = { id: string; name: string; created_at: number };
+export type TopicChartPreferenceRow = {
+  symbol: string;
+  range: string | null;
+  hidden: boolean;
+  sortOrder: number;
+};
+
+type TopicRow = { id: string; name: string; lead_symbol: string | null; created_at: number };
 type LastMessageRow = { payload_json: string; timestamp: string };
+
+export type ResearchSummary = {
+  id: string;
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+  memberCount: number;
+};
+
+export type ResearchMember = {
+  topicId: string;
+  sortOrder: number;
+  digest: string | null;
+  digestThroughTurn: number;
+  seenThroughTurn: number;
+};
+
+type ResearchRow = { id: string; name: string; created_at: number; updated_at: number; member_count: number };
+type ResearchMemberRow = {
+  topic_id: string;
+  sort_order: number;
+  digest: string | null;
+  digest_through_turn: number;
+  seen_through_turn: number;
+};
 
 /** Local, process-safe session persistence backed by one SQLite file. */
 export class SqliteEventStore implements EventStore {
@@ -170,26 +240,32 @@ export class SqliteEventStore implements EventStore {
     );
   }
 
-  createRoom(agentId: string, roomId: string, name: string, createdAt = Date.now()): ChatRoomSummary {
+  createTopic(agentId: string, topicId: string, name: string, createdAt = Date.now()): TopicSummary {
     this.db.prepare(
       `INSERT INTO chat_rooms (id, agent_id, name, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(id) DO NOTHING`,
-    ).run(roomId, agentId, name, createdAt, createdAt);
-    return { id: roomId, name, createdAt, lastMessage: null, messageCount: 0 };
+    ).run(topicId, agentId, name, createdAt, createdAt);
+    return { id: topicId, name, leadSymbol: null, createdAt, lastMessage: null, messageCount: 0 };
   }
 
-  ensureRoom(agentId: string, roomId: string, name: string, createdAt = Date.now()): void {
-    this.createRoom(agentId, roomId, name, createdAt);
+  ensureTopic(agentId: string, topicId: string, name: string, createdAt = Date.now()): void {
+    this.createTopic(agentId, topicId, name, createdAt);
   }
 
-  listRooms(agentId: string): ChatRoomSummary[] {
-    const rooms = this.db.prepare(
-      `SELECT id, name, created_at
+  listTopics(agentId: string): TopicSummary[] {
+    const topics = this.db.prepare(
+      `SELECT chat_rooms.id AS id, chat_rooms.name AS name, chat_rooms.created_at AS created_at,
+              lead.symbol AS lead_symbol
        FROM chat_rooms
+       LEFT JOIN (
+         SELECT topic_id, symbol,
+                ROW_NUMBER() OVER (PARTITION BY topic_id ORDER BY sort_order ASC) AS rn
+         FROM topic_charts WHERE hidden = 0
+       ) lead ON lead.topic_id = chat_rooms.id AND lead.rn = 1
        WHERE agent_id = ?
        ORDER BY updated_at DESC, created_at DESC`,
-    ).all(agentId) as RoomRow[];
+    ).all(agentId) as TopicRow[];
     const countStatement = this.db.prepare(
       `SELECT COUNT(*) AS count
        FROM session_events
@@ -203,10 +279,10 @@ export class SqliteEventStore implements EventStore {
        LIMIT 1`,
     );
 
-    return rooms.map((room) => {
-      const countRow = countStatement.get(room.id) as { count: number };
-      const lastRow = lastMessageStatement.get(room.id) as LastMessageRow | undefined;
-      let lastMessage: ChatRoomSummary["lastMessage"] = null;
+    return topics.map((topic) => {
+      const countRow = countStatement.get(topic.id) as { count: number };
+      const lastRow = lastMessageStatement.get(topic.id) as LastMessageRow | undefined;
+      let lastMessage: TopicSummary["lastMessage"] = null;
       if (lastRow) {
         const payload = JSON.parse(lastRow.payload_json) as JsonObject;
         lastMessage = {
@@ -215,35 +291,214 @@ export class SqliteEventStore implements EventStore {
         };
       }
       return {
-        id: room.id,
-        name: room.name,
-        createdAt: room.created_at,
+        id: topic.id,
+        name: topic.name,
+        leadSymbol: topic.lead_symbol,
+        createdAt: topic.created_at,
         lastMessage,
         messageCount: countRow.count,
       };
     });
   }
 
-  renameRoom(agentId: string, roomId: string, name: string): boolean {
+  updateTopic(
+    agentId: string,
+    topicId: string,
+    patch: { name?: string },
+  ): boolean {
+    const assignments: string[] = [];
+    const values: Array<string | number | null> = [];
+    if (patch.name !== undefined) { assignments.push("name = ?"); values.push(patch.name); }
+    if (assignments.length === 0) return false;
+    assignments.push("updated_at = ?");
+    values.push(Date.now(), topicId, agentId);
+
     const result = this.db.prepare(
-      `UPDATE chat_rooms SET name = ?, updated_at = ? WHERE id = ? AND agent_id = ?`,
-    ).run(name, Date.now(), roomId, agentId);
+      `UPDATE chat_rooms SET ${assignments.join(", ")} WHERE id = ? AND agent_id = ?`,
+    ).run(...values);
     return result.changes > 0;
   }
 
-  deleteRoom(agentId: string, roomId: string): boolean {
-    const room = this.db.prepare("SELECT 1 FROM chat_rooms WHERE id = ? AND agent_id = ?").get(roomId, agentId);
-    if (!room) return false;
+  deleteTopic(agentId: string, topicId: string): boolean {
+    const topic = this.db.prepare("SELECT 1 FROM chat_rooms WHERE id = ? AND agent_id = ?").get(topicId, agentId);
+    if (!topic) return false;
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      this.db.prepare("DELETE FROM session_events WHERE session_id = ?").run(roomId);
-      this.db.prepare("DELETE FROM session_compaction WHERE session_id = ?").run(roomId);
-      this.db.prepare("DELETE FROM chat_rooms WHERE id = ? AND agent_id = ?").run(roomId, agentId);
+      this.db.prepare("DELETE FROM session_events WHERE session_id = ?").run(topicId);
+      this.db.prepare("DELETE FROM session_compaction WHERE session_id = ?").run(topicId);
+      this.db.prepare("DELETE FROM topic_charts WHERE topic_id = ?").run(topicId);
+      this.db.prepare("DELETE FROM research_members WHERE topic_id = ?").run(topicId);
+      this.db.prepare("DELETE FROM chat_rooms WHERE id = ? AND agent_id = ?").run(topicId, agentId);
       this.db.exec("COMMIT");
       return true;
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  listTopicCharts(topicId: string): TopicChartPreferenceRow[] {
+    const rows = this.db.prepare(
+      `SELECT symbol, range, hidden, sort_order
+       FROM topic_charts WHERE topic_id = ? ORDER BY sort_order ASC, symbol ASC`,
+    ).all(topicId) as Array<{ symbol: string; range: string | null; hidden: number; sort_order: number }>;
+    return rows.map((row) => ({
+      symbol: row.symbol,
+      range: row.range,
+      hidden: row.hidden === 1,
+      sortOrder: row.sort_order,
+    }));
+  }
+
+  replaceTopicCharts(topicId: string, rows: TopicChartPreferenceRow[]): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("DELETE FROM topic_charts WHERE topic_id = ?").run(topicId);
+      const insert = this.db.prepare(
+        `INSERT INTO topic_charts (topic_id, symbol, range, hidden, sort_order)
+         VALUES (?, ?, ?, ?, ?)`,
+      );
+      for (const row of rows) {
+        insert.run(topicId, row.symbol, row.range, row.hidden ? 1 : 0, row.sortOrder);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  createResearch(agentId: string, researchId: string, name: string, createdAt = Date.now()): ResearchSummary {
+    this.db.prepare(
+      `INSERT INTO researches (id, agent_id, name, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO NOTHING`,
+    ).run(researchId, agentId, name, createdAt, createdAt);
+    return { id: researchId, name, createdAt, updatedAt: createdAt, memberCount: 0 };
+  }
+
+  listResearches(agentId: string): ResearchSummary[] {
+    const rows = this.db.prepare(
+      `SELECT researches.id AS id, researches.name AS name,
+              researches.created_at AS created_at, researches.updated_at AS updated_at,
+              COUNT(research_members.topic_id) AS member_count
+       FROM researches
+       LEFT JOIN research_members ON research_members.research_id = researches.id
+       WHERE researches.agent_id = ?
+       GROUP BY researches.id
+       ORDER BY researches.updated_at DESC, researches.created_at DESC`,
+    ).all(agentId) as ResearchRow[];
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      memberCount: row.member_count,
+    }));
+  }
+
+  getResearch(agentId: string, researchId: string): ResearchSummary | undefined {
+    const row = this.db.prepare(
+      `SELECT researches.id AS id, researches.name AS name,
+              researches.created_at AS created_at, researches.updated_at AS updated_at,
+              COUNT(research_members.topic_id) AS member_count
+       FROM researches
+       LEFT JOIN research_members ON research_members.research_id = researches.id
+       WHERE researches.agent_id = ? AND researches.id = ?
+       GROUP BY researches.id`,
+    ).get(agentId, researchId) as ResearchRow | undefined;
+    if (!row) return undefined;
+    return {
+      id: row.id,
+      name: row.name,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      memberCount: row.member_count,
+    };
+  }
+
+  renameResearch(agentId: string, researchId: string, name: string): boolean {
+    const result = this.db.prepare(
+      `UPDATE researches SET name = ?, updated_at = ? WHERE id = ? AND agent_id = ?`,
+    ).run(name, Date.now(), researchId, agentId);
+    return result.changes > 0;
+  }
+
+  deleteResearch(agentId: string, researchId: string): boolean {
+    const research = this.db.prepare("SELECT 1 FROM researches WHERE id = ? AND agent_id = ?").get(researchId, agentId);
+    if (!research) return false;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("DELETE FROM research_members WHERE research_id = ?").run(researchId);
+      this.db.prepare("DELETE FROM researches WHERE id = ? AND agent_id = ?").run(researchId, agentId);
+      this.db.prepare("DELETE FROM session_events WHERE session_id = ?").run(researchId);
+      this.db.prepare("DELETE FROM session_compaction WHERE session_id = ?").run(researchId);
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  listResearchMembers(researchId: string): ResearchMember[] {
+    const rows = this.db.prepare(
+      `SELECT topic_id, sort_order, digest, digest_through_turn, seen_through_turn
+       FROM research_members WHERE research_id = ? ORDER BY sort_order ASC`,
+    ).all(researchId) as ResearchMemberRow[];
+    return rows.map((row) => ({
+      topicId: row.topic_id,
+      sortOrder: row.sort_order,
+      digest: row.digest,
+      digestThroughTurn: row.digest_through_turn,
+      seenThroughTurn: row.seen_through_turn,
+    }));
+  }
+
+  /**
+   * Whole-set replacement, but surviving members keep their `digest` / `digestThroughTurn` /
+   * `seenThroughTurn` — a digest costs a real model call, and a membership edit must not
+   * silently re-bill it.
+   */
+  replaceResearchMembers(researchId: string, topicIds: string[]): void {
+    const existing = this.listResearchMembers(researchId);
+    const existingById = new Map(existing.map((member) => [member.topicId, member]));
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("DELETE FROM research_members WHERE research_id = ?").run(researchId);
+      const insert = this.db.prepare(
+        `INSERT INTO research_members (research_id, topic_id, sort_order, digest, digest_through_turn, seen_through_turn)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      );
+      topicIds.forEach((topicId, index) => {
+        const previous = existingById.get(topicId);
+        insert.run(
+          researchId,
+          topicId,
+          index,
+          previous?.digest ?? null,
+          previous?.digestThroughTurn ?? 0,
+          previous?.seenThroughTurn ?? 0,
+        );
+      });
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  setMemberDigest(researchId: string, topicId: string, digest: string, digestThroughTurn: number): void {
+    this.db.prepare(
+      `UPDATE research_members SET digest = ?, digest_through_turn = ?
+       WHERE research_id = ? AND topic_id = ?`,
+    ).run(digest, digestThroughTurn, researchId, topicId);
+  }
+
+  setMemberSeenTurn(researchId: string, topicId: string, seenThroughTurn: number): void {
+    this.db.prepare(
+      `UPDATE research_members SET seen_through_turn = ?
+       WHERE research_id = ? AND topic_id = ?`,
+    ).run(seenThroughTurn, researchId, topicId);
   }
 }

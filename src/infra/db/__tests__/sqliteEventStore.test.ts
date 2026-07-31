@@ -50,23 +50,24 @@ test("SQLite event store keeps different sessions isolated", async () => {
 
 test("SQLite room catalog persists metadata, message previews, rename, and delete", async () => {
   const store = SqliteEventStore.open(":memory:");
-  store.createRoom("default", "room-1", "First room", 100);
+  store.createTopic("default", "room-1", "First room", 100);
   const registry = new SessionRegistry(store);
   const state = await registry.getOrCreate("room-1");
   state.beginTurn("hello");
   state.recordReply("hi", true);
 
-  assert.deepEqual(store.listRooms("default"), [{
+  assert.deepEqual(store.listTopics("default"), [{
     id: "room-1",
     name: "First room",
+    leadSymbol: null,
     createdAt: 100,
     lastMessage: { text: "hi", createdAt: Date.parse(state.allEvents()[1]!.timestamp) },
     messageCount: 2,
   }]);
-  assert.equal(store.renameRoom("default", "room-1", "Renamed"), true);
-  assert.equal(store.listRooms("default")[0]?.name, "Renamed");
-  assert.equal(store.deleteRoom("default", "room-1"), true);
-  assert.deepEqual(store.listRooms("default"), []);
+  assert.equal(store.updateTopic("default", "room-1", { name: "Renamed" }), true);
+  assert.equal(store.listTopics("default")[0]?.name, "Renamed");
+  assert.equal(store.deleteTopic("default", "room-1"), true);
+  assert.deepEqual(store.listTopics("default"), []);
   assert.deepEqual(await store.loadEvents("room-1"), []);
   store.close();
 });
