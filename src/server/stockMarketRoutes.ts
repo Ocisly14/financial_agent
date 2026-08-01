@@ -9,9 +9,14 @@ import {
 } from "../data/stock/index.ts";
 
 export {
+  barsForRangeDays,
   buildStockChartDataResponse,
   createRateLimiter,
+  DEFAULT_RANGE_DAYS,
+  MAX_RANGE_DAYS,
+  MIN_RANGE_DAYS,
   normalizeSymbol,
+  parseRangeDays,
   parseRangeParam,
   type MarketSession,
   type StockChartDataDeps,

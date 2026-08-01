@@ -78,6 +78,23 @@
         --down: rgb(var(--down-rgb));
         --hold: rgb(var(--hold-rgb));
 
+        /* Categorical series ramp. Six slots, because the overlay chart caps
+           at six symbols (design §2) — past that the lines occlude each other
+           and the chart stops being readable, so a seventh slot would only
+           encourage an unreadable chart.
+
+           Ordered by how far apart adjacent hues are, not by the spectrum:
+           a two-line overlay is the common case, so slots 1 and 2 (blue vs.
+           orange) are the pair with the widest separation, and that pair also
+           survives the common red-green deficiencies. Re-picked per theme
+           rather than lightened — see the dark block below. */
+        --series-1: #2563EB;
+        --series-2: #C2410C;
+        --series-3: #0F766E;
+        --series-4: #7C3AED;
+        --series-5: #BE185D;
+        --series-6: #4D7C0F;
+
         /* Elevation. Two-part: a tight contact shadow that pins the object
            to the page, plus a wide ambient one. Single-layer shadows always
            read cheap. Pair each with `inset 0 1px 0 var(--rim)`. */
@@ -169,6 +186,19 @@
         --down-rgb: 255 107 133;
         --hold-rgb: 229 169 60;
 
+        /* Series ramp, re-picked for the dark ground exactly as up/down were.
+           The light values are all mid-to-dark and would sit at roughly the
+           luminance of the canvas here — a line you have to hunt for is worse
+           than a line in the "wrong" hue, so each slot is re-chosen at a
+           luminance that reads against #070A11 while holding its hue identity,
+           so a chart looks like the same chart across a theme switch. */
+        --series-1: #6AA6FF;
+        --series-2: #FF9E5E;
+        --series-3: #45D6C0;
+        --series-4: #B69CFF;
+        --series-5: #FF7BA8;
+        --series-6: #A9D45A;
+
         --e1: 0 0.5px 1px rgba(0, 0, 0, 0.40), 0 1px 3px -1px rgba(0, 0, 0, 0.50);
         --e2: 0 1px 2px rgba(0, 0, 0, 0.50), 0 8px 24px -8px rgba(0, 0, 0, 0.70);
         --e3: 0 2px 4px rgba(0, 0, 0, 0.50), 0 28px 64px -16px rgba(0, 0, 0, 0.85);
@@ -239,6 +269,24 @@
     @keyframes fin-rule-sweep {
         from { transform: scaleX(0); }
         to { transform: scaleX(1); }
+    }
+
+    /*
+     * A torn-off chart window arriving under the cursor. Short and centred on
+     * itself: the window is already where the user dropped it, so the motion
+     * says "this opened here", not "this travelled from somewhere".
+     */
+    @keyframes fin-window-open {
+        from { transform: scale(0.96); opacity: 0; }
+        to { transform: scale(1); opacity: 1; }
+    }
+
+    .fin-window-open {
+        animation: fin-window-open 120ms ease-out;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        .fin-window-open { animation: none; }
     }
 
     * {

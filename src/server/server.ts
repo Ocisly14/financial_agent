@@ -7,7 +7,7 @@ import { attachSse } from "../infra/events/sseProjector.ts";
 import type { FinancialAgentApp } from "../agent/createApp.ts";
 import type { TopicChartPreferenceRow } from "../infra/db/sqliteEventStore.ts";
 import type { TaskResult } from "../framework/types.ts";
-import { handleStockQuote } from "./stockMarketRoutes.ts";
+import { handleStockQuote, parseRangeDays } from "./stockMarketRoutes.ts";
 import { handleLinkPreview } from "./linkPreview.ts";
 import { projectChatHistory } from "./chatHistory.ts";
 
@@ -235,6 +235,100 @@ async function handleUpdateTopic(
   jsonOk(res, { success: true, topic: { id: topicId, ...patch } });
 }
 
+// Byte-identical to the ticker regex in client/src/lib/chartWorkspace.ts's `ticker()` — a
+// mismatch here would let the frontend display a symbol the backend refuses to store.
+const TICKER_PATTERN = /^[A-Z][A-Z.-]{0,5}$/;
+
+function normalizeTicker(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const symbol = value.trim().toUpperCase();
+  return TICKER_PATTERN.test(symbol) ? symbol : undefined;
+}
+
+/** Same rules as chartWorkspace.ts's overlay parsing (design §2): dedupe, keep 2-6 valid
+ *  tickers (truncating past 6 rather than rejecting), fall back to "pct" for an unrecognised
+ *  normalize value. Returns undefined when fewer than 2 valid symbols survive. */
+function normalizeOverlaySymbols(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const seen = new Set<string>();
+  const symbols: string[] = [];
+  for (const candidate of value) {
+    const symbol = normalizeTicker(candidate);
+    if (!symbol || seen.has(symbol)) continue;
+    seen.add(symbol);
+    symbols.push(symbol);
+  }
+  const truncated = symbols.slice(0, 6);
+  return truncated.length >= 2 ? truncated : undefined;
+}
+
+function normalizeMode(value: unknown): "pct" | "index100" {
+  return value === "index100" ? "index100" : "pct";
+}
+
+/** The window an overlay gets when neither the row nor the request names one. */
+const DEFAULT_OVERLAY_RANGE_DAYS = 252;
+
+/**
+ * A range that is absent stays absent (null means "follow the derived range");
+ * a range that is PRESENT must be a whole number of trading days within the
+ * servable window, or the whole write is rejected.
+ *
+ * This is the boundary the original bug walked straight through: an unknown
+ * "6M" was stored verbatim and every reader downstream quietly degraded it to
+ * a one-day intraday chart. Rejecting here means nothing downstream ever has
+ * to guess.
+ */
+function chartRange(value: unknown): number | null | "invalid" {
+  if (value === undefined || value === null) return null;
+  return parseRangeDays(value) ?? "invalid";
+}
+
+/**
+ * Validates a whole `charts` payload into storable rows. Exported for tests:
+ * the reject-on-write posture is the point of this change, so it needs
+ * coverage without standing up an HTTP server.
+ */
+export function parseTopicChartRows(
+  charts: unknown[],
+  makeId: () => string = () => newId("chart"),
+): { rows: TopicChartPreferenceRow[] } | { error: string } {
+  const rows: TopicChartPreferenceRow[] = [];
+  for (const [index, candidate] of charts.entries()) {
+    const item = candidate as Record<string, unknown>;
+    const range = chartRange(item?.range);
+    if (range === "invalid") return { error: `invalid range at index ${index}` };
+    const hidden = item?.hidden === true;
+    const sortOrder = typeof item?.sortOrder === "number" ? item.sortOrder : index;
+
+    if (item?.kind === "overlay") {
+      const overlay = (item as { overlay?: Record<string, unknown> }).overlay;
+      const symbols = normalizeOverlaySymbols(overlay?.symbols);
+      if (!symbols) return { error: `invalid overlay at index ${index}` };
+      const requested = chartRange(overlay?.range);
+      if (requested === "invalid") return { error: `invalid overlay range at index ${index}` };
+      rows.push({
+        id: makeId(),
+        kind: "overlay",
+        overlay: {
+          symbols,
+          range: requested ?? range ?? DEFAULT_OVERLAY_RANGE_DAYS,
+          normalize: normalizeMode(overlay?.normalize),
+        },
+        range,
+        hidden,
+        sortOrder,
+      });
+      continue;
+    }
+
+    const symbol = normalizeTicker(item?.symbol);
+    if (!symbol) return { error: `invalid symbol at index ${index}` };
+    rows.push({ id: makeId(), kind: "symbol", symbol, range, hidden, sortOrder });
+  }
+  return { rows };
+}
+
 async function handleReplaceTopicCharts(
   req: http.IncomingMessage,
   res: http.ServerResponse,
@@ -249,20 +343,10 @@ async function handleReplaceTopicCharts(
   }
   if (!Array.isArray(body.charts)) return jsonError(res, 400, "charts must be an array");
 
-  const rows: TopicChartPreferenceRow[] = [];
-  for (const [index, candidate] of body.charts.entries()) {
-    const item = candidate as Record<string, unknown>;
-    const symbol = typeof item?.symbol === "string" ? item.symbol.trim().toUpperCase() : "";
-    if (!/^[A-Z][A-Z.-]{0,5}$/.test(symbol)) return jsonError(res, 400, `invalid symbol at index ${index}`);
-    rows.push({
-      symbol,
-      range: typeof item.range === "string" ? item.range : null,
-      hidden: item.hidden === true,
-      sortOrder: typeof item.sortOrder === "number" ? item.sortOrder : index,
-    });
-  }
+  const parsed = parseTopicChartRows(body.charts);
+  if ("error" in parsed) return jsonError(res, 400, parsed.error);
 
-  app.eventStore.replaceTopicCharts(topicId, rows);
+  app.eventStore.replaceTopicCharts(topicId, parsed.rows);
   jsonOk(res, { success: true, charts: app.eventStore.listTopicCharts(topicId) });
 }
 

@@ -135,14 +135,19 @@ export type TopicSummary = {
   messageCount: number;
 };
 
-/** The user's intent for the chart-tab set. Does not include study content — that's derived from messages. */
-export type TopicChartPreference = {
-  symbol: string;
-  /** null means follow the range derived from the messages. */
-  range: string | null;
-  hidden: boolean;
-  sortOrder: number;
-};
+/** A multi-ticker comparison a topic_charts row of kind "overlay" carries.
+ *  Mirrors `OverlaySpec` in src/infra/db/sqliteEventStore.ts. */
+/** `range` is a number of trading days — see client/src/lib/stockChart.ts. */
+export type OverlaySpec = { symbols: string[]; range: number; normalize: "pct" | "index100" };
+
+/** The user's intent for the chart-tab set. Does not include study content — that's derived from
+ *  messages. A discriminated union, not two nullable fields, mirroring
+ *  `TopicChartPreferenceRow` in src/infra/db/sqliteEventStore.ts byte for byte: a nullable-both-fields
+ *  shape would push every use site back to hand-rolled null checks instead of letting the compiler
+ *  force the branch. */
+export type TopicChartPreference =
+  | { id: string; kind: "symbol"; symbol: string; /** null means follow the range derived from the messages. */ range: number | null; hidden: boolean; sortOrder: number }
+  | { id: string; kind: "overlay"; overlay: OverlaySpec; range: number | null; hidden: boolean; sortOrder: number };
 
 // ── Research (phase 2 research layer, docs/superpowers/specs/2026-07-30-research-layer-design.md) ──
 // A Research groups several Topics under one controller agent that can ask

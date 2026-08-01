@@ -50,7 +50,7 @@ test("happy path: returns quote, daily bars, and data source label", async () =>
   assert.equal((data["dailyBars"] as DailyBar[]).length, 2);
   assert.match(result.summary, /AAPL/);
   assert.match(result.summary, /213\.45/);
-  assert.deepEqual(result.visualizations, [{ type: "stock_price", symbol: "AAPL", range: "1D" }]);
+  assert.deepEqual(result.visualizations, [{ type: "stock_price", symbol: "AAPL", range: 1 }]);
 });
 
 test("snapshot fails but daily bars exist in the store: degrades gracefully and labels staleness", async () => {

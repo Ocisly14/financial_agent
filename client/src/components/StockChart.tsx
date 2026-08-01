@@ -5,10 +5,12 @@ import type { TFunction } from "i18next";
 import { API_BASE_URL } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import {
+    isPresetStockRange,
     parseStockChartProps,
     pollIntervalForSession,
     shouldPollCandles,
-    STOCK_RANGES,
+    stockRangeLabel,
+    STOCK_RANGE_PRESETS,
     type MarketSession,
     type StockRange,
 } from "@/lib/stockChart";
@@ -23,7 +25,7 @@ import {
 import { MessageTimeContext, StreamingContext } from "./stockChartContext";
 import type { TechnicalStudy } from "@/lib/chartWorkspace";
 
-interface StockCandle {
+export interface StockCandle {
     t: string;
     o: number;
     h: number;
@@ -45,7 +47,7 @@ interface StockQuote {
     quoteTimestamp: string;
 }
 
-interface StockQuoteResponse {
+export interface StockQuoteResponse {
     symbol: string;
     quote: StockQuote | null;
     session: MarketSession;
@@ -98,7 +100,11 @@ const DARK_CANDLE_THEME: CandleTheme = {
     liveTagInk: "#0f172a",
 };
 
-async function fetchStockQuote(symbol: string, range: StockRange | "none"): Promise<StockQuoteResponse> {
+/** Exported so `OverlayChart` fetches through the identical path and, paired with
+ *  the `["stock-candles", symbol, range]` key below, shares one cache entry per
+ *  symbol+range with it — a symbol already open in its own tab is a cache hit,
+ *  not a second request. */
+export async function fetchStockQuote(symbol: string, range: StockRange | "none"): Promise<StockQuoteResponse> {
     const response = await fetch(
         `${API_BASE_URL}/market/stocks/${encodeURIComponent(symbol)}?range=${range}`,
     );
@@ -345,22 +351,32 @@ function StockChartLive({
             </span>
 
             <span className="mt-3 flex gap-1" role="group" aria-label={t("charts.chartRange")}>
-                {STOCK_RANGES.map((item) => (
-                    <button
-                        key={item}
-                        type="button"
-                        onClick={() => setRange(item)}
-                        aria-pressed={range === item}
-                        className={cn(
-                            "rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
-                            range === item
-                                ? "bg-primary text-primary-foreground"
-                                : "text-label-2 hover:bg-fill-1",
-                        )}
-                    >
-                        {item}
-                    </button>
-                ))}
+                {/*
+                  * The curated presets, plus — when the current range is none of
+                  * them (the agent can ask for any window) — one extra chip
+                  * carrying it, selected. Without that chip the user would be
+                  * looking at a chart while every button reads unselected, with
+                  * no way to tell which window is on screen.
+                  */}
+                {(isPresetStockRange(range) ? STOCK_RANGE_PRESETS : [...STOCK_RANGE_PRESETS, range]).map((item) => {
+                    const label = stockRangeLabel(item);
+                    return (
+                        <button
+                            key={item}
+                            type="button"
+                            onClick={() => setRange(item)}
+                            aria-pressed={range === item}
+                            className={cn(
+                                "rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
+                                range === item
+                                    ? "bg-primary text-primary-foreground"
+                                    : "text-label-2 hover:bg-fill-1",
+                            )}
+                        >
+                            {t(label.key, { value: label.value })}
+                        </button>
+                    );
+                })}
             </span>
 
             <span className="mt-2 block overflow-hidden" style={{ height }}>

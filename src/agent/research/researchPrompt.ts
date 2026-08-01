@@ -59,7 +59,28 @@ export const RESEARCH_TOOL_SPECS: { name: string; description: string }[] = [
     description:
       'Add or remove chart tabs for a member. Persisted. ' +
       'input: {"topic_id": "<member id>", "ops": [{"op": "add", "symbol": "NVDA"}, {"op": "remove", "symbol": "SPY"}]}. ' +
-      'Use only when the chart layout genuinely needs to change — the user can undo every change you make, and churning the layout will just get undone.',
+      'Use only when the chart layout genuinely needs to change — the user can undo every change you make, and churning the layout will just get undone. ' +
+      'This only ever touches single-ticker tabs — a tab created by overlay is not visible to this tool, use edit_overlay for those.',
+  },
+  {
+    name: "overlay",
+    description:
+      'Create a normalized multi-ticker comparison chart and add it as a new, selected tab on a member. Persisted immediately — no separate "keep it?" step. ' +
+      'input: {"topic_id": "<member id>", "symbols": ["AAPL", "NVDA"], "range": <optional number>, "normalize": "<optional, \\"pct\\" or \\"index100\\" — defaults to \\"pct\\">"}. ' +
+      'range is a number of trading days: 21 \u2248 1 month, 63 \u2248 3 months, 126 \u2248 6 months, 252 \u2248 1 year. Any whole number from 1 to 1260 is allowed, so pick the window the question actually asks for instead of the nearest familiar label. Omit it to keep that member\'s current range. ' +
+      '2-6 tickers. Use it when the comparison itself is the question ("who ran further", "which fund tracked its benchmark") — a single ticker\'s own trend is what the plain chart is for. ' +
+      'Leave normalize at the default "pct" unless you are comparing fund or index NAV-style levels, where "index100" reads more naturally. ' +
+      'The user sees which mode you chose, right on the chart, so pick deliberately.',
+  },
+  {
+    name: "edit_overlay",
+    description:
+      'Adjust the range and/or normalization of an existing overlay tab. Persisted. ' +
+      'input: {"topic_id": "<member id>", "chart_id": "<the overlay tab\'s id>", "range": <optional number>, "normalize": "<optional>"}. ' +
+      'range is a number of trading days: 21 \u2248 1 month, 63 \u2248 3 months, 126 \u2248 6 months, 252 \u2248 1 year (1 to 1260). ' +
+      'This cannot change which tickers are on the chart — changing the window is looking at the same comparison differently, changing the tickers is a different comparison. ' +
+      'The user may already have judged, positioned, or referred to this exact tab; swapping its tickers in place would quietly turn it into something else while its title and position stay the same. ' +
+      'To compare a different set of tickers, call overlay again for a new tab.',
   },
   {
     name: "edit_members",
@@ -104,6 +125,7 @@ Each turn you run in a loop. Every iteration you read [CONVERSATION SO FAR] (whe
 - Missing a line of investigation → create_topic, then ask_topic to get it started.
 - Before talking about a member → focus, so the user's view matches what you're about to say.
 - The chart layout or member roster genuinely needs to change → edit_tabs / edit_members.
+- The user's question is really a comparison across tickers → overlay (create a new one) / edit_overlay (adjust an existing one's range or normalization — not its tickers).
 - Already have enough → set tool_calls to null and write the complete answer into "reply".
 
 [THE reply FIELD]

@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { toast as sonnerToast } from "sonner";
 import type { TopicChartPreference, UUID } from "@/types/core";
 import { apiClient, type ProcessingStep } from "@/lib/api";
+import { DEFAULT_STOCK_RANGE, parseStockRange } from "@/lib/stockChart";
 import { useTopicStream } from "@/hooks/useTopicStream";
 import type { MemberFocusSignal } from "@/components/workspace/MemberRow";
 import {
@@ -45,20 +46,34 @@ function toDirective(step: ProcessingStep): ResearchDirective | undefined {
 }
 
 /** The persisted chart-preference shape, defensively rebuilt from whatever the
- *  frame carried — the undo path PUTs this straight back. */
+ *  frame carried — the undo path PUTs this straight back. A row missing its id
+ *  or matching neither the symbol nor the overlay shape is dropped rather than
+ *  half-applied, same posture as the rest of this file's frame parsing. */
 function asChartPreferences(value: unknown): TopicChartPreference[] {
     if (!Array.isArray(value)) return [];
     return value.flatMap((entry) => {
         const row = entry as Record<string, unknown>;
-        if (typeof row?.symbol !== "string") return [];
-        return [
-            {
-                symbol: row.symbol,
-                range: typeof row.range === "string" ? row.range : null,
-                hidden: Boolean(row.hidden),
-                sortOrder: typeof row.sortOrder === "number" ? row.sortOrder : 0,
-            },
-        ];
+        const id = typeof row?.id === "string" ? row.id : undefined;
+        if (!id) return [];
+        const range = parseStockRange(row.range) ?? null;
+        const hidden = Boolean(row.hidden);
+        const sortOrder = typeof row.sortOrder === "number" ? row.sortOrder : 0;
+
+        if (typeof row.symbol === "string") {
+            const preference: TopicChartPreference = { id, kind: "symbol", symbol: row.symbol, range, hidden, sortOrder };
+            return [preference];
+        }
+
+        const overlay = row.overlay as { symbols?: unknown; range?: unknown; normalize?: unknown } | undefined;
+        if (overlay && Array.isArray(overlay.symbols)) {
+            const symbols = overlay.symbols.filter((s): s is string => typeof s === "string");
+            const overlayRange = parseStockRange(overlay.range) ?? DEFAULT_STOCK_RANGE;
+            const normalize = overlay.normalize === "index100" ? "index100" as const : "pct" as const;
+            const preference: TopicChartPreference = { id, kind: "overlay", overlay: { symbols, range: overlayRange, normalize }, range, hidden, sortOrder };
+            return [preference];
+        }
+
+        return [] as TopicChartPreference[];
     });
 }
 

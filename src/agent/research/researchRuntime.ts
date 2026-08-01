@@ -47,7 +47,9 @@ import { buildIndexedTurns, refreshStaleDigests, turnCountOf, type DigestStore }
 import { renderExternalDelta, renderRoster, type MemberFacts } from "./memberContext.ts";
 import { RESEARCH_TOOL_SPECS } from "./researchPrompt.ts";
 import {
+  requireRangeDays,
   ResearchToolset,
+  type EditOverlayPatch,
   type MemberOp,
   type ResearchFrame,
   type ResearchToolStore,
@@ -371,7 +373,9 @@ export class ResearchRuntime {
         topicId: member.topicId,
         name: topic?.name ?? member.topicId,
         leadSymbol: topic?.leadSymbol ?? null,
-        chartSymbols: charts.filter((chart) => !chart.hidden).map((chart) => chart.symbol),
+        chartSymbols: charts
+          .filter((chart): chart is Extract<TopicChartPreferenceRow, { kind: "symbol" }> => chart.kind === "symbol" && !chart.hidden)
+          .map((chart) => chart.symbol),
         turnCount: turnCountOf(turns),
         lastActivityMs: topic?.lastMessage?.createdAt ?? topic?.createdAt ?? 0,
         digest: member.digest,
@@ -513,7 +517,35 @@ export class ResearchRuntime {
         const topicId = requireString(input, "topic_id");
         const result = toolset.editTabs(topicId, parseTabOps(input.ops));
         return {
-          summary: `${topicId}'s chart tabs are now: ${result.charts.map((chart) => chart.symbol).join(", ") || "(empty)"}`,
+          summary: `${topicId}'s chart tabs are now: ${result.charts
+            .filter((chart): chart is Extract<TopicChartPreferenceRow, { kind: "symbol" }> => chart.kind === "symbol")
+            .map((chart) => chart.symbol)
+            .join(", ") || "(empty)"}`,
+          data: result,
+        };
+      }
+
+      case "overlay": {
+        const topicId = requireString(input, "topic_id");
+        const symbols = parseSymbolsInput(input.symbols);
+        const range = input.range === undefined || input.range === null
+          ? undefined
+          : requireRangeDays(input.range);
+        const normalize = typeof input.normalize === "string" ? input.normalize : undefined;
+        const result = toolset.overlay(topicId, symbols, range, normalize);
+        return {
+          summary: `Created overlay tab "${result.chart.overlay.symbols.join("+")}" (${result.chart.overlay.normalize}, ${result.chart.overlay.range}) on ${topicId}, selected.`,
+          data: result,
+        };
+      }
+
+      case "edit_overlay": {
+        const topicId = requireString(input, "topic_id");
+        const chartId = requireString(input, "chart_id");
+        const patch = parseEditOverlayPatch(input);
+        const result = toolset.editOverlay(topicId, chartId, patch);
+        return {
+          summary: `Overlay tab "${result.chart.overlay.symbols.join("+")}" on ${topicId} is now ${result.chart.overlay.normalize}, ${result.chart.overlay.range}.`,
           data: result,
         };
       }
@@ -553,7 +585,7 @@ function parseTabOps(value: unknown): TabOp[] {
     const symbol = raw.symbol.trim();
     if (raw.op === "add") {
       const op: TabOp = { op: "add", symbol };
-      if (typeof raw.range === "string") op.range = raw.range;
+      if (raw.range !== undefined && raw.range !== null) op.range = requireRangeDays(raw.range);
       ops.push(op);
     } else if (raw.op === "remove") {
       ops.push({ op: raw.op, symbol });
@@ -561,6 +593,21 @@ function parseTabOps(value: unknown): TabOp[] {
   }
   if (ops.length === 0) throw new Error('"ops" contained no valid operation');
   return ops;
+}
+
+/** Coarse pre-filter only — real validation (ticker regex, dedupe, 2-6 range)
+ *  happens in `ResearchToolset.overlay` (design §2). This just makes sure we
+ *  hand it an array of strings rather than throwing on a malformed shape. */
+function parseSymbolsInput(value: unknown): string[] {
+  if (!Array.isArray(value)) throw new Error('"symbols" is required and must be an array of tickers');
+  return value.filter((entry): entry is string => typeof entry === "string");
+}
+
+function parseEditOverlayPatch(input: JsonObject): EditOverlayPatch {
+  const patch: EditOverlayPatch = {};
+  if (input.range !== undefined && input.range !== null) patch.range = requireRangeDays(input.range);
+  if (typeof input.normalize === "string") patch.normalize = input.normalize;
+  return patch;
 }
 
 function parseMemberOps(value: unknown): MemberOp[] {
@@ -603,8 +650,11 @@ function renderFetchResult(result: {
   for (const entry of result.data) {
     parts.push(`[data ${entry.index}] turn ${entry.turn} · ${entry.agent} · ${JSON.stringify(entry.data)}`);
   }
-  if (result.charts.length) {
-    parts.push(`Related charts: ${result.charts.map((chart) => chart.symbol).join(", ")}`);
+  const symbolCharts = result.charts.filter(
+    (chart): chart is Extract<TopicChartPreferenceRow, { kind: "symbol" }> => chart.kind === "symbol",
+  );
+  if (symbolCharts.length) {
+    parts.push(`Related charts: ${symbolCharts.map((chart) => chart.symbol).join(", ")}`);
   }
   if (result.excerpts.length === 0 && result.data.length === 0) {
     parts.push("(No content found relevant to this question.)");

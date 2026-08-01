@@ -14,9 +14,14 @@ export { SqliteBarStore, type BarStore, type Coverage } from "./barStore.ts";
 export { etDateString, marketSession, type MarketSession } from "./marketHours.ts";
 export { getSharedBarRepository, resetSharedBarRepository } from "./sharedRepository.ts";
 export {
+  barsForRangeDays,
   buildStockChartDataResponse,
   createRateLimiter,
+  DEFAULT_RANGE_DAYS,
+  MAX_RANGE_DAYS,
+  MIN_RANGE_DAYS,
   normalizeSymbol,
+  parseRangeDays,
   parseRangeParam,
   STOCK_CHART_DATA_SOURCE,
   STOCK_CHART_UPSTREAM_CALLS_PER_MINUTE,

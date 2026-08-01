@@ -36,6 +36,7 @@ import {
   type Selection,
 } from "./retrieval.ts";
 import { buildIndexedTurns } from "./digest.ts";
+import { MAX_RANGE_DAYS, MIN_RANGE_DAYS, parseRangeDays } from "../../data/stock/index.ts";
 import { mapWithConcurrency, Semaphore, TimeoutError, withTimeout } from "./concurrency.ts";
 
 // ── guards (§4.4) ─────────────────────────────────────────────────────────
@@ -141,10 +142,70 @@ export type FetchFromTopicResult = {
 };
 
 export type TabOp =
-  | { op: "add"; symbol: string; range?: string | null }
+  | { op: "add"; symbol: string; range?: number | null }
   | { op: "remove"; symbol: string };
 
 export type MemberOp = { op: "add" | "remove"; topicId: string };
+
+export type OverlayRow = Extract<TopicChartPreferenceRow, { kind: "overlay" }>;
+
+/** What `edit_overlay` may change. Deliberately has no `symbols` field —
+ *  design §4.1: changing the window is looking at the same comparison
+ *  differently, changing the symbols is a different comparison. */
+export type EditOverlayPatch = { range?: number; normalize?: string };
+
+// ── overlay validation (design §2) ──────────────────────────────────────
+// Byte-identical to client/src/lib/chartWorkspace.ts's `ticker()` / the
+// server's `TICKER_PATTERN` in src/server/server.ts — each layer implements
+// its own copy on purpose (see that file's comment on the same regex).
+const TICKER_PATTERN = /^[A-Z][A-Z.-]{0,5}$/;
+/** 252 trading days — one year. */
+const DEFAULT_OVERLAY_RANGE = 252;
+
+/**
+ * A range reaching an agent tool is a WRITE, so it is rejected rather than
+ * coerced: a silently substituted window is exactly how a "6M" request once
+ * became a one-day intraday chart. Throwing hands the model a message it can
+ * act on, which a fallback never does.
+ */
+export function requireRangeDays(value: unknown): number {
+  const days = parseRangeDays(value);
+  if (days === undefined) {
+    throw new Error(
+      `"range" must be a whole number of trading days between ${MIN_RANGE_DAYS} and ${MAX_RANGE_DAYS} ` +
+      `(21 = 1 month, 63 = 3 months, 126 = 6 months, 252 = 1 year)`,
+    );
+  }
+  return days;
+}
+
+function normalizeTicker(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const symbol = value.trim().toUpperCase();
+  return TICKER_PATTERN.test(symbol) ? symbol : undefined;
+}
+
+/** Dedupes, validates every ticker, and truncates to the 6-line legibility
+ *  ceiling (design §2) — keeping the first 6 rather than rejecting the whole
+ *  call. A single bad ticker drops that symbol, not the whole call. */
+function cleanOverlaySymbols(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const symbols: string[] = [];
+  for (const candidate of value) {
+    const symbol = normalizeTicker(candidate);
+    if (!symbol || seen.has(symbol)) continue;
+    seen.add(symbol);
+    symbols.push(symbol);
+  }
+  return symbols.slice(0, 6);
+}
+
+/** An unrecognised normalize mode falls back to "pct" rather than throwing —
+ *  storage and messages both outlive the build that wrote them. */
+function normalizeMode(value: unknown): "pct" | "index100" {
+  return value === "index100" ? "index100" : "pct";
+}
 
 // ── selection parsing ─────────────────────────────────────────────────────
 
@@ -449,7 +510,11 @@ export class ResearchToolset {
     }));
 
     const wantedSymbols = new Set(selections.flatMap((s) => s.charts).map((s) => s.toUpperCase()));
-    const selectedCharts = charts.filter((chart) => wantedSymbols.has(chart.symbol.toUpperCase()));
+    // Overlay rows have no single ticker to match against the model's symbol picks — that
+    // resolution is edit_overlay/overlay-tool territory (a later task), not this fetch path.
+    const selectedCharts = charts.filter(
+      (chart) => chart.kind === "symbol" && wantedSymbols.has(chart.symbol.toUpperCase()),
+    );
 
     return {
       framing: this.pickFraming(selections, merged.turns),
@@ -477,8 +542,9 @@ export class ResearchToolset {
         ...preserved.map((entry, index) => `[data ${index}] turn ${entry.turn} · ${entry.agent} · ${JSON.stringify(entry.data)}`),
       );
     }
-    if (charts.length > 0) {
-      parts.push("", `This Topic's charts (reference by symbol): ${charts.map((c) => c.symbol).join(", ")}`);
+    const symbolCharts = charts.filter((c): c is Extract<TopicChartPreferenceRow, { kind: "symbol" }> => c.kind === "symbol");
+    if (symbolCharts.length > 0) {
+      parts.push("", `This Topic's charts (reference by symbol): ${symbolCharts.map((c) => c.symbol).join(", ")}`);
     }
     return parts.join("\n");
   }
@@ -518,13 +584,21 @@ export class ResearchToolset {
    */
   editTabs(topicId: string, ops: TabOp[]): { charts: TopicChartPreferenceRow[]; previous: TopicChartPreferenceRow[] } {
     const previous = this.ctx.store.listTopicCharts(topicId);
-    const rows = previous.map((row) => ({ ...row }));
+    // edit_tabs only ever operates on kind='symbol' rows (spec §6.2): overlay tabs are created by
+    // `overlay` and modified by `edit_overlay`, and their symbol set is not editable in place.
+    // Overlay rows are carried through untouched.
+    const overlays = previous.filter((row): row is Extract<TopicChartPreferenceRow, { kind: "overlay" }> => row.kind === "overlay");
+    const rows = previous
+      .filter((row): row is Extract<TopicChartPreferenceRow, { kind: "symbol" }> => row.kind === "symbol")
+      .map((row) => ({ ...row }));
 
     for (const op of ops) {
       const symbol = op.symbol.toUpperCase();
       const index = rows.findIndex((row) => row.symbol.toUpperCase() === symbol);
       if (op.op === "add") {
-        const next: TopicChartPreferenceRow = {
+        const next: Extract<TopicChartPreferenceRow, { kind: "symbol" }> = {
+          id: index >= 0 ? rows[index]!.id : this.newId("chart"),
+          kind: "symbol",
           symbol,
           range: op.range ?? null,
           hidden: false,
@@ -537,7 +611,7 @@ export class ResearchToolset {
       }
     }
 
-    const normalized = rows.map((row, index) => ({ ...row, sortOrder: index }));
+    const normalized: TopicChartPreferenceRow[] = [...rows.map((row, index) => ({ ...row, sortOrder: index })), ...overlays];
     this.ctx.store.replaceTopicCharts(topicId, normalized);
     this.ctx.emit({
       name: "layout_changed",
@@ -551,6 +625,113 @@ export class ResearchToolset {
       },
     });
     return { charts: normalized, previous };
+  }
+
+  // ── overlay ─────────────────────────────────────────────────────────────
+  /**
+   * Creates a normalized multi-symbol comparison chart and persists it as a
+   * new tab on `topicId` IMMEDIATELY (design §1③, §6): `sortOrder` 0 — the
+   * project's "new tabs go to the front" rule — and selected. There is no
+   * "keep it?" gate; existing rows shift back by one. The user deletes it if
+   * they don't want it, exactly like any other tab.
+   *
+   * `range` defaults to `topicId`'s own current lead chart's range (its
+   * first visible tab by `sortOrder`) — reading "the currently focused
+   * member's range" (design §4) as the range already showing on the member
+   * this overlay is being added to. `normalize` defaults to "pct" (§3.1).
+   *
+   * Throws if fewer than 2 valid, distinct tickers survive validation —
+   * unlike the passive chartWorkspace parser (which silently downgrades to
+   * "no chart"), this is an explicit creation call, so the agent should be
+   * told it failed and can retry with corrected input.
+   */
+  overlay(
+    topicId: string,
+    symbols: string[],
+    range?: number | null,
+    normalize?: string,
+  ): { chart: OverlayRow; charts: TopicChartPreferenceRow[]; previous: TopicChartPreferenceRow[] } {
+    const cleanSymbols = cleanOverlaySymbols(symbols);
+    if (cleanSymbols.length < 2) {
+      throw new Error("overlay needs at least 2 valid, distinct ticker symbols (e.g. AAPL, NVDA)");
+    }
+
+    const previous = this.ctx.store.listTopicCharts(topicId);
+    const resolvedRange = range === undefined || range === null
+      ? this.defaultOverlayRange(previous)
+      : requireRangeDays(range);
+    const resolvedNormalize = normalizeMode(normalize);
+
+    const chart: OverlayRow = {
+      id: this.newId("chart"),
+      kind: "overlay",
+      overlay: { symbols: cleanSymbols, range: resolvedRange, normalize: resolvedNormalize },
+      range: resolvedRange,
+      hidden: false,
+      sortOrder: 0,
+    };
+
+    // "New tabs go to the front": the overlay takes sortOrder 0, everything
+    // else shifts back by one, relative order otherwise unchanged.
+    const shifted = previous.map((row) => ({ ...row, sortOrder: row.sortOrder + 1 }));
+    const next: TopicChartPreferenceRow[] = [chart, ...shifted];
+    this.ctx.store.replaceTopicCharts(topicId, next);
+    this.ctx.emit({
+      name: "layout_changed",
+      data: { scope: "tabs", researchId: this.ctx.researchId, topicId, source: "agent", previous, next },
+    });
+    return { chart, charts: next, previous };
+  }
+
+  private defaultOverlayRange(charts: TopicChartPreferenceRow[]): number {
+    const lead = charts
+      .filter((row) => !row.hidden)
+      .sort((a, b) => a.sortOrder - b.sortOrder)[0];
+    return lead?.range ?? DEFAULT_OVERLAY_RANGE;
+  }
+
+  // ── edit_overlay ────────────────────────────────────────────────────────
+  /**
+   * Adjusts `range` and/or `normalize` on an existing overlay tab. PERSISTED —
+   * this row is already a persisted tab, so it falls under the "agent has
+   * full authority, the user can undo" rule (spec §6).
+   *
+   * Deliberately CANNOT touch `symbols`: `EditOverlayPatch` has no `symbols`
+   * field, so there is nothing in `patch` that could reach it even if a
+   * caller tried — `symbols` is always carried through unchanged from the
+   * existing row. Design §4.1: changing the window is looking at the same
+   * comparison differently; changing the symbols is a different comparison.
+   * Swapping symbols in place means calling `overlay` for a new chart.
+   */
+  editOverlay(
+    topicId: string,
+    chartId: string,
+    patch: EditOverlayPatch,
+  ): { chart: OverlayRow; charts: TopicChartPreferenceRow[]; previous: TopicChartPreferenceRow[] } {
+    const previous = this.ctx.store.listTopicCharts(topicId);
+    const index = previous.findIndex((row) => row.kind === "overlay" && row.id === chartId);
+    if (index === -1) {
+      throw new Error(`no overlay chart with id "${chartId}" on this topic`);
+    }
+    const existing = previous[index] as OverlayRow;
+
+    const nextRange = patch.range === undefined ? existing.overlay.range : requireRangeDays(patch.range);
+    const nextNormalize = patch.normalize !== undefined ? normalizeMode(patch.normalize) : existing.overlay.normalize;
+
+    const updated: OverlayRow = {
+      ...existing,
+      overlay: { symbols: existing.overlay.symbols, range: nextRange, normalize: nextNormalize },
+      range: nextRange,
+    };
+
+    const next = [...previous];
+    next[index] = updated;
+    this.ctx.store.replaceTopicCharts(topicId, next);
+    this.ctx.emit({
+      name: "layout_changed",
+      data: { scope: "tabs", researchId: this.ctx.researchId, topicId, source: "agent", previous, next },
+    });
+    return { chart: updated, charts: next, previous };
   }
 
   // ── edit_members ────────────────────────────────────────────────────────

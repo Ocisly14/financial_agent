@@ -1,9 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  barsForRangeDays,
   buildStockChartDataResponse,
   createRateLimiter,
+  MAX_RANGE_DAYS,
   normalizeSymbol,
+  parseRangeDays,
   parseRangeParam,
   type StockChartDataDeps,
 } from "../stockChartData.ts";
@@ -49,26 +52,44 @@ function makeDeps(over?: Partial<StockChartDataDeps> & { candles?: DailyBar[] })
   });
 }
 
-test("range=1D returns 1Min candles", async () => {
+test("range=1 (one trading day) returns 1Min candles", async () => {
   const deps = makeDeps({ candles: [bar("2026-07-28T13:30:00Z", 338)] });
-  const { status, body } = await buildStockChartDataResponse("AAPL", "1D", deps);
-  const payload = body as { range: string; timeframe: string; candles: DailyBar[] };
+  const { status, body } = await buildStockChartDataResponse("AAPL", "1", deps);
+  const payload = body as { range: number; timeframe: string; candles: DailyBar[] };
   assert.equal(status, 200);
-  assert.equal(payload.range, "1D");
+  assert.equal(payload.range, 1);
   assert.equal(payload.timeframe, "1Min");
   assert.equal(payload.candles.length, 1);
   assert.deepEqual(deps.repositoryCalls[0], { symbol: "AAPL", timeframe: "1Min", count: 390 });
 });
 
-test("1M / 3M / 1Y share daily bars and fetch up to their own limits", async () => {
+test("the timeframe rule reproduces the table it replaced", () => {
+  // Every entry of the deleted RANGE_CONFIG, by its old label.
+  assert.deepEqual(barsForRangeDays(1), { timeframe: "1Min", count: 390 }, "was 1D");
+  assert.deepEqual(barsForRangeDays(5), { timeframe: "5Min", count: 390 }, "was 5D");
+  assert.deepEqual(barsForRangeDays(21), { timeframe: "1Day", count: 21 }, "was 1M");
+  assert.deepEqual(barsForRangeDays(63), { timeframe: "1Day", count: 63 }, "was 3M");
+  assert.deepEqual(barsForRangeDays(252), { timeframe: "1Day", count: 252 }, "was 1Y");
+});
+
+test("the timeframe rule switches tiers at 1, 5 and 6 trading days", () => {
+  assert.equal(barsForRangeDays(1).timeframe, "1Min");
+  assert.equal(barsForRangeDays(2).timeframe, "5Min", "just past the intraday-minute tier");
+  assert.equal(barsForRangeDays(5).timeframe, "5Min", "last day of the 5Min tier");
+  assert.deepEqual(barsForRangeDays(6), { timeframe: "1Day", count: 6 }, "first daily-bar range");
+  // 6M — the window whose absence from the old enum caused the bug.
+  assert.deepEqual(barsForRangeDays(126), { timeframe: "1Day", count: 126 });
+});
+
+test("daily ranges share daily bars and fetch exactly their own day count", async () => {
   const all = Array.from({ length: 300 }, (_, i) => bar(`2026-${String(i).padStart(3, "0")}`, i));
-  for (const [range, count] of [["1M", 21], ["3M", 63], ["1Y", 252]] as const) {
+  for (const days of [21, 63, 126, 252]) {
     const deps = makeDeps({ candles: all });
-    const { body } = await buildStockChartDataResponse("AAPL", range, deps);
+    const { body } = await buildStockChartDataResponse("AAPL", String(days), deps);
     const payload = body as { timeframe: string; candles: DailyBar[] };
     assert.equal(payload.timeframe, "1Day");
-    assert.ok(payload.candles.length <= count);
-    assert.equal(deps.repositoryCalls[0]!.count, count);
+    assert.ok(payload.candles.length <= days);
+    assert.equal(deps.repositoryCalls[0]!.count, days);
   }
 });
 
@@ -81,13 +102,36 @@ test("range=none returns only the quote, without accessing the repository", asyn
   assert.equal(deps.repositoryCalls.length, 0);
 });
 
-test("invalid, empty, and missing range all fall back to 1D", async () => {
-  for (const range of ["7D", "abc", "", null]) {
+test("an unusable range on the READ path still falls back to one day", async () => {
+  // A last resort only: every write boundary now rejects, so nothing invalid
+  // should reach here from storage. A hand-typed query string still can.
+  for (const range of ["abc", "", "0", "-5", "2.5", String(MAX_RANGE_DAYS + 1), null]) {
     const { status, body } = await buildStockChartDataResponse("AAPL", range, makeDeps());
     assert.equal(status, 200);
-    assert.equal((body as { range: string }).range, "1D");
+    assert.equal((body as { range: number }).range, 1);
     assert.equal((body as { timeframe: string }).timeframe, "1Min");
   }
+});
+
+test("parseRangeDays rejects everything that is not a whole servable day count", () => {
+  assert.equal(parseRangeDays(126), 126);
+  assert.equal(parseRangeDays("126"), 126);
+  assert.equal(parseRangeDays(1), 1);
+  assert.equal(parseRangeDays(MAX_RANGE_DAYS), MAX_RANGE_DAYS);
+  for (const bad of [0, -1, 2.5, MAX_RANGE_DAYS + 1, "", null, undefined, {}, NaN, Infinity, "6Q", "M6"]) {
+    assert.equal(parseRangeDays(bad), undefined, `${String(bad)} must be rejected`);
+  }
+});
+
+test("a conventional duration is accepted and converted to days", () => {
+  // Messages already in the event log carry `range: "1Y"`. Rejecting those
+  // would silently redraw every historical chart as one intraday session —
+  // the very failure this change removes. The unit exists only here; the
+  // whole pipeline below is a day count.
+  assert.equal(parseRangeDays("1Y"), 252);
+  assert.equal(parseRangeDays("6M"), 126);
+  assert.equal(parseRangeDays("5D"), 5);
+  assert.equal(parseRangeDays("2w"), 10, "lowercase and weeks both parse");
 });
 
 test("labels previous_session when today has no minute bars", async () => {
@@ -95,7 +139,7 @@ test("labels previous_session when today has no minute bars", async () => {
     bar("2026-07-27T13:30:00Z", 336),
     bar("2026-07-27T13:31:00Z", 337),
   ] });
-  const { body } = await buildStockChartDataResponse("AAPL", "1D", deps);
+  const { body } = await buildStockChartDataResponse("AAPL", "1", deps);
   assert.deepEqual((body as { staleness: unknown }).staleness, {
     reason: "previous_session", asOf: "2026-07-27",
   });
@@ -103,7 +147,7 @@ test("labels previous_session when today has no minute bars", async () => {
 
 test("rejects an invalid symbol without accessing the data source", async () => {
   const deps = makeDeps();
-  const { status, body } = await buildStockChartDataResponse("../etc", "1D", deps);
+  const { status, body } = await buildStockChartDataResponse("../etc", "1", deps);
   assert.equal(status, 400);
   assert.deepEqual(body, { error: "invalid_symbol" });
   assert.equal(deps.repositoryCalls.length, 0);
@@ -115,7 +159,7 @@ test("degrades to 200 when snapshot fails but candles are available", async () =
     loadSnapshot: async () => { throw new Error("Alpaca 500"); },
     candles: [bar("2026-07-27", 336.93)],
   });
-  const { status, body } = await buildStockChartDataResponse("AAPL", "1M", deps);
+  const { status, body } = await buildStockChartDataResponse("AAPL", "21", deps);
   assert.equal(status, 200);
   assert.equal((body as { quote: unknown }).quote, null);
   assert.equal((body as { staleness: { reason: string } }).staleness.reason, "quote_unavailable");
@@ -127,7 +171,7 @@ test("returns 502 when both snapshot and candles fail, while 404 stays mapped", 
       loadSnapshot: async () => { throw new Error(message); },
       candles: [],
     });
-    assert.equal((await buildStockChartDataResponse("AAPL", "1D", deps)).status, expected);
+    assert.equal((await buildStockChartDataResponse("AAPL", "1", deps)).status, expected);
   }
 });
 
@@ -141,10 +185,11 @@ test("rate limiter and symbol/range pure functions preserve boundary behavior", 
   assert.equal(allow(), true);
   assert.equal(normalizeSymbol("  aapl "), "AAPL");
   assert.equal(normalizeSymbol("../etc"), undefined);
-  assert.equal(parseRangeParam("5D"), "5D");
-  assert.equal(parseRangeParam("bad"), "1D");
+  assert.equal(parseRangeParam("5"), 5);
+  assert.equal(parseRangeParam("none"), "none");
+  assert.equal(parseRangeParam("bad"), 1);
 
   const deps = makeDeps({ allowUpstreamCall: () => false });
-  assert.equal((await buildStockChartDataResponse("AAPL", "1D", deps)).status, 429);
+  assert.equal((await buildStockChartDataResponse("AAPL", "1", deps)).status, 429);
   assert.equal(deps.snapshotCalls, 0);
 });

@@ -15,6 +15,47 @@ import {
 
 // ── doubles ───────────────────────────────────────────────────────────────
 
+/** Builds a `kind: "symbol"` row for test fixtures — the id is synthetic and
+ *  unused by any assertion here, matching the "server always regenerates it"
+ *  contract these tests exercise indirectly through `editTabs`. */
+function symbolRow(
+  symbol: string,
+  opts: { range?: number | null; hidden?: boolean; sortOrder: number },
+): TopicChartPreferenceRow {
+  return {
+    id: `chart_${symbol}`,
+    kind: "symbol",
+    symbol,
+    range: opts.range ?? null,
+    hidden: opts.hidden ?? false,
+    sortOrder: opts.sortOrder,
+  };
+}
+
+/** Narrows a mixed row list down to its symbol tickers — overlay rows have no
+ *  single ticker, so callers that only ever seed symbol rows use this instead
+ *  of an unsafe `.symbol` access on the union. */
+function symbolsOf(rows: TopicChartPreferenceRow[]): string[] {
+  return rows.filter((row): row is Extract<TopicChartPreferenceRow, { kind: "symbol" }> => row.kind === "symbol").map((row) => row.symbol);
+}
+
+/** Builds a `kind: "overlay"` row for test fixtures. */
+function overlayRow(
+  id: string,
+  symbols: string[],
+  opts: { range?: number; normalize?: "pct" | "index100"; hidden?: boolean; sortOrder: number },
+): TopicChartPreferenceRow {
+  const range = opts.range ?? 252;
+  return {
+    id,
+    kind: "overlay",
+    overlay: { symbols, range, normalize: opts.normalize ?? "pct" },
+    range,
+    hidden: opts.hidden ?? false,
+    sortOrder: opts.sortOrder,
+  };
+}
+
 class FakeStore implements ResearchToolStore {
   topics: TopicSummary[] = [];
   charts = new Map<string, TopicChartPreferenceRow[]>();
@@ -231,7 +272,7 @@ test("excerpts are verbatim from the source and a framing with digits is dropped
   }));
   const h = harness({ router });
   h.store.createTopic("default", "room_a", "AAPL");
-  h.store.charts.set("room_a", [{ symbol: "AAPL", range: "1Y", hidden: false, sortOrder: 0 }]);
+  h.store.charts.set("room_a", [symbolRow("AAPL", { range: 252, sortOrder: 0 })]);
   h.store.compactions.set("room_a", {
     summarizedThroughTurn: 1,
     summaryText: "早期讨论",
@@ -250,7 +291,7 @@ test("excerpts are verbatim from the source and a framing with digits is dropped
   assert.equal(result.excerpts[0]?.reply, "MSFT 的 P/E 为 34.1。", "byte-for-byte from the original turn");
   assert.equal(result.excerpts[1]?.reply, "当前 P/E 为 31.2，高于五年均值 24.8。");
   assert.deepEqual(result.data, [{ index: 0, turn: 1, agent: "market_data", data: { pe: 31.2 } }]);
-  assert.deepEqual(result.charts.map((c) => c.symbol), ["AAPL"]);
+  assert.deepEqual(symbolsOf(result.charts), ["AAPL"]);
   assert.equal(result.coverage, "Covered all 2 turns");
 });
 
@@ -296,42 +337,42 @@ test("fetch on an empty topic says so without calling a model", async () => {
 
 test("focus emits a frame and writes nothing", async () => {
   const h = harness();
-  h.store.charts.set("room_a", [{ symbol: "AAPL", range: null, hidden: false, sortOrder: 0 }]);
+  h.store.charts.set("room_a", [symbolRow("AAPL", { sortOrder: 0 })]);
 
   h.toolset.focus("room_a", "nvda");
 
   assert.deepEqual(h.frames, [{ name: "topic_focus", data: { topicId: "room_a", symbol: "NVDA" } }]);
-  assert.deepEqual(h.store.listTopicCharts("room_a").map((c) => c.symbol), ["AAPL"], "nothing persisted");
+  assert.deepEqual(symbolsOf(h.store.listTopicCharts("room_a")), ["AAPL"], "nothing persisted");
 });
 
 test("edit_tabs persists, marks the change as the agent's, and reports the previous state for undo", () => {
   const h = harness();
-  h.store.charts.set("room_a", [{ symbol: "AAPL", range: "1Y", hidden: false, sortOrder: 0 }]);
+  h.store.charts.set("room_a", [symbolRow("AAPL", { range: 252, sortOrder: 0 })]);
 
   const result = h.toolset.editTabs("room_a", [{ op: "add", symbol: "nvda" }]);
 
-  assert.deepEqual(result.charts.map((c) => c.symbol), ["AAPL", "NVDA"]);
-  assert.deepEqual(h.store.listTopicCharts("room_a").map((c) => c.symbol), ["AAPL", "NVDA"], "persisted");
+  assert.deepEqual(symbolsOf(result.charts), ["AAPL", "NVDA"]);
+  assert.deepEqual(symbolsOf(h.store.listTopicCharts("room_a")), ["AAPL", "NVDA"], "persisted");
   const frame = h.frames.at(-1);
   assert.equal(frame?.name, "layout_changed");
   assert.equal(frame?.name === "layout_changed" && frame.data.source, "agent");
-  assert.deepEqual(result.previous.map((c) => c.symbol), ["AAPL"]);
+  assert.deepEqual(symbolsOf(result.previous), ["AAPL"]);
 });
 
 test("edit_tabs remove deletes the tab outright — hidden is no longer a veto over the agent", () => {
   const h = harness();
   h.store.charts.set("room_a", [
-    { symbol: "AAPL", range: null, hidden: true, sortOrder: 0 },
-    { symbol: "NVDA", range: null, hidden: false, sortOrder: 1 },
+    symbolRow("AAPL", { hidden: true, sortOrder: 0 }),
+    symbolRow("NVDA", { sortOrder: 1 }),
   ]);
 
   // A tab the user had hidden can be re-added by the agent: `hidden` is not a
   // standing veto, it was one deletion (spec §6).
   const readded = h.toolset.editTabs("room_a", [{ op: "add", symbol: "AAPL" }]);
-  assert.equal(readded.charts.find((c) => c.symbol === "AAPL")?.hidden, false);
+  assert.equal(readded.charts.find((c) => c.kind === "symbol" && c.symbol === "AAPL")?.hidden, false);
 
   const removed = h.toolset.editTabs("room_a", [{ op: "remove", symbol: "AAPL" }]);
-  assert.deepEqual(removed.charts.map((c) => c.symbol), ["NVDA"]);
+  assert.deepEqual(symbolsOf(removed.charts), ["NVDA"]);
 });
 
 test("edit_members adds and removes without deleting the topic", () => {
@@ -352,6 +393,121 @@ test("edit_members ignores an unknown topic id", () => {
   const h = harness();
   const result = h.toolset.editMembers([{ op: "add", topicId: "room_nope" }]);
   assert.deepEqual(result.members, []);
+});
+
+// ── overlay ─────────────────────────────────────────────────────────────
+
+test("overlay persists a new selected tab at sortOrder 0, shifting existing rows back", () => {
+  const h = harness();
+  h.store.charts.set("room_a", [symbolRow("AAPL", { range: 252, sortOrder: 0 })]);
+
+  const result = h.toolset.overlay("room_a", ["nvda", "aapl", "amd"]);
+
+  assert.equal(result.chart.kind, "overlay");
+  assert.equal(result.chart.sortOrder, 0);
+  assert.deepEqual(result.chart.overlay.symbols, ["NVDA", "AAPL", "AMD"]);
+  assert.equal(result.chart.overlay.normalize, "pct", "defaults to pct");
+  const persisted = h.store.listTopicCharts("room_a");
+  assert.deepEqual(
+    persisted.map((row) => [row.kind, row.sortOrder]),
+    [["overlay", 0], ["symbol", 1]],
+    "the overlay tab is at the front; the existing tab shifted back",
+  );
+});
+
+test("overlay defaults range to the member's own current lead chart range", () => {
+  const h = harness();
+  h.store.charts.set("room_a", [
+    symbolRow("SPY", { hidden: true, range: 1, sortOrder: 0 }),
+    symbolRow("AAPL", { range: 63, sortOrder: 1 }),
+  ]);
+
+  const result = h.toolset.overlay("room_a", ["AAPL", "NVDA"]);
+
+  assert.equal(result.chart.overlay.range, 63, "the hidden row is skipped; AAPL is the visible lead");
+});
+
+test("overlay falls back to a default range when the member has no existing charts", () => {
+  const h = harness();
+  const result = h.toolset.overlay("room_a", ["AAPL", "NVDA"]);
+  assert.equal(typeof result.chart.overlay.range, "number");
+  assert.ok(Number.isInteger(result.chart.overlay.range) && result.chart.overlay.range > 0);
+});
+
+test("overlay dedupes, drops invalid tickers, and truncates over 6 to 6", () => {
+  const h = harness();
+  const result = h.toolset.overlay("room_a", [
+    "aapl", "AAPL", "not-a-ticker!", "nvda", "amd", "msft", "goog", "meta", "tsla",
+  ]);
+  assert.deepEqual(result.chart.overlay.symbols, ["AAPL", "NVDA", "AMD", "MSFT", "GOOG", "META"]);
+});
+
+test("overlay throws when fewer than 2 valid tickers survive validation", () => {
+  const h = harness();
+  assert.throws(() => h.toolset.overlay("room_a", ["AAPL", "not valid!"]));
+  assert.throws(() => h.toolset.overlay("room_a", []));
+});
+
+test("overlay falls back to pct for an unrecognised normalize value", () => {
+  const h = harness();
+  const result = h.toolset.overlay("room_a", ["AAPL", "NVDA"], undefined, "zscore");
+  assert.equal(result.chart.overlay.normalize, "pct");
+});
+
+test("overlay accepts an explicit range and index100 normalize", () => {
+  const h = harness();
+  const result = h.toolset.overlay("room_a", ["AAPL", "NVDA"], 5, "index100");
+  assert.equal(result.chart.overlay.range, 5);
+  assert.equal(result.chart.overlay.normalize, "index100");
+});
+
+// ── edit_overlay: window changes, never symbols ───────────────────────────
+
+test("edit_overlay adjusts range and normalize on an existing overlay tab", () => {
+  const h = harness();
+  h.store.charts.set("room_a", [overlayRow("chart_1", ["AAPL", "NVDA"], { range: 252, sortOrder: 0 })]);
+
+  const result = h.toolset.editOverlay("room_a", "chart_1", { range: 63, normalize: "index100" });
+
+  assert.equal(result.chart.overlay.range, 63);
+  assert.equal(result.chart.overlay.normalize, "index100");
+  assert.deepEqual(result.chart.overlay.symbols, ["AAPL", "NVDA"], "symbols untouched");
+});
+
+test("edit_overlay has no way to change symbols — the patch type has no such field", () => {
+  const h = harness();
+  h.store.charts.set("room_a", [overlayRow("chart_1", ["AAPL", "NVDA"], { sortOrder: 0 })]);
+
+  // Even a runtime object smuggling a `symbols` key in has no effect: the
+  // implementation always reads `existing.overlay.symbols`, never `patch`.
+  const sneaky = { range: 63, symbols: ["TSLA", "GME"] } as unknown as { range?: number; normalize?: string };
+  const result = h.toolset.editOverlay("room_a", "chart_1", sneaky);
+
+  assert.deepEqual(result.chart.overlay.symbols, ["AAPL", "NVDA"]);
+});
+
+test("edit_overlay throws for an unknown chart id", () => {
+  const h = harness();
+  h.store.charts.set("room_a", [overlayRow("chart_1", ["AAPL", "NVDA"], { sortOrder: 0 })]);
+  assert.throws(() => h.toolset.editOverlay("room_a", "chart_nope", { range: 63 }));
+});
+
+// ── edit_tabs narrows to kind='symbol' only ────────────────────────────────
+
+test("edit_tabs leaves overlay rows untouched, even when an op targets one of its tickers", () => {
+  const h = harness();
+  h.store.charts.set("room_a", [
+    symbolRow("AAPL", { sortOrder: 0 }),
+    overlayRow("chart_1", ["AAPL", "NVDA"], { sortOrder: 1 }),
+  ]);
+
+  const result = h.toolset.editTabs("room_a", [{ op: "remove", symbol: "AAPL" }]);
+
+  // The symbol tab is gone, but the overlay row (which also references
+  // "AAPL") survives untouched — edit_tabs never reaches into it.
+  assert.deepEqual(symbolsOf(result.charts), []);
+  const overlays = result.charts.filter((row): row is Extract<TopicChartPreferenceRow, { kind: "overlay" }> => row.kind === "overlay");
+  assert.deepEqual(overlays.map((row) => row.overlay.symbols), [["AAPL", "NVDA"]]);
 });
 
 test("create_topic creates the topic and joins it to this research", () => {

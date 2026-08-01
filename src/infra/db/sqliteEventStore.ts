@@ -47,14 +47,28 @@ CREATE TABLE IF NOT EXISTS chat_rooms (
 CREATE INDEX IF NOT EXISTS idx_chat_rooms_agent_updated
   ON chat_rooms (agent_id, updated_at DESC);
 
+-- A tab is either a single ticker (kind='symbol') or a multi-ticker overlay
+-- (kind='overlay', payload in the overlay JSON column). Only one of
+-- symbol/overlay is populated per row, matching the kind. The primary key is
+-- a synthetic id because overlay rows have no natural ticker key; the
+-- partial unique index below preserves the old "no duplicate ticker per
+-- topic" guarantee for symbol rows while leaving overlay rows unconstrained.
 CREATE TABLE IF NOT EXISTS topic_charts (
+  id         TEXT PRIMARY KEY,
   topic_id   TEXT NOT NULL,
-  symbol     TEXT NOT NULL,
-  range      TEXT,
+  kind       TEXT NOT NULL,
+  symbol     TEXT,
+  overlay    TEXT,
+  -- A number of trading days (see src/data/stock/stockChartData.ts). INTEGER
+  -- rather than TEXT because the range is no longer a label like '1Y'.
+  range      INTEGER,
   hidden     INTEGER NOT NULL DEFAULT 0,
-  sort_order INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (topic_id, symbol)
+  sort_order INTEGER NOT NULL DEFAULT 0
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_topic_charts_symbol
+  ON topic_charts (topic_id, symbol) WHERE symbol IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_topic_charts_topic_order
+  ON topic_charts (topic_id, sort_order);
 
 -- researches.id doubles as its session_id, reusing the same trick as topic.
 CREATE TABLE IF NOT EXISTS researches (
@@ -108,12 +122,12 @@ export type TopicSummary = {
   messageCount: number;
 };
 
-export type TopicChartPreferenceRow = {
-  symbol: string;
-  range: string | null;
-  hidden: boolean;
-  sortOrder: number;
-};
+/** `range` is a number of trading days (src/data/stock/stockChartData.ts). */
+export type OverlaySpec = { symbols: string[]; range: number; normalize: "pct" | "index100" };
+
+export type TopicChartPreferenceRow =
+  | { id: string; kind: "symbol"; symbol: string; range: number | null; hidden: boolean; sortOrder: number }
+  | { id: string; kind: "overlay"; overlay: OverlaySpec; range: number | null; hidden: boolean; sortOrder: number };
 
 type TopicRow = { id: string; name: string; lead_symbol: string | null; created_at: number };
 type LastMessageRow = { payload_json: string; timestamp: string };
@@ -339,15 +353,51 @@ export class SqliteEventStore implements EventStore {
 
   listTopicCharts(topicId: string): TopicChartPreferenceRow[] {
     const rows = this.db.prepare(
-      `SELECT symbol, range, hidden, sort_order
+      `SELECT id, kind, symbol, overlay, range, hidden, sort_order
        FROM topic_charts WHERE topic_id = ? ORDER BY sort_order ASC, symbol ASC`,
-    ).all(topicId) as Array<{ symbol: string; range: string | null; hidden: number; sort_order: number }>;
-    return rows.map((row) => ({
-      symbol: row.symbol,
-      range: row.range,
-      hidden: row.hidden === 1,
-      sortOrder: row.sort_order,
-    }));
+    ).all(topicId) as Array<{
+      id: string;
+      kind: string;
+      symbol: string | null;
+      overlay: string | null;
+      range: number | null;
+      hidden: number;
+      sort_order: number;
+    }>;
+    const result: TopicChartPreferenceRow[] = [];
+    for (const row of rows) {
+      if (row.kind === "symbol" && row.symbol !== null) {
+        result.push({
+          id: row.id,
+          kind: "symbol",
+          symbol: row.symbol,
+          range: row.range,
+          hidden: row.hidden === 1,
+          sortOrder: row.sort_order,
+        });
+      } else if (row.kind === "overlay" && row.overlay !== null) {
+        // Storage outlives the build that wrote it: a row this build cannot
+        // parse (schema drift, hand-edited data, a future field we don't
+        // know about) must be skipped, not allowed to throw and take the
+        // whole tab bar down with it.
+        try {
+          const overlay = JSON.parse(row.overlay) as OverlaySpec;
+          result.push({
+            id: row.id,
+            kind: "overlay",
+            overlay,
+            range: row.range,
+            hidden: row.hidden === 1,
+            sortOrder: row.sort_order,
+          });
+        } catch {
+          continue;
+        }
+      }
+      // Rows whose kind doesn't match a known variant (or whose matching
+      // payload column is NULL) are skipped for the same reason.
+    }
+    return result;
   }
 
   replaceTopicCharts(topicId: string, rows: TopicChartPreferenceRow[]): void {
@@ -355,17 +405,30 @@ export class SqliteEventStore implements EventStore {
     try {
       this.db.prepare("DELETE FROM topic_charts WHERE topic_id = ?").run(topicId);
       const insert = this.db.prepare(
-        `INSERT INTO topic_charts (topic_id, symbol, range, hidden, sort_order)
-         VALUES (?, ?, ?, ?, ?)`,
+        `INSERT INTO topic_charts (id, topic_id, kind, symbol, overlay, range, hidden, sort_order)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       );
       for (const row of rows) {
-        insert.run(topicId, row.symbol, row.range, row.hidden ? 1 : 0, row.sortOrder);
+        if (row.kind === "symbol") {
+          insert.run(row.id, topicId, "symbol", row.symbol, null, row.range, row.hidden ? 1 : 0, row.sortOrder);
+        } else {
+          insert.run(row.id, topicId, "overlay", null, JSON.stringify(row.overlay), row.range, row.hidden ? 1 : 0, row.sortOrder);
+        }
       }
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  /**
+   * Test-only raw SQL escape hatch. Used to simulate storage that outlives
+   * the build that wrote it (e.g. a hand-corrupted overlay JSON payload),
+   * which is otherwise impossible to construct through the typed API.
+   */
+  rawExec(sql: string): void {
+    this.db.exec(sql);
   }
 
   createResearch(agentId: string, researchId: string, name: string, createdAt = Date.now()): ResearchSummary {

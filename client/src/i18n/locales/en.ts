@@ -78,9 +78,41 @@ const en = {
         messageSentHoursAgo: "message sent {{count}}h ago",
         messageSentMinutesAgo: "message sent {{count}}m ago",
         chartRange: "Chart range",
+        // A range is a number of trading days; these render it the way a
+        // finance reader says it. `value` (not `count`) on purpose — a `count`
+        // interpolation would make i18next demand plural variants.
+        range: {
+            days: "{{value}}D",
+            months: "{{value}}M",
+            years: "{{value}}Y",
+        },
         noCandleData: "No candle data available",
         invalidTickerSymbol: "Invalid ticker symbol: {{error}}",
         chartWillDisplay: "Chart will display once the answer finishes",
+        overlay: {
+            symbolCount: "{{count}} symbols",
+            derivedHint: "Derived comparison",
+            chartLabel: "Normalized comparison of {{symbols}}",
+            modePct: "% change",
+            modeIndex100: "indexed to 100",
+            // The permanent basis line (design §3.3). Never abbreviate it away:
+            // it is what makes a rescaled chart safe to read.
+            basis: "{{mode}} · from {{date}}",
+            basisLabel: "Normalization basis",
+            rebasedFrom: "from {{date}}",
+            unavailable: "no data in range",
+            noOverlap: "No overlapping data in this range",
+            loading: "Loading comparison…",
+            resetZoom: "Reset zoom",
+            zoomHint: "Drag across the chart to zoom — the basis follows the left edge",
+        },
+        floating: {
+            windowLabel: "{{title}} — floating chart",
+            returnToTabs: "Return to tab bar",
+            dragToDock: "Drag onto the tab bar to dock it back",
+            resize: "Resize window",
+            allDetached: "Every chart is open in a floating window. Drag one onto the tab bar, or close it, to bring its tab back.",
+        },
     },
     topics: {
         title: "Topics",

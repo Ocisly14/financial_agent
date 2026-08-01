@@ -125,7 +125,9 @@ export function createGetStockPriceTool(overrides?: {
 
       return {
         summary: `${symbol} ${priceStr} | ${changeStr} | Vol ${fmtVolume(data.volume)}${suffix}`,
-        visualizations: [{ type: "stock_price", symbol, range: "1D" }],
+        // `range` is a number of trading days (src/data/stock/stockChartData.ts);
+        // 1 is the intraday session this tool's quote describes.
+        visualizations: [{ type: "stock_price", symbol, range: 1 }],
         generation_context: {
           prompt: buildStockPricePrompt(symbol, data.marketSession, data.staleness),
           data: toJsonData(data),

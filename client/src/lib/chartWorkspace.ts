@@ -1,4 +1,4 @@
-import { DEFAULT_STOCK_RANGE, STOCK_RANGES, extractStockCharts, type StockRange } from "./stockChart.ts";
+import { DEFAULT_STOCK_RANGE, extractStockCharts, parseStockRange, type StockRange } from "./stockChart.ts";
 
 export type TechnicalPoint = { timestamp: string; value: number };
 export type TechnicalSeries = { key: string; label: string; points: TechnicalPoint[] };
@@ -17,7 +17,8 @@ export type TechnicalStudy = {
 
 export type WorkspaceVisualization =
   | { type: "stock_price"; symbol: string; range: StockRange }
-  | { type: "stock_technical"; symbol: string; study: TechnicalStudy };
+  | { type: "stock_technical"; symbol: string; study: TechnicalStudy }
+  | { type: "stock_overlay"; symbols: string[]; range: StockRange; normalize: "pct" | "index100" };
 
 export type SymbolChartWorkspace = {
   symbol: string;
@@ -45,10 +46,33 @@ function ticker(value: unknown): string | undefined {
   return /^[A-Z][A-Z.-]{0,5}$/.test(symbol) ? symbol : undefined;
 }
 
+/** A visualization is model-generated and outlives the build that wrote it,
+ *  so a range this build cannot use degrades to the default rather than
+ *  throwing. This is a READ path — nothing here is written back to storage. */
 function stockRange(value: unknown): StockRange {
-  return typeof value === "string" && (STOCK_RANGES as readonly string[]).includes(value)
-    ? value as StockRange
-    : DEFAULT_STOCK_RANGE;
+  return parseStockRange(value) ?? DEFAULT_STOCK_RANGE;
+}
+
+/** Storage and messages both outlive the build that wrote them: an unrecognised
+ *  normalisation mode must fall back to the default, never throw. */
+function normalizeMode(value: unknown): "pct" | "index100" {
+  return value === "index100" ? "index100" : "pct";
+}
+
+/** Dedupes, validates each ticker with the same regex the rest of this file
+ *  uses, and truncates to the 6-line legibility ceiling (design §2) — keeping
+ *  the first 6 rather than rejecting the set outright. */
+function overlaySymbols(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const symbols: string[] = [];
+  for (const candidate of value) {
+    const symbol = ticker(candidate);
+    if (!symbol || seen.has(symbol)) continue;
+    seen.add(symbol);
+    symbols.push(symbol);
+  }
+  return symbols.slice(0, 6);
 }
 
 function technicalSeries(value: unknown): TechnicalSeries[] {
@@ -71,8 +95,24 @@ function technicalSeries(value: unknown): TechnicalSeries[] {
 
 export function parseWorkspaceVisualization(value: unknown): WorkspaceVisualization | undefined {
   const source = record(value);
-  const symbol = ticker(source?.symbol);
-  if (!source || !symbol) return undefined;
+  if (!source) return undefined;
+
+  if (source.type === "stock_overlay") {
+    // Fewer than 2 symbols after dedupe/validation is not an overlay — the
+    // file's existing convention for "no chart" is to return undefined, same
+    // as any other malformed spec below.
+    const symbols = overlaySymbols(source.symbols);
+    if (symbols.length < 2) return undefined;
+    return {
+      type: "stock_overlay",
+      symbols,
+      range: stockRange(source.range),
+      normalize: normalizeMode(source.normalize),
+    };
+  }
+
+  const symbol = ticker(source.symbol);
+  if (!symbol) return undefined;
   if (source.type === "stock_price") {
     return { type: "stock_price", symbol, range: stockRange(source.range) };
   }
@@ -120,8 +160,10 @@ export function parseWorkspaceVisualization(value: unknown): WorkspaceVisualizat
   };
 }
 
+/** A daily study needs a year of daily bars behind it (252 trading days); an
+ *  intraday study needs the current session (1). Both are day counts now. */
 export function rangeForTechnicalTimeframe(timeframe: string): StockRange {
-  return timeframe === "1Day" ? "1Y" : "1D";
+  return timeframe === "1Day" ? 252 : 1;
 }
 
 /** Fold all assistant turns into one persistent main chart per symbol. */
@@ -185,7 +227,7 @@ export function buildSymbolChartWorkspace(
       // The model commonly emits `<StockChart symbol="MSFT" />`, whose parser
       // defaults to 1D. Do not let that presentation default collapse a daily
       // technical study to an intraday price window where timestamps cannot align.
-      if (!(dailyTechnicalSymbols.has(directive.symbol) && directive.range === "1D")) {
+      if (!(dailyTechnicalSymbols.has(directive.symbol) && directive.range === DEFAULT_STOCK_RANGE)) {
         chart.range = directive.range;
       }
       focus(directive.symbol);

@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { NavLink, useNavigate } from "react-router-dom";
-import { CheckSquare, PanelLeftClose, PanelLeftOpen, Plus, Scale, Trash2, TrendingUp, X } from "lucide-react";
+import { CheckSquare, PanelLeftClose, PanelLeftOpen, Plus, Trash2, TrendingUp, X } from "lucide-react";
 import type { ResearchSummary, TopicSummary, UUID } from "@/types/core";
 import { apiClient } from "@/lib/api";
 import { cn, generateTopicName } from "@/lib/utils";
@@ -10,6 +10,14 @@ import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { MemberPicker } from "@/components/workspace/MemberPicker";
 import { TopicRailItem } from "./TopicRailItem";
+
+/** Both sections create through the same control: a `+` in the section header.
+ *  The two sections hold different kinds of thing, so what they create differs —
+ *  but "add one of these" is one gesture, and it should not change shape between
+ *  two lists sitting six pixels apart. Shared here rather than copied so the two
+ *  cannot drift. */
+const ADD_BUTTON_CLASS =
+    "rounded-sm p-1 text-label-3 transition-colors hover:bg-fill-1 hover:text-label-1";
 
 interface TopicRailProps {
     agentId: UUID;
@@ -232,17 +240,6 @@ export function TopicRail({
                 </button>
             </header>
 
-            <div className="flex shrink-0 flex-col gap-0.5 border-b border-sep px-1 py-1.5">
-                <button
-                    type="button"
-                    onClick={handleCreate}
-                    className="flex w-full items-center gap-2.5 rounded-md px-2 py-2 text-left text-sm font-medium text-label-1 transition-colors hover:bg-fill-1"
-                >
-                    <Plus className="size-4 shrink-0 text-label-2" />
-                    {t("topics.new")}
-                </button>
-            </div>
-
             <div className="group/topics flex min-h-0 flex-1 flex-col overflow-y-auto">
                 {/* Section one: Research. Flat, above Topics, never wrapping them. */}
                 <div className="flex items-center gap-2 px-2 pb-1 pt-2">
@@ -256,9 +253,9 @@ export function TopicRail({
                                 type="button"
                                 aria-label={t("research.new")}
                                 title={t("research.new")}
-                                className="rounded-sm p-1 text-label-3 transition-colors hover:bg-fill-1 hover:text-label-1"
+                                className={ADD_BUTTON_CLASS}
                             >
-                                <Scale className="size-3.5" />
+                                <Plus className="size-3.5" />
                             </button>
                         }
                     />
@@ -307,6 +304,18 @@ export function TopicRail({
                             {selectionMode ? <X className="size-3.5" /> : <CheckSquare className="size-3.5" />}
                         </button>
                     )}
+                    {/* Last in the row, so it sits at the same x as the Research
+                        section's — the two "add" affordances line up vertically
+                        and read as one control repeated per section. */}
+                    <button
+                        type="button"
+                        onClick={() => void handleCreate()}
+                        aria-label={t("topics.new")}
+                        title={t("topics.new")}
+                        className={ADD_BUTTON_CLASS}
+                    >
+                        <Plus className="size-3.5" />
+                    </button>
                 </div>
 
                 <div className="flex flex-col gap-0.5 px-1 pb-2">

@@ -19,9 +19,9 @@ test("pollIntervalForSession maps each session to its interval", () => {
 
 // 11. parseStockChartProps
 test("parseStockChartProps accepts well-formed tickers", () => {
-  assert.deepEqual(parseStockChartProps({ symbol: "AAPL", range: "1Y" }), {
+  assert.deepEqual(parseStockChartProps({ symbol: "AAPL", range: 252 }), {
     symbol: "AAPL",
-    range: "1Y",
+    range: 252,
   });
   assert.deepEqual(parseStockChartProps({ symbol: "BRK.B" }), { symbol: "BRK.B", range: DEFAULT_STOCK_RANGE });
 });
@@ -45,24 +45,31 @@ test("parseStockChartProps reports the original text so the UI can echo it", () 
   assert.deepEqual(result, { error: "not a ticker" });
 });
 
-test("parseStockChartProps accepts five ranges and defaults invalid values to 1D", () => {
-  for (const range of ["1D", "5D", "1M", "3M", "1Y"] as const) {
-    assert.equal((parseStockChartProps({ symbol: "AAPL", range }) as { range: string }).range, range);
+test("parseStockChartProps takes a day count, or a duration written the way a reader says it", () => {
+  // A range is a number of trading days. Conventional durations are also
+  // accepted at this boundary and converted, because every message already
+  // written stores `range="1Y"` and a model writing prose reaches for that
+  // before it reaches for 252.
+  for (const [input, days] of [[1, 1], [126, 126], ["252", 252], ["1Y", 252], ["6M", 126], ["5D", 5]] as const) {
+    assert.equal((parseStockChartProps({ symbol: "AAPL", range: input }) as { range: number }).range, days);
   }
-  for (const range of ["7D", "abc", "", 30, undefined]) {
+  // An arbitrary window is legal now — that is the point of dropping the enum.
+  assert.equal((parseStockChartProps({ symbol: "AAPL", range: 7 }) as { range: number }).range, 7);
+
+  for (const range of ["abc", "", 0, -1, 2.5, undefined]) {
     assert.equal(
-      (parseStockChartProps({ symbol: "AAPL", range }) as { range: string }).range,
+      (parseStockChartProps({ symbol: "AAPL", range }) as { range: number }).range,
       DEFAULT_STOCK_RANGE,
     );
   }
 });
 
-test("shouldPollCandles only polls intraday ranges", () => {
-  assert.equal(shouldPollCandles("1D"), true);
-  assert.equal(shouldPollCandles("5D"), true);
-  assert.equal(shouldPollCandles("1M"), false);
-  assert.equal(shouldPollCandles("3M"), false);
-  assert.equal(shouldPollCandles("1Y"), false);
+test("shouldPollCandles only polls the intraday windows", () => {
+  assert.equal(shouldPollCandles(1), true);
+  assert.equal(shouldPollCandles(5), true);
+  assert.equal(shouldPollCandles(6), false, "past a week the bars are daily and stop moving intraday");
+  assert.equal(shouldPollCandles(21), false);
+  assert.equal(shouldPollCandles(252), false);
 });
 
 // 12. stripIncompleteTrailingTag
@@ -92,15 +99,20 @@ test("extractStockCharts reads valid agent chart directives", () => {
       "<StockChart symbol='SPY' range='5D'/>",
     ].join("\n")),
     [
-      { symbol: "AAPL", range: "1Y" },
-      { symbol: "SPY", range: "5D" },
+      { symbol: "AAPL", range: 252 },
+      { symbol: "SPY", range: 5 },
     ],
   );
 });
 
-test("extractStockCharts ignores invalid symbols and defaults invalid ranges", () => {
+test("extractStockCharts ignores invalid symbols and defaults unparseable ranges", () => {
   assert.deepEqual(
-    extractStockCharts('<StockChart symbol="../etc" /><StockChart symbol="MSFT" range="7D" />'),
+    extractStockCharts('<StockChart symbol="../etc" /><StockChart symbol="MSFT" range="nonsense" />'),
     [{ symbol: "MSFT", range: DEFAULT_STOCK_RANGE }],
+  );
+  // "7D" is no longer invalid — an arbitrary window is the whole point.
+  assert.deepEqual(
+    extractStockCharts('<StockChart symbol="MSFT" range="7D" />'),
+    [{ symbol: "MSFT", range: 7 }],
   );
 });

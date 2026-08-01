@@ -88,6 +88,17 @@ export default {
     				DEFAULT: 'rgb(var(--brand-rgb) / <alpha-value>)',
     				sub: 'var(--brand-sub)'
     			},
+    			// Categorical ramp for multi-line charts. Like the tokens above
+    			// these carry no alpha channel of their own — pick a slot, do
+    			// not tint one.
+    			series: {
+    				1: 'var(--series-1)',
+    				2: 'var(--series-2)',
+    				3: 'var(--series-3)',
+    				4: 'var(--series-4)',
+    				5: 'var(--series-5)',
+    				6: 'var(--series-6)'
+    			},
     			up: 'rgb(var(--up-rgb) / <alpha-value>)',
     			down: 'rgb(var(--down-rgb) / <alpha-value>)',
     			hold: 'rgb(var(--hold-rgb) / <alpha-value>)',
