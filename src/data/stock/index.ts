@@ -9,6 +9,7 @@ export {
   type Snapshot,
   type Timeframe,
 } from "./alpacaClient.ts";
+export { condenseBars, type BarDigest, type BarStats } from "./barDigest.ts";
 export { createBarRepository, type BarRepository, type BarRepositoryDeps } from "./barRepository.ts";
 export { SqliteBarStore, type BarStore, type Coverage } from "./barStore.ts";
 export { etDateString, marketSession, type MarketSession } from "./marketHours.ts";
