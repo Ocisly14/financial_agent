@@ -19,8 +19,8 @@
 - 不改 `src/framework/contextCompaction.ts`（那是 Part 2）。
 - 唯一允许改动的 framework 文件是 `src/framework/subagent.ts` 第 314 行一处删除（Task 1）。
 - 全部数值四舍五入到 2 位小数。
-- 测试跑法：`pnpm test`（根目录）。基线：**316 passing / 0 failing**（`01eabb7`）。任何任务结束时不得低于这个数且不得有 failing。
-- 分支 `topic-workspace`，起点 `01eabb7`。开工前工作区必须干净。
+- 测试跑法：`pnpm test`（根目录）。基线：**322 passing / 0 failing**（`3951021`）。任何任务结束时不得低于这个数且不得有 failing。
+- 分支 `topic-workspace`，起点 `3951021`。开工前工作区必须干净。
 - 类型检查：`npx tsc --noEmit` 必须干净。
 - 常量取值：`MAX_RANGE_DAYS = 1260`（`src/data/stock/stockChartData.ts:32`）。
 - 不要自行 `git commit` 之外的推送操作；每个 Task 末尾的 commit 是计划的一部分，但不 push。
