@@ -1,5 +1,7 @@
 import type { JsonObject, JsonSchema, ToolExecutionResult } from "../../src/framework/types.ts";
 import {
+  etDateString,
+  fetchBars,
   getSharedBarRepository,
   normalizeSymbol,
   type BarRepository,
@@ -16,6 +18,8 @@ export type TechnicalTimeframe = "1Day" | `${number}Min`;
 
 export type TechnicalToolDeps = {
   getRepository?: () => Promise<BarRepository | undefined>;
+  /** Direct-Alpaca fallback used only when the repository cannot be opened. */
+  fetchBars?: (symbol: string, timeframe: Timeframe, from: string, to: string) => Promise<DailyBar[]>;
 };
 
 export type LoadedTechnicalBars = {
@@ -157,6 +161,66 @@ export function numberParam(
   return Math.max(min, Math.min(value, max));
 }
 
+/**
+ * Aggregates, trims and validates a raw bar window, whichever source produced it.
+ * `source` only ever reaches the user through the insufficient-bars wording, so a
+ * short answer names the thing that was actually short.
+ */
+function finishBars(
+  sourceBars: DailyBar[],
+  symbol: string,
+  parsedTimeframe: ParsedTimeframe,
+  historyBars: number,
+  minimumBars: number,
+  source: "database" | "upstream",
+): LoadTechnicalBarsResult {
+  const bars = (
+    parsedTimeframe.sourceTimeframe === "1Min"
+      ? aggregateMinuteBars(sourceBars, parsedTimeframe.aggregateMinutes)
+      : sourceBars
+  ).slice(-historyBars);
+  if (bars.length < minimumBars) {
+    const returned = source === "database" ? "the database returned" : "the upstream feed returned";
+    return {
+      ok: false,
+      result: {
+        summary: `Stock technical calculation for ${symbol} needs ${minimumBars} bars but ${returned} ${bars.length}.`,
+        error: {
+          code: "insufficient_bars",
+          message: `At least ${minimumBars} ${parsedTimeframe.timeframe} bars are required; ${bars.length} are available.`,
+        },
+      },
+    };
+  }
+  return {
+    ok: true,
+    value: {
+      symbol,
+      timeframe: parsedTimeframe.timeframe,
+      sourceTimeframe: parsedTimeframe.sourceTimeframe,
+      bars,
+    },
+  };
+}
+
+/**
+ * One direct Alpaca window wide enough to contain `count` bars. Trading days are
+ * roughly 5/7 of calendar days and holidays eat more, hence the 1.5x plus a fixed
+ * pad; over-fetching is harmless because `finishBars` trims from the tail.
+ */
+async function directFetch(
+  fetch: (symbol: string, timeframe: Timeframe, from: string, to: string) => Promise<DailyBar[]>,
+  symbol: string,
+  timeframe: Timeframe,
+  count: number,
+): Promise<DailyBar[]> {
+  const sessions = timeframe === "1Day" ? count : Math.ceil(count / MINUTES_PER_REGULAR_SESSION);
+  const to = new Date();
+  const from = new Date(to);
+  from.setUTCDate(from.getUTCDate() - Math.ceil(sessions * 1.5) - 5);
+  return fetch(symbol, timeframe, etDateString(from), etDateString(to));
+}
+
 export async function loadTechnicalBars(
   input: JsonObject,
   minimumBars: number,
@@ -197,50 +261,43 @@ export async function loadTechnicalBars(
   );
 
   const repository = await (deps.getRepository ?? getSharedBarRepository)();
-  if (!repository) {
-    return {
-      ok: false,
-      result: {
-        summary: `Stock technical calculation for ${symbol} failed: stock database is unavailable.`,
-        error: { code: "stock_database_unavailable", message: "Stock database is unavailable." },
-      },
-    };
-  }
+  const sourceCount = parsedTimeframe.sourceTimeframe === "1Day"
+    ? historyBars
+    : Math.min(
+        MAX_SOURCE_BARS,
+        Math.max(MINUTES_PER_REGULAR_SESSION, historyBars * parsedTimeframe.aggregateMinutes),
+      );
 
-  try {
-    const sourceCount = parsedTimeframe.sourceTimeframe === "1Day"
-      ? historyBars
-      : Math.min(
-          MAX_SOURCE_BARS,
-          Math.max(MINUTES_PER_REGULAR_SESSION, historyBars * parsedTimeframe.aggregateMinutes),
-        );
-    const sourceBars = await repository.getBars(symbol, parsedTimeframe.sourceTimeframe, sourceCount);
-    const bars = (
-      parsedTimeframe.sourceTimeframe === "1Min"
-        ? aggregateMinuteBars(sourceBars, parsedTimeframe.aggregateMinutes)
-        : sourceBars
-    ).slice(-historyBars);
-    if (bars.length < minimumBars) {
+  if (!repository) {
+    // The store is the normal path; this is the degraded one. It costs a full
+    // upstream fetch per call with none of the store's incremental reuse, so it
+    // exists to keep indicators answerable while SQLite is out, not as a peer.
+    try {
+      const direct = await directFetch(
+        deps.fetchBars ?? fetchBars,
+        symbol,
+        parsedTimeframe.sourceTimeframe,
+        sourceCount,
+      );
+      return finishBars(direct, symbol, parsedTimeframe, historyBars, minimumBars, "upstream");
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
       return {
         ok: false,
         result: {
-          summary: `Stock technical calculation for ${symbol} needs ${minimumBars} bars but the database returned ${bars.length}.`,
+          summary: `Stock technical calculation for ${symbol} failed: stock database is unavailable and the direct fetch failed: ${message}`,
           error: {
-            code: "insufficient_bars",
-            message: `At least ${minimumBars} ${parsedTimeframe.timeframe} bars are required; ${bars.length} are available.`,
+            code: "stock_database_unavailable",
+            message: `Stock database is unavailable and the direct fetch failed: ${message}`,
           },
         },
       };
     }
-    return {
-      ok: true,
-      value: {
-        symbol,
-        timeframe: parsedTimeframe.timeframe,
-        sourceTimeframe: parsedTimeframe.sourceTimeframe,
-        bars,
-      },
-    };
+  }
+
+  try {
+    const sourceBars = await repository.getBars(symbol, parsedTimeframe.sourceTimeframe, sourceCount);
+    return finishBars(sourceBars, symbol, parsedTimeframe, historyBars, minimumBars, "database");
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     return {

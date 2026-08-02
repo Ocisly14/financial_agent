@@ -520,6 +520,12 @@ async function activateStrategy(
   const rejected = body.decision === "reject";
   strategy.status = rejected ? "draft" : "active";
   await saveStrategy(strategy);
+  // The monitor idles at a slow heartbeat when nothing is active; this is the
+  // moment that stops being true.
+  if (!rejected) {
+    const { wakeMonitor } = await import("../trading/strategyMonitor.ts");
+    wakeMonitor();
+  }
   const approvalId = body.approvalId ?? id;
   const approvalContext = findApprovalContext(app, body.threadId, approvalId);
   const approvalTaskId = approvalContext?.event.parent_event_id ?? undefined;

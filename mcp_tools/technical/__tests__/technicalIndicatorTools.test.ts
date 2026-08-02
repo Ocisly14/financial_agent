@@ -155,6 +155,39 @@ test("every indicator returns structured stock data without a prompt template", 
   }
 });
 
+test("falls back to a direct Alpaca fetch when the stock database cannot be opened", async () => {
+  const calls: Array<{ symbol: string; timeframe: Timeframe }> = [];
+  const allBars = bars();
+  const tool = createTechnicalIndicatorTools({
+    getRepository: async () => undefined,
+    fetchBars: async (symbol, timeframe) => {
+      calls.push({ symbol, timeframe });
+      return allBars;
+    },
+  }).find((candidate) => candidate.name === "stock_sma")!;
+
+  const result = await tool.execute(
+    { symbol: "AAPL", timeframe: "1Day", period: 20, history_bars: 80 },
+    { sessionId: "test" },
+  );
+
+  assert.deepEqual(calls, [{ symbol: "AAPL", timeframe: "1Day" }]);
+  assert.equal(result.error, undefined);
+  assert.equal(result.generation_context?.data.bar_count, 80);
+});
+
+test("reports the database as unavailable only when the direct fetch also fails", async () => {
+  const tool = createTechnicalIndicatorTools({
+    getRepository: async () => undefined,
+    fetchBars: async () => { throw new Error("alpaca down"); },
+  })[0]!;
+
+  const result = await tool.execute({ symbol: "AAPL" }, { sessionId: "test" });
+
+  assert.equal(result.error?.code, "stock_database_unavailable");
+  assert.match(result.error?.message ?? "", /alpaca down/);
+});
+
 test("rejects a missing symbol before opening the stock repository", async () => {
   let opened = false;
   const tool = createTechnicalIndicatorTools({

@@ -23,41 +23,89 @@ import {
  * Self-scheduling (setTimeout after completion) to avoid overlapping ticks.
  */
 
-const DEFAULT_INTERVAL_MS = 7_000;
+/** Cadence while at least one strategy is active. */
+export const ACTIVE_INTERVAL_MS = 7_000;
+
+/**
+ * Cadence while nothing is active. A pass over zero strategies still costs a
+ * directory read and a JSON parse per file, which is not worth paying every 7
+ * seconds on a server that is only being used for research.
+ *
+ * The loop parks rather than stopping outright: `wakeMonitor` is called from every
+ * path that makes a strategy active, so this heartbeat exists purely so that a
+ * strategy activated some other way — a hand-edited file, a path added later —
+ * starts within a minute instead of never.
+ */
+export const IDLE_INTERVAL_MS = 60_000;
+
+/** How long to wait before the next pass, given what the last one found. */
+export function nextTickDelay(activeStrategies: number): number {
+  return activeStrategies > 0 ? ACTIVE_INTERVAL_MS : IDLE_INTERVAL_MS;
+}
 
 let timer: ReturnType<typeof setTimeout> | undefined;
 let active = false;
+let fastIntervalMs = ACTIVE_INTERVAL_MS;
 
 /** consecutive samples where the condition was met, per strategy id */
 const confirmCounts = new Map<string, number>();
 /** last fire time (ms) per strategy id, for recurring cooldown */
 const lastFireMs = new Map<string, number>();
 
-export function startMonitor(intervalMs: number = DEFAULT_INTERVAL_MS): void {
+export function startMonitor(intervalMs: number = ACTIVE_INTERVAL_MS): void {
   if (active) return;
   active = true;
+  fastIntervalMs = intervalMs;
   const tick = async (): Promise<void> => {
     if (!active) return;
+    let found = 0;
     try {
-      await runOnce(new Date());
+      found = await runOnce(new Date());
     } catch (err) {
       console.error("[strategyMonitor] tick error:", err);
+      // An unreadable store is not evidence that nothing is active; stay fast.
+      found = 1;
     }
-    if (active) timer = setTimeout(() => void tick(), intervalMs);
+    if (active) schedule(found > 0 ? fastIntervalMs : IDLE_INTERVAL_MS, tick);
   };
-  timer = setTimeout(() => void tick(), intervalMs);
+  schedule(fastIntervalMs, tick);
+}
+
+/**
+ * Collapses an idle wait so a strategy that just became active is picked up on the
+ * next fast interval rather than at the end of the idle heartbeat. A no-op when the
+ * monitor is not running or is already ticking fast.
+ */
+export function wakeMonitor(): void {
+  if (!active || !timer) return;
+  const pending = timer;
+  const tick = pendingTick;
+  if (!tick) return;
+  clearTimeout(pending);
+  schedule(fastIntervalMs, tick);
 }
 
 export function stopMonitor(): void {
   active = false;
+  pendingTick = undefined;
   if (timer) {
     clearTimeout(timer);
     timer = undefined;
   }
 }
 
-/** One evaluation pass over all active strategies. Exposed for tests. */
-export async function runOnce(now: Date): Promise<void> {
+let pendingTick: (() => Promise<void>) | undefined;
+
+function schedule(delayMs: number, tick: () => Promise<void>): void {
+  pendingTick = tick;
+  timer = setTimeout(() => void tick(), delayMs);
+}
+
+/**
+ * One evaluation pass over all active strategies. Returns how many were active,
+ * which is what decides the next interval. Exposed for tests.
+ */
+export async function runOnce(now: Date): Promise<number> {
   const strategies = await listStrategies("active");
   const nowMs = now.getTime();
 
@@ -83,6 +131,8 @@ export async function runOnce(now: Date): Promise<void> {
       await evaluateStrategy(strategy, price, now);
     }
   }
+
+  return strategies.length;
 }
 
 async function evaluateStrategy(strategy: StoredStrategy, price: number, now: Date): Promise<void> {

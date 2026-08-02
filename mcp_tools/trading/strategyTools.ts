@@ -16,6 +16,7 @@ import {
   type ManageOp as StoreManageOp,
 } from "../../src/trading/persistence/strategyStore.ts";
 import { fetchStockStrategyPrice } from "../../src/trading/stockStrategyMarketData.ts";
+import { wakeMonitor } from "../../src/trading/strategyMonitor.ts";
 
 let idCounter = 0;
 function newStrategyId(): string {
@@ -334,6 +335,9 @@ export function createManageStrategyTool(): RegisteredTool {
       if (op === "pause") {
         return { summary: `Strategy ${id} paused.`, generation_context: { prompt: "Confirm pause.", data: { strategy_id: id, status: "paused" } } };
       }
+      // Resuming is the other way a strategy becomes active, so it too has to
+      // pull the monitor out of its idle heartbeat.
+      wakeMonitor();
       return { summary: `Strategy ${id} resumed (active).`, generation_context: { prompt: "Confirm resume.", data: { strategy_id: id, status: "active" } } };
     },
   };
