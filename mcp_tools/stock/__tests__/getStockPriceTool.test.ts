@@ -76,3 +76,9 @@ test("neither snapshot nor store has data: returns an error context instead of t
   assert.match(result.generation_context!.prompt ?? "", /No market data available for AAPL/);
   assert.equal(result.generation_context!.data["error"], "network down");
 });
+
+test("input schema does not declare the framework-injected task parameter", () => {
+  const tool = createGetStockPriceTool();
+  assert.equal(tool.inputSchema?.properties?.["task"], undefined);
+  assert.ok(!(tool.inputSchema?.required ?? []).includes("task"));
+});

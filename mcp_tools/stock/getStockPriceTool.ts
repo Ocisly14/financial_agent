@@ -59,10 +59,6 @@ export function createGetStockPriceTool(overrides?: {
           description:
             "US stock ticker to look up, e.g. AAPL, TSLA, NVDA. Required — resolve it from the conversation before calling.",
         },
-        task: {
-          type: "string",
-          description: "Natural-language request, passed through for report context.",
-        },
         historyDays: {
           type: "number",
           description: `How many trading days of daily bars to return. Defaults to ${DEFAULT_HISTORY_DAYS}.`,

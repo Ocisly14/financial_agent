@@ -37,9 +37,8 @@ export function createCreateStrategyTool(): RegisteredTool {
     category: "trading",
     inputSchema: {
       type: "object",
-      required: ["task", "name", "symbol", "phases"],
+      required: ["name", "symbol", "phases"],
       properties: {
-        task: { type: "string", description: "Natural-language description of the user's intent." },
         user_id: { type: "string", description: "Owner id for per-user state. Defaults to 'default'." },
         name: { type: "string", description: "Human-friendly strategy plan name." },
         symbol: { type: "string", description: "US stock or ETF ticker, e.g. AAPL, MSFT, SPY, or BRK.B." },
@@ -204,9 +203,8 @@ export function createStartStrategyTool(): RegisteredTool {
     category: "trading",
     inputSchema: {
       type: "object",
-      required: ["task", "strategy_id"],
+      required: ["strategy_id"],
       properties: {
-        task: { type: "string", description: "Natural-language request." },
         strategy_id: { type: "string", description: "The strategy id to start." },
       },
     },
@@ -252,9 +250,8 @@ export function createListStrategiesTool(): RegisteredTool {
     category: "trading",
     inputSchema: {
       type: "object",
-      required: ["task"],
+      required: [],
       properties: {
-        task: { type: "string", description: "Natural-language request." },
         status: { type: "string", description: "Optional status filter (draft|pending_approval|active|running|paused|completed|cancelled|failed)." },
       },
     },
@@ -295,9 +292,8 @@ export function createManageStrategyTool(): RegisteredTool {
     category: "trading",
     inputSchema: {
       type: "object",
-      required: ["task", "strategy_id", "op"],
+      required: ["strategy_id", "op"],
       properties: {
-        task: { type: "string", description: "Natural-language request." },
         strategy_id: { type: "string", description: "The strategy id." },
         op: { type: "string", description: "get | pause | resume | cancel.", enum: ["get", "pause", "resume", "cancel"] },
       },

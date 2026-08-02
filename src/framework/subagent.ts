@@ -123,7 +123,9 @@ function renderSchemaFields(s: JsonSchema, indent: string, lines: string[], dept
   }
 }
 
-/** Render a tool's argument schema (excluding the auto-supplied `task`) as a structured block. */
+/** Render a tool's argument schema as a structured block. `task` is filtered as a
+ *  guard: no tool declares it any more, and none should — it was a framework-injected
+ *  parameter that no `execute` ever read. */
 function formatToolArgs(schema: JsonSchema | undefined): string {
   if (!schema?.properties) return "";
   const visible = Object.fromEntries(Object.entries(schema.properties).filter(([k]) => k !== "task"));
@@ -311,7 +313,7 @@ export class SubagentRuntime {
       return { awaitingApproval: false };
     }
 
-    const callInput: JsonObject = { task: input.request.task, ...call.input };
+    const callInput: JsonObject = { ...call.input };
     const toolUseId = newId("tooluse");
     const useEv = state.record(
       definition.name,
