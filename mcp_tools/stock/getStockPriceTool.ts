@@ -69,7 +69,8 @@ export function createGetStockPriceTool(overrides?: {
         },
         includeIntraday: {
           type: "boolean",
-          description: "Whether to include today's 1-minute bars. Defaults to false.",
+          description:
+            "Whether to include the latest session's 1-minute bars. Defaults to false. Each bar carries its own timestamp; outside trading hours these are the previous session's.",
         },
       },
     },

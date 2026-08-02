@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { NavLink } from "react-router-dom";
-import { Edit, MoreVertical, Trash2 } from "lucide-react";
-import type { TopicSummary, UUID } from "@/types/core";
+import { Edit, MoreVertical, Tag, Trash2 } from "lucide-react";
+import { TOPIC_CATEGORIES, type TopicCategory, type TopicSummary, type UUID } from "@/types/core";
 import { apiClient } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
@@ -13,6 +13,12 @@ import {
     DropdownMenu,
     DropdownMenuContent,
     DropdownMenuItem,
+    DropdownMenuRadioGroup,
+    DropdownMenuRadioItem,
+    DropdownMenuSeparator,
+    DropdownMenuSub,
+    DropdownMenuSubContent,
+    DropdownMenuSubTrigger,
     DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
@@ -34,9 +40,12 @@ interface TopicRailItemProps {
 /**
  * One row: the fin-figure ticker chip (derived from the topic's charts —
  * absent for topics with no chart tabs), the topic name, and a single-line
- * preview of the last message. The row's own dropdown carries rename /
- * delete — the only per-topic actions this app has. Binding a symbol is not
- * one of them: that intent belongs to the chart tab bar (`ChartTabBar`).
+ * preview of the last message. The row's own dropdown carries rename, category
+ * and delete. Binding a SYMBOL is still not one of them: that intent belongs to
+ * the chart tab bar (`ChartTabBar`), because a symbol is a statement about what
+ * the topic charts. A category is a statement about what the topic IS — it has
+ * no other home, and overriding the model's guess has to be possible from
+ * wherever that guess is visible, which is here.
  */
 export function TopicRailItem({
     agentId,
@@ -82,6 +91,20 @@ export function TopicRailItem({
             toast({
                 variant: "destructive",
                 title: t("topics.rename"),
+                description: error instanceof Error ? error.message : t("common.unexpectedError"),
+            });
+        }
+    };
+
+    /** `null` hands the topic back to the background classifier. */
+    const setCategory = async (category: TopicCategory | null) => {
+        try {
+            await apiClient.updateTopic(agentId, topic.id, { category });
+            onMutated();
+        } catch (error) {
+            toast({
+                variant: "destructive",
+                title: t("topics.setCategory"),
                 description: error instanceof Error ? error.message : t("common.unexpectedError"),
             });
         }
@@ -194,6 +217,43 @@ export function TopicRailItem({
                             <Edit className="mr-2 size-4" />
                             {t("topics.rename")}
                         </DropdownMenuItem>
+                        <DropdownMenuSub>
+                            <DropdownMenuSubTrigger>
+                                <Tag className="mr-2 size-4" />
+                                {t("topics.setCategory")}
+                            </DropdownMenuSubTrigger>
+                            <DropdownMenuSubContent>
+                                {/* A radio group, not plain items: the category is
+                                    single-valued and the current one must be legible
+                                    without the user having to remember it. "Automatic"
+                                    is the selected row precisely when nothing is
+                                    locked, so an unclassified topic and one the model
+                                    has classified read the same way here — in both
+                                    cases the model still owns the choice. */}
+                                <DropdownMenuRadioGroup
+                                    value={topic.categoryLocked && topic.category ? topic.category : "auto"}
+                                    onValueChange={(value) =>
+                                        void setCategory(value === "auto" ? null : (value as TopicCategory))
+                                    }
+                                >
+                                    <DropdownMenuRadioItem value="auto">
+                                        {t("topics.categoryAuto")}
+                                        {topic.category && !topic.categoryLocked && (
+                                            <span className="ml-1.5 text-label-3">
+                                                ({t(`topics.categories.${topic.category}`)})
+                                            </span>
+                                        )}
+                                    </DropdownMenuRadioItem>
+                                    <DropdownMenuSeparator />
+                                    {TOPIC_CATEGORIES.map((category) => (
+                                        <DropdownMenuRadioItem key={category} value={category}>
+                                            {t(`topics.categories.${category}`)}
+                                        </DropdownMenuRadioItem>
+                                    ))}
+                                </DropdownMenuRadioGroup>
+                            </DropdownMenuSubContent>
+                        </DropdownMenuSub>
+                        <DropdownMenuSeparator />
                         <DropdownMenuItem onClick={handleDelete} className="text-destructive">
                             <Trash2 className="mr-2 size-4" />
                             {t("topics.delete")}

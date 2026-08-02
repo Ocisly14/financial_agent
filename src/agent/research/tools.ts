@@ -35,7 +35,7 @@ import {
   type IndexedTurn,
   type Selection,
 } from "./retrieval.ts";
-import { buildIndexedTurns } from "./digest.ts";
+import { buildIndexedTurns } from "../topicDigest.ts";
 import { MAX_RANGE_DAYS, MIN_RANGE_DAYS, parseRangeDays } from "../../data/stock/index.ts";
 import { mapWithConcurrency, Semaphore, TimeoutError, withTimeout } from "./concurrency.ts";
 

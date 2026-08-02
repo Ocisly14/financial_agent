@@ -11,6 +11,13 @@ import { getSharedBarRepository } from "./sharedRepository.ts";
 
 export const STOCK_PRICE_DATA_SOURCE = "Alpaca (IEX feed)";
 
+/**
+ * How many 1-minute bars to pull from the store before slicing off the latest session.
+ * 960 is 04:00-20:00 ET, so a full extended-hours day survives the slice even when the tail
+ * of the window still holds the previous session.
+ */
+const INTRADAY_LOOKBACK_BARS = 960;
+
 export type StockPriceData = {
   symbol: string;
   price: number | null;
@@ -49,6 +56,21 @@ export type StockPriceDataResult =
   | { ok: true; data: StockPriceData }
   | { ok: false; error: string };
 
+/**
+ * Keeps only the bars sharing the newest bar's calendar day.
+ *
+ * The window is "the most recent session", not "today": on a weekend or before the
+ * open there is no today, and the last real session is the useful answer — the same
+ * rule the intraday chart applies (see stockChartData.ts). Every bar carries its own
+ * timestamp, so a caller reading a Friday session on a Sunday can tell.
+ */
+function latestSession(bars: DailyBar[]): DailyBar[] {
+  const latest = bars[bars.length - 1];
+  if (!latest) return [];
+  const day = latest.t.slice(0, 10);
+  return bars.filter((item) => item.t.slice(0, 10) === day);
+}
+
 function pct(current: number, base: number): number | null {
   if (!isFinite(base) || base === 0) return null;
   return parseFloat((((current - base) / base) * 100).toFixed(2));
@@ -68,10 +90,11 @@ export async function loadStockPriceData(
   const loadDailyBars = deps.dailyBars ?? fetchDailyBars;
   const loadIntradayBars = deps.intradayBars ?? fetchIntradayBars;
 
+  const repository =
+    deps.repository === undefined ? await getSharedBarRepository() : deps.repository;
+
   let dailyBars: DailyBar[] = [];
   try {
-    const repository =
-      deps.repository === undefined ? await getSharedBarRepository() : deps.repository;
     if (repository) {
       dailyBars = await repository.getBars(query.symbol, "1Day", query.historyDays);
     } else {
@@ -113,7 +136,13 @@ export async function loadStockPriceData(
   let intradayBars: DailyBar[] | undefined;
   if (query.includeIntraday) {
     try {
-      intradayBars = await loadIntradayBars(query.symbol, etDateString(current));
+      // The store already holds minute bars for anything that has been charted or
+      // run through an indicator, and refreshes them on a 60-second window, so going
+      // through it costs nothing extra and spends no upstream quota on a repeat call.
+      // Only when SQLite is out of reach does this fall back to a direct fetch.
+      intradayBars = repository
+        ? latestSession(await repository.getBars(query.symbol, "1Min", INTRADAY_LOOKBACK_BARS))
+        : await loadIntradayBars(query.symbol, etDateString(current));
     } catch {
       intradayBars = [];
     }

@@ -5,7 +5,8 @@ import { fileURLToPath } from "node:url";
 import { newId } from "../framework/ids.ts";
 import { attachSse } from "../infra/events/sseProjector.ts";
 import type { FinancialAgentApp } from "../agent/createApp.ts";
-import type { TopicChartPreferenceRow } from "../infra/db/sqliteEventStore.ts";
+import type { TopicChartPreferenceRow, TopicCategory } from "../infra/db/sqliteEventStore.ts";
+import { asTopicCategory, TOPIC_CATEGORIES } from "../infra/db/sqliteEventStore.ts";
 import type { TaskResult } from "../framework/types.ts";
 import { handleStockQuote, parseRangeDays } from "./stockMarketRoutes.ts";
 import { handleLinkPreview } from "./linkPreview.ts";
@@ -161,6 +162,11 @@ async function handleChat(
     clearInterval(keepalive);
     unsubscribe();
     activeWorkflows.delete(agentId);
+    // The turn is over — the one moment at which this Topic's history is a
+    // complete thought. Arming the debounce here (rather than when the user
+    // sent the message) is what stops the summariser reading a half-streamed
+    // reply. Research sessions are excluded: they have no `chat_rooms` row.
+    if (!research) app.topicDigests.schedule(sessionId);
     res.end();
   }
 }
@@ -215,18 +221,26 @@ async function handleUpdateTopic(
   agentId: string,
   topicId: string,
 ): Promise<void> {
-  let body: { name?: string };
+  let body: { name?: string; category?: string | null };
   try {
     body = JSON.parse(await readBody(req));
   } catch {
     return jsonError(res, 400, "invalid json");
   }
 
-  const patch: { name?: string } = {};
+  const patch: { name?: string; category?: TopicCategory | null } = {};
   if (body.name !== undefined) {
     const name = body.name.trim();
     if (!name) return jsonError(res, 400, "name must not be empty");
     patch.name = name;
+  }
+  if (body.category !== undefined) {
+    // `null` is the "back to automatic" signal, not an invalid category — it
+    // clears the lock and lets the next digest choose again.
+    if (body.category !== null && asTopicCategory(body.category) === null) {
+      return jsonError(res, 400, `category must be null or one of: ${TOPIC_CATEGORIES.join(", ")}`);
+    }
+    patch.category = body.category === null ? null : asTopicCategory(body.category);
   }
 
   if (!app.eventStore.updateTopic(agentId, topicId, patch)) {
@@ -552,7 +566,14 @@ export function createHttpServer(app: FinancialAgentApp): http.Server {
       const topicsMatch = pathname.match(/^\/api\/agents\/([^/]+)\/topics$/);
       if (topicsMatch) {
         const agentId = decodeURIComponent(topicsMatch[1]!);
-        if (method === "GET") return jsonOk(res, { success: true, topics: app.eventStore.listTopics(agentId) });
+        if (method === "GET") {
+          jsonOk(res, { success: true, topics: app.eventStore.listTopics(agentId) });
+          // Backstop for digests a restart lost, AFTER the response is out so
+          // the sidebar never waits on a model call. Throttled inside, because
+          // the client repeats this poll every 30s per open tab.
+          void app.topicDigests.catchUp(agentId);
+          return;
+        }
         if (method === "POST") return await handleCreateTopic(req, res, app, agentId);
       }
 

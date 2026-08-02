@@ -125,6 +125,24 @@ export interface StoredStrategy {
   [k: string]: any;
 }
 
+/** What kind of investigation a Topic is. Mirrors `TOPIC_CATEGORIES` in
+ *  src/infra/db/sqliteEventStore.ts — the array ORDER is also the order the
+ *  rail prints the groups in, so the two must not drift.
+ *
+ *  Each boundary falls where the reader's next action differs, which is why
+ *  asset class (crypto / commodities / FX) is deliberately absent: it is an
+ *  orthogonal axis that surfaces through `leadSymbol` instead. */
+export const TOPIC_CATEGORIES = [
+  "single_name",
+  "comparative",
+  "sector",
+  "macro",
+  "strategy",
+  "portfolio",
+] as const;
+
+export type TopicCategory = (typeof TOPIC_CATEGORIES)[number];
+
 export type TopicSummary = {
   id: string;
   name: string;
@@ -133,6 +151,11 @@ export type TopicSummary = {
   createdAt: number;
   lastMessage: { text: string; createdAt: number } | null;
   messageCount: number;
+  /** Background SMALL-model blurb. Null until the topic has had a turn. */
+  summary: string | null;
+  category: TopicCategory | null;
+  /** True once the user picked the category by hand — the model stops overwriting it. */
+  categoryLocked: boolean;
 };
 
 /** A multi-ticker comparison a topic_charts row of kind "overlay" carries.

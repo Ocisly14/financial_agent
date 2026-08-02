@@ -2,9 +2,10 @@ import { useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { NavLink, useNavigate } from "react-router-dom";
-import { CheckSquare, PanelLeftClose, PanelLeftOpen, Plus, Trash2, TrendingUp, X } from "lucide-react";
+import { CheckSquare, Clock, PanelLeftClose, PanelLeftOpen, Plus, Tag, Trash2, TrendingUp, X } from "lucide-react";
 import type { ResearchSummary, TopicSummary, UUID } from "@/types/core";
 import { apiClient } from "@/lib/api";
+import { groupTopics, isGroupingMode, type GroupingMode, type TopicGroup } from "@/lib/topicGrouping";
 import { cn, generateTopicName } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
@@ -18,6 +19,26 @@ import { TopicRailItem } from "./TopicRailItem";
  *  cannot drift. */
 const ADD_BUTTON_CLASS =
     "rounded-sm p-1 text-label-3 transition-colors hover:bg-fill-1 hover:text-label-1";
+
+/** Persisted so the rail comes back the way it was left. A rail that silently
+ *  reverted to recency on reload would read as the setting not having worked. */
+const GROUPING_STORAGE_KEY = "topicRail.grouping";
+
+/** Cycled through by the one header button, in this order. Recency is first
+ *  and is the default: the rail's most frequent use is "what was I just
+ *  working on", and any grouping breaks that scan. */
+const GROUPING_CYCLE: readonly GroupingMode[] = ["recency", "symbol", "category"];
+
+const GROUPING_ICON = { recency: Clock, symbol: TrendingUp, category: Tag } as const;
+
+/** Mode slug → the i18n key under `topics.grouping`. They differ because the
+ *  slugs name the grouping KEY and the labels name what the user sees. */
+const GROUPING_LABEL_KEY = { recency: "recency", symbol: "bySymbol", category: "byCategory" } as const;
+
+function loadGroupingMode(): GroupingMode {
+    const stored = typeof localStorage === "undefined" ? null : localStorage.getItem(GROUPING_STORAGE_KEY);
+    return isGroupingMode(stored) ? stored : "recency";
+}
 
 interface TopicRailProps {
     agentId: UUID;
@@ -57,6 +78,20 @@ export function TopicRail({
 
     const [selectionMode, setSelectionMode] = useState(false);
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+    const [grouping, setGrouping] = useState<GroupingMode>(loadGroupingMode);
+
+    const cycleGrouping = () => {
+        setGrouping((prev) => {
+            const next = GROUPING_CYCLE[(GROUPING_CYCLE.indexOf(prev) + 1) % GROUPING_CYCLE.length]!;
+            try {
+                localStorage.setItem(GROUPING_STORAGE_KEY, next);
+            } catch {
+                // Private-browsing quota. A preference that cannot be persisted
+                // is still worth honouring for this session.
+            }
+            return next;
+        });
+    };
 
     const { data, isPending } = useQuery({
         queryKey: ["topics", agentId],
@@ -75,6 +110,15 @@ export function TopicRail({
         });
         return list;
     }, [data]);
+
+    const groups = useMemo(() => groupTopics(topics, grouping), [topics, grouping]);
+
+    // A symbol group's key IS the ticker and is shown verbatim; a category
+    // group's key is a slug that has to be looked up.
+    const groupLabel = (group: TopicGroup): string => {
+        if (group.kind === "symbol") return group.key;
+        return group.uncategorized ? t("topics.categories.none") : t(`topics.categories.${group.key}`);
+    };
 
     const { data: researchData } = useQuery({
         queryKey: ["researches", agentId],
@@ -294,6 +338,27 @@ export function TopicRail({
                     {topics.length > 0 && (
                         <button
                             type="button"
+                            aria-label={`${t("topics.grouping.label")}: ${t(`topics.grouping.${GROUPING_LABEL_KEY[grouping]}`)}`}
+                            title={`${t("topics.grouping.label")}: ${t(`topics.grouping.${GROUPING_LABEL_KEY[grouping]}`)}`}
+                            onClick={cycleGrouping}
+                            className={cn(
+                                "rounded-sm p-1 transition-colors hover:bg-fill-1 hover:text-label-1",
+                                // Non-default modes stay lit, so a grouped rail
+                                // never looks like an unexplained reordering.
+                                grouping === "recency"
+                                    ? "text-label-3 opacity-0 focus-visible:opacity-100 group-hover/topics:opacity-100"
+                                    : "text-label-1",
+                            )}
+                        >
+                            {(() => {
+                                const Icon = GROUPING_ICON[grouping];
+                                return <Icon className="size-3.5" />;
+                            })()}
+                        </button>
+                    )}
+                    {topics.length > 0 && (
+                        <button
+                            type="button"
                             aria-label={selectionMode ? t("topics.exitSelection") : t("topics.selectMultiple")}
                             onClick={() => {
                                 setSelectionMode((prev) => !prev);
@@ -324,18 +389,42 @@ export function TopicRail({
                     ) : topics.length === 0 ? (
                         <div className="p-2 text-xs text-label-3">{t("topics.empty")}</div>
                     ) : (
-                        topics.map((topic) => (
-                            <TopicRailItem
-                                key={topic.id}
-                                agentId={agentId}
-                                topic={topic}
-                                isActive={topic.id === activeTopicId}
-                                collapsed={false}
-                                selectionMode={selectionMode}
-                                selected={selectedIds.has(topic.id)}
-                                onToggleSelected={() => toggleSelected(topic.id)}
-                                onMutated={refetchTopics}
-                            />
+                        groups.map((group) => (
+                            <div key={group.key} className="flex flex-col gap-0.5">
+                                {group.kind !== "none" && (
+                                    <div className="flex items-baseline gap-1.5 px-2 pb-0.5 pt-1.5">
+                                        <span
+                                            className={cn(
+                                                "min-w-0 flex-1 truncate",
+                                                // A ticker is data, so it gets the tabular
+                                                // figure treatment the rest of the app gives
+                                                // symbols; a category is a label.
+                                                group.kind === "symbol"
+                                                    ? "fin-figure text-[11px] font-semibold text-label-2"
+                                                    : "fin-label text-label-3",
+                                            )}
+                                        >
+                                            {groupLabel(group)}
+                                        </span>
+                                        <span className="fin-figure shrink-0 text-[10px] text-label-3">
+                                            {group.topics.length}
+                                        </span>
+                                    </div>
+                                )}
+                                {group.topics.map((topic) => (
+                                    <TopicRailItem
+                                        key={topic.id}
+                                        agentId={agentId}
+                                        topic={topic}
+                                        isActive={topic.id === activeTopicId}
+                                        collapsed={false}
+                                        selectionMode={selectionMode}
+                                        selected={selectedIds.has(topic.id)}
+                                        onToggleSelected={() => toggleSelected(topic.id)}
+                                        onMutated={refetchTopics}
+                                    />
+                                ))}
+                            </div>
                         ))
                     )}
                 </div>

@@ -63,6 +63,9 @@ test("SQLite room catalog persists metadata, message previews, rename, and delet
     createdAt: 100,
     lastMessage: { text: "hi", createdAt: Date.parse(state.allEvents()[1]!.timestamp) },
     messageCount: 2,
+    summary: null,
+    category: null,
+    categoryLocked: false,
   }]);
   assert.equal(store.updateTopic("default", "room-1", { name: "Renamed" }), true);
   assert.equal(store.listTopics("default")[0]?.name, "Renamed");

@@ -41,7 +41,17 @@ CREATE TABLE IF NOT EXISTS chat_rooms (
   name        TEXT NOT NULL,
   created_at  INTEGER NOT NULL,
   updated_at  INTEGER NOT NULL,
-  archived_at INTEGER
+  archived_at INTEGER,
+  -- The SMALL-model blurb describing what this Topic investigates and where
+  -- its conclusions stand. Generated per Topic (src/agent/topicDigest.ts), NOT
+  -- per Research: a Topic that was never pulled into a Research still gets one.
+  summary            TEXT,
+  -- One of TOPIC_CATEGORIES, or NULL for a Topic the model hasn't seen yet.
+  category           TEXT,
+  -- Set once the user picks a category by hand. The model then refreshes the
+  -- summary but leaves the category alone, so the two never fight.
+  category_locked    INTEGER NOT NULL DEFAULT 0,
+  digest_through_turn INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_chat_rooms_agent_updated
@@ -94,6 +104,30 @@ CREATE INDEX IF NOT EXISTS idx_research_members_topic
   ON research_members (topic_id);
 `;
 
+/** Columns added to `chat_rooms` after the table shipped. `CREATE TABLE IF NOT
+ *  EXISTS` is a no-op against a database that already has the old table, so a
+ *  new column in SCHEMA above reaches new databases only — existing ones need
+ *  this. There is no migration framework here and this list is deliberately
+ *  the whole mechanism: each entry is an idempotent `ADD COLUMN`, applied only
+ *  when `PRAGMA table_info` says it is missing. Keep it in sync with SCHEMA. */
+const CHAT_ROOM_ADDED_COLUMNS: ReadonlyArray<{ name: string; ddl: string }> = [
+  { name: "summary", ddl: "summary TEXT" },
+  { name: "category", ddl: "category TEXT" },
+  { name: "category_locked", ddl: "category_locked INTEGER NOT NULL DEFAULT 0" },
+  { name: "digest_through_turn", ddl: "digest_through_turn INTEGER NOT NULL DEFAULT 0" },
+];
+
+/** Adds any of `CHAT_ROOM_ADDED_COLUMNS` the database does not have yet. Safe
+ *  to run on every open: a database already carrying them does no writes. */
+function migrateChatRooms(db: DatabaseSync): void {
+  const existing = new Set(
+    (db.prepare("PRAGMA table_info(chat_rooms)").all() as Array<{ name: string }>).map((row) => row.name),
+  );
+  for (const column of CHAT_ROOM_ADDED_COLUMNS) {
+    if (!existing.has(column.name)) db.exec(`ALTER TABLE chat_rooms ADD COLUMN ${column.ddl}`);
+  }
+}
+
 type EventRow = {
   event_id: string;
   parent_event_id: string | null;
@@ -112,6 +146,32 @@ type CompactionRow = {
   preserved_data_json: string;
 };
 
+/**
+ * What kind of investigation a Topic is, in the order the sidebar groups them.
+ *
+ * The test each category has to pass is "does this label predict what the user
+ * opens next" — that is why asset class (crypto / commodities / FX) is NOT a
+ * category. Asset class is an axis orthogonal to these six: a BTC Topic can be
+ * single-name research or a macro thesis. It falls out of `leadSymbol` instead.
+ */
+export const TOPIC_CATEGORIES = [
+  "single_name",
+  "comparative",
+  "sector",
+  "macro",
+  "strategy",
+  "portfolio",
+] as const;
+
+export type TopicCategory = (typeof TOPIC_CATEGORIES)[number];
+
+/** Narrows an untrusted string (model output, request body) to a category. */
+export function asTopicCategory(value: unknown): TopicCategory | null {
+  return typeof value === "string" && (TOPIC_CATEGORIES as readonly string[]).includes(value)
+    ? (value as TopicCategory)
+    : null;
+}
+
 export type TopicSummary = {
   id: string;
   name: string;
@@ -120,6 +180,11 @@ export type TopicSummary = {
   createdAt: number;
   lastMessage: { text: string; createdAt: number } | null;
   messageCount: number;
+  /** SMALL-model blurb; null until the Topic has had a turn and been digested. */
+  summary: string | null;
+  category: TopicCategory | null;
+  /** True once the user set the category by hand — the model stops overwriting it. */
+  categoryLocked: boolean;
 };
 
 /** `range` is a number of trading days (src/data/stock/stockChartData.ts). */
@@ -129,7 +194,15 @@ export type TopicChartPreferenceRow =
   | { id: string; kind: "symbol"; symbol: string; range: number | null; hidden: boolean; sortOrder: number }
   | { id: string; kind: "overlay"; overlay: OverlaySpec; range: number | null; hidden: boolean; sortOrder: number };
 
-type TopicRow = { id: string; name: string; lead_symbol: string | null; created_at: number };
+type TopicRow = {
+  id: string;
+  name: string;
+  lead_symbol: string | null;
+  created_at: number;
+  summary: string | null;
+  category: string | null;
+  category_locked: number;
+};
 type LastMessageRow = { payload_json: string; timestamp: string };
 
 export type ResearchSummary = {
@@ -172,6 +245,7 @@ export class SqliteEventStore implements EventStore {
     db.exec("PRAGMA journal_mode = WAL");
     db.exec("PRAGMA busy_timeout = 5000");
     db.exec(SCHEMA);
+    migrateChatRooms(db);
     return new SqliteEventStore(db);
   }
 
@@ -260,7 +334,17 @@ export class SqliteEventStore implements EventStore {
        VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(id) DO NOTHING`,
     ).run(topicId, agentId, name, createdAt, createdAt);
-    return { id: topicId, name, leadSymbol: null, createdAt, lastMessage: null, messageCount: 0 };
+    return {
+      id: topicId,
+      name,
+      leadSymbol: null,
+      createdAt,
+      lastMessage: null,
+      messageCount: 0,
+      summary: null,
+      category: null,
+      categoryLocked: false,
+    };
   }
 
   ensureTopic(agentId: string, topicId: string, name: string, createdAt = Date.now()): void {
@@ -270,6 +354,8 @@ export class SqliteEventStore implements EventStore {
   listTopics(agentId: string): TopicSummary[] {
     const topics = this.db.prepare(
       `SELECT chat_rooms.id AS id, chat_rooms.name AS name, chat_rooms.created_at AS created_at,
+              chat_rooms.summary AS summary, chat_rooms.category AS category,
+              chat_rooms.category_locked AS category_locked,
               lead.symbol AS lead_symbol
        FROM chat_rooms
        LEFT JOIN (
@@ -311,18 +397,40 @@ export class SqliteEventStore implements EventStore {
         createdAt: topic.created_at,
         lastMessage,
         messageCount: countRow.count,
+        summary: topic.summary,
+        category: asTopicCategory(topic.category),
+        categoryLocked: topic.category_locked === 1,
       };
     });
   }
 
+  /**
+   * User-driven edits to a Topic. Distinct from `setTopicDigest`, which is the
+   * model's write path: this one bumps `updated_at` (the user touched the
+   * Topic, so it belongs at the top of the rail) and, for `category`, sets the
+   * lock that stops the model overwriting the choice.
+   *
+   * `category: null` means "go back to automatic" — it releases the lock and
+   * leaves the stored category ALONE. Blanking it would be the worse reading of
+   * the same gesture: the Topic is not stale (its digest already covers every
+   * turn), so nothing would reclassify it, and the user would watch the label
+   * vanish until they happened to chat again. Automatic means the model owns
+   * the choice, not that there is no choice.
+   */
   updateTopic(
     agentId: string,
     topicId: string,
-    patch: { name?: string },
+    patch: { name?: string; category?: TopicCategory | null },
   ): boolean {
     const assignments: string[] = [];
     const values: Array<string | number | null> = [];
     if (patch.name !== undefined) { assignments.push("name = ?"); values.push(patch.name); }
+    if (patch.category === null) {
+      assignments.push("category_locked = 0");
+    } else if (patch.category !== undefined) {
+      assignments.push("category = ?", "category_locked = 1");
+      values.push(patch.category);
+    }
     if (assignments.length === 0) return false;
     assignments.push("updated_at = ?");
     values.push(Date.now(), topicId, agentId);
@@ -331,6 +439,77 @@ export class SqliteEventStore implements EventStore {
       `UPDATE chat_rooms SET ${assignments.join(", ")} WHERE id = ? AND agent_id = ?`,
     ).run(...values);
     return result.changes > 0;
+  }
+
+  /**
+   * The digest writer's counterpart to `updateTopic`.
+   *
+   * Deliberately does NOT touch `updated_at`. The rail orders by it, so a
+   * background digest that bumped it would shove the Topic to the top of the
+   * list minutes after the user stopped working on it — the summariser would
+   * be manufacturing the very activity it is supposed to be describing.
+   *
+   * `category` is skipped when the user has locked one, but `summary` is
+   * written either way: a locked category is a statement about what the Topic
+   * IS, not a request to freeze what it currently says.
+   */
+  setTopicDigest(
+    topicId: string,
+    summary: string,
+    category: TopicCategory | null,
+    throughTurn: number,
+  ): void {
+    const locked = this.db
+      .prepare("SELECT category_locked FROM chat_rooms WHERE id = ?")
+      .get(topicId) as { category_locked: number } | undefined;
+    if (!locked) return;
+
+    if (locked.category_locked === 1 || category === null) {
+      this.db
+        .prepare("UPDATE chat_rooms SET summary = ?, digest_through_turn = ? WHERE id = ?")
+        .run(summary, throughTurn, topicId);
+      return;
+    }
+    this.db
+      .prepare("UPDATE chat_rooms SET summary = ?, category = ?, digest_through_turn = ? WHERE id = ?")
+      .run(summary, category, throughTurn, topicId);
+  }
+
+  /**
+   * Whether one Topic's log has moved past its digest. Same rule as
+   * `listStaleTopics`, kept in SQL beside it so the two can never disagree —
+   * the scheduler asks this at fire time rather than trusting the reason it
+   * was scheduled.
+   *
+   * A Topic with no turns is not stale: summarising a conversation that hasn't
+   * happened yields a confident description of nothing.
+   */
+  isTopicDigestStale(topicId: string): boolean {
+    const row = this.db.prepare(
+      `SELECT chat_rooms.digest_through_turn AS digested,
+              (SELECT MAX(turn) FROM session_events WHERE session_id = chat_rooms.id) AS max_turn
+       FROM chat_rooms WHERE id = ?`,
+    ).get(topicId) as { digested: number; max_turn: number | null } | undefined;
+    if (!row) return false;
+    return (row.max_turn ?? 0) > row.digested;
+  }
+
+  /**
+   * Topics whose log has moved past their digest — the same `turnCount >
+   * digestThroughTurn` rule the Research layer already used, pushed into SQL
+   * so a catch-up sweep never has to load event payloads to find out.
+   */
+  listStaleTopics(agentId: string): string[] {
+    const rows = this.db.prepare(
+      `SELECT chat_rooms.id AS id
+       FROM chat_rooms
+       LEFT JOIN (
+         SELECT session_id, MAX(turn) AS max_turn FROM session_events GROUP BY session_id
+       ) turns ON turns.session_id = chat_rooms.id
+       WHERE chat_rooms.agent_id = ?
+         AND COALESCE(turns.max_turn, 0) > chat_rooms.digest_through_turn`,
+    ).all(agentId) as Array<{ id: string }>;
+    return rows.map((row) => row.id);
   }
 
   deleteTopic(agentId: string, topicId: string): boolean {
@@ -429,6 +608,12 @@ export class SqliteEventStore implements EventStore {
    */
   rawExec(sql: string): void {
     this.db.exec(sql);
+  }
+
+  /** Test-only counterpart to `rawExec`, for asserting on columns the typed
+   *  API deliberately does not project (e.g. `updated_at`). */
+  rawGet(sql: string): unknown {
+    return this.db.prepare(sql).get();
   }
 
   createResearch(agentId: string, researchId: string, name: string, createdAt = Date.now()): ResearchSummary {

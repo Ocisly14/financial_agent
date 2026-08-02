@@ -129,6 +129,23 @@ const zhCN = {
         createFailedDescription: "话题未能创建。",
         emptyTitle: "还没有话题",
         emptyDescription: "一个话题就是一个最小研究单元——可以是一只标的，也可以是一个宏观问题——它的图表与对话会跨会话保留。",
+        grouping: {
+            label: "分组方式",
+            recency: "最近",
+            bySymbol: "标的",
+            byCategory: "类别",
+        },
+        setCategory: "类别",
+        categoryAuto: "自动",
+        categories: {
+            single_name: "个股",
+            comparative: "横向对比",
+            sector: "板块与主题",
+            macro: "宏观与政策",
+            strategy: "策略与信号",
+            portfolio: "组合与风险",
+            none: "未分类",
+        },
     },
     research: {
         title: "Research",

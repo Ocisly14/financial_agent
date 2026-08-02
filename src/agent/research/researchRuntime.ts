@@ -43,7 +43,7 @@ import type { JsonObject } from "../../framework/types.ts";
 import type { ModelRouter } from "../../infra/llm/provider.ts";
 import type { TopicChartPreferenceRow } from "../../infra/db/sqliteEventStore.ts";
 import { mapWithConcurrency } from "./concurrency.ts";
-import { buildIndexedTurns, refreshStaleDigests, turnCountOf, type DigestStore } from "./digest.ts";
+import { buildIndexedTurns, turnCountOf } from "../topicDigest.ts";
 import { renderExternalDelta, renderRoster, type MemberFacts } from "./memberContext.ts";
 import { RESEARCH_TOOL_SPECS } from "./researchPrompt.ts";
 import {
@@ -83,7 +83,7 @@ const ROSTER_RECORD_NAME = "research_roster";
 
 const TOOL_NAMES = new Set(RESEARCH_TOOL_SPECS.map((spec) => spec.name));
 
-export type ResearchRuntimeStore = ResearchToolStore & DigestStore;
+export type ResearchRuntimeStore = ResearchToolStore;
 
 export type ResearchRuntimeDeps = {
   prompt: PromptTemplate;
@@ -295,23 +295,16 @@ export class ResearchRuntime {
    * restart. The external delta then covers only members the controller has
    * already met.
    *
-   * Digests are refreshed first, lazily: only members whose Topic has moved
-   * past `digest_through_turn` cost a model call (§4.2.2).
+   * Digests are NOT generated here. Each Topic summarises itself in the
+   * background (src/server/topicDigestScheduler.ts) and this layer reads the
+   * result off the Topic row, so opening a Research costs no model calls beyond
+   * its own turn — and a member that has never been opened in a Research still
+   * arrives with a digest already written.
    */
   private async buildMemberContext(
     input: ResearchRunInput,
     state: SessionState,
   ): Promise<{ roster: string; externalDelta: string }> {
-    try {
-      await refreshStaleDigests(input.researchId, this.store, this.sessions, this.modelRouter);
-    } catch (error) {
-      // A digest is a nicety; a Research turn is still usable with a stale one.
-      state.record("orchestrator", "error", {
-        scope: "main",
-        message: `digest refresh failed: ${error instanceof Error ? error.message : String(error)}`,
-      });
-    }
-
     const facts = await this.memberFacts(input.agentId, input.researchId);
     if (facts.length === 0) {
       return {
@@ -378,7 +371,7 @@ export class ResearchRuntime {
           .map((chart) => chart.symbol),
         turnCount: turnCountOf(turns),
         lastActivityMs: topic?.lastMessage?.createdAt ?? topic?.createdAt ?? 0,
-        digest: member.digest,
+        digest: topic?.summary ?? null,
         seenThroughTurn: member.seenThroughTurn,
       };
     });

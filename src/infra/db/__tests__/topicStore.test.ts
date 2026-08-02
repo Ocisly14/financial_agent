@@ -1,5 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { SessionRegistry } from "../../../framework/sessionState.ts";
 import { SqliteEventStore } from "../sqliteEventStore.ts";
 
 test("a new topic has no lead symbol", () => {
@@ -146,4 +151,129 @@ test("a malformed overlay JSON row is skipped rather than crashing the read", ()
   assert.doesNotThrow(() => store.listTopicCharts("t1"));
   assert.deepEqual(store.listTopicCharts("t1"), []);
   store.close();
+});
+
+// ── digest, category and the lock ────────────────────────────────────────────
+
+test("a digest write does not resurface the topic in the rail", () => {
+  const store = SqliteEventStore.open(":memory:");
+  store.createTopic("a1", "t1", "美联储降息路径", 100);
+  const before = store.rawGet("SELECT updated_at FROM chat_rooms WHERE id='t1'") as { updated_at: number };
+
+  store.setTopicDigest("t1", "在跟踪降息路径", "macro", 3);
+
+  const after = store.rawGet("SELECT updated_at FROM chat_rooms WHERE id='t1'") as { updated_at: number };
+  assert.equal(after.updated_at, before.updated_at,
+    "the rail orders by updated_at — a background summary that bumped it would manufacture the activity it describes");
+  const topic = store.listTopics("a1")[0];
+  assert.equal(topic?.summary, "在跟踪降息路径");
+  assert.equal(topic?.category, "macro");
+  assert.equal(topic?.categoryLocked, false);
+  store.close();
+});
+
+test("a hand-picked category is locked and survives the next digest", () => {
+  const store = SqliteEventStore.open(":memory:");
+  store.createTopic("a1", "t1", "英伟达");
+  store.setTopicDigest("t1", "第一版", "single_name", 1);
+
+  assert.equal(store.updateTopic("a1", "t1", { category: "strategy" }), true);
+  assert.equal(store.listTopics("a1")[0]?.categoryLocked, true);
+
+  store.setTopicDigest("t1", "第二版", "single_name", 2);
+
+  const topic = store.listTopics("a1")[0];
+  assert.equal(topic?.category, "strategy", "the model must not argue with the user");
+  assert.equal(topic?.summary, "第二版", "but the summary is still refreshed — locking a category is not freezing the blurb");
+  store.close();
+});
+
+test("returning a topic to automatic releases the lock without blanking the label", () => {
+  const store = SqliteEventStore.open(":memory:");
+  store.createTopic("a1", "t1", "英伟达");
+  store.updateTopic("a1", "t1", { category: "strategy" });
+
+  store.updateTopic("a1", "t1", { category: null });
+
+  const released = store.listTopics("a1")[0];
+  assert.equal(released?.categoryLocked, false);
+  assert.equal(released?.category, "strategy",
+    "the topic is not stale, so nothing would reclassify it — blanking here would just make the label vanish");
+
+  // The next digest is now free to overwrite it.
+  store.setTopicDigest("t1", "某缩要", "single_name", 1);
+  assert.equal(store.listTopics("a1")[0]?.category, "single_name");
+  store.close();
+});
+
+test("a digest with no category never blanks one already stored", () => {
+  const store = SqliteEventStore.open(":memory:");
+  store.createTopic("a1", "t1", "英伟达");
+  store.setTopicDigest("t1", "第一版", "single_name", 1);
+
+  // The model replied with prose instead of JSON, so the category was lost.
+  store.setTopicDigest("t1", "第二版", null, 2);
+
+  const topic = store.listTopics("a1")[0];
+  assert.equal(topic?.category, "single_name", "an unparsable reply must not undo a good classification");
+  assert.equal(topic?.summary, "第二版");
+  store.close();
+});
+
+test("staleness tracks the topic's own log", async () => {
+  const store = SqliteEventStore.open(":memory:");
+  store.createTopic("a1", "t1", "T");
+  assert.equal(store.isTopicDigestStale("t1"), false, "a topic with no turns has nothing to summarise");
+  assert.deepEqual(store.listStaleTopics("a1"), []);
+
+  const registry = new SessionRegistry(store);
+  const state = await registry.getOrCreate("t1");
+  state.beginTurn("问");
+  state.recordReply("答", true);
+
+  assert.equal(store.isTopicDigestStale("t1"), true);
+  assert.deepEqual(store.listStaleTopics("a1"), ["t1"]);
+
+  store.setTopicDigest("t1", "缩要", "macro", 1);
+  assert.equal(store.isTopicDigestStale("t1"), false);
+  assert.deepEqual(store.listStaleTopics("a1"), []);
+  store.close();
+});
+
+test("an unknown topic is never reported stale", () => {
+  const store = SqliteEventStore.open(":memory:");
+  assert.equal(store.isTopicDigestStale("ghost"), false);
+  store.close();
+});
+
+test("a database written before the digest columns existed is migrated on open", () => {
+  // CREATE TABLE IF NOT EXISTS is a no-op against an existing table, so a new
+  // column in SCHEMA reaches new databases only. This is the path that covers
+  // everyone who already has a sessions.sqlite on disk.
+  const dir = mkdtempSync(join(tmpdir(), "topic-migrate-"));
+  const path = join(dir, "sessions.sqlite");
+
+  const legacy = new DatabaseSync(path);
+  legacy.exec(`CREATE TABLE chat_rooms (
+    id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, name TEXT NOT NULL,
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, archived_at INTEGER)`);
+  legacy.exec("INSERT INTO chat_rooms VALUES ('t1', 'a1', '旧话题', 100, 100, NULL)");
+  legacy.close();
+
+  const store = SqliteEventStore.open(path);
+  const topic = store.listTopics("a1")[0];
+  assert.equal(topic?.name, "旧话题", "the existing row survives");
+  assert.equal(topic?.summary, null);
+  assert.equal(topic?.category, null);
+  assert.equal(topic?.categoryLocked, false);
+
+  store.setTopicDigest("t1", "缩要", "macro", 1);
+  assert.equal(store.listTopics("a1")[0]?.category, "macro", "the added columns are writable");
+  store.close();
+
+  // Opening again must not try to add them a second time.
+  const reopened = SqliteEventStore.open(path);
+  assert.equal(reopened.listTopics("a1")[0]?.summary, "缩要");
+  reopened.close();
+  rmSync(dir, { recursive: true, force: true });
 });

@@ -5,7 +5,7 @@ import { SessionRegistry } from "../../../framework/sessionState.ts";
 import { InMemoryEventStore } from "../../../framework/eventStore.ts";
 import type { CompactionCache } from "../../../framework/eventStore.ts";
 import type { ResearchMember, TopicChartPreferenceRow, TopicSummary } from "../../../infra/db/sqliteEventStore.ts";
-import { buildIndexedTurns } from "../digest.ts";
+import { buildIndexedTurns } from "../../topicDigest.ts";
 import {
   ResearchToolset,
   parseChunkSelection,
@@ -64,7 +64,10 @@ class FakeStore implements ResearchToolStore {
   seen: Array<{ topicId: string; turn: number }> = [];
 
   createTopic(_agentId: string, topicId: string, name: string, createdAt = Date.now()): TopicSummary {
-    const topic: TopicSummary = { id: topicId, name, leadSymbol: null, createdAt, lastMessage: null, messageCount: 0 };
+    const topic: TopicSummary = {
+      id: topicId, name, leadSymbol: null, createdAt, lastMessage: null, messageCount: 0,
+      summary: null, category: null, categoryLocked: false,
+    };
     this.topics.push(topic);
     return topic;
   }

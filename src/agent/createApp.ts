@@ -15,6 +15,7 @@ import { SqliteEventStore } from "../infra/db/sqliteEventStore.ts";
 import { orchestratorPrompt } from "./prompts/orchestratorPrompt.ts";
 import { createSubagentRegistry } from "./subagents/registerSubagents.ts";
 import { ResearchRuntime } from "./research/researchRuntime.ts";
+import { TopicDigestScheduler } from "../server/topicDigestScheduler.ts";
 import { researchPrompt } from "./research/researchPrompt.ts";
 
 export type FinancialAgentApp = Awaited<ReturnType<typeof createFinancialAgentApp>>;
@@ -55,6 +56,11 @@ export async function createFinancialAgentApp() {
     topicOrchestrator: orchestrator,
   });
 
+  // Keeps every Topic's own summary and category current, in the background.
+  // Nothing reads from it — it only writes to `chat_rooms` — so both the
+  // sidebar and the Research roster pick the result up through the store.
+  const topicDigests = new TopicDigestScheduler({ store: eventStore, sessions, modelRouter });
+
   return {
     eventStore,
     sessions,
@@ -64,6 +70,7 @@ export async function createFinancialAgentApp() {
     skills,
     orchestrator,
     researchRuntime,
+    topicDigests,
     createDispatcher: dispatcherFactory,
   };
 }

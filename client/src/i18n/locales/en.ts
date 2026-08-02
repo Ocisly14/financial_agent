@@ -135,6 +135,23 @@ const en = {
         emptyTitle: "No topics yet",
         emptyDescription:
             "A topic is one unit of research — a ticker or a macro question — and it keeps its charts and conversation across sessions.",
+        grouping: {
+            label: "Group by",
+            recency: "Recent",
+            bySymbol: "Ticker",
+            byCategory: "Category",
+        },
+        setCategory: "Category",
+        categoryAuto: "Automatic",
+        categories: {
+            single_name: "Single name",
+            comparative: "Comparison",
+            sector: "Sector & theme",
+            macro: "Macro & policy",
+            strategy: "Strategy & signals",
+            portfolio: "Portfolio & risk",
+            none: "Unclassified",
+        },
     },
     research: {
         title: "Research",

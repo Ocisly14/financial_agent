@@ -1,6 +1,7 @@
 import type {
     StoredStrategy,
     ExecutionLogEntry,
+    TopicCategory,
     TopicSummary,
     TopicChartPreference,
     ResearchSummary,
@@ -144,10 +145,12 @@ export const apiClient = {
     getTopics: (agentId: string): Promise<{ success: boolean; topics: TopicSummary[] }> =>
         fetcher({ url: `/api/agents/${encodeURIComponent(agentId)}/topics` }),
 
+    /** `category: null` means "back to automatic" — it clears the user's lock
+     *  and lets the next background digest classify the topic again. */
     updateTopic: (
         agentId: string,
         topicId: string,
-        patch: { name?: string },
+        patch: { name?: string; category?: TopicCategory | null },
     ): Promise<{ success: boolean }> =>
         fetcher({
             url: `/api/agents/${encodeURIComponent(agentId)}/topics/${encodeURIComponent(topicId)}`,
