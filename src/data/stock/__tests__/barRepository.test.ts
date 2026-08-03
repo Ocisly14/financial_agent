@@ -156,3 +156,57 @@ test("count limits the number of bars returned and an empty backfill does not wr
   assert.deepEqual(await repo.getBars("NOSUCH", "1Day", 60), []);
   assert.equal(await store.getCoverage("NOSUCH", "1Day"), undefined);
 });
+
+test("getBarsBetween returns the inclusive range in ascending order", async () => {
+  const store = new InMemoryBarStore();
+  await store.putBars("AAPL", "1Day", [
+    bar("2026-01-05", 10),
+    bar("2026-01-06", 20),
+    bar("2026-01-07", 30),
+    bar("2026-01-08", 40),
+  ]);
+  await store.putCoverage({
+    symbol: "AAPL", timeframe: "1Day", firstDate: "2026-01-05", lastDate: "2026-01-08",
+    backfilledAt: "2026-01-08T00:00:00.000Z", lastCheckedAt: "2026-01-08T00:00:00.000Z",
+  });
+  const repo = createBarRepository({
+    store,
+    client: { fetchBars: async () => [] },
+    now: () => new Date("2026-01-08T00:10:00Z"),
+  });
+
+  const bars = await repo.getBarsBetween("AAPL", "1Day", "2026-01-06", "2026-01-07");
+  assert.deepEqual(bars.map((b) => b.t), ["2026-01-06", "2026-01-07"]);
+});
+
+test("getBarsBetween returns nothing when from is after to", async () => {
+  const store = new InMemoryBarStore();
+  await store.putBars("AAPL", "1Day", [bar("2026-01-05", 10)]);
+  await store.putCoverage({
+    symbol: "AAPL", timeframe: "1Day", firstDate: "2026-01-05", lastDate: "2026-01-05",
+    backfilledAt: "2026-01-05T00:00:00.000Z", lastCheckedAt: "2026-01-05T00:00:00.000Z",
+  });
+  const repo = createBarRepository({
+    store,
+    client: { fetchBars: async () => [] },
+    now: () => new Date("2026-01-05T00:10:00Z"),
+  });
+
+  assert.deepEqual(await repo.getBarsBetween("AAPL", "1Day", "2026-02-01", "2026-01-01"), []);
+});
+
+test("getBarsBetween returns nothing when the range misses local coverage", async () => {
+  const store = new InMemoryBarStore();
+  await store.putBars("AAPL", "1Day", [bar("2026-01-05", 10)]);
+  await store.putCoverage({
+    symbol: "AAPL", timeframe: "1Day", firstDate: "2026-01-05", lastDate: "2026-01-05",
+    backfilledAt: "2026-01-05T00:00:00.000Z", lastCheckedAt: "2026-01-05T00:00:00.000Z",
+  });
+  const repo = createBarRepository({
+    store,
+    client: { fetchBars: async () => [] },
+    now: () => new Date("2026-01-05T00:10:00Z"),
+  });
+
+  assert.deepEqual(await repo.getBarsBetween("AAPL", "1Day", "2020-01-01", "2020-06-01"), []);
+});

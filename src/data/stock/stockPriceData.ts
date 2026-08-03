@@ -8,6 +8,7 @@ import {
 import type { BarRepository } from "./barRepository.ts";
 import { etDateString, marketSession, type MarketSession } from "./marketHours.ts";
 import { getSharedBarRepository } from "./sharedRepository.ts";
+import { MAX_RANGE_DAYS } from "./stockChartData.ts";
 
 export const STOCK_PRICE_DATA_SOURCE = "Alpaca (IEX feed)";
 
@@ -34,6 +35,15 @@ export type StockPriceData = {
   dailyBars: DailyBar[];
   dataSource: string;
   intradayBars?: DailyBar[];
+  /** Bars for the requested `window`, unabridged. Absent when the range could
+   *  not be served; `windowNote` then says why. */
+  windowBars?: DailyBar[];
+  /** Present only when the requested window could not be served as asked. */
+  windowNote?: string;
+  /** Present only when `dailyBars` came back empty because the local store
+   *  could not be read, rather than because the ticker genuinely has no
+   *  history in the requested range. */
+  dailyNote?: string;
   staleness?: string;
 };
 
@@ -41,6 +51,10 @@ export type StockPriceQuery = {
   symbol: string;
   historyDays: number;
   includeIntraday: boolean;
+  /** An absolute, inclusive date range, independent of `historyDays`. The two
+   *  have different anchors — trailing-from-today versus fixed — so they are not
+   *  two spellings of one thing, and both may be present. */
+  window?: { from: string; to: string };
 };
 
 export type StockPriceDataDeps = {
@@ -76,6 +90,27 @@ function pct(current: number, base: number): number | null {
   return parseFloat((((current - base) / base) * 100).toFixed(2));
 }
 
+/** MAX_RANGE_DAYS (1260) is a budget of *trading* days, matching the depth the
+ *  local store actually backfills (about five years). capWindowStart works in
+ *  calendar days on purpose — bounding a memory read doesn't need a market
+ *  calendar — so the trading-day budget is converted using the conventional
+ *  ~252 trading days per year. Using MAX_RANGE_DAYS directly as a calendar-day
+ *  count would cap at ~3.45 years instead of ~5, truncating windows the store
+ *  can actually serve. */
+const MAX_WINDOW_CALENDAR_DAYS = Math.round((MAX_RANGE_DAYS * 365) / 252);
+
+/** Pull a window's start forward so it spans at most MAX_WINDOW_CALENDAR_DAYS
+ *  calendar days back from its end. Calendar days, not trading days: the cap
+ *  exists to bound how much gets read into memory, and converting to trading
+ *  days here would need a market calendar for no gain. */
+function capWindowStart(from: string, to: string): string {
+  const end = new Date(`${to}T00:00:00Z`);
+  const earliest = new Date(end);
+  earliest.setUTCDate(earliest.getUTCDate() - MAX_WINDOW_CALENDAR_DAYS);
+  const earliestIso = earliest.toISOString().slice(0, 10);
+  return from < earliestIso ? earliestIso : from;
+}
+
 /**
  * Stock quote use case. Handles the full assembly of the local history store, Alpaca fallback,
  * snapshot, and intraday data, so the upstream MCP/HTTP adapters don't need to know whether the
@@ -94,6 +129,7 @@ export async function loadStockPriceData(
     deps.repository === undefined ? await getSharedBarRepository() : deps.repository;
 
   let dailyBars: DailyBar[] = [];
+  let dailyNote: string | undefined;
   try {
     if (repository) {
       dailyBars = await repository.getBars(query.symbol, "1Day", query.historyDays);
@@ -108,8 +144,13 @@ export async function loadStockPriceData(
       );
       dailyBars = fetched.slice(Math.max(0, fetched.length - query.historyDays));
     }
-  } catch {
+  } catch (error) {
+    // An empty `dailyBars` here is otherwise indistinguishable from a ticker
+    // that genuinely has no history — this note is what tells them apart.
     dailyBars = [];
+    dailyNote = `Daily history for ${query.symbol} could not be loaded: ${
+      error instanceof Error ? error.message : String(error)
+    }.`;
   }
 
   let snapshot: Snapshot | undefined;
@@ -148,6 +189,39 @@ export async function loadStockPriceData(
     }
   }
 
+  let windowBars: DailyBar[] | undefined;
+  let windowNote: string | undefined;
+  if (query.window) {
+    const { from, to } = query.window;
+    if (from > to) {
+      // Not swapped: an inverted range is a mistake upstream, and silently
+      // fixing it hides that the model asked for something it did not mean.
+      windowNote = `The window was ignored: its end (${to}) is before its start (${from}).`;
+    } else {
+      const capped = capWindowStart(from, to);
+      if (capped !== from) {
+        windowNote = `The requested start ${from} was truncated to ${capped} to stay within the ${MAX_RANGE_DAYS}-trading-day budget (~${MAX_WINDOW_CALENDAR_DAYS} calendar days) before ${to}.`;
+      }
+      if (!repository) {
+        // Distinct from "no bars in range": this is a claim about the system,
+        // not about the market, and the two must not read the same.
+        windowNote = `The local bar store is unavailable, so the window ${capped}..${to} could not be checked for ${query.symbol}.`;
+      } else {
+        try {
+          // `repository` is already resolved at the top of loadStockPriceData —
+          // do NOT re-resolve it here.
+          const bars = await repository.getBarsBetween(query.symbol, "1Day", capped, to);
+          if (bars.length > 0) windowBars = bars;
+          else {
+            windowNote = `No stored bars fall in ${capped}..${to} for ${query.symbol}.`;
+          }
+        } catch {
+          windowNote = `The window ${capped}..${to} could not be read.`;
+        }
+      }
+    }
+  }
+
   return {
     ok: true,
     data: {
@@ -166,6 +240,9 @@ export async function loadStockPriceData(
       dailyBars,
       dataSource: STOCK_PRICE_DATA_SOURCE,
       ...(intradayBars ? { intradayBars } : {}),
+      ...(windowBars ? { windowBars } : {}),
+      ...(windowNote ? { windowNote } : {}),
+      ...(dailyNote ? { dailyNote } : {}),
       ...(staleness ? { staleness } : {}),
     },
   };

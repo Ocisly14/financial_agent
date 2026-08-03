@@ -77,7 +77,7 @@ test("aggregates arbitrary minute candles from the 09:30 ET session boundary", (
 });
 
 test("registers nine independently callable stock indicator tools", () => {
-  const repository: BarRepository = { getBars: async () => bars() };
+  const repository: BarRepository = { getBars: async () => bars(), getBarsBetween: async () => [] };
   const tools = createTechnicalIndicatorTools({ getRepository: async () => repository });
 
   assert.deepEqual(tools.map((tool) => tool.name), [...TECHNICAL_TOOL_NAMES]);
@@ -94,6 +94,7 @@ test("an indicator reads the requested stock bars from the repository", async ()
       calls.push({ symbol, timeframe, count });
       return allBars.slice(-count);
     },
+    getBarsBetween: async () => [],
   };
   const tool = createTechnicalIndicatorTools({ getRepository: async () => repository })
     .find((candidate) => candidate.name === "stock_sma")!;
@@ -121,6 +122,7 @@ test("a custom minute indicator reads 1Min bars and returns the aggregated timef
       calls.push({ symbol, timeframe, count });
       return minuteBars(31);
     },
+    getBarsBetween: async () => [],
   };
   const tool = createTechnicalIndicatorTools({ getRepository: async () => repository })
     .find((candidate) => candidate.name === "stock_sma")!;
@@ -141,6 +143,7 @@ test("every indicator returns structured stock data without a prompt template", 
   const allBars = bars();
   const repository: BarRepository = {
     getBars: async (_symbol, _timeframe, count) => allBars.slice(-count),
+    getBarsBetween: async () => [],
   };
 
   for (const tool of createTechnicalIndicatorTools({ getRepository: async () => repository })) {

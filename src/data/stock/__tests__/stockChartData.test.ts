@@ -37,6 +37,7 @@ function makeDeps(over?: Partial<StockChartDataDeps> & { candles?: DailyBar[] })
         repositoryCalls.push({ symbol, timeframe, count });
         return candles.slice(Math.max(0, candles.length - count));
       },
+      getBarsBetween: async () => [],
     },
     loadSnapshot: async () => {
       snapshotCalls++;

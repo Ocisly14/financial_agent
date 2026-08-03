@@ -30,8 +30,18 @@ export type BarStats = {
   count: number;
   first: number;
   last: number;
+  /** Lowest and highest CLOSE, with the day it first occurred. */
   min: { value: number; t: string };
   max: { value: number; t: string };
+  /** Lowest low and highest high — the real extremes of the period, intraday
+   *  included. These exist because a model asked for "the 52-week high" wants
+   *  this, not `max`, and until it was here the only honest answer was a
+   *  closing high wearing the wrong label. They are also the one thing the
+   *  digest could not otherwise recover: `recentBars` carries h/l for the tail
+   *  only, and `trend` carries closes alone, so an extreme in the downsampled
+   *  middle would be invisible. */
+  trueLow: { value: number; t: string };
+  trueHigh: { value: number; t: string };
   mean: number;
   stdev: number;
   returnPct: number;
@@ -96,10 +106,14 @@ function computeStats(bars: readonly DailyBar[]): BarStats {
 
   let min = { value: closes[0]!, t: bars[0]!.t };
   let max = { value: closes[0]!, t: bars[0]!.t };
+  let trueLow = { value: bars[0]!.l, t: bars[0]!.t };
+  let trueHigh = { value: bars[0]!.h, t: bars[0]!.t };
   for (let i = 1; i < bars.length; i++) {
     // Strict comparison keeps the FIRST occurrence of a repeated extreme.
     if (closes[i]! < min.value) min = { value: closes[i]!, t: bars[i]!.t };
     if (closes[i]! > max.value) max = { value: closes[i]!, t: bars[i]!.t };
+    if (bars[i]!.l < trueLow.value) trueLow = { value: bars[i]!.l, t: bars[i]!.t };
+    if (bars[i]!.h > trueHigh.value) trueHigh = { value: bars[i]!.h, t: bars[i]!.t };
   }
 
   const mean = closes.reduce((sum, c) => sum + c, 0) / closes.length;
@@ -112,6 +126,8 @@ function computeStats(bars: readonly DailyBar[]): BarStats {
     last: round2(last),
     min: { value: round2(min.value), t: min.t },
     max: { value: round2(max.value), t: max.t },
+    trueLow: { value: round2(trueLow.value), t: trueLow.t },
+    trueHigh: { value: round2(trueHigh.value), t: trueHigh.t },
     mean: round2(mean),
     stdev: round2(stdev(closes, mean)),
     // A zero opening price would make the ratio infinite; report no move

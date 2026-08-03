@@ -87,6 +87,40 @@ test("min and max report the first occurrence of a repeated extreme", () => {
   assert.equal(stats.max.t, "2021-01-02");
 });
 
+test("trueHigh and trueLow come from h/l, not from the closes", () => {
+  // `bar(t, c)` builds h = c + 1 and l = c - 2, so the real extremes must sit
+  // outside the closing ones — the mismatch is the whole point of the fields.
+  const bars = [bar("2021-01-01", 10), bar("2021-01-02", 30), bar("2021-01-03", 20)];
+  const stats = condenseBars(bars, { keepTail: 3 }).stats!;
+
+  assert.deepEqual(stats.max, { value: 30, t: "2021-01-02" });
+  assert.deepEqual(stats.trueHigh, { value: 31, t: "2021-01-02" });
+  assert.deepEqual(stats.min, { value: 10, t: "2021-01-01" });
+  assert.deepEqual(stats.trueLow, { value: 8, t: "2021-01-01" });
+  assert.ok(stats.trueHigh.value > stats.max.value, "a real high cannot be below the closing high");
+  assert.ok(stats.trueLow.value < stats.min.value, "a real low cannot be above the closing low");
+});
+
+test("a true extreme hidden in the downsampled middle still surfaces", () => {
+  // The spike is neither in recentBars nor recoverable from trend (which carries
+  // closes only), so stats is the only place it can be seen at all.
+  const bars = series(60, () => 100);
+  bars[25] = { t: bars[25]!.t, o: 100, h: 180, l: 40, c: 100, v: 1_000, vw: 100 };
+  const digest = condenseBars(bars);
+
+  assert.equal(digest.stats?.trueHigh.value, 180);
+  assert.equal(digest.stats?.trueLow.value, 40);
+  assert.equal(digest.stats?.max.value, 100, "the spike never touched a close");
+  assert.ok(!digest.recentBars.some((b) => b.h === 180), "the spike is outside the raw tail");
+});
+
+test("min/max and trueHigh/trueLow report the first occurrence of a repeat", () => {
+  const bars = [bar("2021-01-01", 5), bar("2021-01-02", 9), bar("2021-01-03", 5), bar("2021-01-04", 9)];
+  const stats = condenseBars(bars, { keepTail: 4 }).stats!;
+  assert.equal(stats.trueLow.t, "2021-01-01");
+  assert.equal(stats.trueHigh.t, "2021-01-02");
+});
+
 test("a monotonic rise has no drawdown", () => {
   const stats = condenseBars(series(50, (i) => 100 + i), { keepTail: 50 }).stats!;
   assert.equal(stats.maxDrawdownPct, 0);

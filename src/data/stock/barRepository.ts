@@ -14,6 +14,8 @@ const SPLIT_EPSILON = 0.0001;
 
 export type BarRepository = {
   getBars(symbol: string, timeframe: Timeframe, count: number): Promise<DailyBar[]>;
+  /** Bars for an absolute, inclusive date range. `from > to` yields an empty array. */
+  getBarsBetween(symbol: string, timeframe: Timeframe, from: string, to: string): Promise<DailyBar[]>;
 };
 
 export type BarRepositoryDeps = {
@@ -103,47 +105,66 @@ export function createBarRepository(deps: BarRepositoryDeps): BarRepository {
     return true;
   }
 
+  /** Bring the local store up to date for this symbol/timeframe, then leave the
+   *  reading to the caller. Shared by both public readers so their freshness
+   *  behaviour cannot drift apart. */
+  async function ensureFresh(symbol: string, timeframe: Timeframe): Promise<void> {
+    const current = now();
+    const nowIso = current.toISOString();
+    const today = isoDate(current);
+    const coverage = await store.getCoverage(symbol, timeframe);
+
+    if (!coverage) {
+      await backfill(symbol, timeframe, today, nowIso);
+      return;
+    }
+
+    const checkedAgeMs = current.getTime() - new Date(coverage.lastCheckedAt).getTime();
+    const freshnessMs = deps.freshnessMs ?? freshnessFor(timeframe);
+    if (checkedAgeMs < freshnessMs) return;
+
+    const from = incrementalFrom(timeframe, coverage.lastDate);
+    const fetched = await client.fetchBars(symbol, timeframe, from, today);
+
+    if (fetched.length === 0) {
+      await store.putCoverage({ ...coverage, lastCheckedAt: nowIso });
+      return;
+    }
+
+    const overlap = await store.getBarsOnOrAfter(symbol, timeframe, from);
+    if (hasSplitDivergence(overlap, fetched)) {
+      await store.clearSymbol(symbol, timeframe);
+      await backfill(symbol, timeframe, today, nowIso);
+      return;
+    }
+
+    await store.putBars(symbol, timeframe, fetched);
+    const newest = fetched[fetched.length - 1]!.t;
+    await store.putCoverage({
+      ...coverage,
+      lastDate: newest > coverage.lastDate ? newest : coverage.lastDate,
+      lastCheckedAt: nowIso,
+    });
+  }
+
   return {
     async getBars(symbol: string, timeframe: Timeframe, count: number): Promise<DailyBar[]> {
-      const current = now();
-      const nowIso = current.toISOString();
-      const today = isoDate(current);
-      const coverage = await store.getCoverage(symbol, timeframe);
-
-      if (!coverage) {
-        await backfill(symbol, timeframe, today, nowIso);
-        return store.getBars(symbol, timeframe, count);
-      }
-
-      const checkedAgeMs = current.getTime() - new Date(coverage.lastCheckedAt).getTime();
-      const freshnessMs = deps.freshnessMs ?? freshnessFor(timeframe);
-      if (checkedAgeMs < freshnessMs) {
-        return store.getBars(symbol, timeframe, count);
-      }
-
-      const from = incrementalFrom(timeframe, coverage.lastDate);
-      const fetched = await client.fetchBars(symbol, timeframe, from, today);
-
-      if (fetched.length === 0) {
-        await store.putCoverage({ ...coverage, lastCheckedAt: nowIso });
-        return store.getBars(symbol, timeframe, count);
-      }
-
-      const overlap = await store.getBarsOnOrAfter(symbol, timeframe, from);
-      if (hasSplitDivergence(overlap, fetched)) {
-        await store.clearSymbol(symbol, timeframe);
-        await backfill(symbol, timeframe, today, nowIso);
-        return store.getBars(symbol, timeframe, count);
-      }
-
-      await store.putBars(symbol, timeframe, fetched);
-      const newest = fetched[fetched.length - 1]!.t;
-      await store.putCoverage({
-        ...coverage,
-        lastDate: newest > coverage.lastDate ? newest : coverage.lastDate,
-        lastCheckedAt: nowIso,
-      });
+      await ensureFresh(symbol, timeframe);
       return store.getBars(symbol, timeframe, count);
+    },
+
+    async getBarsBetween(
+      symbol: string,
+      timeframe: Timeframe,
+      from: string,
+      to: string,
+    ): Promise<DailyBar[]> {
+      if (from > to) return [];
+      // Same freshness and backfill path as getBars: a second, divergent copy of
+      // that logic is a worse cost than the one coverage comparison it saves.
+      await ensureFresh(symbol, timeframe);
+      const onOrAfter = await store.getBarsOnOrAfter(symbol, timeframe, from);
+      return onOrAfter.filter((bar) => bar.t <= to);
     },
   };
 }
