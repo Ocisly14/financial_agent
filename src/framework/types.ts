@@ -54,6 +54,8 @@ export type SkillResult = {
   task_results?: TaskResult[];
   artifacts?: ArtifactRef[];
   error?: { code: string; message: string };
+  /** 技能正文。渐进披露的第二级：只在 invoke 之后的轮次进入上下文。 */
+  content?: string;
 };
 
 export type ToolCategory = "main" | "non_trading" | "trading";
@@ -91,13 +93,17 @@ export type ToolExecutionResult = {
  * One decision the orchestrator emits per loop iteration. `reply` is always the
  * user-facing message for this turn (a short status line when an action is taken,
  * the final answer when all action fields are null). `dispatch` / `skill` /
- * `tool_call` are mutually exclusive — at most one is non-null per step.
+ * `tool_calls` may share a step; `skill` is exclusive of both.
  */
+export type OrchestratorToolCall = { name: string; input: JsonObject };
+
 export type OrchestratorStep = {
   reply: string;
   dispatch: TaskRequest[] | null;
   skill: string | null;
-  tool_call: { name: string; input: JsonObject } | null;
+  /** Plural because reading two references should not cost two loop iterations
+   *  out of the step budget. A single `tool_call` object is still parsed. */
+  tool_calls: OrchestratorToolCall[] | null;
 };
 
 export type SSEEvent =

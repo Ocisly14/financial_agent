@@ -41,6 +41,10 @@ export function projectEvent(event: SessionEvent, state: SessionState): SSEEvent
     case "workflow_done":
       return [{ type: "workflow_done", workflow_id: p.workflow_id as string, status: p.status as "ok" | "failed", summary: p.summary as string }];
     case "error":
+      // A protocol violation is the orchestrator talking to itself: it reads the
+      // message back on the next step and corrects. Surfacing it would show the
+      // user an error for something that self-heals within the same turn.
+      if (p.scope === "protocol") return [];
       return [{ type: "error", scope: (p.scope as "main" | "task") ?? "main", message: p.message as string }];
     case "reply":
       if (p.final !== true) return [{ type: "step_reply", content: p.content as string }];

@@ -32,6 +32,12 @@ export async function createFinancialAgentApp() {
   const skills = new SkillRegistry();
   await skills.loadFromDirectory(resolveSkillsPath());
 
+  const { createReadSkillReferenceTool, createRunSkillScriptTool } = await import(
+    "../../mcp_tools/skill/skillFileTools.ts"
+  );
+  toolRegistry.register(createReadSkillReferenceTool(skills));
+  toolRegistry.register(createRunSkillScriptTool(skills));
+
   const dispatcherFactory = (sessionId: string) =>
     new Dispatcher(sessionId, subagents, subagentRuntime, toolRegistry, sessions.getExisting(sessionId));
 

@@ -41,7 +41,7 @@ const APPROVAL_TTL_MS = 15 * 60_000;
 /** Allowed (source, kind) pairs. Lightweight fail-fast guard against dirty events. */
 const KINDS: Record<Source, ReadonlySet<string>> = {
   user: new Set(["user_message"]),
-  orchestrator: new Set(["reply", "dispatch", "skill_invoke", "error", "tool_use", "tool_result"]),
+  orchestrator: new Set(["reply", "dispatch", "skill_invoke", "skill_result", "error", "tool_use", "tool_result"]),
   market_data: new Set(["task_result", "tool_use", "tool_result"]),
   market_research: new Set(["task_result", "tool_use", "tool_result"]),
   trading_operations: new Set(["task_result", "tool_use", "tool_result", "approval_required", "approval_resolved"]),
@@ -360,6 +360,18 @@ export class SessionState {
       if (e.kind === "reply") progressLines.push(`You: ${e.payload.content as string}`);
       else if (e.kind === "dispatch") progressLines.push(`[dispatch → ${e.payload.agent}] ${e.payload.task as string}`);
       else if (e.kind === "skill_invoke") progressLines.push(`[skill ${e.payload.skill as string}]`);
+      // The orchestrator's own errors — a malformed step, a protocol violation —
+      // are the one class of failure it can actually correct, but only if it can
+      // see them. Without this the same bad step just repeats until the budget runs out.
+      else if (e.kind === "error") progressLines.push(`[error] ${e.payload.message as string}`);
+      else if (e.kind === "skill_result") {
+        const content = e.payload.content as string | undefined;
+        progressLines.push(
+          content
+            ? `[skill ${e.payload.skill as string}]\n${content}`
+            : `[skill ${e.payload.skill as string}] ${e.payload.summary as string}`,
+        );
+      }
       else if (e.kind === "approval_required" && this.isApprovalPendingEvent(e)) progressLines.push(this.formatApprovalRequiredLine(e));
       else if (e.kind === "task_result") progressLines.push(this.formatTaskResultLine(e, artifacts));
       else if (e.kind === "tool_result" && !e.is_sidechain) {

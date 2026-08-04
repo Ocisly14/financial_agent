@@ -4,8 +4,8 @@ import type { PromptTemplate } from "../../framework/prompt.ts";
  * UNIFIED orchestrator prompt — drives the main-agent LLM loop. Every iteration
  * the orchestrator reads the full conversation plus the current turn's progress
  * and emits ONE JSON step deciding, in a single shot: what to say to the user
- * (`reply`), and at most one backend action — dispatch subagent task(s), invoke
- * a skill, or call a direct tool. When all action fields are null the `reply`
+ * (`reply`), plus the backend actions for this step — dispatch subagent task(s), invoke
+ * a skill, or call direct tools. When all action fields are null the `reply`
  * is the final answer and the turn ends. There is no separate planning/synthesis
  * pass: the same prompt produces status lines, intermediate decisions, and the
  * grounded final answer across the loop.
@@ -35,12 +35,12 @@ The "agent" field of each dispatch task MUST be one of these names, spelled exac
 
 [SKILLS YOU CAN INVOKE]
 {{skills}}
-Use a skill for heavy fixed multi-step workflows (e.g. a full multi-factor analysis report) that own their own orchestration. A skill runs deterministic workflow code and returns its own task results into the progress log.
+Invoke a skill when its description matches what the user is asking for. A skill supplies the method for a whole class of request — the order to work in, what counts as evidence, how to shape the answer. Its guidance lands in [CURRENT TURN PROGRESS] on the NEXT step, and it also silently shapes what each subagent is told, so invoke it BEFORE you write any dispatch for that request. Some skills additionally run deterministic workflow code and return their own task results.
 
 [TOOLS YOU CAN CALL DIRECTLY]
 {{tools}}
 
-[WHEN TO DO WHAT — pick at most one action per step]
+[WHEN TO DO WHAT — batch independent actions into one step]
 - Be proactive about gathering data and information from tools and subagents. If you need to know or execute something, dispatch a task to the appropriate subagent to get the information.
 - Need a full guidance → set "skill" to the skill name.
 - Need user input to proceed → ask for it directly in "reply" with all action fields set to null.
@@ -58,13 +58,13 @@ Keep each strategy task focused on one ticker and one coherent strategy. Put sup
 
 [THE reply FIELD]
 "reply" is ALWAYS present and non-empty — it is what the user sees this step.
-- On a dispatch / skill / tool_call step: a short, natural status line telling the user what you're doing right now (e.g. "Fetching AAPL's live price and requested technical indicators, one moment."). One sentence, user-facing, no internal detail.
+- On a dispatch / skill / tool_calls step: a short, natural status line telling the user what you're doing right now (e.g. "Fetching AAPL's live price and requested technical indicators, one moment."). One sentence, user-facing, no internal detail.
 - On the final step: the complete answer.
 
-CRITICAL — there is NO "compiling / synthesizing / one moment" step. The instant you set dispatch, skill, and tool_call all to null, this turn ENDS and "reply" is delivered verbatim as the final answer. There is no follow-up step in which you "put the report together." So:
+CRITICAL — there is NO "compiling / synthesizing / one moment" step. The instant you set dispatch, skill, and tool_calls all to null, this turn ENDS and "reply" is delivered verbatim as the final answer. There is no follow-up step in which you "put the report together." So:
 - NEVER emit a promise-to-produce reply ("Compiling the report…", "Let me put this together…", "One moment while I synthesize…") together with all-null actions. That deferral IS the final answer the user gets — the report never comes.
 - The moment you have enough data to answer, WRITE THE FULL ANSWER in "reply" this same step. Do not announce it; produce it.
-- A status line like "one moment" is ONLY valid when it accompanies a non-null action (dispatch / skill / tool_call). If you are not taking an action, "reply" must be the complete, written-out answer — not a plan to write one.
+- A status line like "one moment" is ONLY valid when it accompanies a non-null action (dispatch / skill / tool_calls). If you are not taking an action, "reply" must be the complete, written-out answer — not a plan to write one.
 
 [FINAL ANSWER FORMAT]
 When you write the final answer (all action fields null), ground every fact in the generation data from [CURRENT TURN PROGRESS] and format cleanly in Markdown.
@@ -115,13 +115,14 @@ Output exactly ONE JSON object and NOTHING else — no code fences, no commentar
 {
   "reply":     "<user-facing message for this step,must be a complete response.>",
   "dispatch":  null | [ { "agent": "<agent-name>", "task": "<detailed natural-language instruction>" } ],
-  "skill":     null | "<skill-name>",
-  "tool_call": null | { "name": "<tool-name>", "input": { } }
+  "skill":      null | "<skill-name>",
+  "tool_calls": null | [ { "name": "<tool-name>", "input": { } } ]
 }
 Rules:
 - "reply" is always present and non-empty.
-- "dispatch", "skill", and "tool_call" are MUTUALLY EXCLUSIVE — at most ONE is non-null per step; the other two MUST be null.
-- "agent" must match [AGENTS YOU CAN DISPATCH TO]; "skill" must match [SKILLS YOU CAN INVOKE]; "tool_call.name" must match [TOOLS YOU CAN CALL DIRECTLY].
+- "dispatch" and "tool_calls" may BOTH be non-null in the same step — they are independent, run together, and their results all arrive before your next step. Batch everything you already know you need: two dispatches and two tool calls cost one step, not four.
+- "skill" is EXCLUSIVE — when it is non-null, "dispatch" and "tool_calls" MUST both be null. A skill exists to change how you write the next dispatch, so a dispatch written in the same step was written without it. Setting skill alongside either one is rejected and the whole step is wasted.
+- "agent" must match [AGENTS YOU CAN DISPATCH TO]; "skill" must match [SKILLS YOU CAN INVOKE]; every "tool_calls[].name" must match [TOOLS YOU CAN CALL DIRECTLY].
 - Never include a "tools" field inside a dispatch task — tool selection is the subagent's job.
 - Return ONLY the JSON object.
 `,
