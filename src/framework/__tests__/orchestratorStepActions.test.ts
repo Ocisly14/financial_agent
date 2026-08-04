@@ -18,7 +18,7 @@ import type { JsonObject, TaskRequest } from "../types.ts";
  */
 
 type Harness = {
-  run: (steps: string[]) => Promise<void>;
+  run: (steps: string[], options?: { allowUserInput?: boolean }) => Promise<void>;
   dispatched: TaskRequest[];
   toolCalls: { name: string; input: JsonObject }[];
   sessions: SessionRegistry;
@@ -43,7 +43,7 @@ function harness(): Harness {
   // Both orchestrator-level tools, stubbed: the branch under test is the loop's,
   // not the tools' own behaviour (they have their own tests).
   const tools = new McpToolRegistry();
-  for (const name of ["read_skill_reference", "run_skill_script"]) {
+  for (const name of ["read_skill_reference", "run_skill_script", "ask_user"]) {
     tools.register({
       name,
       description: "d",
@@ -51,6 +51,21 @@ function harness(): Harness {
       inputSchema: { type: "object" },
       execute: async (input: JsonObject) => {
         toolCalls.push({ name, input });
+        if (name === "ask_user") {
+          return {
+            summary: "waiting",
+            user_input_request: {
+              request_id: "input_test",
+              questions: [{
+                id: "q",
+                question: "Pick one",
+                options: [{ id: "a", label: "A" }, { id: "b", label: "B" }],
+                min_selections: 1,
+                max_selections: 1,
+              }],
+            },
+          };
+        }
         return { summary: `${name} ok` };
       },
     });
@@ -64,7 +79,7 @@ function harness(): Harness {
     dispatched,
     toolCalls,
     sessions,
-    run: async (steps: string[]) => {
+    run: async (steps: string[], options?: { allowUserInput?: boolean }) => {
       let call = 0;
       const provider: LlmProvider = {
         name: "stub",
@@ -83,7 +98,7 @@ function harness(): Harness {
         tools,
         sessions,
       );
-      await orchestrator.run({ sessionId: "s", userMessage: "go" });
+      await orchestrator.run({ sessionId: "s", userMessage: "go", ...options });
     },
   };
 }
@@ -164,4 +179,49 @@ test("the protocol error is visible to the model, so it can correct itself next 
   const progress = state.projectForPrompt(1).currentTurnProgress;
   assert.match(progress, /skill/i);
   assert.match(progress, /exclusive|同时|mutually/i);
+});
+
+test("ask_user records a request and ends the turn without another model step", async () => {
+  const h = harness();
+
+  await h.run([
+    JSON.stringify({ reply: "Choose what fits.", tool_calls: [{ name: "ask_user", input: { questions: [] } }] }),
+    JSON.stringify({ reply: "this must not be reached" }),
+  ]);
+
+  const state = h.sessions.getExisting("s");
+  assert.equal(state.userInputRequest("input_test")?.status, "pending");
+  const final = [...state.allEvents()].reverse().find((event) => event.kind === "reply" && event.payload.final === true);
+  assert.equal(final?.payload.content, "Choose what fits.");
+  assert.equal(h.toolCalls.filter((call) => call.name === "ask_user").length, 1);
+});
+
+test("ask_user is rejected when mixed with another action", async () => {
+  const h = harness();
+
+  await h.run([
+    JSON.stringify({
+      reply: "mixed",
+      tool_calls: [
+        { name: "ask_user", input: {} },
+        { name: "read_skill_reference", input: { path: "a.md" } },
+      ],
+    }),
+    JSON.stringify({ reply: "done" }),
+  ]);
+
+  assert.equal(h.toolCalls.length, 0);
+  assert.match(h.sessions.getExisting("s").projectForPrompt(1).currentTurnProgress, /ask_user must be the only action/);
+});
+
+test("ask_user is unavailable when a Research controller drives a Topic in the background", async () => {
+  const h = harness();
+
+  await h.run([
+    JSON.stringify({ reply: "choose", tool_calls: [{ name: "ask_user", input: {} }] }),
+    JSON.stringify({ reply: "missing input returned to caller" }),
+  ], { allowUserInput: false });
+
+  assert.equal(h.toolCalls.length, 0);
+  assert.equal(h.sessions.getExisting("s").userInputRequest("input_test"), undefined);
 });

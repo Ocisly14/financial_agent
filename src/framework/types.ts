@@ -5,6 +5,8 @@ export type TaskStatus = "ok" | "failed" | "timeout";
 
 export type SkillStatus = "loaded" | "ok" | "failed";
 
+export type SkillLayer = "topic" | "research";
+
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 export type JsonObject = { [key: string]: JsonValue };
@@ -18,6 +20,42 @@ export type ArtifactRef = {
 export type GenerationContext = {
   prompt?: string;
   data: JsonObject;
+};
+
+export type UserInputOption = {
+  id: string;
+  label: string;
+  description?: string;
+  recommended?: boolean;
+};
+
+export type UserInputQuestion = {
+  id: string;
+  header?: string;
+  question: string;
+  options: UserInputOption[];
+  min_selections: number;
+  max_selections: number;
+};
+
+export type UserInputRequest = {
+  request_id: string;
+  questions: UserInputQuestion[];
+};
+
+export type UserInputAnswer = {
+  question_id: string;
+  selected_option_ids: string[];
+};
+
+export type UserInputResponse = {
+  request_id: string;
+  answers: UserInputAnswer[];
+};
+
+export type UserInputRequestView = UserInputRequest & {
+  status: "pending" | "answered" | "skipped";
+  answers?: UserInputAnswer[];
 };
 
 export type TaskRequest = {
@@ -87,6 +125,8 @@ export type ToolExecutionResult = {
     approval_id: string;
     payload: JsonObject;
   };
+  /** Turn-ending request rendered by the client as structured choices. */
+  user_input_request?: UserInputRequest;
 };
 
 /**
@@ -119,5 +159,5 @@ export type SSEEvent =
   | { type: "artifact"; task_id: string; artifact: ArtifactRef }
   | { type: "approval_required"; approval_id: string; payload: JsonObject }
   | { type: "error"; scope: "main" | "task"; task_id?: string; message: string }
-  | { type: "final"; sessionId: string; response: string; artifacts: { n: number; type: "file" | "url"; ref: string; label: string }[]; visualizations: JsonObject[]; sources: CitationSource[] }
+  | { type: "final"; sessionId: string; response: string; artifacts: { n: number; type: "file" | "url"; ref: string; label: string }[]; visualizations: JsonObject[]; sources: CitationSource[]; input_request?: UserInputRequestView }
   | { type: "done"; reason: "complete" | "stopped" | "disconnected" };

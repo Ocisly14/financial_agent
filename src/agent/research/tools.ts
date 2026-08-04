@@ -69,7 +69,7 @@ export type ResearchToolStore = {
 /** The existing OrchestratorRuntime, seen through the only method this layer
  *  is allowed to use — the same one `handleChat` calls. */
 export type TopicOrchestrator = {
-  run(input: { sessionId: string; userMessage: string }): Promise<{ response: string }>;
+  run(input: { sessionId: string; userMessage: string; allowUserInput?: boolean }): Promise<{ response: string }>;
 };
 
 export type SessionAccess = Pick<SessionRegistry, "getOrCreate" | "loadEvents">;
@@ -291,14 +291,26 @@ export class ResearchToolset {
   private readonly askSemaphore = new Semaphore(ASK_TOPIC_CONCURRENCY);
   /** Recursion depth 1: a Topic already driven THIS turn cannot be re-entered. */
   private drivenThisTurn = new Set<string>();
+  /** The active skill's `## for: topic` section. Becomes visible text on the
+   *  member Topic's own timeline, so it is written in the user's voice and
+   *  carries no internal marker here. */
+  private topicSection = "";
 
   constructor(ctx: ResearchToolContext) {
     this.ctx = ctx;
   }
 
-  /** Resets per-turn state. Call once at the start of every controller turn. */
+  /** Resets per-turn state. Call once at the start of every controller turn.
+   *  Deliberately does NOT reset `topicSection` — the skill is invoked
+   *  within the turn, and resetting here would erase it within that same
+   *  turn. */
   beginTurn(): void {
     this.drivenThisTurn = new Set<string>();
+  }
+
+  /** Called by the Research runtime after a skill is invoked. */
+  setTopicSection(section: string): void {
+    this.topicSection = section.trim();
   }
 
   private newId(prefix: string): string {
@@ -323,11 +335,13 @@ export class ResearchToolset {
    */
   async askTopic(topicId: string, message: string): Promise<AskTopicResult> {
     const topicName = this.topicName(topicId);
-    const task = message.trim();
-
-    if (!task) {
+    const trimmed = message.trim();
+    if (!trimmed) {
       return { topicId, topicName, status: "failed", reason: "message is empty" };
     }
+    // Appended after the empty-message check: a message that's only guidance,
+    // with no instruction, should not count as a valid drive.
+    const task = this.topicSection ? `${trimmed}\n\n${this.topicSection}` : trimmed;
     if (this.drivenThisTurn.has(topicId)) {
       // Recursion depth 1 (§4.4): one drive per Topic per controller turn.
       const result: AskTopicResult = {
@@ -349,7 +363,7 @@ export class ResearchToolset {
       let response: string;
       try {
         const result = await withTimeout(
-          this.ctx.orchestrator.run({ sessionId: topicId, userMessage: task }),
+          this.ctx.orchestrator.run({ sessionId: topicId, userMessage: task, allowUserInput: false }),
           this.ctx.askTimeoutMs ?? ASK_TOPIC_TIMEOUT_MS,
           `ask_topic(${topicId})`,
         );

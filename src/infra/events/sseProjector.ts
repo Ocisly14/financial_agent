@@ -97,6 +97,7 @@ function buildFinal(event: SessionEvent, state: SessionState): SSEEvent {
       artifacts.push({ n: n++, type: a.type, ref: a.ref, label: a.label ?? "" });
     }
   }
+  const inputRequest = state.userInputRequestForTurn(event.turn);
   return {
     type: "final",
     sessionId: state.session_id,
@@ -104,6 +105,7 @@ function buildFinal(event: SessionEvent, state: SessionState): SSEEvent {
     artifacts,
     visualizations,
     sources: collectTurnSources(state.allEvents(), event.turn),
+    ...(inputRequest ? { input_request: inputRequest } : {}),
   };
 }
 

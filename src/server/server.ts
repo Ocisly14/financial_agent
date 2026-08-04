@@ -7,7 +7,7 @@ import { attachSse } from "../infra/events/sseProjector.ts";
 import type { FinancialAgentApp } from "../agent/createApp.ts";
 import type { TopicChartPreferenceRow, TopicCategory } from "../infra/db/sqliteEventStore.ts";
 import { asTopicCategory, TOPIC_CATEGORIES } from "../infra/db/sqliteEventStore.ts";
-import type { TaskResult } from "../framework/types.ts";
+import type { TaskResult, UserInputAnswer, UserInputRequest, UserInputResponse } from "../framework/types.ts";
 import { handleStockQuote, parseRangeDays } from "./stockMarketRoutes.ts";
 import { handleLinkPreview } from "./linkPreview.ts";
 import { projectChatHistory } from "./chatHistory.ts";
@@ -99,23 +99,105 @@ function sseWrite(res: http.ServerResponse, data: unknown): void {
   res.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
+type ChatBody = {
+  message?: string;
+  sessionId?: string;
+  inputResponse?: {
+    requestId?: unknown;
+    answers?: unknown;
+  };
+};
+
+export function validateUserInputAnswers(
+  request: UserInputRequest,
+  rawAnswers: unknown,
+): { response: UserInputResponse; message: string } | { error: string } {
+  if (!Array.isArray(rawAnswers)) return { error: "inputResponse.answers must be an array" };
+
+  const byQuestion = new Map<string, string[]>();
+  for (const raw of rawAnswers) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      return { error: "each input response answer must be an object" };
+    }
+    const answer = raw as { questionId?: unknown; selectedOptionIds?: unknown };
+    if (typeof answer.questionId !== "string" || !Array.isArray(answer.selectedOptionIds)) {
+      return { error: "each answer requires questionId and selectedOptionIds" };
+    }
+    if (byQuestion.has(answer.questionId)) return { error: `duplicate answer for question '${answer.questionId}'` };
+    if (!answer.selectedOptionIds.every((id): id is string => typeof id === "string")) {
+      return { error: `selectedOptionIds for '${answer.questionId}' must contain only strings` };
+    }
+    if (new Set(answer.selectedOptionIds).size !== answer.selectedOptionIds.length) {
+      return { error: `selectedOptionIds for '${answer.questionId}' must be unique` };
+    }
+    byQuestion.set(answer.questionId, answer.selectedOptionIds);
+  }
+
+  if (byQuestion.size !== request.questions.length) {
+    return { error: "answers must include every question exactly once" };
+  }
+
+  const answers: UserInputAnswer[] = [];
+  const lines: string[] = [];
+  for (const question of request.questions) {
+    const selected = byQuestion.get(question.id);
+    if (!selected) return { error: `missing answer for question '${question.id}'` };
+    if (selected.length < question.min_selections || selected.length > question.max_selections) {
+      return {
+        error: `question '${question.id}' requires ${question.min_selections}-${question.max_selections} selections`,
+      };
+    }
+    const options = new Map(question.options.map((option) => [option.id, option]));
+    const unknown = selected.find((id) => !options.has(id));
+    if (unknown) return { error: `unknown option '${unknown}' for question '${question.id}'` };
+    answers.push({ question_id: question.id, selected_option_ids: selected });
+    lines.push(`${question.question}: ${selected.map((id) => options.get(id)!.label).join(", ")}`);
+  }
+
+  return {
+    response: { request_id: request.request_id, answers },
+    message: lines.join("\n"),
+  };
+}
+
 async function handleChat(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   app: FinancialAgentApp,
 ): Promise<void> {
-  let body: { message?: string; sessionId?: string };
+  let body: ChatBody;
   try {
-    body = JSON.parse(await readBody(req)) as { message?: string; sessionId?: string };
+    body = JSON.parse(await readBody(req)) as ChatBody;
   } catch {
     return jsonError(res, 400, "Invalid JSON body");
   }
 
-  const message = (body.message ?? "").trim();
-  if (!message) return jsonError(res, 400, "message is required");
-
+  if (body.inputResponse && !body.sessionId) {
+    return jsonError(res, 400, "sessionId is required for inputResponse");
+  }
   const sessionId = body.sessionId ?? newId("sess");
   const agentId = (req.headers["x-agent-id"] as string | undefined) ?? "default";
+  const state = await app.sessions.getOrCreate(sessionId);
+
+  let message: string;
+  let inputResponse: UserInputResponse | undefined;
+  if (body.inputResponse) {
+    const requestId = body.inputResponse.requestId;
+    if (typeof requestId !== "string" || !requestId.trim()) {
+      return jsonError(res, 400, "inputResponse.requestId is required");
+    }
+    const requestView = state.userInputRequest(requestId);
+    if (!requestView) return jsonError(res, 404, "user input request not found");
+    if (requestView.status !== "pending") return jsonError(res, 409, `user input request is ${requestView.status}`);
+    const request = state.pendingUserInput(requestId)!;
+    const validated = validateUserInputAnswers(request, body.inputResponse.answers);
+    if ("error" in validated) return jsonError(res, 400, validated.error);
+    inputResponse = validated.response;
+    message = validated.message;
+  } else {
+    message = (body.message ?? "").trim();
+    if (!message) return jsonError(res, 400, "message is required");
+  }
 
   // A Research id is also its session id (spec §3), exactly like a Topic id.
   // So the ONE thing that decides which runtime handles this turn is whether a
@@ -135,7 +217,7 @@ async function handleChat(
 
   const keepaliveMs = Number.parseInt(process.env["SSE_KEEPALIVE_INTERVAL"] ?? "15000", 10);
   const keepalive = setInterval(() => res.write(": ping\n\n"), keepaliveMs);
-  const unsubscribe = attachSse(await app.sessions.getOrCreate(sessionId), (frame) => sseWrite(res, frame));
+  const unsubscribe = attachSse(state, (frame) => sseWrite(res, frame));
   activeWorkflows.set(agentId, { kind: "task_chain", startedAt: Date.now(), sessionId });
 
   try {
@@ -145,6 +227,7 @@ async function handleChat(
         researchId: sessionId,
         researchName: research.name,
         userMessage: message,
+        ...(inputResponse ? { inputResponse } : {}),
         // §4.5: the driven Topic's own dispatch / tool_call / task_done frames
         // are never forwarded here — they belong to that Topic's stream. What
         // reaches this stream is the one compressed line the toolset emits.
@@ -154,7 +237,7 @@ async function handleChat(
       // in; without this the sidebar would order Researches by creation only.
       app.eventStore.renameResearch(agentId, sessionId, research.name);
     } else {
-      await app.orchestrator.run({ sessionId, userMessage: message });
+      await app.orchestrator.run({ sessionId, userMessage: message, ...(inputResponse ? { inputResponse } : {}) });
     }
   } catch (error) {
     sseWrite(res, { type: "error", scope: "main", message: String(error) });

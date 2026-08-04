@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { Dispatcher } from "../framework/dispatcher.ts";
 import { OrchestratorRuntime } from "../framework/orchestrator.ts";
 import { SkillRegistry } from "../framework/skill.ts";
+import { createReadSkillReferenceTool, createRunSkillScriptTool } from "../framework/skillTools.ts";
 import { SubagentRuntime } from "../framework/subagent.ts";
 import { MockLlmProvider, ModelRouter, type LlmProvider } from "../infra/llm/provider.ts";
 import { AnthropicProvider } from "../infra/llm/anthropicProvider.ts";
@@ -32,9 +33,6 @@ export async function createFinancialAgentApp() {
   const skills = new SkillRegistry();
   await skills.loadFromDirectory(resolveSkillsPath());
 
-  const { createReadSkillReferenceTool, createRunSkillScriptTool } = await import(
-    "../../mcp_tools/skill/skillFileTools.ts"
-  );
   toolRegistry.register(createReadSkillReferenceTool(skills));
   toolRegistry.register(createRunSkillScriptTool(skills));
 
@@ -60,6 +58,8 @@ export async function createFinancialAgentApp() {
     store: eventStore,
     sessions,
     topicOrchestrator: orchestrator,
+    tools: toolRegistry,
+    skills,
   });
 
   // Keeps every Topic's own summary and category current, in the background.

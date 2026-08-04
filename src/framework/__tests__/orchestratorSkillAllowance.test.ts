@@ -46,7 +46,7 @@ test("a dispatch issued from inside a skill's workflow is subject to that skill'
   skills.registerWorkflow("narrow-workflow", async (skill, context) => {
     // Declares only market_data — this dispatch to trading_operations must be
     // refused by the allowance, not silently executed.
-    await context.dispatcher.dispatch([{ agent: "trading_operations", task: "should be blocked" }]);
+    await context.dispatcher!.dispatch([{ agent: "trading_operations", task: "should be blocked" }]);
     return { skill: skill.name, status: "ok", summary: "workflow ran" };
   });
 

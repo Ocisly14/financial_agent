@@ -2,7 +2,7 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast as sonnerToast } from "sonner";
-import type { UUID } from "@/types/core";
+import type { UUID, UserInputAnswer, UserInputRequestView, UserInputSubmission } from "@/types/core";
 import { apiClient, StreamingApiClient, type ProcessingStep } from "@/lib/api";
 import type { StrategyApprovalDialogData } from "@/components/Dialog/StrategyApprovalDialog";
 import { useToast } from "@/hooks/use-toast";
@@ -73,10 +73,30 @@ export function useTopicStream(
         [queryClient, queryKey]
     );
 
-    const sendMessage = useCallback(
-        async (text: string) => {
+    const updateInputRequests = useCallback(
+        (update: (request: UserInputRequestView) => UserInputRequestView) => {
+            queryClient.setQueryData<ContentWithUser[]>(queryKey, (previous) =>
+                (previous ?? []).map((message) => {
+                    const content = (message as { content?: { metadata?: Record<string, unknown> } }).content;
+                    const request = content?.metadata?.inputRequest as UserInputRequestView | undefined;
+                    if (!request) return message;
+                    return {
+                        ...message,
+                        content: {
+                            ...content,
+                            metadata: { ...content?.metadata, inputRequest: update(request) },
+                        },
+                    } as ContentWithUser;
+                }),
+            );
+        },
+        [queryClient, queryKey],
+    );
+
+    const runTurn = useCallback(
+        async (text: string, inputResponse?: UserInputSubmission): Promise<boolean> => {
             const trimmed = text.trim();
-            if (!trimmed || isProcessing || isHistoryLoading) return;
+            if (!trimmed || isProcessing || isHistoryLoading) return false;
             const now = Date.now();
             appendMessages([
                 { id: `user-${now}`, user: "user", text: trimmed, createdAt: now } as unknown as ContentWithUser,
@@ -85,6 +105,7 @@ export function useTopicStream(
             setStreamingText("");
             tasksRef.current = new Map();
             setLiveTasks([]);
+            let failed = false;
             try {
                 await streaming.sendMessageStream(
                     agentId,
@@ -178,6 +199,7 @@ export function useTopicStream(
                     },
                     undefined, // onTopicUpdate
                     (err) => {
+                        failed = true;
                         setIsConnected(false);
                         const message = typeof err === "string" ? err : err?.message ?? "Error";
                         appendMessages([
@@ -193,13 +215,57 @@ export function useTopicStream(
                     undefined, // selectedFiles
                     undefined, // messageClassification
                     undefined, // language
+                    0,
+                    inputResponse,
                 );
             } catch {
+                failed = true;
+            } finally {
                 setIsProcessing(false);
                 setStreamingText("");
             }
+            return !failed;
         },
         [agentId, topicId, isProcessing, isHistoryLoading, appendMessages, streaming, queryClient, navigate]
+    );
+
+    const sendMessage = useCallback(
+        async (text: string) => {
+            updateInputRequests((request) =>
+                request.status === "pending" ? { ...request, status: "skipped" } : request,
+            );
+            await runTurn(text);
+        },
+        [runTurn, updateInputRequests],
+    );
+
+    const submitUserInput = useCallback(
+        async (request: UserInputRequestView, answers: UserInputAnswer[]) => {
+            if (request.status !== "pending" || isProcessing || isHistoryLoading) return;
+            const previous = queryClient.getQueryData<ContentWithUser[]>(queryKey);
+            updateInputRequests((candidate) =>
+                candidate.request_id === request.request_id
+                    ? { ...candidate, status: "answered", answers }
+                    : candidate,
+            );
+
+            const byQuestion = new Map(answers.map((answer) => [answer.question_id, answer.selected_option_ids]));
+            const text = request.questions.map((question) => {
+                const selected = new Set(byQuestion.get(question.id) ?? []);
+                const labels = question.options.filter((option) => selected.has(option.id)).map((option) => option.label);
+                return `${question.question}: ${labels.join(", ")}`;
+            }).join("\n");
+            const inputResponse: UserInputSubmission = {
+                requestId: request.request_id,
+                answers: answers.map((answer) => ({
+                    questionId: answer.question_id,
+                    selectedOptionIds: answer.selected_option_ids,
+                })),
+            };
+            const ok = await runTurn(text, inputResponse);
+            if (!ok) queryClient.setQueryData(queryKey, previous);
+        },
+        [isProcessing, isHistoryLoading, queryClient, queryKey, runTurn, updateInputRequests],
     );
 
     const stop = useCallback(() => {
@@ -254,6 +320,7 @@ export function useTopicStream(
         pendingApproval: pendingInterrupt?.payload ?? null,
         isConnected,
         sendMessage,
+        submitUserInput,
         stop,
         resolveApproval,
     };

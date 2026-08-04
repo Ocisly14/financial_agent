@@ -7,7 +7,7 @@ import type { SessionRegistry, SessionState } from "./sessionState.ts";
 import { maybeCompact } from "./contextCompaction.ts";
 import type { McpToolRegistry } from "../../mcp_tools/toolRegistry.ts";
 import type { PromptTemplate } from "./prompt.ts";
-import type { AgentKind, JsonObject, OrchestratorStep, OrchestratorToolCall, SkillResult, TaskRequest } from "./types.ts";
+import type { AgentKind, JsonObject, OrchestratorStep, OrchestratorToolCall, SkillResult, TaskRequest, UserInputRequest, UserInputResponse } from "./types.ts";
 
 /** Max orchestrator loop iterations per user turn — a runaway-loop backstop. */
 const MAX_STEPS = 6;
@@ -154,6 +154,9 @@ function normalizeToolCalls(raw: unknown): OrchestratorToolCall[] | null {
 export type OrchestratorInput = {
   sessionId: string;
   userMessage: string;
+  inputResponse?: UserInputResponse;
+  /** False for agent-to-agent Topic drives, where no human is watching that Topic stream. */
+  allowUserInput?: boolean;
 };
 
 /** Result of a turn. Task results / artifacts are read from the session log
@@ -164,7 +167,7 @@ export type OrchestratorResult = {
 };
 
 /** Tools the orchestrator can call directly (by name). */
-const ORCHESTRATOR_DIRECT_TOOLS = new Set<string>(["read_skill_reference", "run_skill_script"]);
+const ORCHESTRATOR_DIRECT_TOOLS = new Set<string>(["read_skill_reference", "run_skill_script", "ask_user"]);
 
 function normalizeToolError(output: { summary: string; error?: { code: string; message: string } }): { code: string; message: string } | undefined {
   if (output.error) return output.error;
@@ -206,7 +209,10 @@ export class OrchestratorRuntime {
 
   async run(input: OrchestratorInput): Promise<OrchestratorResult> {
     const state = await this.sessions.getOrCreate(input.sessionId);
-    const turn = state.beginTurn(input.userMessage);
+    if (input.inputResponse && !state.pendingUserInput(input.inputResponse.request_id)) {
+      throw new Error(`user input request '${input.inputResponse.request_id}' is no longer pending`);
+    }
+    const turn = state.beginTurn(input.userMessage, input.inputResponse);
     await maybeCompact(state, this.modelRouter, turn);
 
     const dispatcher = this.dispatcherFactory(input.sessionId);
@@ -215,6 +221,9 @@ export class OrchestratorRuntime {
 
     let skillResult: SkillResult | undefined;
     let finalReply = "";
+    const directTools = input.allowUserInput === false
+      ? new Set([...this.orchestratorTools].filter((name) => name !== "ask_user"))
+      : this.orchestratorTools;
 
     for (let step = 1; step <= MAX_STEPS; step++) {
       const proj = state.projectForPrompt(turn);
@@ -229,7 +238,7 @@ export class OrchestratorRuntime {
         subagents: formatList(this.subagents.list().map((a) => ({ name: a.name, description: a.description }))),
         skills: formatList(this.skills.list().map((s) => ({ name: s.name, description: s.description }))),
         tools: formatList(this.tools.list()
-          .filter((t) => this.orchestratorTools.has(t.name))
+          .filter((t) => directTools.has(t.name))
           .map((t) => ({ name: t.name, description: t.description }))),
       });
 
@@ -267,12 +276,33 @@ export class OrchestratorRuntime {
         continue;
       }
 
+      const askUserCalls = (stepObj.tool_calls ?? []).filter((call) => call.name === "ask_user");
+      const askUserMixed = askUserCalls.length > 0 && (
+        askUserCalls.length > 1 ||
+        (stepObj.dispatch?.length ?? 0) > 0 ||
+        (stepObj.tool_calls?.length ?? 0) !== askUserCalls.length
+      );
+      if (askUserCalls.length > 0 && input.allowUserInput === false) {
+        state.record("orchestrator", "error", {
+          scope: "protocol",
+          message: "ask_user is unavailable in an agent-to-agent Topic run; return the missing information to the caller instead",
+        });
+        continue;
+      }
+      if (askUserMixed) {
+        state.record("orchestrator", "error", {
+          scope: "protocol",
+          message: "ask_user must be the only action in its step and may only be called once",
+        });
+        continue;
+      }
+
       // --- dispatch + tool_calls: independent of each other, so they share a step ---
       const tasks: TaskRequest[] = (stepObj.dispatch ?? [])
         .filter((t) => t && typeof t.task === "string" && t.task.trim() && validAgents.has(t.agent as AgentKind))
         .map((t) => ({ agent: t.agent as AgentKind, task: t.task.trim() }));
 
-      const toolCalls = (stepObj.tool_calls ?? []).filter((call) => this.orchestratorTools.has(call.name));
+      const toolCalls = (stepObj.tool_calls ?? []).filter((call) => directTools.has(call.name));
 
       if (tasks.length > 0 || toolCalls.length > 0) {
         const tradingRetryBlocked = tasks.some((task) => task.agent === "trading_operations")
@@ -286,12 +316,17 @@ export class OrchestratorRuntime {
           finalReply = tradingRetryBlocked.summary;
           break;
         }
-        if (status) state.recordReply(status, false);
-        await Promise.all([
+        const isAskingUser = toolCalls.some((call) => call.name === "ask_user");
+        if (status && !isAskingUser) state.recordReply(status, false);
+        const [, toolOutcomes] = await Promise.all([
           // Subagents write their own task_result events.
           tasks.length > 0 ? dispatcher.dispatch(tasks) : Promise.resolve(),
-          ...toolCalls.map((call) => this.runOrchestratorTool(call, input.sessionId, state)),
+          Promise.all(toolCalls.map((call) => this.runOrchestratorTool(call, input.sessionId, state))),
         ]);
+        if (toolOutcomes.some(Boolean)) {
+          finalReply = status || "Please answer the questions below.";
+          break;
+        }
         continue;
       }
 
@@ -350,7 +385,7 @@ export class OrchestratorRuntime {
     call: OrchestratorToolCall,
     sessionId: string,
     state: SessionState,
-  ): Promise<void> {
+  ): Promise<UserInputRequest | undefined> {
     const { name, input: toolInput } = call;
     state.record("orchestrator", "tool_use", { name, input: toolInput });
     try {
@@ -361,11 +396,16 @@ export class OrchestratorRuntime {
       const normalizedError = normalizeToolError(output);
       if (normalizedError) toolResultPayload.error = normalizedError;
       state.record("orchestrator", "tool_result", toolResultPayload);
+      if (output.user_input_request) {
+        state.recordUserInputRequest(output.user_input_request);
+        return output.user_input_request;
+      }
     } catch (error) {
       state.record("orchestrator", "tool_result", {
         name,
         error: { code: "tool_error", message: error instanceof Error ? error.message : String(error) },
       });
     }
+    return undefined;
   }
 }

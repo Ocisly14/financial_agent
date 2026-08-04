@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { ChatComposer } from "@/components/ChatComposer";
-import type { UUID } from "@/types/core";
+import type { UUID, UserInputRequestView } from "@/types/core";
 import {
     ChatBubbleMessage,
     ChatBubbleTimestamp,
@@ -17,6 +17,7 @@ import type { MessageSource } from "@/components/marks/citationContext";
 import { MessageTimeContext } from "@/components/stockChartContext";
 import type { ContentWithUser } from "@/components/chat/types";
 import { ChatProgressPill, type ProgressTask } from "@/components/ChatProgressPill";
+import { UserInputCard } from "@/components/chat/UserInputCard";
 import { cn, moment } from "@/lib/utils";
 import type { useTopicStream } from "@/hooks/useTopicStream";
 
@@ -124,7 +125,19 @@ export function ConversationPane({ agentId, title, subtitle, stream, input, onIn
         const metadata = (m as { content?: { metadata?: Record<string, unknown> }; metadata?: Record<string, unknown> })
             .content?.metadata ?? (m as { metadata?: Record<string, unknown> }).metadata;
         const sources = Array.isArray(metadata?.sources) ? (metadata.sources as MessageSource[]) : [];
-        return <MarkdownRenderer streaming={streaming} sources={sources}>{m.text ?? ""}</MarkdownRenderer>;
+        const inputRequest = metadata?.inputRequest as UserInputRequestView | undefined;
+        return (
+            <>
+                <MarkdownRenderer streaming={streaming} sources={sources}>{m.text ?? ""}</MarkdownRenderer>
+                {inputRequest ? (
+                    <UserInputCard
+                        key={inputRequest.request_id}
+                        request={inputRequest}
+                        onSubmit={stream.submitUserInput}
+                    />
+                ) : null}
+            </>
+        );
     };
 
     const renderAssistantBubble = (

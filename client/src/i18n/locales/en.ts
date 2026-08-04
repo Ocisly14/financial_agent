@@ -181,6 +181,16 @@ const en = {
         approvalFailedTitle: "Approval Failed",
         approvalFailedFallback: "Failed to submit approval",
         inputPlaceholder: "Type your message here...",
+        userInput: {
+            title: "Questions from the agent",
+            questionNumber: "Question {{number}}",
+            selectionRange: "Select {{min}}–{{max}}",
+            recommended: "Recommended",
+            submit: "Submit choices",
+            submitting: "Submitting…",
+            answered: "Choices submitted",
+            skipped: "Skipped",
+        },
     },
     audio: {
         unableToStartRecording: "Unable to start recording",

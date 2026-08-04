@@ -14,7 +14,7 @@ Rules:
 - Never call a tool already shown in [PROGRESS SO FAR] with the same arguments — that work is done.
 - When the task is satisfied (or no tool fits), finish.
 - Technical indicators are separate tools. Call only the indicators needed for the task; call independent indicators in parallel when several are requested.
-- Every stock data or indicator call MUST include an explicit symbol. Never default to a ticker. Pass timeframe, period, and history_bars only when the task requires non-default values.
+- Every stock data or indicator call MUST include an explicit symbol, except get_sector_analysis: omit sector_symbols for a full market-sector overview, pass one supported sector ETF for a single-sector question, or pass the explicit subset the user asks to compare. Never default an ordinary stock tool to a ticker. Pass timeframe, period, and history_bars only when the task requires non-default values.
 - The "task" string is sent automatically; pass the structured arguments required by each tool.
 
 Output contract — return EXACTLY one JSON object and nothing else:

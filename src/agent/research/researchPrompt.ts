@@ -27,6 +27,13 @@ import type { PromptTemplate } from "../../framework/prompt.ts";
  */
 export const RESEARCH_TOOL_SPECS: { name: string; description: string }[] = [
   {
+    name: "ask_user",
+    description:
+      'Ask the user for structured input and end the current turn. This MUST be the only tool call in the step. ' +
+      'input: {"questions":[1-3 items shaped as {"id":"stable_id","header":"optional short label","question":"text","options":[2-8 items shaped as {"id":"stable_id","label":"short title","description":"optional tradeoff","recommended":false}],"min_selections":1,"max_selections":2}]}. ' +
+      'All questions are submitted together. Recommendation badges never preselect an option.',
+  },
+  {
     name: "ask_topic",
     description:
       'Deliver an instruction to a member Topic as the user would, wait for it to finish, and get back its final answer. ' +
@@ -103,6 +110,10 @@ Facts belong to the Topic; judgment belongs to you.
 - Your job is the thing that only makes sense from above multiple Topics: comparing, weighing tradeoffs, surfacing where they diverge or share a common driver, and forming one synthesized judgment.
 - You have no market-data or data tools of your own. Every number you can use comes from some member Topic's answer or from the verbatim text fetch_from_topic returns.
 
+[SKILLS YOU CAN INVOKE]
+{{skills}}
+Invoke a skill when its description matches what the user is asking for. A skill supplies the method for a whole class of request — the order to work in, when to stop and ask the user, what shape the answer takes. Its guidance lands in [CURRENT TURN PROGRESS] on the NEXT step, and it also silently shapes what each member Topic is told, so invoke it BEFORE you write any ask_topic for that request.
+
 [YOUR MEMBERS]
 {{roster}}
 {{externalDelta}}
@@ -120,7 +131,9 @@ Each turn you run in a loop. Every iteration you read [CONVERSATION SO FAR] (whe
 6. Do not deflect with disclaimers like "I can't give investment advice" — give a clear, data-grounded judgment.
 
 [WHEN TO DO WHAT]
+- The request matches a skill's description → set "skill" to its name, with tool_calls null.
 - Need new facts → ask_topic (dispatch several in one step whenever they can run in parallel).
+- Need user input that can be expressed as 1-3 selectable questions → call ask_user as the only tool in the step; put a concise introduction in reply and do not repeat every option there.
 - Want to know what a member already said → fetch_from_topic. When unsure whether it already covered something, fetch first and decide whether to ask afterward — that's cheaper than re-asking outright.
 - Missing a line of investigation → create_topic, then ask_topic to get it started.
 - Before talking about a member → focus, so the user's view matches what you're about to say.
@@ -147,11 +160,15 @@ CRITICAL — there is no "now compiling" step. The instant you set tool_calls to
 Output exactly ONE JSON object and nothing else — no code fences, no commentary:
 {
   "reply": "<what the user sees this step; the final step is the complete answer>",
+  "skill": null | "<skill-name>",
   "tool_calls": null | [ { "name": "<tool name>", "input": { } } ]
 }
 Rules:
 - "reply" is always present and non-empty.
 - "tool_calls" is an array; multiple calls in one step run in parallel; it must be null (or empty) when no tool is called.
+- Exception: ask_user is turn-ending and must be called exactly once with no other tool call in that step.
+- "skill" is EXCLUSIVE — when it is non-null, "tool_calls" MUST be null. A skill exists to change how you write the next ask_topic, so an ask_topic written in the same step was written without it. Setting both is rejected and the whole step is wasted.
+- "skill" must match a name from [SKILLS YOU CAN INVOKE].
 - "name" must exactly match a name from [TOOLS YOU CAN CALL], and "input" must match the shape given in that tool's description.
 - topic_id must be a real member id that appeared in the roster or your own history — never invent one.
 - Return only that JSON object.

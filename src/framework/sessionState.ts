@@ -1,5 +1,14 @@
 import { newId } from "./ids.ts";
-import type { AgentKind, ArtifactRef, GenerationContext, JsonObject, TaskResult } from "./types.ts";
+import type {
+  AgentKind,
+  ArtifactRef,
+  GenerationContext,
+  JsonObject,
+  TaskResult,
+  UserInputRequest,
+  UserInputRequestView,
+  UserInputResponse,
+} from "./types.ts";
 import type { CompactionCache, EventStore } from "./eventStore.ts";
 
 /**
@@ -41,7 +50,7 @@ const APPROVAL_TTL_MS = 15 * 60_000;
 /** Allowed (source, kind) pairs. Lightweight fail-fast guard against dirty events. */
 const KINDS: Record<Source, ReadonlySet<string>> = {
   user: new Set(["user_message"]),
-  orchestrator: new Set(["reply", "dispatch", "skill_invoke", "skill_result", "error", "tool_use", "tool_result"]),
+  orchestrator: new Set(["reply", "dispatch", "skill_invoke", "skill_result", "error", "tool_use", "tool_result", "user_input_required"]),
   market_data: new Set(["task_result", "tool_use", "tool_result"]),
   market_research: new Set(["task_result", "tool_use", "tool_result"]),
   trading_operations: new Set(["task_result", "tool_use", "tool_result", "approval_required", "approval_resolved"]),
@@ -123,9 +132,14 @@ export class SessionState {
 
   // ── convenience writers ──────────────────────────────────────────────
   /** Start a new user turn and record the message. Returns the new turn number. */
-  beginTurn(content: string): number {
+  beginTurn(content: string, inputResponse?: UserInputResponse): number {
     this.turn += 1;
-    this.record("user", "user_message", { content });
+    const payload: JsonObject = { content };
+    if (inputResponse) {
+      payload.response_to = inputResponse.request_id;
+      payload.input_response = inputResponse as unknown as JsonObject;
+    }
+    this.record("user", "user_message", payload);
     return this.turn;
   }
 
@@ -305,6 +319,49 @@ export class SessionState {
     return { approval_id: approvalId, payload: req.payload.payload as JsonObject };
   }
 
+  recordUserInputRequest(request: UserInputRequest): SessionEvent {
+    return this.record("orchestrator", "user_input_required", {
+      request: request as unknown as JsonObject,
+    });
+  }
+
+  /** The request plus its append-only derived state. The first later user turn
+   *  either answers this exact request or skips it by moving on. */
+  userInputRequest(requestId: string): UserInputRequestView | undefined {
+    const event = [...this.events].reverse().find((candidate) => {
+      if (candidate.kind !== "user_input_required") return false;
+      const request = candidate.payload.request as unknown as UserInputRequest | undefined;
+      return request?.request_id === requestId;
+    });
+    if (!event) return undefined;
+    return this.userInputViewForEvent(event);
+  }
+
+  pendingUserInput(requestId: string): UserInputRequest | undefined {
+    const view = this.userInputRequest(requestId);
+    if (!view || view.status !== "pending") return undefined;
+    const { status: _status, answers: _answers, ...request } = view;
+    return request;
+  }
+
+  userInputRequestForTurn(turn: number): UserInputRequestView | undefined {
+    const event = this.events.find((candidate) => candidate.turn === turn && candidate.kind === "user_input_required");
+    return event ? this.userInputViewForEvent(event) : undefined;
+  }
+
+  private userInputViewForEvent(event: SessionEvent): UserInputRequestView {
+    const request = event.payload.request as unknown as UserInputRequest;
+    const nextUserMessage = this.events.find(
+      (candidate) => candidate.kind === "user_message" && candidate.turn > event.turn,
+    );
+    if (!nextUserMessage) return { ...request, status: "pending" };
+    const response = nextUserMessage.payload.input_response as unknown as UserInputResponse | undefined;
+    if (nextUserMessage.payload.response_to === request.request_id && response) {
+      return { ...request, status: "answered", answers: response.answers };
+    }
+    return { ...request, status: "skipped" };
+  }
+
   /** Fold workflow_* events into a progress view. Replaces the old workflows store. */
   workflow(workflowId: string): DerivedWorkflow | undefined {
     const evs = this.events.filter((e) => e.payload.workflow_id === workflowId);
@@ -373,6 +430,7 @@ export class SessionState {
         );
       }
       else if (e.kind === "approval_required" && this.isApprovalPendingEvent(e)) progressLines.push(this.formatApprovalRequiredLine(e));
+      else if (e.kind === "user_input_required") progressLines.push(this.formatUserInputRequiredLine(e));
       else if (e.kind === "task_result") progressLines.push(this.formatTaskResultLine(e, artifacts));
       else if (e.kind === "tool_result" && !e.is_sidechain) {
         const name = e.payload.name as string;
@@ -444,6 +502,12 @@ export class SessionState {
       ? String(payload["summary"] ?? `strategy ${String(payload["strategy_id"] ?? approvalId)}`)
       : `strategy ${approvalId}`;
     return `[strategy approval_required] approval_id=${approvalId} | ${summary} is awaiting user approval; the strategy has not been activated yet.`;
+  }
+
+  private formatUserInputRequiredLine(e: SessionEvent): string {
+    const request = e.payload.request as unknown as UserInputRequest;
+    const questions = request.questions.map((question) => question.question).join(" | ");
+    return `[user input requested] request_id=${request.request_id} | ${questions}`;
   }
 
   private isApprovalPendingEvent(e: SessionEvent): boolean {

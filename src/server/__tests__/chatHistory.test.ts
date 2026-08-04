@@ -49,6 +49,49 @@ test("chat history includes non-final step replies in event order", () => {
   ]);
 });
 
+test("chat history restores answered and skipped input cards", () => {
+  const answered = new SessionState("room-input", "2026-08-04T00:00:00.000Z");
+  answered.beginTurn("Help me choose");
+  answered.recordUserInputRequest({
+    request_id: "input_answered",
+    questions: [{
+      id: "risk",
+      question: "Risk level?",
+      options: [{ id: "low", label: "Low" }, { id: "high", label: "High" }],
+      min_selections: 1,
+      max_selections: 1,
+    }],
+  });
+  answered.recordReply("Choose one.", true);
+  answered.beginTurn("Risk level?: Low", {
+    request_id: "input_answered",
+    answers: [{ question_id: "risk", selected_option_ids: ["low"] }],
+  });
+  answered.recordReply("Got it.", true);
+
+  const answeredCard = projectChatHistory(answered.allEvents())[1]?.content?.metadata?.inputRequest;
+  assert.equal(answeredCard?.status, "answered");
+  assert.deepEqual(answeredCard?.answers, [{ question_id: "risk", selected_option_ids: ["low"] }]);
+
+  const skipped = new SessionState("room-skipped", "2026-08-04T00:00:00.000Z");
+  skipped.beginTurn("Help me choose");
+  skipped.recordUserInputRequest({
+    request_id: "input_skipped",
+    questions: [{
+      id: "risk",
+      question: "Risk level?",
+      options: [{ id: "low", label: "Low" }, { id: "high", label: "High" }],
+      min_selections: 1,
+      max_selections: 1,
+    }],
+  });
+  skipped.recordReply("Choose one.", true);
+  skipped.beginTurn("Never mind");
+  skipped.recordReply("Okay.", true);
+
+  assert.equal(projectChatHistory(skipped.allEvents())[1]?.content?.metadata?.inputRequest?.status, "skipped");
+});
+
 test("chat history carries retrieved sources so citations can be rendered inline", () => {
   const state = new SessionState("room-3", "2026-07-30T00:00:00.000Z");
   state.beginTurn("NVDA 有什么传闻");

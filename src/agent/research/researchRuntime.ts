@@ -39,8 +39,10 @@
 import { formatList, PromptRenderer, type PromptTemplate } from "../../framework/prompt.ts";
 import { maybeCompact } from "../../framework/contextCompaction.ts";
 import type { SessionEvent, SessionRegistry, SessionState } from "../../framework/sessionState.ts";
-import type { JsonObject } from "../../framework/types.ts";
+import type { JsonObject, UserInputRequest, UserInputResponse } from "../../framework/types.ts";
 import type { ModelRouter } from "../../infra/llm/provider.ts";
+import type { SkillRegistry } from "../../framework/skill.ts";
+import type { McpToolRegistry } from "../../../mcp_tools/toolRegistry.ts";
 import type { TopicChartPreferenceRow } from "../../infra/db/sqliteEventStore.ts";
 import { mapWithConcurrency } from "./concurrency.ts";
 import { buildIndexedTurns, turnCountOf } from "../topicDigest.ts";
@@ -93,6 +95,8 @@ export type ResearchRuntimeDeps = {
   /** The EXISTING, untouched Topic orchestrator. `ask_topic` calls exactly the
    *  method `handleChat` calls for a human turn. */
   topicOrchestrator: TopicOrchestrator;
+  tools: McpToolRegistry;
+  skills: SkillRegistry;
 };
 
 export type ResearchRunInput = {
@@ -100,6 +104,7 @@ export type ResearchRunInput = {
   researchId: string;
   researchName: string;
   userMessage: string;
+  inputResponse?: UserInputResponse;
   /** Research-layer frames (§4.5). The caller writes them to the SSE stream;
    *  standard reply/token/final frames still come from `attachSse`. */
   emit: (frame: ResearchFrame) => void;
@@ -108,7 +113,7 @@ export type ResearchRunInput = {
 export type ResearchRunResult = { response: string };
 
 type ToolCall = { name: string; input: JsonObject };
-type ResearchStep = { reply: string; toolCalls: ToolCall[] };
+type ResearchStep = { reply: string; skill: string | null; toolCalls: ToolCall[] };
 
 // ── step parsing ──────────────────────────────────────────────────────────
 
@@ -166,16 +171,17 @@ function asToolCall(value: unknown): ToolCall | null {
 export function parseResearchStep(text: string): ResearchStep {
   const cleaned = stripCodeFence(text);
   const json = extractJsonObject(cleaned);
-  if (!json) return { reply: text.trim(), toolCalls: [] };
+  if (!json) return { reply: text.trim(), skill: null, toolCalls: [] };
 
   let raw: Record<string, unknown>;
   try {
     raw = JSON.parse(json) as Record<string, unknown>;
   } catch {
-    return { reply: text.trim(), toolCalls: [] };
+    return { reply: text.trim(), skill: null, toolCalls: [] };
   }
 
   const reply = typeof raw.reply === "string" ? raw.reply : "";
+  const skill = typeof raw.skill === "string" && raw.skill.trim() ? raw.skill.trim() : null;
   const candidates = Array.isArray(raw.tool_calls)
     ? raw.tool_calls
     : raw.tool_call
@@ -184,6 +190,7 @@ export function parseResearchStep(text: string): ResearchStep {
 
   return {
     reply,
+    skill,
     toolCalls: candidates.map(asToolCall).filter((call): call is ToolCall => call !== null),
   };
 }
@@ -197,6 +204,8 @@ export class ResearchRuntime {
   private readonly store: ResearchRuntimeStore;
   private readonly sessions: SessionRegistry;
   private readonly topicOrchestrator: TopicOrchestrator;
+  private readonly tools: McpToolRegistry;
+  private readonly skills: SkillRegistry;
 
   constructor(deps: ResearchRuntimeDeps) {
     this.prompt = deps.prompt;
@@ -204,11 +213,16 @@ export class ResearchRuntime {
     this.store = deps.store;
     this.sessions = deps.sessions;
     this.topicOrchestrator = deps.topicOrchestrator;
+    this.tools = deps.tools;
+    this.skills = deps.skills;
   }
 
   async run(input: ResearchRunInput): Promise<ResearchRunResult> {
     const state = await this.sessions.getOrCreate(input.researchId);
-    const turn = state.beginTurn(input.userMessage);
+    if (input.inputResponse && !state.pendingUserInput(input.inputResponse.request_id)) {
+      throw new Error(`user input request '${input.inputResponse.request_id}' is no longer pending`);
+    }
+    const turn = state.beginTurn(input.userMessage, input.inputResponse);
     await maybeCompact(state, this.modelRouter, turn);
 
     const toolset = new ResearchToolset({
@@ -225,6 +239,10 @@ export class ResearchRuntime {
 
     const { roster, externalDelta } = await this.buildMemberContext(input, state);
     const tools = formatList(RESEARCH_TOOL_SPECS);
+    const researchSkills = this.skills.list("research");
+    const skills = researchSkills.length
+      ? formatList(researchSkills.map((skill) => ({ name: skill.name, description: skill.description })))
+      : "(No skills are available.)";
 
     let finalReply = "";
 
@@ -236,6 +254,7 @@ export class ResearchRuntime {
         roster,
         externalDelta,
         tools,
+        skills,
       });
 
       let completionText: string;
@@ -260,17 +279,67 @@ export class ResearchRuntime {
       const parsed = parseResearchStep(completionText);
       const status = parsed.reply.trim();
 
+      if (parsed.skill) {
+        if (parsed.toolCalls.length > 0) {
+          state.record("orchestrator", "error", {
+            scope: "protocol",
+            message:
+              "skill is exclusive with tool_calls — invoke the skill alone, then act on its guidance in the next step",
+          });
+          continue;
+        }
+        const skill = this.skills.get(parsed.skill, "research");
+        if (!skill) {
+          const available = researchSkills.map((s) => s.name).join(", ") || "(none)";
+          state.record("orchestrator", "error", {
+            scope: "protocol",
+            message: `unknown skill '${parsed.skill}'; available skills: ${available}`,
+          });
+          continue;
+        }
+        if (status) state.recordReply(status, false);
+        state.record("orchestrator", "skill_invoke", { skill: skill.name });
+        // The section has to land here: the ask_topic written next step is what carries it.
+        toolset.setTopicSection(skill.topicSection ?? "");
+        const result = await this.skills.invoke(skill.name, {
+          sessionId: state.session_id,
+          userMessage: input.userMessage,
+          state,
+        });
+        state.record("orchestrator", "skill_result", {
+          skill: result.skill,
+          status: result.status,
+          summary: result.summary,
+          ...(result.content ? { content: result.content } : {}),
+        });
+        continue;
+      }
+
+      const askUserCalls = parsed.toolCalls.filter((call) => call.name === "ask_user");
+      if (askUserCalls.length > 0 && (askUserCalls.length > 1 || parsed.toolCalls.length !== 1)) {
+        state.record("orchestrator", "error", {
+          scope: "protocol",
+          message: "ask_user must be the only tool call in its step and may only be called once",
+        });
+        continue;
+      }
+
       if (parsed.toolCalls.length === 0) {
         finalReply = parsed.reply;
         break;
       }
 
-      if (status) state.recordReply(status, false);
+      const isAskingUser = askUserCalls.length === 1;
+      if (status && !isAskingUser) state.recordReply(status, false);
       // Calls in one step run together: three `ask_topic`s issued at once is the
       // whole reason the concurrency guard exists.
-      await mapWithConcurrency(parsed.toolCalls, MAX_PARALLEL_TOOL_CALLS, (call) =>
+      const outcomes = await mapWithConcurrency(parsed.toolCalls, MAX_PARALLEL_TOOL_CALLS, (call) =>
         this.invokeTool(toolset, state, call),
       );
+      if (outcomes.some(Boolean)) {
+        finalReply = status || "Please answer the questions below.";
+        break;
+      }
     }
 
     if (!finalReply.trim()) {
@@ -432,6 +501,11 @@ export class ResearchRuntime {
       }
       case "error":
         return `[runtime error] ${String(payload.message ?? "")}`;
+      case "skill_result": {
+        const content = String(payload.content ?? "");
+        const head = `[skill ${String(payload.skill ?? "")}] ${String(payload.summary ?? "")}`;
+        return content ? `${head}\n${content}` : head;
+      }
       default:
         return null;
     }
@@ -447,9 +521,20 @@ export class ResearchRuntime {
    * Research's (§4.4). Bad arguments are reported back to the model in the same
    * shape, so it can correct itself on the next step rather than crash the turn.
    */
-  private async invokeTool(toolset: ResearchToolset, state: SessionState, call: ToolCall): Promise<void> {
+  private async invokeTool(toolset: ResearchToolset, state: SessionState, call: ToolCall): Promise<UserInputRequest | undefined> {
     state.record("orchestrator", "tool_use", { name: call.name, input: call.input });
     try {
+      if (call.name === "ask_user") {
+        const output = await this.tools.call("ask_user", call.input, { sessionId: state.session_id });
+        const payload: JsonObject = { name: call.name, summary: output.summary };
+        if (output.error) payload.error = output.error;
+        state.record("orchestrator", "tool_result", payload);
+        if (output.user_input_request) {
+          state.recordUserInputRequest(output.user_input_request);
+          return output.user_input_request;
+        }
+        return undefined;
+      }
       const { summary, data } = await this.executeTool(toolset, call);
       const payload: JsonObject = { name: call.name, summary };
       if (data !== undefined) payload.data = data as JsonObject[string];
@@ -460,6 +545,7 @@ export class ResearchRuntime {
         error: { code: "research_tool_error", message: error instanceof Error ? error.message : String(error) },
       });
     }
+    return undefined;
   }
 
   private async executeTool(

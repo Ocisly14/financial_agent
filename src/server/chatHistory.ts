@@ -1,5 +1,5 @@
 import type { SessionEvent } from "../framework/sessionState.ts";
-import type { ArtifactRef, JsonObject } from "../framework/types.ts";
+import type { ArtifactRef, JsonObject, UserInputRequest, UserInputRequestView, UserInputResponse } from "../framework/types.ts";
 import { collectTurnSources, type CitationSource } from "../framework/citationSources.ts";
 
 type ProgressTask = {
@@ -28,6 +28,7 @@ export type ChatHistoryMessage = {
       artifacts: Array<ArtifactRef & { n: number }>;
       visualizations: JsonObject[];
       sources: CitationSource[];
+      inputRequest?: UserInputRequestView;
     };
   };
   progressTasks?: ProgressTask[];
@@ -37,6 +38,19 @@ function turnDetails(events: readonly SessionEvent[], turn: number) {
   const artifacts: Array<ArtifactRef & { n: number }> = [];
   const visualizations: JsonObject[] = [];
   const progressTasks: ProgressTask[] = [];
+  let inputRequest: UserInputRequestView | undefined;
+
+  const requestEvent = events.find((event) => event.turn === turn && event.kind === "user_input_required");
+  if (requestEvent) {
+    const request = requestEvent.payload.request as unknown as UserInputRequest;
+    const nextUserMessage = events.find((event) => event.kind === "user_message" && event.turn > turn);
+    const response = nextUserMessage?.payload.input_response as unknown as UserInputResponse | undefined;
+    inputRequest = nextUserMessage
+      ? nextUserMessage.payload.response_to === request.request_id && response
+        ? { ...request, status: "answered", answers: response.answers }
+        : { ...request, status: "skipped" }
+      : { ...request, status: "pending" };
+  }
 
   for (const dispatch of events) {
     if (dispatch.turn !== turn || dispatch.kind !== "dispatch") continue;
@@ -58,7 +72,7 @@ function turnDetails(events: readonly SessionEvent[], turn: number) {
     if (typeof result?.payload.summary === "string") task.summary = result.payload.summary;
     progressTasks.push(task);
   }
-  return { artifacts, visualizations, progressTasks, sources: collectTurnSources(events, turn) };
+  return { artifacts, visualizations, progressTasks, sources: collectTurnSources(events, turn), inputRequest };
 }
 
 function replaceArtifactMarkers(text: string, artifacts: Array<ArtifactRef & { n: number }>): string {
@@ -105,6 +119,7 @@ export function projectChatHistory(events: readonly SessionEvent[]): ChatHistory
           artifacts: details.artifacts,
           visualizations: details.visualizations,
           sources: details.sources,
+          ...(event.payload.final === true && details.inputRequest ? { inputRequest: details.inputRequest } : {}),
         },
       },
     };

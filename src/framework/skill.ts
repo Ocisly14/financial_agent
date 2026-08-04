@@ -3,7 +3,7 @@ import path from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { Dispatcher } from "./dispatcher.ts";
 import type { SessionState } from "./sessionState.ts";
-import type { AgentKind, SkillResult } from "./types.ts";
+import type { AgentKind, SkillLayer, SkillResult } from "./types.ts";
 
 const AGENT_KINDS: ReadonlySet<string> = new Set<AgentKind>([
   "market_data",
@@ -11,13 +11,22 @@ const AGENT_KINDS: ReadonlySet<string> = new Set<AgentKind>([
   "trading_operations",
 ]);
 
+const SKILL_LAYERS: ReadonlySet<string> = new Set<SkillLayer>(["topic", "research"]);
+
+/** `## for:` 的第四个合法目标。member Topic 不是 AgentKind——它没有角色，
+ *  只有"被问什么"的区别——所以它的小节存在独立字段里，不混进 agentSections。 */
+const TOPIC_SECTION_TARGET = "topic";
+
 export type SkillDefinition = {
   name: string;
   description: string;
   path: string; // <name>.md 的绝对路径
   dir: string; // skill 目录的绝对路径，后续任务的路径锁定基准
+  layer: SkillLayer;
   body: string;
   agentSections: Partial<Record<AgentKind, string>>;
+  /** `## for: topic` 的内容。只有 research 层的技能会有。 */
+  topicSection?: string;
   agents?: AgentKind[];
   tools?: string[];
   workflow?: string;
@@ -26,7 +35,8 @@ export type SkillDefinition = {
 export type WorkflowContext = {
   sessionId: string;
   userMessage: string;
-  dispatcher: Dispatcher;
+  /** 只有 workflow 型技能会用到,而 workflow 仅限 topic 层——research 层的调用方不传。 */
+  dispatcher?: Dispatcher;
   state: SessionState;
 };
 
@@ -64,12 +74,18 @@ export class SkillRegistry {
     this.workflows.set(name, handler);
   }
 
-  list(): SkillDefinition[] {
-    return [...this.skills.values()];
+  /**
+   * 默认只返回 topic 层。这个默认值是刻意的：它让既有的 Topic orchestrator
+   * 与 read_skill_reference / run_skill_script 一个字节都不用改，就自动看不到
+   * research 层的技能。
+   */
+  list(layer: SkillLayer = "topic"): SkillDefinition[] {
+    return [...this.skills.values()].filter((skill) => skill.layer === layer);
   }
 
-  get(name: string): SkillDefinition | undefined {
-    return this.skills.get(name);
+  get(name: string, layer: SkillLayer = "topic"): SkillDefinition | undefined {
+    const skill = this.skills.get(name);
+    return skill && skill.layer === layer ? skill : undefined;
   }
 
   async invoke(name: string, context: WorkflowContext): Promise<SkillResult> {
@@ -110,23 +126,26 @@ const AGENT_SECTION = /^##[ \t]+for:[ \t]*(\S+)[ \t]*$/gm;
 export function splitAgentSections(
   raw: string,
   context: string,
-): { body: string; agentSections: Partial<Record<AgentKind, string>> } {
+): { body: string; agentSections: Partial<Record<AgentKind, string>>; topicSection?: string } {
   const agentSections: Partial<Record<AgentKind, string>> = {};
+  let topicSection: string | undefined;
   const matches = [...raw.matchAll(AGENT_SECTION)];
   if (matches.length === 0) return { body: raw, agentSections };
 
   const body = raw.slice(0, matches[0]!.index);
   for (let i = 0; i < matches.length; i += 1) {
     const current = matches[i]!;
-    const agent = current[1]!;
-    if (!AGENT_KINDS.has(agent)) {
-      throw new Error(`skill section '## for: ${agent}' names an unknown agent: ${context}`);
+    const target = current[1]!;
+    if (target !== TOPIC_SECTION_TARGET && !AGENT_KINDS.has(target)) {
+      throw new Error(`skill section '## for: ${target}' names an unknown agent: ${context}`);
     }
     const start = current.index! + current[0].length;
     const end = i + 1 < matches.length ? matches[i + 1]!.index! : raw.length;
-    agentSections[agent as AgentKind] = raw.slice(start, end).trim();
+    const content = raw.slice(start, end).trim();
+    if (target === TOPIC_SECTION_TARGET) topicSection = content;
+    else agentSections[target as AgentKind] = content;
   }
-  return { body, agentSections };
+  return topicSection === undefined ? { body, agentSections } : { body, agentSections, topicSection };
 }
 
 function parseSkillMarkdown(filePath: string, dir: string, raw: string): SkillDefinition {
@@ -141,18 +160,38 @@ function parseSkillMarkdown(filePath: string, dir: string, raw: string): SkillDe
   const name = requireString(frontmatter, "name", filePath);
   const description = requireString(frontmatter, "description", filePath);
 
+  const layerRaw = frontmatter["layer"];
+  if (layerRaw !== undefined && (typeof layerRaw !== "string" || !SKILL_LAYERS.has(layerRaw))) {
+    throw new Error(`skill ${name} declares unknown layer '${String(layerRaw)}': ${filePath}`);
+  }
+  const layer = (layerRaw as SkillLayer | undefined) ?? "topic";
+
   const split = splitAgentSections(match[2] ?? "", filePath);
+  // 写错层的小节静默失效是最难查的一类问题，两个方向都抛。
+  if (layer === "topic" && split.topicSection !== undefined) {
+    throw new Error(`topic-layer skill ${name} carries a '## for: topic' section: ${filePath}`);
+  }
+  if (layer === "research" && Object.keys(split.agentSections).length > 0) {
+    const first = Object.keys(split.agentSections)[0];
+    throw new Error(`research-layer skill ${name} carries a '## for: ${first}' section: ${filePath}`);
+  }
+
   const skill: SkillDefinition = {
     name,
     description,
     path: filePath,
     dir,
+    layer,
     body: split.body,
     agentSections: split.agentSections,
   };
+  if (split.topicSection !== undefined) skill.topicSection = split.topicSection;
 
   const agents = optionalStringArray(frontmatter, "agents", filePath);
   if (agents) {
+    if (layer === "research") {
+      throw new Error(`research-layer skill ${name} may not declare 'agents': ${filePath}`);
+    }
     for (const agent of agents) {
       if (!AGENT_KINDS.has(agent)) {
         throw new Error(`skill ${name} declares unknown agent '${agent}': ${filePath}`);
@@ -162,9 +201,17 @@ function parseSkillMarkdown(filePath: string, dir: string, raw: string): SkillDe
   }
 
   const tools = optionalStringArray(frontmatter, "tools", filePath);
-  if (tools) skill.tools = tools;
+  if (tools) {
+    if (layer === "research") {
+      throw new Error(`research-layer skill ${name} may not declare 'tools': ${filePath}`);
+    }
+    skill.tools = tools;
+  }
 
   if (frontmatter["workflow"] !== undefined) {
+    if (layer === "research") {
+      throw new Error(`research-layer skill ${name} may not declare 'workflow': ${filePath}`);
+    }
     skill.workflow = requireString(frontmatter, "workflow", filePath);
   }
   return skill;

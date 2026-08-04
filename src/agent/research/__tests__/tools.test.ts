@@ -120,18 +120,18 @@ type Harness = {
   store: FakeStore;
   sessions: SessionRegistry;
   frames: ResearchFrame[];
-  runs: Array<{ sessionId: string; userMessage: string }>;
+  runs: Array<{ sessionId: string; userMessage: string; allowUserInput?: boolean }>;
 };
 
 function harness(options: {
-  run?: (input: { sessionId: string; userMessage: string }) => Promise<{ response: string }>;
+  run?: (input: { sessionId: string; userMessage: string; allowUserInput?: boolean }) => Promise<{ response: string }>;
   router?: ModelRouter;
   askTimeoutMs?: number;
 } = {}): Harness {
   const store = new FakeStore();
   const sessions = new SessionRegistry(new InMemoryEventStore());
   const frames: ResearchFrame[] = [];
-  const runs: Array<{ sessionId: string; userMessage: string }> = [];
+  const runs: Array<{ sessionId: string; userMessage: string; allowUserInput?: boolean }> = [];
   const toolset = new ResearchToolset({
     agentId: "default",
     researchId: "res_1",
@@ -164,8 +164,8 @@ test("ask_topic runs the topic's own orchestrator and returns its final reply", 
 
   assert.equal(result.status, "ok");
   assert.equal(result.reply, "reply to 渠道库存怎么样？");
-  assert.deepEqual(h.runs, [{ sessionId: "room_a", userMessage: "渠道库存怎么样？" }],
-    "it must take the same path a human typing in the chat box takes");
+  assert.deepEqual(h.runs, [{ sessionId: "room_a", userMessage: "渠道库存怎么样？", allowUserInput: false }],
+    "the background Topic run must not surface an input card outside the current Research");
 });
 
 test("the user_message written on the topic carries origin, unchanged content, and no framework edit", async () => {
@@ -523,6 +523,39 @@ test("create_topic creates the topic and joins it to this research", () => {
 });
 
 // ── turn projection ───────────────────────────────────────────────────────
+
+// ── setTopicSection: the skill's `## for: topic` text ──────────────────────
+
+test("setTopicSection appends its text to the message ask_topic sends", async () => {
+  const h = harness();
+  h.store.createTopic("default", "room_a", "AAPL");
+  h.toolset.setTopicSection("请给出具体读数和日期。");
+
+  await h.toolset.askTopic("room_a", "渠道库存怎么样？");
+
+  assert.equal(h.runs.length, 1);
+  assert.equal(h.runs[0]!.userMessage, "渠道库存怎么样？\n\n请给出具体读数和日期。");
+});
+
+test("without a topic section the message is unchanged", async () => {
+  const h = harness();
+  h.store.createTopic("default", "room_a", "AAPL");
+
+  await h.toolset.askTopic("room_a", "渠道库存怎么样？");
+
+  assert.equal(h.runs[0]!.userMessage, "渠道库存怎么样？");
+});
+
+test("an empty message is still rejected before the section is appended", async () => {
+  const h = harness();
+  h.store.createTopic("default", "room_a", "AAPL");
+  h.toolset.setTopicSection("请给出具体读数和日期。");
+
+  const result = await h.toolset.askTopic("room_a", "   ");
+
+  assert.equal(result.status, "failed");
+  assert.equal(h.runs.length, 0);
+});
 
 test("buildIndexedTurns pairs each turn with its final reply and keeps the turn number", async () => {
   const h = harness();

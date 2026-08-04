@@ -6,6 +6,39 @@
 
 export type UUID = string;
 
+export type UserInputOption = {
+  id: string;
+  label: string;
+  description?: string;
+  recommended?: boolean;
+};
+
+export type UserInputQuestion = {
+  id: string;
+  header?: string;
+  question: string;
+  options: UserInputOption[];
+  min_selections: number;
+  max_selections: number;
+};
+
+export type UserInputAnswer = {
+  question_id: string;
+  selected_option_ids: string[];
+};
+
+export type UserInputRequestView = {
+  request_id: string;
+  questions: UserInputQuestion[];
+  status: "pending" | "answered" | "skipped";
+  answers?: UserInputAnswer[];
+};
+
+export type UserInputSubmission = {
+  requestId: string;
+  answers: Array<{ questionId: string; selectedOptionIds: string[] }>;
+};
+
 export interface Character {
   name?: string;
   username?: string;

@@ -1,9 +1,9 @@
 import { readFile } from "node:fs/promises";
-import type { RegisteredTool } from "../toolRegistry.ts";
-import type { JsonObject } from "../../src/framework/types.ts";
-import type { SkillRegistry } from "../../src/framework/skill.ts";
-import { resolveSkillFile, SkillPathError } from "../../src/framework/skillFiles.ts";
-import { runSkillScript } from "../../src/framework/skillScript.ts";
+import type { RegisteredTool } from "../../mcp_tools/toolRegistry.ts";
+import type { JsonObject } from "./types.ts";
+import type { SkillRegistry } from "./skill.ts";
+import { resolveSkillFile, SkillPathError } from "./skillFiles.ts";
+import { runSkillScript } from "./skillScript.ts";
 
 export const READ_SKILL_REFERENCE = "read_skill_reference";
 

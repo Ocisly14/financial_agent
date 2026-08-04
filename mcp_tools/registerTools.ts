@@ -2,6 +2,8 @@ import { McpToolRegistry } from "./toolRegistry.ts";
 
 // stock
 import { createGetStockPriceTool } from "./stock/getStockPriceTool.ts";
+// sector
+import { createGetSectorAnalysisTool } from "./sector/getSectorAnalysisTool.ts";
 // search
 import { createFinancialSearchTool } from "./search/financialSearchTool.ts";
 // technical
@@ -12,10 +14,13 @@ import {
   createListStrategiesTool,
   createManageStrategyTool,
 } from "./trading/strategyTools.ts";
+import { createAskUserTool } from "./user/askUserTool.ts";
 
 export function registerAllTools(registry: McpToolRegistry): void {
+  registry.register(createAskUserTool());
   // non_trading tools
   registry.register(createGetStockPriceTool());
+  registry.register(createGetSectorAnalysisTool());
   registry.register(createFinancialSearchTool());
   for (const tool of createTechnicalIndicatorTools()) registry.register(tool);
   // Price-driven stock strategy tools. Execution is paper/shadow only until a
@@ -28,6 +33,7 @@ export function registerAllTools(registry: McpToolRegistry): void {
 
 export const MARKET_DATA_TOOLS = [
   "get_stock_price",
+  "get_sector_analysis",
   ...TECHNICAL_TOOL_NAMES,
 ] as const;
 

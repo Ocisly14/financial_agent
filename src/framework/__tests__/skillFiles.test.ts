@@ -11,6 +11,7 @@ const SKILL: SkillDefinition = {
   description: "d",
   path: "/tmp/skills/demo/demo.md",
   dir: "/tmp/skills/demo",
+  layer: "topic",
   body: "",
   agentSections: {},
 };
@@ -43,6 +44,7 @@ async function makeTempSkill(): Promise<SkillDefinition> {
     description: "d",
     path: path.join(dir, "demo.md"),
     dir,
+    layer: "topic",
     body: "",
     agentSections: {},
   };

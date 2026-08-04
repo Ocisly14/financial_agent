@@ -175,6 +175,16 @@ const zhCN = {
         approvalFailedTitle: "批准失败",
         approvalFailedFallback: "提交批准失败",
         inputPlaceholder: "在这里输入你的消息...",
+        userInput: {
+            title: "智能体提问",
+            questionNumber: "问题 {{number}}",
+            selectionRange: "请选择 {{min}}–{{max}} 项",
+            recommended: "推荐",
+            submit: "提交选择",
+            submitting: "提交中…",
+            answered: "已提交选择",
+            skipped: "已跳过",
+        },
     },
     audio: {
         unableToStartRecording: "无法开始录音",

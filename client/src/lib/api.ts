@@ -6,6 +6,8 @@ import type {
     TopicChartPreference,
     ResearchSummary,
     ResearchMember,
+    UserInputRequestView,
+    UserInputSubmission,
 } from "@/types/core";
 
 export type ProcessingStep = {
@@ -332,6 +334,7 @@ function buildAssistantResponse(
     artifacts: ChatArtifact[],
     visualizations: Record<string, unknown>[] = [],
     sources: Record<string, unknown>[] = [],
+    inputRequest?: UserInputRequestView,
 ) {
     const byN = new Map(artifacts.map((a) => [a.n, a]));
     const text = response
@@ -356,6 +359,7 @@ function buildAssistantResponse(
                 artifacts,
                 visualizations,
                 sources,
+                ...(inputRequest ? { inputRequest } : {}),
             },
         },
     };
@@ -441,6 +445,7 @@ export class StreamingApiClient {
         messageClassification?: "TASK_CHAIN_MESSAGE",
         language?: string,
         retryCount = 0,
+        inputResponse?: UserInputSubmission,
     ) {
         // Create a unique key for request deduplication.
         const classificationKeySegment = messageClassification ?? "";
@@ -476,7 +481,11 @@ export class StreamingApiClient {
         // it back via X-Session-Id). File uploads are not supported by this backend.
         void selectedFiles; void messageClassification;
         void language;
-        const body: string = JSON.stringify({ message, sessionId: topicId });
+        const body: string = JSON.stringify(
+            inputResponse
+                ? { inputResponse, sessionId: topicId }
+                : { message, sessionId: topicId },
+        );
         const headers: HeadersInit = { "Content-Type": "application/json", "X-Agent-Id": agentId };
 
         let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
@@ -507,12 +516,20 @@ export class StreamingApiClient {
                 ]),
             });
 
-            if (!response.body) {
-                throw new Error('No response body');
+            if (!response.ok) {
+                let message = `HTTP ${response.status}: ${response.statusText}`;
+                try {
+                    const payload = await response.json() as { error?: unknown; message?: unknown };
+                    if (typeof payload.error === "string") message = payload.error;
+                    else if (typeof payload.message === "string") message = payload.message;
+                } catch {
+                    // Keep the HTTP fallback when the response is not JSON.
+                }
+                throw new Error(message);
             }
 
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            if (!response.body) {
+                throw new Error('No response body');
             }
 
             // The backend mints/echoes the session id; keep the topic in sync if
@@ -674,6 +691,7 @@ export class StreamingApiClient {
                                 parsed.artifacts ?? [],
                                 parsed.visualizations ?? [],
                                 parsed.sources ?? [],
+                                parsed.input_request,
                             ),
                         ]);
                         break;
@@ -831,6 +849,7 @@ export class StreamingApiClient {
                         messageClassification,
                         language,
                         retryCount + 1,
+                        inputResponse,
                     );
                 }, delay);
                 return;
