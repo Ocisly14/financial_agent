@@ -34,6 +34,15 @@ export type UserInputRequestView = {
   answers?: UserInputAnswer[];
 };
 
+/** A member Topic's own question, surfaced on the Research stream (see the
+ *  member-input-passthrough design). `topicId` is the session the answer must
+ *  be POSTed to — NOT the Research session the card is displayed in. */
+export type MemberInputRequestFrame = {
+    topicId: string;
+    topicName: string;
+    request: UserInputRequestView;
+};
+
 export type UserInputSubmission = {
   requestId: string;
   answers: Array<{ questionId: string; selectedOptionIds: string[] }>;

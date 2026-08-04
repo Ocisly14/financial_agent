@@ -170,6 +170,8 @@ const en = {
             tabs: "The agent changed the charts",
             members: "The agent changed the members",
         },
+        memberAsked: "{{topic}} is asking",
+        continueAfterMemberInput: "(Answered the follow-up questions above — please continue.)",
     },
     conversation: {
         originLabel: "From Research: {{name}}",

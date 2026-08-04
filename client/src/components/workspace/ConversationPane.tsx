@@ -126,6 +126,8 @@ export function ConversationPane({ agentId, title, subtitle, stream, input, onIn
             .content?.metadata ?? (m as { metadata?: Record<string, unknown> }).metadata;
         const sources = Array.isArray(metadata?.sources) ? (metadata.sources as MessageSource[]) : [];
         const inputRequest = metadata?.inputRequest as UserInputRequestView | undefined;
+        const memberTopicId = metadata?.memberTopicId as string | undefined;
+        const memberTopicName = metadata?.memberTopicName as string | undefined;
         return (
             <>
                 <MarkdownRenderer streaming={streaming} sources={sources}>{m.text ?? ""}</MarkdownRenderer>
@@ -133,7 +135,12 @@ export function ConversationPane({ agentId, title, subtitle, stream, input, onIn
                     <UserInputCard
                         key={inputRequest.request_id}
                         request={inputRequest}
-                        onSubmit={stream.submitUserInput}
+                        onSubmit={
+                            memberTopicId
+                                ? (request, answers) => stream.submitMemberInput(memberTopicId, request, answers)
+                                : stream.submitUserInput
+                        }
+                        {...(memberTopicName ? { attribution: memberTopicName } : {})}
                     />
                 ) : null}
             </>

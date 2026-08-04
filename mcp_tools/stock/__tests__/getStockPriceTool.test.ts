@@ -23,7 +23,7 @@ test("returns an error context instead of guessing a symbol when the symbol argu
     },
     snapshot: async () => { throw new Error("should not be called"); },
   });
-  const result = await tool.execute({ task: "帮我看看今天的行情" }, CTX);
+  const result = await tool.execute({ task: "Show me today's market action" }, CTX);
   assert.match(result.summary, /symbol/i);
   assert.equal(result.generation_context!.data["symbol"], null);
   assert.equal(result.generation_context!.data["error"], "symbol_required");
@@ -34,7 +34,7 @@ test("symbol is uppercased and trimmed of whitespace", async () => {
     repository: { getBars: async () => [bar("2026-07-27", 211)], getBarsBetween: async () => [] },
     snapshot: async () => ({ ...SNAPSHOT, symbol: "AAPL" }),
   });
-  const result = await tool.execute({ task: "查一下", symbol: "  aapl " }, CTX);
+  const result = await tool.execute({ task: "Look it up", symbol: "  aapl " }, CTX);
   assert.equal(result.generation_context!.data["symbol"], "AAPL");
 });
 
@@ -46,7 +46,7 @@ test("happy path: returns quote, daily bars, and data source label", async () =>
     },
     snapshot: async () => SNAPSHOT,
   });
-  const result = await tool.execute({ task: "AAPL 现在多少钱", symbol: "AAPL" }, CTX);
+  const result = await tool.execute({ task: "What is AAPL trading at now?", symbol: "AAPL" }, CTX);
   const data = result.generation_context!.data;
 
   assert.equal(data["symbol"], "AAPL");

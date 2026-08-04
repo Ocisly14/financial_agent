@@ -164,7 +164,7 @@ test("ask_topic runs the topic's own orchestrator and returns its final reply", 
 
   assert.equal(result.status, "ok");
   assert.equal(result.reply, "reply to 渠道库存怎么样？");
-  assert.deepEqual(h.runs, [{ sessionId: "room_a", userMessage: "渠道库存怎么样？", allowUserInput: false }],
+  assert.deepEqual(h.runs, [{ sessionId: "room_a", userMessage: "渠道库存怎么样？" }],
     "the background Topic run must not surface an input card outside the current Research");
 });
 
@@ -571,4 +571,75 @@ test("buildIndexedTurns pairs each turn with its final reply and keeps the turn 
     { turn: 1, user: "问题一", reply: "答案一" },
     { turn: 2, user: "问题二", reply: "答案二" },
   ]);
+});
+
+// ── ask_topic: a member may ask the user back ──────────────────────────────
+
+test("a member that leaves a pending question comes back as needs_input", async () => {
+  const h = harness({
+    // The driven Topic calls ask_user: its run() returns immediately and the
+    // request is recorded on that Topic's own session.
+    run: async (input) => {
+      const state = await h.sessions.getOrCreate(input.sessionId);
+      state.recordUserInputRequest({
+        request_id: "req_1",
+        questions: [{
+          id: "q1",
+          question: "Which fiscal year?",
+          options: [{ id: "fy25", label: "FY25" }, { id: "fy26", label: "FY26" }],
+          min_selections: 1,
+          max_selections: 1,
+        }],
+      });
+      return { response: "Please answer the questions below." };
+    },
+  });
+
+  const result = await h.toolset.askTopic("room_a", "渠道库存怎么样？");
+
+  assert.equal(result.status, "needs_input");
+  assert.equal(result.request?.request_id, "req_1");
+  assert.equal(result.request?.status, "pending");
+});
+
+test("needs_input emits a member_input_request frame carrying the member's identity", async () => {
+  const h = harness({
+    run: async (input) => {
+      const state = await h.sessions.getOrCreate(input.sessionId);
+      state.recordUserInputRequest({
+        request_id: "req_1",
+        questions: [{
+          id: "q1",
+          question: "Which fiscal year?",
+          options: [{ id: "fy25", label: "FY25" }, { id: "fy26", label: "FY26" }],
+          min_selections: 1,
+          max_selections: 1,
+        }],
+      });
+      return { response: "Please answer the questions below." };
+    },
+  });
+
+  await h.toolset.askTopic("room_a", "渠道库存怎么样？");
+
+  const frame = h.frames.find((f) => f.name === "member_input_request");
+  assert.ok(frame, "a member_input_request frame should be emitted");
+  assert.equal(frame.data.topicId, "room_a");
+  assert.equal(frame.data.request.request_id, "req_1");
+});
+
+test("a member that answers normally is unaffected", async () => {
+  const h = harness();   // default run() just returns a reply
+
+  const result = await h.toolset.askTopic("room_a", "渠道库存怎么样？");
+
+  assert.equal(result.status, "ok");
+  assert.equal(result.request, undefined);
+  assert.equal(h.frames.filter((f) => f.name === "member_input_request").length, 0);
+});
+
+test("the driven Topic is no longer forbidden from asking the user", async () => {
+  const h = harness();
+  await h.toolset.askTopic("room_a", "渠道库存怎么样？");
+  assert.equal(h.runs[0]!.allowUserInput, undefined);
 });

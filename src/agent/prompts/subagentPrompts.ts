@@ -45,7 +45,9 @@ Rules:
 - You MAY call several INDEPENDENT tools in one step (they run in parallel). Only defer a tool to a LATER step when its choice/arguments depend on a prior tool's result.
 - Never call a tool already shown in [PROGRESS SO FAR] with the same arguments — that work is done.
 - When the task is satisfied (or no tool fits), finish.
+- For a US public company, use SEC tools before web search when the task needs official identity, filing history, filing links, or standardized reported financial facts. Use get_sec_company_profile to resolve the filer, get_sec_filings to locate dated forms, and get_sec_company_facts for exact XBRL values. SEC facts do not include all company-specific extensions or segment disclosures.
 - For financial_search, you MUST write a complete, focused query in the required query argument. The tool does not derive, expand, or rewrite queries. Choose topic=news for recent events and search_depth=advanced when deeper research is useful.
+- Use financial_search for narrative business descriptions, investor-relations materials, management commentary, company-specific KPIs, news, macro evidence, and attributed expectations that the SEC tools do not provide. Never replace an available SEC fact with an unattributed search snippet.
 - For other tool arguments, pass what the task specifies. The "task" string is sent automatically.
 
 Output contract — return EXACTLY one JSON object and nothing else:

@@ -115,7 +115,11 @@ member 的恢复走的是普通 `orchestrator.run`（`server.ts:240`），`allow
 
 ### 4.2 卡片提交路由
 
-`UserInputCard` 提交时，`submitInput` 当前把答案 POST 到当前 session。带 `topicId` 的卡片必须 POST 到**那个 member 的 session**。这是本设计前端侧的**唯一实质改动**：提交目标从"当前 session"变为"卡片自带的 session"，未带 `topicId` 的卡片行为不变。
+带 `topicId` 的卡片必须 POST 到**那个 member 的 session**，未带 `topicId` 的卡片行为逐字不变。
+
+> 修正（2026-08-04，写实现计划时实地核对得出）：本节早前写的是"这是前端唯一的实质改动：提交目标从当前 session 换成卡片自带的 session"。**不止如此。** 既有的 `submitUserInput` 走 `runTurn`，而 `runTurn` 会往当前会话追加一条用户消息、清空任务列表并进入 processing 状态——那些都属于 Research 视图自己的一轮，而 member 的提交并没有开启 Research 的一轮。因此需要一条独立的、安静的提交路径，不能只改 `runTurn` 的目标。
+>
+> 同样修正 §7：`UserInputCard.tsx` **不需要**透传 `topicId`。提交处理函数由 `ConversationPane` 按消息 metadata 选好再传进去，卡片不必知道 session 的存在；它只多一个纯展示用的可选归属标签。
 
 member 的恢复会在它自己的流上产生事件。Research 视图不订阅那条流，因此这次提交在 Research 界面上只需要把卡片标记为已回答。
 
@@ -151,9 +155,9 @@ member 的恢复会在它自己的流上产生事件。Research 视图不订阅�
 - `askTopic`：`needs_input` 时 emit `member_input_request` 帧，`topicId` / `topicName` 正确。
 - `askTopic`：`needs_input` 时 `markSeen` 仍被调用。
 - `researchRuntime`：`needs_input` 的 `tool_result` summary 里说明该 member 在等待输入；其余并行 member 的结果照常入库；本轮照常收口不挂起。
-- `tools.ts:352` 不再传 `allowUserInput: false` —— 这会让既有的 `src/agent/research/__tests__/tools.test.ts:167` 从当前的失败状态回到通过。
+- `tools.ts:352` 不再传 `allowUserInput: false`。
 
-> 注：该测试目前是失败的（工作区里 `allowUserInput: false` 已加、测试期望未更新）。本设计把这个参数移除，正好让它自然恢复。实施时确认它变绿，而不是另外去改期望值。
+> 注（2026-08-04 更新）：本节早前写的是"该测试当前失败，移除参数后会自然变绿"。那已经过时——`src/agent/research/__tests__/tools.test.ts:167` 的期望值此后被更新为**包含** `allowUserInput: false`，测试现在是通过的。因此本设计移除该参数时，需要把那条期望值改回不含该字段的形式，而不是等它自己变绿。方向反了，别照旧文执行。
 
 **前端单元**
 

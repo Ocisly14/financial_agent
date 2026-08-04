@@ -8,9 +8,12 @@ import { cn } from "@/lib/utils";
 export function UserInputCard({
     request,
     onSubmit,
+    attribution,
 }: {
     request: UserInputRequestView;
     onSubmit: (request: UserInputRequestView, answers: UserInputAnswer[]) => Promise<void> | void;
+    /** Which member asked. Absent when the controller itself is asking. */
+    attribution?: string;
 }) {
     const { t } = useTranslation();
     const [submitting, setSubmitting] = useState(false);
@@ -77,6 +80,11 @@ export function UserInputCard({
             aria-label={t("chat.userInput.title")}
             data-testid="user-input-card"
         >
+            {attribution ? (
+                <div className="border-b border-sep px-4 pt-3">
+                    <span className="text-xs text-muted-foreground">{t("research.memberAsked", { topic: attribution })}</span>
+                </div>
+            ) : null}
             <div className="space-y-5 px-4 py-4">
                 {request.questions.map((question, questionIndex) => {
                     const values = selected[question.id] ?? [];

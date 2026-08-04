@@ -502,7 +502,12 @@ export class ResearchRuntime {
       case "error":
         return `[runtime error] ${String(payload.message ?? "")}`;
       case "skill_result": {
-        const content = String(payload.content ?? "");
+        const raw = String(payload.content ?? "");
+        // Same truncation the tool_result case applies, for the same reason: the
+        // skill body is guidance for the turn that invoked it. Re-sending it in
+        // full on every later step grows the prompt without adding anything the
+        // controller has not already acted on.
+        const content = isCurrent ? raw : truncate(raw, PRIOR_TOOL_SUMMARY_CHARS);
         const head = `[skill ${String(payload.skill ?? "")}] ${String(payload.summary ?? "")}`;
         return content ? `${head}\n${content}` : head;
       }
@@ -562,7 +567,11 @@ export class ResearchRuntime {
         const summary =
           result.status === "ok"
             ? `[${result.topicName}] answered:\n${result.reply ?? ""}`
-            : `[${result.topicName}] ${result.status} this turn: ${result.reason ?? "unknown reason"}`;
+            : result.status === "needs_input"
+              // Say plainly that this is an open question, not an empty answer —
+              // otherwise the controller reads the gap as "no data" and fills it in.
+              ? `[${result.topicName}] is waiting on the user's answer to a question of its own and did not report this turn. Do not substitute another member's figures for it; once the user answers, fetch_from_topic will have its reply.`
+              : `[${result.topicName}] ${result.status} this turn: ${result.reason ?? "unknown reason"}`;
         return { summary, data: result };
       }
 

@@ -6,6 +6,8 @@ import { createGetStockPriceTool } from "./stock/getStockPriceTool.ts";
 import { createGetSectorAnalysisTool } from "./sector/getSectorAnalysisTool.ts";
 // search
 import { createFinancialSearchTool } from "./search/financialSearchTool.ts";
+// SEC filings and standardized company facts
+import { createSecTools, SEC_TOOL_NAMES } from "./sec/secTools.ts";
 // technical
 import { createTechnicalIndicatorTools, TECHNICAL_TOOL_NAMES } from "./technical/technicalIndicatorTools.ts";
 import {
@@ -22,6 +24,7 @@ export function registerAllTools(registry: McpToolRegistry): void {
   registry.register(createGetStockPriceTool());
   registry.register(createGetSectorAnalysisTool());
   registry.register(createFinancialSearchTool());
+  for (const tool of createSecTools()) registry.register(tool);
   for (const tool of createTechnicalIndicatorTools()) registry.register(tool);
   // Price-driven stock strategy tools. Execution is paper/shadow only until a
   // stock broker adapter is explicitly added.
@@ -38,6 +41,7 @@ export const MARKET_DATA_TOOLS = [
 ] as const;
 
 export const MARKET_RESEARCH_TOOLS = [
+  ...SEC_TOOL_NAMES,
   "financial_search",
 ] as const;
 

@@ -164,6 +164,8 @@ const zhCN = {
             tabs: "agent 调整了图表",
             members: "agent 调整了成员",
         },
+        memberAsked: "{{topic}} 想确认",
+        continueAfterMemberInput: "（已回答上述追问，请继续。）",
     },
     conversation: {
         originLabel: "来自 Research：{{name}}",

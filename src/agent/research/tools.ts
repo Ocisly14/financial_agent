@@ -27,6 +27,7 @@ import type {
   TopicChartPreferenceRow,
   TopicSummary,
 } from "../../infra/db/sqliteEventStore.ts";
+import type { UserInputRequestView } from "../../framework/types.ts";
 import {
   chunkTurns,
   containsDigits,
@@ -88,6 +89,10 @@ export type ResearchFrame =
     }
   | { name: "topic_focus"; data: { topicId: string; symbol?: string } }
   | {
+      name: "member_input_request";
+      data: { topicId: string; topicName: string; request: UserInputRequestView };
+    }
+  | {
       name: "layout_changed";
       data: {
         scope: "tabs" | "members";
@@ -117,7 +122,7 @@ export type ResearchToolContext = {
 
 // ── tool results ──────────────────────────────────────────────────────────
 
-export type AskStatus = "running" | "ok" | "failed" | "timeout" | "skipped";
+export type AskStatus = "running" | "ok" | "failed" | "timeout" | "skipped" | "needs_input";
 
 export type AskTopicResult = {
   topicId: string;
@@ -127,6 +132,9 @@ export type AskTopicResult = {
   reply?: string;
   /** Why it did not succeed. */
   reason?: string;
+  /** Only present when status is needs_input: the member's own unanswered
+   *  question left behind this turn. */
+  request?: UserInputRequestView;
 };
 
 export type FetchExcerpt = { turn: number; user: string; reply: string };
@@ -359,11 +367,15 @@ export class ResearchToolset {
     this.ctx.emit({ name: "topic_dispatch", data: { topicId, topicName, task, status: "running" } });
 
     try {
+      // The member's own state, so we can see whether this turn left a question
+      // behind. `getOrCreate` is registry-cached — this is not a second load.
+      const memberState = await this.ctx.sessions.getOrCreate(topicId);
+
       const unstamp = await this.stampOrigin(topicId, task);
       let response: string;
       try {
         const result = await withTimeout(
-          this.ctx.orchestrator.run({ sessionId: topicId, userMessage: task, allowUserInput: false }),
+          this.ctx.orchestrator.run({ sessionId: topicId, userMessage: task }),
           this.ctx.askTimeoutMs ?? ASK_TOPIC_TIMEOUT_MS,
           `ask_topic(${topicId})`,
         );
@@ -373,8 +385,28 @@ export class ResearchToolset {
       }
 
       // Changes this controller caused are not "external" (§4.2.3), so move the
-      // seen marker past them before the next turn's delta is computed.
+      // seen marker past them before the next turn's delta is computed. This
+      // runs for a needs_input turn too: the member really did produce events.
       await this.markSeen(topicId);
+
+      // The member asked the user something. The request stays on ITS session —
+      // the answer will arrive there, through the ordinary resume path. All we
+      // do is tell the controller, and hand the UI enough to render the card.
+      //
+      // Checked against `currentTurn` (read AFTER run() returns) rather than a
+      // turn number captured before the call: the real orchestrator's run()
+      // begins a new turn as its first step, so this lands on that new turn in
+      // production; a run() that never begins a turn (as in the "member asks
+      // immediately" test double) still lands correctly because the turn never
+      // moved. A `turnBefore + 1` guess is wrong whenever run() does not begin
+      // exactly one new turn.
+      const pending = memberState.userInputRequestForTurn(memberState.currentTurn);
+      if (pending && pending.status === "pending") {
+        this.ctx.emit({ name: "member_input_request", data: { topicId, topicName, request: pending } });
+        this.ctx.emit({ name: "topic_dispatch", data: { topicId, topicName, task, status: "needs_input" } });
+        return { topicId, topicName, status: "needs_input", reply: response, request: pending };
+      }
+
       this.ctx.emit({ name: "topic_dispatch", data: { topicId, topicName, task, status: "ok" } });
       return { topicId, topicName, status: "ok", reply: response };
     } catch (error) {

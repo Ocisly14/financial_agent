@@ -15,7 +15,7 @@ export function createSubagentRegistry(): SubagentRegistry {
   registry.register({
     name: "market_research",
     description:
-      "Cross-market research agent for financial news, current events, macro themes, institutional activity, and asset-specific research.",
+      "Company and cross-market research agent for official SEC filings and XBRL facts, financial news, current events, macro themes, institutional activity, and asset-specific research.",
     modelClass: "MEDIUM",
     defaultTools: [...MARKET_RESEARCH_TOOLS],
     systemPrompt: marketResearchSubagentPrompt,

@@ -1,8 +1,10 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast as sonnerToast } from "sonner";
-import type { UUID, UserInputAnswer, UserInputRequestView, UserInputSubmission } from "@/types/core";
+import type { MemberInputCard } from "@/lib/memberInput";
+import { answerText, shouldContinueResearch } from "@/lib/memberInput";
+import type { MemberInputRequestFrame, UUID, UserInputAnswer, UserInputRequestView, UserInputSubmission } from "@/types/core";
 import { apiClient, StreamingApiClient, type ProcessingStep } from "@/lib/api";
 import type { StrategyApprovalDialogData } from "@/components/Dialog/StrategyApprovalDialog";
 import { useToast } from "@/hooks/use-toast";
@@ -116,6 +118,26 @@ export function useTopicStream(
                         // Research layout frames: not work, not progress.
                         if (step.name === "topic_focus" || step.name === "layout_changed") {
                             onDirectiveRef.current?.(step);
+                            return;
+                        }
+                        if (step.name === "member_input_request") {
+                            const data = step.data as MemberInputRequestFrame | undefined;
+                            if (data?.request) {
+                                // Its own message, so N simultaneous questions render as N cards.
+                                appendMessages([{
+                                    id: `member-input-${data.request.request_id}`,
+                                    user: "assistant",
+                                    text: "",
+                                    createdAt: Date.now(),
+                                    content: {
+                                        metadata: {
+                                            inputRequest: data.request,
+                                            memberTopicId: data.topicId,
+                                            memberTopicName: data.topicName,
+                                        },
+                                    },
+                                } as unknown as ContentWithUser]);
+                            }
                             return;
                         }
                         if (step.name === "strategy_created") {
@@ -249,12 +271,7 @@ export function useTopicStream(
                     : candidate,
             );
 
-            const byQuestion = new Map(answers.map((answer) => [answer.question_id, answer.selected_option_ids]));
-            const text = request.questions.map((question) => {
-                const selected = new Set(byQuestion.get(question.id) ?? []);
-                const labels = question.options.filter((option) => selected.has(option.id)).map((option) => option.label);
-                return `${question.question}: ${labels.join(", ")}`;
-            }).join("\n");
+            const text = answerText(request, answers);
             const inputResponse: UserInputSubmission = {
                 requestId: request.request_id,
                 answers: answers.map((answer) => ({
@@ -266,6 +283,67 @@ export function useTopicStream(
             if (!ok) queryClient.setQueryData(queryKey, previous);
         },
         [isProcessing, isHistoryLoading, queryClient, queryKey, runTurn, updateInputRequests],
+    );
+
+    /**
+     * A member Topic's own answer, delivered to that Topic's own session — not
+     * the current one. Deliberately not `runTurn`: that appends to *this*
+     * conversation, clears `tasksRef`, and enters processing state, none of
+     * which apply here since no turn is starting in this view.
+     *
+     * `POST /chat` always answers with an SSE stream whether or not the caller
+     * wants one. `sendMessageStream` consumes it to completion, so awaiting
+     * this call is what keeps the member's resume alive — dropping the
+     * connection early would cut it off mid-write. All the step/response
+     * callbacks are no-ops: that stream's content belongs to the member's own
+     * view, not this one.
+     */
+    const submitMemberInput = useCallback(
+        async (topicId: string, request: UserInputRequestView, answers: UserInputAnswer[]) => {
+            if (request.status !== "pending") return;
+            updateInputRequests((candidate) =>
+                candidate.request_id === request.request_id
+                    ? { ...candidate, status: "answered", answers }
+                    : candidate,
+            );
+
+            const inputResponse: UserInputSubmission = {
+                requestId: request.request_id,
+                answers: answers.map((answer) => ({
+                    questionId: answer.question_id,
+                    selectedOptionIds: answer.selected_option_ids,
+                })),
+            };
+
+            try {
+                await streaming.sendMessageStream(
+                    agentId,
+                    answerText(request, answers),
+                    topicId,
+                    () => {}, // onStep
+                    () => {}, // onActionResponse
+                    () => {}, // onIntermediateResponse
+                    () => {}, // onFinalResponse
+                    undefined, // onTopicUpdate
+                    (error) => { sonnerToast.error(String(typeof error === "string" ? error : error?.message ?? error)); },
+                    undefined, // onComplete
+                    undefined, // onStreamingUpdate
+                    undefined, // selectedFiles
+                    undefined, // messageClassification
+                    undefined, // language
+                    0, // retryCount
+                    inputResponse,
+                );
+            } catch {
+                // Put the card back so the user can retry; the member never got the answer.
+                updateInputRequests((candidate) =>
+                    candidate.request_id === request.request_id
+                        ? { ...candidate, status: "pending" }
+                        : candidate,
+                );
+            }
+        },
+        [agentId, streaming, updateInputRequests],
     );
 
     const stop = useCallback(() => {
@@ -311,8 +389,46 @@ export function useTopicStream(
         [pendingInterrupt, queryClient, toast, t]
     );
 
+    const memberCards = useMemo<MemberInputCard[]>(() => {
+        const rows = queryClient.getQueryData<ContentWithUser[]>(queryKey) ?? [];
+        return rows.flatMap((row) => {
+            const metadata = (row as { content?: { metadata?: Record<string, unknown> } }).content?.metadata;
+            const request = metadata?.inputRequest as UserInputRequestView | undefined;
+            const topicId = metadata?.memberTopicId as string | undefined;
+            if (!request || !topicId) return [];
+            return [{
+                topicId,
+                topicName: (metadata?.memberTopicName as string | undefined) ?? topicId,
+                requestId: request.request_id,
+                status: request.status,
+            }];
+        });
+    }, [queryClient, queryKey, messages]);
+
+    // Once every card a turn produced is resolved, resume the Research turn
+    // exactly once. `continuationFiredRef` is keyed on the set of request ids
+    // rather than a boolean: without it the effect would re-fire on every
+    // unrelated message append while the resolved set is unchanged, and it
+    // re-arms as soon as a new turn's cards appear (memberCards empties out
+    // between turns because a fresh turn's assistant messages don't carry
+    // the previous turn's resolved cards forward).
+    const continuationFiredRef = useRef<string | null>(null);
+
+    useEffect(() => {
+        if (!shouldContinueResearch(memberCards)) {
+            // Cards gone (new turn) — arm the trigger again.
+            if (memberCards.length === 0) continuationFiredRef.current = null;
+            return;
+        }
+        const key = memberCards.map((card) => card.requestId).sort().join("|");
+        if (continuationFiredRef.current === key) return;
+        continuationFiredRef.current = key;
+        void runTurn(t("research.continueAfterMemberInput"));
+    }, [memberCards, runTurn, t]);
+
     return {
         messages,
+        memberCards,
         isHistoryLoading,
         isProcessing,
         streamingText,
@@ -321,6 +437,7 @@ export function useTopicStream(
         isConnected,
         sendMessage,
         submitUserInput,
+        submitMemberInput,
         stop,
         resolveApproval,
     };
