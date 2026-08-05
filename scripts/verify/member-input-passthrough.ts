@@ -17,7 +17,7 @@
  * VERIFY_DB_PATH (default /tmp/member-input-verify.sqlite), AGENT_ID
  * (default "verify-member-input").
  *
- * Note on the brief's Step 2 ("造一个必然触发反问的场景"): the natural-language
+ * Note on constructing a scenario that reliably provokes a question: the natural-language
  * ambiguity examples in the brief (e.g. "last quarter" without specifying
  * calendar vs. fiscal) are not guaranteed to make the model ask — a
  * sufficiently capable member Topic may simply pick an interpretation and

@@ -6,7 +6,11 @@ import { createLogger } from "../infra/logger/logger.ts";
 import { assertToolAllowedForAgent } from "./toolAccess.ts";
 
 const log = createLogger("dispatcher");
-const DEFAULT_TASK_TIMEOUT_MS = 60_000;
+/** A research task routinely takes three or four LLM rounds with advanced web
+ *  search; at 60s those were being killed a few seconds before they finished,
+ *  and the completed work was discarded because there is no cancellation — the
+ *  subagent ran on, answered, and nobody was listening. */
+const DEFAULT_TASK_TIMEOUT_MS = 5 * 60_000;
 const DEFAULT_TRADE_TASK_TIMEOUT_MS = 16 * 60_000;
 
 /**
