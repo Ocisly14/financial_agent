@@ -4,11 +4,13 @@
 
 **Goal:** Build the calculation and persistence core of the financial modeling platform — versioned model store, typed Model Operations DSL, restricted Formula DSL, deterministic calculation engine, metrics library, and DCF valuation — with no network access and no MCP tools.
 
-**Architecture:** Domain dependencies flow from `types` → `periodGrid` → Formula `dsl/` → `engine` → `metrics`/`valuation`, while `operations` composes the domain types, skeleton, lifecycle, and aggregation compilers without doing arithmetic. `store` is persistence-only; `service` composes `operations`, calculation, valuation, and store. The typed Model Operations DSL changes an in-memory snapshot; the Formula DSL only calculates cells and cannot mutate model state. Every non-empty mutation batch runs one shared commit pipeline that compiles formulas, recalculates the whole grid, sorts diagnostics into blockers and warnings, and commits one immutable revision only when no blocker exists. Read queries bypass the pipeline and never commit. `metrics` performs no arithmetic of its own — it generates formulas and hands them to the engine, so library metrics and Agent formulas share one arithmetic path.
+**Architecture:** Domain dependencies flow from `types` → `periodGrid` → Formula `dsl/` → `engine` → `metrics`/`valuation`, while `operations` composes the domain types, skeleton, lifecycle, statement-mapping and DCF-category compilers without doing arithmetic. `reconciliation` checks category groups and built-in accounting identities only after the DCF cell pass. `store` is persistence-only; `service` composes `operations`, calculation, reconciliation, valuation, and store. The typed Model Operations DSL changes an in-memory snapshot; the Formula DSL only calculates cells and cannot mutate model state. Every non-empty mutation batch runs one shared commit pipeline that compiles formulas, recalculates the whole grid, reconciles the DCF table, sorts diagnostics into blockers and warnings, and commits one immutable revision only when no blocker exists. Read queries bypass the pipeline and never commit. `metrics` performs no arithmetic of its own — it generates formulas and hands them to the engine, so library metrics and Agent formulas share one arithmetic path.
 
 **Tech Stack:** TypeScript on Node ≥23, run directly via `--experimental-strip-types`. `node:sqlite` (`DatabaseSync`) for persistence, `node:test` + `node:assert/strict` for tests. No new runtime dependencies.
 
 **Spec:** `docs/superpowers/specs/2026-08-04-dcf-core-engine-design.md`. Parent: `docs/superpowers/specs/2026-08-04-financial-modeling-dcf-platform-design.md`.
+
+**Execution status (2026-08-05):** Tasks 1–13 are implemented. The DCF-only reconciliation revision described in the spec is included: the Agent creates issuer-specific category rows and `DcfCategoryGroup` membership during initial import, and reconciliation reads only populated DCF rows plus fixed accounting identities. The phase-1 financial-model suite passes 193/193 tests, the full repository suite passes 683/683 tests, `pnpm build` passes, and `git diff --check` is clean. The per-task commit commands below remain operator-controlled checkpoints and were not run automatically.
 
 ## Global Constraints
 
@@ -20,14 +22,14 @@
 - **Facts never use last-write-wins.** The lifecycle layer resolves exactly one committed `ActiveFact` per historical cell; every replacement and review decision is retained.
 - **One successful mutating Agent step is one snapshot row.** Revisions are complete immutable snapshots, current state is derived from the greatest revision, and there is no mutable current-revision pointer. Read steps write nothing.
 - **Agent model context has one complete workbook.** Inject deterministic summaries for every revision before the latest and exactly one complete Excel-shaped JSON workbook for the latest revision. Never accumulate old complete workbooks or construct history summaries with an LLM; exact old revisions and lineage remain explicit reads.
-- **Source statements are a mapping-time view, not permanent prompt payload.** Initial history construction may expose the three prepared statement sheets beside the DCF template. Persist the reviewed period/category/sign mapping, then inject only the complete DCF workbook unless an unmapped row, restatement, structural change, failed reconciliation, low-confidence mapping, or explicit audit request reopens the source view.
+- **Source statements are a mapping-time view, not permanent prompt payload.** Initial history construction may expose the three prepared statement sheets beside the DCF template. Persist the reviewed period/category/sign mapping, then inject only the complete DCF workbook unless an unmapped row, restatement, structural change, failed required reconciliation, low-confidence mapping, or explicit audit request reopens the source view.
 - **No generic model patch.** Agent changes use the closed `ModelOperation` union; exact and selected reads use `ModelQuery`. A successful non-empty mutation batch creates one revision, while every read creates none.
 - **Source changes are explicit and range-scoped.** `set_line_item_source` may switch only a complete historical or forecast range to its allowlisted sources, cannot select `calculated`, and cannot modify registry-owned or engine-native rows.
 - **No conditional or fallback Formula DSL.** Comparisons, booleans, `IF`, and `COALESCE` are outside the language. Missing inputs and zero denominators remain diagnosed until the Agent explicitly changes a fact, assumption, or period-specific formula.
 - **Historical values are never overwritten.** `replace_fact` must execute the audited fact-lifecycle replacement and retain both facts plus the paired commit and supersede decisions.
-- **Revenue aggregation is reviewed configuration.** Never infer an aggregate from every hierarchy child; execute only the normalized formula generated from the committed `RevenueAggregationPlan`.
-- **Formula DSL has no hierarchy aggregation.** Category membership and signs come only from reviewed revenue or working-capital plans; the compiler emits explicit row references.
-- **Operating working capital is reviewed configuration.** Generate it only from the committed `WorkingCapitalAggregationPlan`; use the cash-flow-statement change as reconciliation evidence, never as a second FCFF adjustment.
+- **DCF category groups are reviewed configuration.** During initial import/mapping, the Agent may create arbitrary issuer-specific DCF member rows and classify them into groups under a parent DCF row. Category names and dimensions are semantic strings, not enums; execute only the normalized formula generated from the committed group.
+- **Formula DSL has no hierarchy aggregation.** Every group stores explicit `add`/`subtract`/`exclude` DCF members and period coverage. Source rows are lineage only after mapping and never participate in later aggregation.
+- **Reconciliation is DCF-table based.** Reconcile every group and built-in cross-category accounting identities over DCF rows with `passed`/`failed`/`insufficient_data`/`not_applicable` results. Missing detail is never zero; only failed required history checks block. Operating working capital uses the same group mechanism and no separately configured cash-flow evidence line.
 - **Valuation method choices are versioned.** Read discount convention, anchor, terminal metric, and sensitivity deltas from `ValuationConfig`; never accept an unversioned calculation override.
 - **Discount timing is anchor-relative.** `YEAR_INDEX`, `DISCOUNT_FACTOR`, and engine-native valuation all begin with the first forecast period strictly after the stored valuation anchor.
 - **Period order is authoritative model state.** Preserve the validated creation-time periods array; never sort it inside the engine and never mutate it after creation.
@@ -53,7 +55,8 @@
 | `src/financial-model/dsl/parser.ts` | Tokenizer and recursive-descent parser producing an allowlisted AST. |
 | `src/financial-model/dsl/graph.ts` | Dependency graph over `(lineItemId, periodId)` cells; topological order; cycle detection. |
 | `src/financial-model/engine.ts` | Evaluates the grid in topological order; quantizes; emits cell diagnostics. |
-| `src/financial-model/skeleton.ts` | Generates the standard chart of accounts with bound roles; adds revenue-stream pairs. |
+| `src/financial-model/skeleton.ts` | Generates the standard chart of accounts; maps sources; creates DCF category members and forecast formulas. |
+| `src/financial-model/reconciliation.ts` | Checks signed category groups and built-in accounting identities over DCF cells only. |
 | `src/financial-model/metrics.ts` | The metrics library, expressed as generated formulas. No arithmetic. |
 | `src/financial-model/valuation.ts` | Engine-native DCF: discounting, both terminal methods, equity bridge, sensitivity matrices. |
 | `src/financial-model/operations.ts` | Typed Model Operations DSL: selectors, pure mutation reducer, fixed-skeleton and coverage validation. |
@@ -77,7 +80,7 @@
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `Unit`, `PeriodClass`, `Period`, `LifecycleStage`, `CellSource`, `LineItemSection`, `LineItemRole`, `LineItem`, `StatementKind`, `PreparedStatementRow`, `FactStatus`, `Fact`, `ActiveFact`, `FactReviewDecision`, `AssumptionPayload`, `Assumption`, `StatementMappingPlan`, `RevenueAggregationPlan`, `WorkingCapitalAggregationPlan`, `ValuationConfig`, `Diagnostic`, `Cell`; `FinancialModelError`, `FinancialModelErrorCode`; `buildGrid(periods): PeriodGrid`, `PeriodGrid.at(periodId, offset): Period | undefined`, `PeriodGrid.range(periodId, from, to): Period[]`, `PeriodGrid.all: readonly Period[]`, `PeriodGrid.ordered: readonly Period[]`, `PeriodGrid.positionOf(periodId): number`, `PeriodGrid.offsetIndexOf(periodId): number`.
+- Produces: `Unit`, `PeriodClass`, `Period`, `LifecycleStage`, `CellSource`, `LineItemSection`, `LineItemRole`, `LineItem`, `StatementKind`, `PreparedStatementRow`, `NewDcfCategoryLineItem`, `FactStatus`, `Fact`, `ActiveFact`, `FactReviewDecision`, `AssumptionPayload`, `Assumption`, `StatementMappingPlan`, `DcfCategoryGroup`, `ReconciliationStatus`, `ReconciliationResult`, `ValuationConfig`, `Diagnostic`, `Cell`; `FinancialModelError`, `FinancialModelErrorCode`; `buildGrid(periods): PeriodGrid`, `PeriodGrid.at(periodId, offset): Period | undefined`, `PeriodGrid.range(periodId, from, to): Period[]`, `PeriodGrid.all: readonly Period[]`, `PeriodGrid.ordered: readonly Period[]`, `PeriodGrid.positionOf(periodId): number`, `PeriodGrid.offsetIndexOf(periodId): number`.
 
 - [ ] **Step 1: Add the test glob to `package.json`**
 
@@ -155,6 +158,12 @@ export type PreparedStatementRow = {
   order: number;
 };
 
+export type NewDcfCategoryLineItem = {
+  id: string;
+  label: string;
+  parentLineItemId: string;
+};
+
 export type Provenance = {
   sourceType: string;
   sourceRefs: string[];
@@ -216,11 +225,12 @@ export type Assumption = {
   rationale: string;
 };
 
-export type RevenueAggregationPlan = {
-  /** Plans in one model cover disjoint period sets. */
+export type DcfCategoryGroup = {
+  parentLineItemId: string;
+  /** Opaque Agent-defined dimension/category; deliberately not an enum. */
+  category: string;
+  /** Groups for one parent/category cover disjoint period sets. */
   periodIds: string[];
-  reportedTotalId: string;
-  aggregationSet: string;
   members: Array<{
     lineItemId: string;
     treatment: "add" | "subtract" | "exclude";
@@ -239,14 +249,16 @@ export type StatementMappingPlan = {
   reviewDecisionId: string;
 };
 
-export type WorkingCapitalAggregationPlan = {
-  /** Plans in one model cover disjoint period sets. */
-  periodIds: string[];
-  members: Array<{
-    lineItemId: string;
-    treatment: "operating_asset" | "operating_liability" | "exclude";
-  }>;
-  reviewDecisionId: string;
+export type ReconciliationStatus =
+  | "passed" | "failed" | "insufficient_data" | "not_applicable";
+
+export type ReconciliationResult = {
+  ruleId: string;
+  periodId: string;
+  status: ReconciliationStatus;
+  required: boolean;
+  difference: number | null;
+  refs: string[];
 };
 
 export type DiscountConvention = "year_end" | "mid_year";
@@ -1334,7 +1346,7 @@ Semantics the implementer must honor:
 - The Formula DSL has no comparison, boolean, conditional, or fallback nodes. The evaluator never selects an alternative data source; the Agent must read diagnostics and submit an explicit later operation.
 - `YEAR_INDEX()` counts only forecast periods strictly after `valuationConfig.anchorPeriodId`, from 1 under `year_end` and from 0.5 under `mid_year`. Historical periods and forecast periods at or before the anchor are `null` with `not_applicable`.
 - `DISCOUNT_FACTOR(wacc)` uses the WACC path strictly after the valuation anchor through the current forecast period. Year-end multiplies every full-period factor; mid-year multiplies full prior-period factors and the square root of the current factor. Periods at or before the anchor are `not_applicable`.
-- `periodIds` narrows a formula to explicit cells within its declared period class. This is how period-specific revenue and working-capital plans are executable. Omission means every period in the class. Overlapping formulas for the same cell are `invalid_formula`.
+- `periodIds` narrows a formula to explicit cells within its declared period class. This is how period-specific DCF category groups generate forecast parent formulas. Omission means every period in the class. Overlapping formulas for the same cell are `invalid_formula`.
 - A `not_applicable` assumption seeds a null cell with an N/A diagnostic. Reads of that cell remain N/A rather than becoming ordinary missing input; the DSL never coerces it to zero.
 - Assumption coverage is unique by `(lineItemId, periodId)`. Overlap is `invalid_assumption`; input order must never choose a winner.
 - Unit checking happens at compile time over the AST, before any evaluation. A mismatch throws `incompatible_units` and nothing is computed.
@@ -1408,7 +1420,7 @@ const VALUATION_CONFIG: ValuationConfig = {
 const FORMULAS: Formula[] = [
   { lineItemId: "revenue.a", appliesTo: "forecast", source: "LAG(revenue.a, 1) * (1 + growth.revenue.a)" },
   { lineItemId: "revenue.b", appliesTo: "forecast", source: "LAG(revenue.b, 1) * (1 + growth.revenue.b)" },
-  // Generated from the committed RevenueAggregationPlan; the engine executes
+  // Generated from the committed DcfCategoryGroup; the engine executes
   // the normalized formula and never infers membership from all hierarchy children.
   { lineItemId: "revenue.total", appliesTo: "forecast", source: "revenue.a + revenue.b" },
 ];
@@ -2000,15 +2012,17 @@ git commit -m "feat(financial-model): deterministic calculation engine with cell
 
 ---
 
-### Task 6: Standard skeleton and reviewed mapping/aggregation compilers
+### Task 6: Standard skeleton, reviewed DCF category groups, and reconciliation
 
 **Files:**
 - Create: `src/financial-model/skeleton.ts`
+- Create: `src/financial-model/reconciliation.ts`
 - Test: `src/financial-model/__tests__/skeleton.test.ts`
+- Test: `src/financial-model/__tests__/reconciliation.test.ts`
 
 **Interfaces:**
-- Consumes: `LineItem`, `LineItemRole`, `Period`, `StatementMappingPlan`, `RevenueAggregationPlan`, `WorkingCapitalAggregationPlan`, and `Formula` from tasks 1 and 5.
-- Produces: `createSkeleton(input): Skeleton`, `addSourceStatementRows(skeleton, rows): Skeleton`, `applyStatementMappingPlans(skeleton, plans): Skeleton`, `addRevenueStream(skeleton, input): Skeleton`, `applyRevenueAggregationPlans(skeleton, plans): Skeleton`, `applyWorkingCapitalAggregationPlans(skeleton, plans): Skeleton`, and `validateRoleCardinality(lineItems): void`, where `Skeleton = { lineItems: LineItem[]; formulas: Formula[] }`.
+- Consumes: `LineItem`, `LineItemRole`, `Period`, `StatementMappingPlan`, `DcfCategoryGroup`, `ReconciliationResult`, `Cell`, and `Formula` from tasks 1 and 5.
+- Produces: `createSkeleton(input): Skeleton`, `addSourceStatementRows(skeleton, rows): Skeleton`, `applyStatementMappingPlans(skeleton, plans): Skeleton`, `addDcfCategoryLineItem(skeleton, input): Skeleton`, `applyDcfCategoryGroups(skeleton, groups): Skeleton`, and `validateRoleCardinality(lineItems): void`, where `Skeleton = { lineItems: LineItem[]; formulas: Formula[] }`; plus `reconcileDcf(input): ReconciliationResult[]` for generic group checks and built-in accounting identities.
 
 The skeleton is the accounting boundary for phase 1. It has four layers:
 
@@ -2060,9 +2074,11 @@ test("keeps raw cash separate from bridge-available cash", () => {
   assert.equal(byId(skeleton, "cash_available_for_bridge").role, "cash_available_for_bridge");
 });
 
-test("adding a revenue stream creates its value and growth rows atomically", () => {
+test("adding a forecastable revenue member creates its value and growth rows atomically", () => {
   const base = createSkeleton({ currency: "USD", periods: PERIODS });
-  const next = addRevenueStream(base, { id: "services", label: "Services" });
+  const next = addDcfCategoryLineItem(base, {
+    id: "revenue.services", parentLineItemId: "revenue", label: "Services",
+  });
   assert.equal(byId(next, "revenue.services").role, "revenue_stream");
   assert.equal(byId(next, "growth.revenue.services").historical, "formula");
   assert.equal(byId(next, "growth.revenue.services").forecast, "assumption");
@@ -2072,10 +2088,10 @@ test("adding a revenue stream creates its value and growth rows atomically", () 
     "LAG(revenue.services, 1) * (1 + growth.revenue.services)");
 });
 
-test("a revenue plan signs only its reviewed active set for its periods", () => {
-  const planned = applyRevenueAggregationPlans(SKELETON_WITH_DISCLOSURES, [{
+test("arbitrary revenue categories coexist and forecast coverage selects one group per parent cell", () => {
+  const planned = applyDcfCategoryGroups(SKELETON_WITH_DISCLOSURES, [{
+    parentLineItemId: "revenue.total", category: "product",
     periodIds: ["FY2026", "FY2027"],
-    reportedTotalId: "revenue.total", aggregationSet: "product",
     members: [
       { lineItemId: "revenue.products", treatment: "add" },
       { lineItemId: "revenue.services", treatment: "add" },
@@ -2088,23 +2104,27 @@ test("a revenue plan signs only its reviewed active set for its periods", () => 
     "revenue.products + revenue.services - revenue.eliminations", ["FY2026", "FY2027"]);
 });
 
-test("a working-capital plan excludes financing and produces assets less liabilities", () => {
-  const planned = applyWorkingCapitalAggregationPlans(SKELETON_WITH_DISCLOSURES, [{
+test("working capital is an ordinary DCF category group with explicit signs", () => {
+  const groups = [{
+    parentLineItemId: "operating_working_capital", category: "operating_working_capital",
     periodIds: ["FY2024", "FY2025"],
     members: [
-      { lineItemId: "accounts_receivable", treatment: "operating_asset" },
-      { lineItemId: "inventory", treatment: "operating_asset" },
-      { lineItemId: "accounts_payable", treatment: "operating_liability" },
+      { lineItemId: "accounts_receivable", treatment: "add" },
+      { lineItemId: "inventory", treatment: "add" },
+      { lineItemId: "accounts_payable", treatment: "subtract" },
       { lineItemId: "cash_and_equivalents", treatment: "exclude" },
       { lineItemId: "debt", treatment: "exclude" },
     ],
     reviewDecisionId: "review-2",
-  }]);
-  assertFormula(planned, "operating_working_capital", "historical",
-    "accounts_receivable + inventory - accounts_payable", ["FY2024", "FY2025"]);
-  assert.equal(planned.formulas.some((formula) =>
-    formula.lineItemId === "change_nwc" && formula.source.includes("reported_change_operating_assets_liabilities")), false);
+  }];
+  assert.deepEqual(reconcileDcf({ ...DCF_INPUT, groups }).map(({ status }) => status),
+    ["passed", "passed"]);
+  assert.equal(JSON.stringify(groups).includes("reported_change_operating_assets_liabilities"), false);
 });
+
+test("category reconciliation compares DCF members to the DCF parent without source rows", ...);
+test("built-in accounting identities return all four statuses and never coerce missing detail to zero", ...);
+test("only failed required history checks are blockers", ...);
 
 test("a reviewed statement plan maps several source categories into one canonical DCF row", () => {
   const withSources = addSourceStatementRows(createSkeleton({ currency: "USD", periods: PERIODS }), [
@@ -2132,8 +2152,8 @@ Use annual actual periods plus five forecast periods in the fixture so formula c
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `node --experimental-strip-types --test "src/financial-model/__tests__/skeleton.test.ts"`
-Expected: FAIL — cannot find module `../skeleton.ts`.
+Run: `node --experimental-strip-types --test "src/financial-model/__tests__/skeleton.test.ts" "src/financial-model/__tests__/reconciliation.test.ts"`
+Expected: FAIL — cannot find modules `../skeleton.ts` and `../reconciliation.ts`.
 
 - [ ] **Step 3: Implement the fixed chart of accounts**
 
@@ -2151,9 +2171,9 @@ Canonical mapping targets default to historical `none` / forecast `none` until a
 
 Generate explicit `periodIds` for every default formula. This makes later plan application a deterministic replacement over selected cells instead of an overlap with a class-wide formula. Preserve a stable section/order sequence; do not derive order from object or set iteration.
 
-- [ ] **Step 4: Implement revenue-stream pairs and role cardinality**
+- [ ] **Step 4: Implement Agent-created DCF category rows and role cardinality**
 
-`addRevenueStream` validates a lowercase semantic slug, rejects collisions, inserts `revenue.<slug>` and `growth.revenue.<slug>` together, and returns new arrays without mutating the input. Its forecast formula is:
+`addDcfCategoryLineItem` validates a semantic ID, an allowlisted parent DCF row, and unit/section compatibility, rejects collisions, and returns new arrays without mutating the input. Category names and dimensions are not enumerated and are stored on `DcfCategoryGroup`, not encoded into a fixed role union. New non-revenue members use `role: "none"` and receive no implicit formula. For a revenue child, the helper inserts `revenue.<slug>` and `growth.revenue.<slug>` together. Its forecast formula is:
 
 ```text
 LAG(revenue.<slug>, 1) * (1 + growth.revenue.<slug>)
@@ -2161,46 +2181,51 @@ LAG(revenue.<slug>, 1) * (1 + growth.revenue.<slug>)
 
 The companion growth row has historical source `formula` and forecast source `assumption`. Install `YOY(revenue.<slug>)` over explicit actual-period IDs at the same time as the forecast formula. Missing prior history remains a normal `missing_input` diagnostic; do not omit the metric row or fill it with zero.
 
-`validateRoleCardinality` requires exactly one of every fixed role listed in the first test. It permits zero or more `revenue_stream`, `bridge_other`, and `none`. It rejects a role not present in the closed union at compile time; there is deliberately no `terminal_metric` role because valuation selects `ebitda` or `fcff`.
+`validateRoleCardinality` requires exactly one of every fixed role listed in the first test. It permits zero or more `revenue_stream`, `bridge_other`, and `none`. It rejects a role not present in the closed union at compile time; there is deliberately no category-specific or `terminal_metric` role because categories are data and valuation selects `ebitda` or `fcff`.
 
-- [ ] **Step 5: Implement all three reviewed plan compilers**
+- [ ] **Step 5: Implement statement mapping and generic DCF-category compilation**
 
-For all plan types:
+For statement mappings and DCF category groups:
 
-- sort plans by first period-grid index, then semantic identity: statement target ID; revenue reported-total ID then aggregation-set name; working capital has the unique target. Use the complete ordered period list as the final tie-breaker;
-- reject unknown periods, repeated period IDs, overlapping output coverage for the same target, unknown member rows, and duplicate member IDs;
+- sort records by first period-grid index, then semantic identity: statement target ID, or category `parentLineItemId` then category string. Use the complete ordered period list as the final tie-breaker;
+- reject unknown periods, repeated period IDs, unknown member rows, and duplicate member IDs. Historical groups with different categories may overlap on the same parent and period because each reconciles independently; only selected forecast formula coverage must be unique per parent-period cell;
 - preserve member order only for display; sort included IDs by line-item `order`, then ID when generating formulas;
-- ignore `exclude` members in arithmetic but preserve them in the stored plan;
-- reject an active plan with no included member;
-- emit normalized formulas with explicit `periodIds`, split into historical and forecast definitions where necessary;
+- ignore `exclude` members in arithmetic but preserve them in the stored mapping or group;
+- reject an active mapping or group with no included member;
+- emit normalized forecast formulas with explicit `periodIds` only for selected forecast groups; historical groups are reconciliation definitions and do not overwrite independently mapped parent cells;
 - replace any existing formula only for the exact covered cells and reject every other overlap.
 
-Revenue formulas use `add` and `subtract` signs and target `reportedTotalId`; the Formula DSL has no hierarchy-summing function. Historical periods remain independent actuals and are reconciled later by the service using the same signed members. Forecast plan formulas replace the consolidated-only default formula only for the plan's explicit period coverage.
+DCF category formulas use `add` and `subtract` signs and target `parentLineItemId`; the Formula DSL has no hierarchy-summing function. Historical parent values remain independently mapped and are reconciled later using the same signed DCF members. A group's forecast periods are its explicit selection to generate those parent cells; the compiler rejects multiple committed groups for one parent-period cell. A revenue group may replace the consolidated-only default formula, and an operating-working-capital group may replace its ratio-driven default, only for explicit forecast coverage.
 
 Statement-mapping formulas use only reserved source rows, target only prebuilt canonical/DCF rows, and cover actual periods selected by the Agent. They may combine several source categories with explicit `add`/`subtract` signs, preserve `exclude` decisions for audit, and switch exactly their covered target cells to formula source. One target-period cell may have only one plan. The compiler performs the arithmetic; it never materializes an LLM-computed fact.
 
-Statement mappings have no arbitrary ID. Normalize and locate them by `targetLineItemId` plus their ordered `periodIds`; a new mapping replaces the exact target-period coverage it names and rejects partial overlap with any other mapping for that target. Revision metadata supplies audit identity.
+Neither statement mappings nor DCF category groups have an arbitrary caller ID. Normalize and locate statement mappings by `targetLineItemId + ordered periodIds`; locate groups by `parentLineItemId + category + ordered periodIds`. Exact business-key coverage may be replaced; ambiguous or partial overlap for the same business key is rejected. `reviewDecisionId` is only an audit link to the human/Agent decision. Category strings such as product, geography, segment, operating-cost function, or operating working capital are opaque values, never an enum or dispatch tag.
 
-Revenue and working-capital plans likewise have no arbitrary ID. Locate revenue plans by `reportedTotalId + aggregationSet + periodIds`, and working-capital plans by `periodIds` because `operating_working_capital` is the fixed target. Exact business-key coverage may be replaced; ambiguous or partial overlap is rejected. `reviewDecisionId` remains an audit link to the human/Agent decision, not a plan identifier.
+Working capital is represented by a normal group whose parent is the unique `operating_working_capital` row. The initial Agent proposal may add `accounts_receivable`, `inventory`, and other operating current assets; subtract `accounts_payable`, deferred revenue, accrued operating liabilities, and other operating current liabilities; and exclude cash, restricted cash, investments, debt, and lease liabilities. The committed group is authoritative. Reconciliation and forecast generation use only those DCF rows. `reported_change_operating_assets_liabilities` is neither a group member nor separately configured evidence.
 
-Working-capital formulas target the unique `operating_working_capital` row and generate operating assets less operating liabilities. The initial proposal assigns `accounts_receivable`, `inventory`, and `other_operating_current_assets` to operating assets; `accounts_payable`, `deferred_revenue`, `accrued_operating_liabilities`, and `other_operating_current_liabilities` to operating liabilities; and `cash_and_equivalents`, `restricted_cash`, `short_term_investments`, `debt`, and `lease_liabilities` to exclusions. The committed review decision may change any proposal. A forecast working-capital plan may replace the ratio-driven formula for its exact periods. `reported_change_operating_assets_liabilities` never appears in the generated formula.
+- [ ] **Step 6: Implement DCF-table reconciliation**
 
-- [ ] **Step 6: Run focused tests and type check**
+`reconcileDcf` deterministically evaluates every historical `DcfCategoryGroup` and the built-in accounting-identity registry after the cell engine pass. A group compares its signed included-member sum with its independent parent value. Built-in rules include, when applicable, revenue/cost/gross-profit, gross-profit/operating-expense/operating-income, pretax/tax/net-income, EBITDA, NOPAT, operating NWC/change NWC, and FCFF identities. Every result records `ruleId`, period, ordered DCF refs, `required`, `difference`, and one of `passed`, `failed`, `insufficient_data`, or `not_applicable`.
+
+Never inspect a `source.*` row in this module. If a parent or required member is missing, return `insufficient_data`; do not substitute zero and do not manufacture an omitted residual. Explicit reviewed scope can return `not_applicable`. The history gate blocks only `status: "failed"` results whose rule metadata says `required: true`; insufficient, N/A, and informational failures remain visible in the workbook.
+
+- [ ] **Step 7: Run focused tests and type check**
 
 Run:
 
 ```bash
-node --experimental-strip-types --test "src/financial-model/__tests__/skeleton.test.ts" "src/financial-model/__tests__/engine.test.ts"
+node --experimental-strip-types --test "src/financial-model/__tests__/skeleton.test.ts" "src/financial-model/__tests__/reconciliation.test.ts" "src/financial-model/__tests__/engine.test.ts"
 pnpm build
 ```
 
 Expected: all tests PASS and type check exits 0.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add src/financial-model/skeleton.ts src/financial-model/__tests__/skeleton.test.ts
-git commit -m "feat(financial-model): standard DCF skeleton and reviewed aggregation plans"
+git add src/financial-model/skeleton.ts src/financial-model/reconciliation.ts \
+  src/financial-model/__tests__/skeleton.test.ts src/financial-model/__tests__/reconciliation.test.ts
+git commit -m "feat(financial-model): reviewed DCF categories and reconciliation"
 ```
 
 ---
@@ -2747,7 +2772,7 @@ git commit -m "feat(financial-model): DCF valuation and sensitivity matrices"
 - Test: `src/financial-model/__tests__/views.test.ts`
 
 **Interfaces:**
-- Consumes: financial-model types, task-8 revision headers, `addSourceStatementRows`, `addRevenueStream`, statement/revenue/working-capital plan compilers, fact lifecycle, `installRegisteredMetric` from task 9, Formula records, and valuation configuration types. It consumes neither the evaluator nor a writable store.
+- Consumes: financial-model types, task-8 revision headers, `addSourceStatementRows`, `addDcfCategoryLineItem`, statement-mapping and DCF-category compilers, fact lifecycle, `installRegisteredMetric` from task 9, Formula records, reconciliation results, and valuation configuration types. It consumes neither the evaluator nor a writable store.
 - Produces from `operations.ts`: `ModelSelector`, `ModelQuery`, closed `ModelOperation` union, `FinancialModelSnapshot`, and pure `applyModelOperations(snapshot, operations)`.
 - Produces from `views.ts`: closed `RevisionChange`, `RevisionChangeSummary`, `RevisionSummary`, `WorkbookCellStatus`, `WorkbookCellSource`, `WorkbookCellView`, `WorkbookRowView`, `SourceStatementRowView`, `SourceStatementReviewView`, `CurrentWorkbookView`, `WorkbookSliceView`, `ModelContextView`, `buildWorkbookView`, `buildWorkbookSlice`, and `buildModelContextView`.
 
@@ -2794,7 +2819,7 @@ export type ModelOperation =
     }
   | { kind: "set_formula"; formula: Formula }
   | { kind: "set_statement_mapping_plan"; plan: StatementMappingPlan }
-  | { kind: "set_aggregation_plan"; plan: RevenueAggregationPlan | WorkingCapitalAggregationPlan }
+  | { kind: "set_category_group"; group: DcfCategoryGroup }
   | { kind: "set_valuation_config"; config: ValuationConfig }
   | {
       kind: "advance_stage";
@@ -2817,19 +2842,20 @@ test("set_line_item_source switches a complete range and can be populated later 
 test("source switching clears current formula and assumption coverage but retains facts in the working snapshot", ...);
 test("source switching rejects calculated, forecast actual, registry metrics, and engine-native rows", ...);
 test("historical source may switch to a sourced assumption for an anchor-period N/A bridge decision", ...);
-test("add_line_item accepts a revenue stream and creates its companion driver and formula", ...);
+test("add_line_item accepts an allowlisted DCF category member and creates a revenue driver only when applicable", ...);
 test("add_line_item rejects a fixed or non-extensible parent", ...);
 test("add_metric installs only a parameterized registry definition with a derived id", ...);
 test("custom metric rows cannot use or overwrite registry ids", ...);
 test("set_statement_mapping_plan stores periods/categories/signs and installs its generated target formula", ...);
 test("statement mapping rejects raw target writes, overlapping target periods, and non-source members", ...);
-test("set_aggregation_plan stores the plan and its normalized generated formula", ...);
+test("set_category_group stores the semantic group key and its selected forecast formula", ...);
+test("category names and dimensions are arbitrary non-empty strings rather than enums", ...);
 test("advance_stage records an explicit forward transition for later gate validation", ...);
 ```
 
 - [ ] **Step 2: Define the complete snapshot and pure query behavior**
 
-`FinancialModelSnapshot` contains the lifecycle stage, periods, hidden source-statement rows, DCF line items, all fact candidates and review decisions, assumptions, formulas and normalized ASTs, statement/revenue/working-capital plans, valuation configuration, computed cells, valuation output when available, ordered diagnostics, and engine version. Task 12 supplies its strict codec and persistence service.
+`FinancialModelSnapshot` contains the lifecycle stage, periods, hidden source-statement lineage rows, DCF line items, all fact candidates and review decisions, assumptions, formulas and normalized ASTs, statement-mapping plans, DCF category groups, ordered reconciliation results, valuation configuration, computed cells, valuation output when available, ordered diagnostics, and engine version. Task 12 supplies its strict codec and persistence service.
 
 The selector logic used by `buildWorkbookSlice(snapshot, selector, includeLineage)` must:
 
@@ -2840,7 +2866,7 @@ The selector logic used by `buildWorkbookSlice(snapshot, selector, includeLineag
 5. return compact source references unless full lineage is requested;
 6. leave the snapshot byte-for-byte unchanged.
 
-Implement the parent spec §5.4 view contracts in `views.ts`. In normal `dcf` mode the complete workbook includes every non-source DCF line item and every authoritative period, grouped into `history`, `metrics`, `revenue`, `operations`, and `dcf`; it does not include hidden `source.*` rows or full statement-mapping plans. In `statement_mapping` mode the same single workbook additionally includes three read-only source sheets, selected period candidates, active/proposed mappings, and reconciliation diagnostics. Initial mapping uses all three prepared sheets; later exception views may be limited to affected rows/periods. Materialize source `none` as `not_modeled`; never collapse it into `missing_input`. Include active formula source text and current assumptions once at row level, raw quantized cell values, semantic units, compact row-level mapping/source references, current revenue/working-capital plans and valuation configuration, diagnostics, and valuation. Exclude inactive audit records, normalized ASTs, and full provenance unless an explicit lineage slice is requested.
+Implement the parent spec §5.4 view contracts in `views.ts`. In normal `dcf` mode the complete workbook includes every non-source DCF line item and every authoritative period, grouped into `history`, `metrics`, `revenue`, `operations`, and `dcf`; it does not include hidden `source.*` rows or full statement-mapping plans. In `statement_mapping` mode the same single workbook additionally includes three read-only source sheets, selected period candidates, active/proposed mappings, proposed DCF category groups, and reconciliation results. Initial mapping uses all three prepared sheets; later exception views may be limited to affected rows/periods. Materialize source `none` as `not_modeled`; never collapse it into `missing_input`. Include active formula source text and current assumptions once at row level, raw quantized cell values, semantic units, compact row-level mapping/category references, current DCF category groups, reconciliation results, valuation configuration, diagnostics, and valuation. Exclude inactive audit records, normalized ASTs, and full provenance unless an explicit lineage slice is requested.
 
 Once statement plans are committed and the history gate passes, `buildWorkbookView` must deterministically select `mode: "dcf"`; it must not rely on the LLM to remove source sheets. It selects `statement_mapping` only while initial mapping blockers exist or when the caller explicitly requests a mapping/source exception. Compact references on each DCF row identify the active plan and source rows without embedding their values. This is how the Agent maps once and subsequently operates only on the DCF workbook.
 
@@ -2854,8 +2880,9 @@ test("cells keyed by period distinguish ok, missing, divide-by-zero, N/A, and no
 test("active formulas and assumptions appear once at row level while ASTs and inactive audit data do not", ...);
 test("compact source references expand only for an explicit lineage slice", ...);
 test("initial mapping mode contains three source sheets beside the prebuilt DCF rows", ...);
-test("after mapping, default context omits every source row and retains reusable mapping references", ...);
-test("unmapped, restated, structurally changed, or unreconciled sources reopen only the required mapping view", ...);
+test("after mapping, default context omits every source row and retains reusable DCF mapping/category references", ...);
+test("unmapped, restated, structurally changed, or failed-required cases reopen only the required mapping view", ...);
+test("insufficient-data and not-applicable reconciliation results stay visible without reopening sources", ...);
 test("model context contains every prior summary and exactly one complete current workbook", ...);
 test("model context rejects missing, duplicate, out-of-order, or malformed revision headers", ...);
 test("building any view leaves the snapshot byte-for-byte unchanged", ...);
@@ -2868,11 +2895,11 @@ Use an exhaustive `switch (operation.kind)` with a `never` assertion. Apply the 
 - `replace_fact` stages the new fact and invokes the fact-lifecycle transition with its required commit decision and the predecessor's paired supersede decision; it may not mutate a committed fact's value, unit, period, provenance, or mapping in place;
 - `set_line_item_source` changes the complete `historical` or `forecast` source range without changing row identity. Historical permits `actual`, `assumption`, `formula`, or `none`, including sourced overrides and explicit N/A bridge decisions at the valuation anchor; forecast permits `assumption`, `formula`, or `none`; `calculated` is never an Agent option. It removes formula and assumption records whose coverage is in that range before subsequent operations are applied, retains facts for audit, and rejects registry-owned metrics and engine-native rows. The final reduced snapshot—not each intermediate operation—is checked for source/coverage consistency, so a source switch plus its new assumptions or formulas is atomic;
 - `set_assumption` replaces only the named `(lineItemId, periodId)` coverage, validates provenance and unit, and rejects overlap in the final snapshot;
-- `add_line_item` accepts only a designated extensible parent. Phase 1 allows revenue streams and rows in the custom-metrics namespace. Revenue streams delegate to `addRevenueStream`, which atomically creates the value row, a historical `YOY` growth formula, the forecast growth-assumption cells, and the default revenue forecast formula. Custom metric rows must use non-registry IDs and receive arithmetic only through a separate `set_formula` operation;
+- `add_line_item` accepts only an allowlisted DCF parent or the custom-metrics namespace. DCF category members inherit compatible unit/section constraints and cannot choose a fixed role. Revenue members delegate to `addDcfCategoryLineItem`, which also creates the historical `YOY` growth formula, forecast growth-assumption cells, and default member forecast formula; other category members receive no implicit forecast arithmetic. Custom metric rows must use non-registry IDs and receive arithmetic only through a separate `set_formula` operation;
 - `add_metric` delegates to task 9's registry, which validates the allowlisted target and lookback and derives the row ID, unit, coverage, and formula without accepting an expression from the Agent;
 - `set_formula` replaces only explicit coverage, validates the target classification, and leaves parsing to the compile phase;
 - `set_statement_mapping_plan` validates selected actual periods and reserved source-row members, stores the reviewed add/subtract/exclude decisions, and replaces only the compiler-owned historical formula coverage on its canonical target. Plans for one target cannot overlap. Raw statement facts remain on their source rows and are never copied or summed by the Agent;
-- `set_aggregation_plan` discriminates the plan shape, validates non-overlapping periods, stores it, and replaces the compiler-owned normalized formula coverage;
+- `set_category_group` validates the non-empty arbitrary category string, the `parentLineItemId + category + periodIds` business key, DCF-only members, and explicit signs. It stores the group with no caller ID; its forecast period coverage replaces compiler-owned parent formulas, while its historical coverage feeds reconciliation without replacing mapped parent cells. Different historical categories may overlap, but forecast parent-period coverage may not;
 - `set_valuation_config` validates and normalizes sourced configuration and sensitivity arrays;
 - `advance_stage` permits only forward lifecycle transitions and does not itself fabricate missing inputs.
 
@@ -2925,10 +2952,11 @@ test("maps encode as deterministically ordered JSON arrays and decode back to ma
 test("encoding the same snapshot twice produces byte-identical JSON", ...);
 test("codec rejects NaN and Infinity, normalizes negative zero, and rejects unknown fields, missing fields, and invalid union tags", ...);
 test("codec rejects duplicate cell keys and structural references to unknown rows or periods", ...);
+test("codec validates category-group business keys and ordered reconciliation references", ...);
 test("malformed stored JSON throws invalid_snapshot rather than a model-not-found error", ...);
 ```
 
-The codec accepts and returns complete snapshots, never partial JSON. Encode object fields in a fixed schema order; encode maps as arrays ordered by authoritative period position, numeric line-item order, line-item ID, then complete cell key. On decode, validate every primitive, closed union tag, unit, ID reference, unique key, finite numeric value, and formula/period coverage before constructing maps. Preserve the stored periods array exactly; never sort it. Do not serialize `undefined`, functions, class instances, or non-finite numbers. Normalize `-0` to `0` through the numeric policy.
+The codec accepts and returns complete snapshots, never partial JSON. Encode object fields in a fixed schema order; encode maps as arrays ordered by authoritative period position, numeric line-item order, line-item ID, then complete cell key. On decode, validate every primitive, closed union tag, unit, ID reference, unique key, finite numeric value, formula/period coverage, DCF category-group business key, group member reference, forecast parent-period uniqueness, and reconciliation result before constructing maps. Category strings are validated only as non-empty semantic text, not against an enum. Preserve the stored periods array exactly; never sort it. Do not serialize `undefined`, functions, class instances, or non-finite numbers. Normalize `-0` to `0` through the numeric policy.
 
 - [ ] **Step 2: Write service and revision-boundary tests**
 
@@ -2944,8 +2972,11 @@ test("an empty operation batch, invalid operation, compile error, gate blocker, 
 test("readCells and getModel can read an old revision and never create a revision", ...);
 test("default getModel returns all past summaries and exactly one complete latest workbook", ...);
 test("draft mapping context exposes three prepared source sheets and the prebuilt DCF template", ...);
-test("committed statement plans switch default context to DCF-only without deleting source audit rows", ...);
+test("initial review creates DCF members, mappings, and arbitrary category groups atomically", ...);
+test("committed mappings switch default context to DCF-only and source rows become lineage-only", ...);
 test("mapping exceptions or explicit source reads reopen the relevant source view", ...);
+test("group and built-in reconciliation persist all four statuses without treating missing detail as zero", ...);
+test("only failed required reconciliation blocks the history gate", ...);
 test("section and selector reads return workbook-shaped slices rather than flat cell arrays", ...);
 test("revision summaries omit values, formula text, provenance, rationale, and generated prose", ...);
 test("changing a fact or assumption fully recalculates downstream cells without a metrics call", ...);
@@ -2964,12 +2995,13 @@ For every non-empty mutation:
 
 1. Load the exact current snapshot and compare `expectedRevision` before work begins.
 2. Clone it and apply only the method-specific mutation: stage facts, review facts, reduce Model Operations, or mark archived.
-3. Validate period order, reserved source-row namespaces, fixed-role cardinality, extensible namespaces, allowed historical/forecast source combinations, source coverage, assumption uniqueness, statement/revenue/working-capital plan coverage, valuation configuration, and all cross-references.
+3. Validate period order, reserved source-row namespaces, fixed-role cardinality, allowlisted DCF-category parents, allowed historical/forecast source combinations, source coverage, assumption uniqueness, statement-mapping coverage, `parentLineItemId + category + periodIds` group keys, forecast parent-period uniqueness, valuation configuration, and all cross-references.
 4. Resolve committed active facts; parse and unit-check every formula; build the cell graph; evaluate the entire grid once. Default and parameterized metrics participate as ordinary formula rows.
-5. If the resulting stage is `valued`, calculate valuation by role and store both terminal-method outputs and both sensitivity matrices; at earlier stages remove any stale valuation output.
-6. Normalize and deterministically sort diagnostics. Missing metric inputs and divide-by-zero cells are warnings in partial models; enforce the documented stage gates, promoting required unresolved history, FCFF, or valuation inputs to typed blockers only at their boundary.
-7. Generate a closed `RevisionChangeSummary` from the accepted method input: targets and periods only, including `statement_mapping_plan_set` when relevant, deterministically ordered, plus changed sections and diagnostic counts. Validate it against the resulting snapshot; never summarize with an LLM and never copy source-statement values, formula text, assumption payloads, provenance, or rationales into it.
-8. Encode the complete snapshot and validate the JSON-compatible summary, then call `store.commit` exactly once with both. A throw at any earlier point writes neither.
+5. Run `reconcileDcf` over DCF cells only, replacing the complete ordered reconciliation-result set. Never consult source rows and never turn a missing member into zero.
+6. If the resulting stage is `valued`, calculate valuation by role and store both terminal-method outputs and both sensitivity matrices; at earlier stages remove any stale valuation output.
+7. Normalize and deterministically sort diagnostics. Missing metric inputs, insufficient reconciliation data, N/A checks, and divide-by-zero cells are warnings in partial models. Only failed required reconciliation checks block the history gate; enforce FCFF and valuation inputs only at their own boundaries.
+8. Generate a closed `RevisionChangeSummary` from the accepted method input: targets and periods only, including `statement_mapping_plan_set` and `category_group_set` when relevant, deterministically ordered, plus changed sections and diagnostic counts. Validate it against the resulting snapshot; never summarize with an LLM and never copy source-statement values, formula text, assumption payloads, provenance, rationales, or category labels into it.
+9. Encode the complete snapshot and validate the JSON-compatible summary, then call `store.commit` exactly once with both. A throw at any earlier point writes neither.
 
 Do not special-case “affected” rows or preserve old calculated values. The service always replaces `cells`, normalized ASTs, diagnostics, valuation output, and `engineVersion` with results from the current engine pass.
 
@@ -2981,7 +3013,9 @@ Implement exactly:
 export type ReviewFactsInput = {
   decisions: FactReviewDecision[];
   selectedHistoricalPeriodIds: string[];
+  categoryLineItems: NewDcfCategoryLineItem[];
   statementMappingPlans: StatementMappingPlan[];
+  categoryGroups: DcfCategoryGroup[];
 };
 
 class FinancialModelService {
@@ -2996,7 +3030,7 @@ class FinancialModelService {
 }
 ```
 
-`ReviewFactsInput` contains the fact decisions, selected historical period IDs, and initial `StatementMappingPlan` values; the service applies and validates them together so the initial three-statement-to-DCF mapping is one atomic revision. `createModel` validates the creation-time period array, builds the fixed DCF skeleton, installs prepared source rows and all default metrics, performs the initial engine pass, and atomically creates revision `0` with a `model_created` summary. Until selected periods and statement plans pass the history gate, its complete workbook is in `statement_mapping` mode with the three source sheets beside the DCF template. `stageFacts`, `reviewFacts`, `applyOperations`, and `archive` use the shared pipeline and return the committed `RevisionSummary` plus its complete `CurrentWorkbookView`. Once mapping succeeds, the default workbook is deterministically `dcf` mode and source rows are available only through a mapping exception or explicit source/audit read. Later mapping changes use `set_statement_mapping_plan`. `readCells`, `getModel`, and `listModels` are read-only and never call `commit`. An unfiltered current `getModel` obtains old summaries through `listRevisionHeaders`, loads only the latest snapshot, and returns `ModelContextView`. A revision, section, selector, or lineage option returns the requested workbook/audit slice. Reads validate a requested revision and all selector IDs. Reject every mutation against an archived latest revision.
+`ReviewFactsInput` contains the fact decisions, selected historical period IDs, Agent-created DCF category-member definitions, initial `StatementMappingPlan` values, and initial `DcfCategoryGroup` values. The service applies and validates them together so the initial three-statement-to-DCF mapping, category construction, and reconciliation are one atomic revision. `createModel` validates the creation-time period array, builds the fixed DCF skeleton, installs prepared source rows and all default metrics, performs the initial engine pass, and atomically creates revision `0` with a `model_created` summary. Until selected periods, DCF mappings, any declared groups, and required reconciliation checks pass the history gate, its complete workbook is in `statement_mapping` mode with the three source sheets beside the DCF template. A consolidated-only model may legitimately declare no revenue subgroup. `stageFacts`, `reviewFacts`, `applyOperations`, and `archive` use the shared pipeline and return the committed `RevisionSummary` plus its complete `CurrentWorkbookView`. Once mapping succeeds, the default workbook is deterministically `dcf` mode: source rows remain immutable lineage but are unavailable to calculations and ordinary context, returning only for a mapping exception or explicit source/audit read. Later mapping changes use `set_statement_mapping_plan`; later category changes use `add_line_item` and `set_category_group`. `readCells`, `getModel`, and `listModels` are read-only and never call `commit`. An unfiltered current `getModel` obtains old summaries through `listRevisionHeaders`, loads only the latest snapshot, and returns `ModelContextView`. A revision, section, selector, or lineage option returns the requested workbook/audit slice. Reads validate a requested revision and all selector IDs. Reject every mutation against an archived latest revision.
 
 `CreateModelInput` includes the authoritative periods, reporting currency, stable metadata, and `preparedStatementRows: PreparedStatementRow[]`. Phase 1 receives these rows from its caller and performs no network extraction or raw-taxonomy classification.
 
@@ -3036,30 +3070,30 @@ git commit -m "feat(financial-model): strict snapshots and atomic model service"
 
 - [ ] **Step 1: Build an inspectable hand-computed fixture**
 
-Use a small synthetic USD company with at least three actual annual periods and three forecast annual periods. State the input facts, forecast assumptions, WACC path, terminal growth, exit multiple, bridge balances, diluted shares, and expected arithmetic as named constants in the test. Derive expected revenue, historical default metrics (including ROA and ROE), operating income, NOPAT, D&A, capex, operating NWC, change in NWC, FCFF, discount factors, terminal values, enterprise values, equity bridge, and per-share values independently with literal hand-computed reference numbers. Do not generate expected values by calling production helpers or by recording a production snapshot.
+Use a small synthetic USD company with at least three actual annual periods and three forecast annual periods. Include arbitrary Agent-classified DCF groups for at least two simultaneous revenue dimensions, one operating-cost grouping, and operating working capital, with an elimination or excluded member. State the input facts, mapped DCF values, forecast assumptions, WACC path, terminal growth, exit multiple, bridge balances, diluted shares, expected reconciliation statuses, and expected arithmetic as named constants in the test. Derive expected revenue, historical default metrics (including ROA and ROE), operating income, NOPAT, D&A, capex, operating NWC, change in NWC, FCFF, discount factors, terminal values, enterprise values, equity bridge, and per-share values independently with literal hand-computed reference numbers. Do not generate expected values by calling production helpers or by recording a production snapshot.
 
 - [ ] **Step 2: Exercise the real revision workflow**
 
 Drive the fixture only through service calls:
 
 1. create revision `0` with three prepared source sheets, the prebuilt DCF template, and default metric rows; assert mapping mode exposes the sheets only once;
-2. choose the historical periods, stage/review source-row facts, and commit statement-mapping plans that map single and multiple source categories into the canonical revenue, COGS, operating-cost, EBIT/EBITDA, D&A, capex, and balance-sheet rows;
-3. advance through the history gate, then assert the default workbook is DCF-only, the source rows remain audit-readable, and the generated mappings reproduce the expected historical values without Agent arithmetic;
-4. read and assert automatically calculated metrics without a calculation mutation;
-5. populate the preinstalled `growth.revenue.total` assumption path for the consolidated-only fixture, verify its default revenue formula without creating an artificial stream, and advance to `revenue_forecast`;
+2. choose the historical periods, stage/review source-row facts, create issuer-specific DCF category-member rows, and atomically commit statement mappings plus arbitrary `DcfCategoryGroup` values for revenue, operating costs, and working capital;
+3. advance through the history gate, then assert the default workbook is DCF-only, source rows remain explicit audit lineage but do not appear in formulas or reconciliation refs, and generated mappings reproduce expected historical DCF values without Agent arithmetic;
+4. assert every category-group reconciliation and applicable built-in accounting identity cell by cell, including `passed`, `insufficient_data`, and explicit `not_applicable`; add a separate failing-required case that blocks history while an informational failure does not. Read and assert automatically calculated metrics without a calculation mutation;
+5. use one committed revenue category group's explicit forecast coverage to generate `revenue.total`, verify its normalized signed formula, and advance to `revenue_forecast`; separately cover the preinstalled consolidated-only `growth.revenue.total` path in a focused case so no artificial stream is required;
 6. apply operating/FCFF assumptions and advance to `operations_fcff`;
 7. set the sourced valuation configuration and role-bound bridge inputs, then advance to `valued`;
 8. assert both Gordon-growth and exit-multiple outputs and both sensitivity matrices cell by cell.
 
 Assert each mutating Agent step advances the revision by exactly one, each read leaves it unchanged, every output links to its source cells, and no terminal-method blend or upside/downside scenario exists.
 
-After the final valuation, request the unfiltered current model context. Assert revisions `0..current-1` appear only as deterministic summaries, the valued revision appears exactly once as the complete workbook, every workbook row and period is present, and no prior snapshot values, ASTs, rejected facts, or superseded facts are embedded. Serialize the context to JSON and use that exact payload as the golden Agent-facing representation.
+After the final valuation, request the unfiltered current model context. Assert revisions `0..current-1` appear only as deterministic summaries, the valued revision appears exactly once as the complete workbook, every workbook row and period is present, arbitrary category groups and ordered reconciliation results are present, and no source-row values, prior snapshot values, ASTs, rejected facts, or superseded facts are embedded. Serialize the context to JSON and use that exact payload as the golden Agent-facing representation.
 
 - [ ] **Step 3: Prove determinism and idempotence**
 
-Starting from equivalent inputs, reorder only non-semantic collections: fact candidates, review decisions where transitions are independent, assumptions, formula records, and line-item input enumeration. Never shuffle the authoritative periods array. Assert byte-identical ordered cells, diagnostics, and valuation output under the same `ENGINE_VERSION`.
+Starting from equivalent inputs, reorder only non-semantic collections: fact candidates, review decisions where transitions are independent, assumptions, formula records, DCF category groups, members within a group, and line-item input enumeration. Never shuffle the authoritative periods array. Assert byte-identical ordered cells, reconciliation results, diagnostics, and valuation output under the same `ENGINE_VERSION`.
 
-Persist the golden snapshot through SQLite, close and reopen the store, decode it, and recalculate through an input-equivalent `set_assumption` operation. Assert every numeric cell, diagnostic, formula AST, lineage reference, and valuation output is identical apart from revision metadata. Repeat the same input-equivalent recalculation once more to prove idempotence. Also assert malformed period order is rejected rather than normalized.
+Persist the golden snapshot through SQLite, close and reopen the store, decode it, and recalculate through an input-equivalent `set_assumption` operation. Assert every numeric cell, reconciliation result, diagnostic, formula AST, lineage reference, and valuation output is identical apart from revision metadata. Repeat the same input-equivalent recalculation once more to prove idempotence. Also assert malformed period order is rejected rather than normalized.
 
 Reopen the store again with snapshot decoding instrumented. Build `revisionHistory` from headers without decoding any old snapshot, decode only the latest snapshot for `currentWorkbook`, and assert the reconstructed `ModelContextView` is byte-identical to the pre-close view.
 

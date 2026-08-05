@@ -1,7 +1,7 @@
 # DCF Core Engine (Phase 1)
 
 Date: 2026-08-04
-Status: Approved design; not yet implemented
+Status: Phase 1 implemented and verified on 2026-08-05
 
 Parent spec: [Versioned Financial Modeling and DCF Platform](2026-08-04-financial-modeling-dcf-platform-design.md). This document specifies phase 1 of that plan (§19). Where the two differ, the deviations are listed in §12 and the parent spec is amended to match.
 
@@ -22,6 +22,7 @@ Phase 1 is complete when a hand-computed golden valuation and a determinism test
 - The full fact lifecycle: staged, committed, rejected, and superseded facts, plus retained review decisions.
 - The typed Model Operations DSL used to query and mutate a working model without exposing a generic patch mechanism.
 - The restricted formula DSL: parser, unit checker, dependency graph, evaluator.
+- Agent-created arbitrary DCF category groups, forecast formula compilation, and DCF-table reconciliation.
 - The default and parameterized metric registry (parent spec §9), installed as Formula DSL rows and recalculated automatically.
 - One versioned forecast assumption set. Phase 1 does not model named operating scenarios; valuation uncertainty is expressed by the two sensitivity matrices.
 - Engine-native DCF valuation: explicit period, both terminal methods, equity bridge, sensitivity matrices.
@@ -46,6 +47,8 @@ types.ts        model, period, line item, unit, role, fact, assumption, revision
 periodGrid.ts   ordered period grid: sorting, offset resolution, TTM skipping
 dsl/            parser -> AST -> unit checker -> dependency graph
 engine.ts       topological evaluation, quantization, cell diagnostics
+skeleton.ts     fixed DCF rows, source mapping, and DCF-category formula compilation
+reconciliation.ts generic category checks and built-in DCF accounting identities
 metrics.ts      default and parameterized §9 registry, expressed as generated formulas
 valuation.ts    engine-native DCF, binding rows by role
 operations.ts   typed model queries and mutations over an in-memory snapshot
@@ -57,7 +60,7 @@ Two structural rules carry most of the design's weight:
 
 **`metrics.ts` performs no arithmetic of its own.** It translates a metric definition such as gross margin into the formula `gross_profit / revenue.total` and hands it to the engine. Unit checking, missing-input propagation, and division-by-zero behavior are therefore identical between library metrics and Agent-authored formulas. A second arithmetic path would eventually disagree with the first, and the disagreement would surface as a wrong number rather than as an error.
 
-**`valuation.ts` is the only module permitted to compute outside the DSL.** Parent spec §8.4 gives the reason: terminal value needs to anchor on a specific period rather than an offset, sensitivity analysis needs to expand one calculation across a parameter matrix, and constraints such as `WACC > terminal_growth` must be checked before evaluation. All three are outside what a row-by-row DSL can express safely.
+**Only `reconciliation.ts` and `valuation.ts` compute outside the DSL.** Reconciliation compares already-calculated DCF cells against reviewed signed group membership and immutable accounting-identity rules; it does not create model values. Valuation is engine-native because terminal value must anchor on a specific period rather than an offset, sensitivity analysis expands one calculation across a parameter matrix, and constraints such as `WACC > terminal_growth` must be checked before evaluation. Neither module is a second general-purpose formula path.
 
 The store follows the existing repository pattern in `src/data/stock/barStore.ts`: an interface, a SQLite implementation opened by a static `open(path)` that accepts `:memory:`, and an in-memory double for tests.
 
@@ -159,7 +162,7 @@ type Formula = {
 };
 ```
 
-Every explicit period must belong to `appliesTo`. Two formulas may not cover the same `(line item, period)` cell. Revenue and working-capital plan compilers emit explicit coverage and replace a default formula only for the reviewed periods, which makes segment or account-definition changes executable rather than merely descriptive.
+Every explicit period must belong to `appliesTo`. Two formulas may not cover the same `(line item, period)` cell. The DCF-category-group compiler emits explicit coverage and replaces a default formula only for the reviewed periods, which makes changes in segment, product, geography, expense, or account definitions executable rather than merely descriptive.
 
 `LineItemRole` is a closed union. `valuation.ts` binds rows by role, never by string ID:
 
@@ -176,24 +179,24 @@ type LineItemRole =
   | "none";
 ```
 
-Revenue disclosure hierarchies are not inferred from `parentId` during evaluation. A company may disclose product, geography, and operating-segment breakdowns that each independently sum to consolidated revenue; adding every revenue child would double- or triple-count the company. The reviewed aggregation decision is therefore stored explicitly:
+Issuer disclosure hierarchies are not inferred from `parentId` during evaluation. A company may expose several dimensions for the same DCF parent—for example product, geography, and operating segment under revenue—or several incompatible presentations of operating expense and working capital. Adding every child would double-count the parent. During the initial three-statement import, the Agent classifies the useful statement rows into arbitrary DCF category groups, creates any required DCF member rows, and stores the reviewed aggregation decision explicitly:
 
 ```ts
-type RevenueAggregationTreatment = "add" | "subtract" | "exclude";
+type DcfCategoryTreatment = "add" | "subtract" | "exclude";
 
-type RevenueAggregationPlan = {
+type DcfCategoryGroup = {
+  parentLineItemId: string;
+  category: string;
   periodIds: string[];
-  reportedTotalId: string;
-  aggregationSet: string; // for example "product", "segment", "geography", or "custom"
   members: Array<{
     lineItemId: string;
-    treatment: RevenueAggregationTreatment;
+    treatment: DcfCategoryTreatment;
   }>;
   reviewDecisionId: string;
 };
 ```
 
-Plans for the same model must cover disjoint period sets. This permits a company to change its segment definition without silently applying the new grouping to old periods.
+`category` is an opaque, non-empty Agent classification such as `product`, `geography`, `segment`, `operating_expense_function`, or `operating_working_capital`; neither category names nor dimensions are enums. There is no caller-supplied plan or group ID. A group is located by `parentLineItemId + category + periodIds`. Groups with the same parent and category must cover disjoint period sets, which permits an issuer to change a disclosure or account definition without silently applying it to old periods. Different categories may coexist for the same parent and historical period because they are alternative, independently reconciled views, not members of one implicit hierarchy; across all categories, forecast coverage remains unique per parent-period because a cell can have only one generated formula.
 
 Prepared source-statement categories do not become DCF rows merely because their labels look familiar. Store their reviewed mapping explicitly:
 
@@ -209,22 +212,32 @@ type StatementMappingPlan = {
 };
 ```
 
-`PreparedStatementRow` carries `sourceLineItemId`, statement kind, original label, unit, and source order. Source statement rows use the reserved `source.<statement>.*` namespace and the three `source_*` sections. A committed source fact maps one-to-one to one source row and period. A reviewed statement plan selects the usable periods and vertical categories, covers a disjoint target-period set, and compiles to an explicit signed historical formula on the canonical DCF target. Its identity is the target plus period coverage; it has no caller-supplied plan ID. This permits several source rows to feed COGS or operating expenses without weakening the one-active-fact-per-source-cell invariant. Source rows remain in the snapshot for audit but are hidden from the normal post-mapping DCF workbook.
+`PreparedStatementRow` carries `sourceLineItemId`, statement kind, original label, unit, and source order. Source statement rows use the reserved `source.<statement>.*` namespace and the three `source_*` sections. A committed source fact maps one-to-one to one source row and period. A reviewed statement plan selects usable periods and source categories, covers a disjoint target-period set, and compiles to an explicit signed historical formula on a canonical or Agent-created DCF target. Its identity is the target plus period coverage; it has no caller-supplied plan ID. This permits several source rows to feed one DCF member without weakening the one-active-fact-per-source-cell invariant. Once this initial mapping revision is accepted, source rows are lineage only: calculations, category reconciliation, forecast generation, and ordinary Agent context operate exclusively on DCF rows. Source rows remain in the immutable snapshot and can be reopened only for audit or a mapping exception.
 
-Balance-sheet hierarchy is equally unsafe as an operating-working-capital rule. Cash, debt, lease liabilities, and non-operating investments can all appear within current assets or current liabilities but must not enter operating NWC. Store that reviewed classification separately:
+Every committed `DcfCategoryGroup` has two deterministic uses. For historical periods, the generic reconciliation rule compares the signed sum of its available DCF member cells with the independently mapped `parentLineItemId` cell. For forecast periods, the same `add`/`subtract` membership compiles to an explicit normalized parent formula; `exclude` members remain visible but do not enter arithmetic. The engine never asks a language model to add values and never infers membership from labels or `parentId`.
+
+Working capital uses this same general mechanism rather than a special plan type. A group whose parent is the unique `operating_working_capital` row adds operating-asset DCF rows, subtracts operating-liability DCF rows, and explicitly excludes cash, restricted cash, investments, debt, and lease liabilities when those rows are present. Its reconciliation is entirely DCF-table based. There is no separately configured cash-flow-statement evidence row, and `reported_change_operating_assets_liabilities` is never used as a second FCFF adjustment. `change_nwc` remains the period-over-period change in the reconciled operating-NWC parent.
+
+The engine also runs a built-in registry of cross-category accounting identities over DCF rows, independently of source captions. Each result is explicit:
 
 ```ts
-type WorkingCapitalAggregationPlan = {
-  periodIds: string[];
-  members: Array<{
-    lineItemId: string;
-    treatment: "operating_asset" | "operating_liability" | "exclude";
-  }>;
-  reviewDecisionId: string;
+type ReconciliationStatus =
+  | "passed"
+  | "failed"
+  | "insufficient_data"
+  | "not_applicable";
+
+type ReconciliationResult = {
+  ruleId: string;
+  periodId: string;
+  status: ReconciliationStatus;
+  required: boolean;
+  difference: number | null;
+  refs: string[];
 };
 ```
 
-No aggregation plan has a caller-supplied identifier. Revenue plans are located by `reportedTotalId + aggregationSet + periodIds`; working-capital plans are located by `periodIds` because their target is the unique operating-NWC row. Plans for one model cover disjoint period sets. The generated normalized working-capital formula is `sum(operating_asset) - sum(operating_liability)`. The initial proposal classifies accounts receivable, inventory, and other operating current assets as operating assets, and accounts payable, deferred revenue, accrued operating liabilities, and other operating current liabilities as operating liabilities. Cash and cash equivalents, restricted cash, marketable securities, short-term borrowings, current debt, and lease liabilities default to `exclude`. These are proposal defaults only; the reviewed plan is authoritative. The cash-flow-statement line for reported changes in operating assets and liabilities is reconciliation evidence only; it is never added to a balance-derived `change_nwc`, which would double count the same cash use or source.
+Built-in identities include, when applicable, `revenue.total = cost_of_revenue + gross_profit`, `gross_profit - operating_expenses = operating_income`, `pretax_income - income_tax_expense = net_income` subject to attributable-income presentation, and the engine-owned EBITDA, NOPAT, operating-NWC/change-NWC, and FCFF identities. A rule is `insufficient_data` if any required DCF input is missing; missing detail is never treated as zero. An explicit reviewed scope decision may produce `not_applicable`. Only a `failed` result from a rule marked required for the history gate blocks `history_committed`; `insufficient_data`, `not_applicable`, and failed informational checks remain visible diagnostics without fabricating data.
 
 ### 4.4 The skeleton
 
@@ -234,8 +247,8 @@ The skeleton is a DCF chart of accounts, not an attempt to reproduce every issue
 
 | ID | Role | Historical | Forecast | Default or rule |
 | --- | --- | --- | --- | --- |
-| `revenue` | `revenue_root` | `none` | `none` | Extensible disclosure parent. |
-| `revenue.total` | `revenue_total` | `actual` or mapping `formula` | `formula` | Independent reported total historically; `LAG(revenue.total, 1) * (1 + growth.revenue.total)` for a consolidated-only forecast, or a generated revenue plan. |
+| `revenue` | `revenue_root` | `none` | `none` | Extensible DCF parent. |
+| `revenue.total` | `revenue_total` | `actual` or mapping `formula` | `formula` | Independent reported total historically; `LAG(revenue.total, 1) * (1 + growth.revenue.total)` for a consolidated-only forecast, or a generated DCF category-group formula. |
 | `growth.revenue.total` | `none` | `formula` | `assumption` | Historical `YOY(revenue.total)`; sourced consolidated-growth forecast driver. |
 | `margin.operating` | `none` | `formula` | `assumption` | `operating_income / revenue.total`; forecast driver. |
 | `operating_income` | `operating_income` | `actual` or mapping `formula` | `formula` | `revenue.total * margin.operating`. EBIT is represented by operating income, not net income or operating cash flow. |
@@ -246,7 +259,7 @@ The skeleton is a DCF chart of accounts, not an attempt to reproduce every issue
 | `ebitda` | `ebitda` | `formula` | `formula` | `operating_income + depreciation_amortization`; the only exit-multiple EBITDA role. |
 | `capital_expenditures` | `capex` | `actual` or mapping `formula` | `formula` | Stored as a positive cash outflow; `revenue.total * ratio.capex_to_revenue`. |
 | `ratio.capex_to_revenue` | `none` | `formula` | `assumption` | `capital_expenditures / revenue.total`; forecast driver. |
-| `operating_working_capital` | `operating_working_capital` | `formula` | `formula` | Generated from the reviewed working-capital plan historically; `revenue.total * ratio.operating_nwc_to_revenue` in forecast. |
+| `operating_working_capital` | `operating_working_capital` | `actual` or mapping `formula` | `formula` | Independently mapped historically and reconciled to its DCF category group; `revenue.total * ratio.operating_nwc_to_revenue` by default in forecast, replaceable for explicit periods by the same group. |
 | `ratio.operating_nwc_to_revenue` | `none` | `formula` | `assumption` | `operating_working_capital / revenue.total`; forecast driver. |
 | `change_nwc` | `change_nwc` | `formula` | `formula` | `operating_working_capital - LAG(operating_working_capital, 1)`; positive means a use of cash. |
 | `fcff` | `fcff` | `formula` | `formula` | `nopat + depreciation_amortization - capital_expenditures - change_nwc`. |
@@ -266,7 +279,7 @@ The following canonical US-GAAP rows are prebuilt in the DCF workbook with role 
 
 Acquisitions, asset-sale proceeds, debt issuance and repayment, dividends, and repurchases do not enter the FCFF formula. They remain available for audit, reconciliation, and later analytics.
 
-The skeleton also installs the parent spec §9 default metric registry as historical formula rows. This includes growth, margins, cash conversion, current ratio, leverage, net debt, ROA, ROE, ROIC, and diluted per-share metrics, plus stored helper formulas for free cash flow and invested capital. Driver rows already present in the DCF spine, including `growth.revenue.total`, `margin.operating`, `tax_rate`, and the D&A/capex/operating-NWC revenue ratios, serve both the model and the metrics view rather than being duplicated. Adding a revenue stream changes its companion `growth.revenue.<stream>` row to historical `formula` / forecast `assumption`, with `YOY(revenue.<stream>)` installed for actual periods.
+The skeleton also installs the parent spec §9 default metric registry as historical formula rows. This includes growth, margins, cash conversion, current ratio, leverage, net debt, ROA, ROE, ROIC, and diluted per-share metrics, plus stored helper formulas for free cash flow and invested capital. Driver rows already present in the DCF spine, including `growth.revenue.total`, `margin.operating`, `tax_rate`, and the D&A/capex/operating-NWC revenue ratios, serve both the model and the metrics view rather than being duplicated. When the Agent creates a forecastable revenue member during mapping, its companion `growth.revenue.<member>` row is created with historical `formula` / forecast `assumption`, and `YOY(revenue.<member>)` is installed for actual periods.
 
 Metric outputs are never Agent-writable. They recalculate during every normal engine pass and remain null with cell diagnostics until their inputs exist. Default total-revenue CAGR rows use three- and five-period lookbacks. `add_metric` may install another registry-defined CAGR row for an allowlisted target and bounded integer lookback; the registry derives its stable ID, unit, actual-period coverage, and normalized formula. A custom metric uses the designated custom-metrics namespace plus `set_formula` and cannot use or replace a registry ID.
 
@@ -285,24 +298,22 @@ The equity-bridge spine is separate from both raw balance-sheet captions and FCF
 
 Raw `cash_and_equivalents` is not automatically cash available for the bridge. Review classifies restricted cash and required operating cash and records how `cash_available_for_bridge` was derived. A bridge row may resolve from a reviewed fact, a formula over reviewed facts, or a sourced assumption after its source classification is changed in the same revision. Optional bridge adjustments require either a numeric resolution or explicit `not_applicable`; diluted shares is always numeric.
 
-Role cardinality is validated before valuation. There is exactly one of every fixed DCF and fixed bridge role, zero or more `revenue_stream` and `bridge_other` roles, and no `terminal_metric` role: `ValuationConfig.exitTerminalMetric` selects the unique `ebitda` or `fcff` row directly.
+Role cardinality is validated before valuation. There is exactly one of every fixed DCF and fixed bridge role, zero or more `revenue_stream` and `bridge_other` roles, and no `terminal_metric` role: `ValuationConfig.exitTerminalMetric` selects the unique `ebitda` or `fcff` row directly. Agent-created DCF category members use `role: "none"` unless they are revenue children, which retain `revenue_stream` for the preinstalled growth-driver behavior; arbitrary category names never extend the role union.
 
-The caller extends the model only at designated extensible parents. In phase 1 these are `revenue`, whose children carry role `revenue_stream`, and the custom-metrics namespace, whose rows carry role `none` and cannot impersonate a registry ID.
+The Agent may create category-member rows under allowlisted DCF parents during initial import/mapping, plus rows in the custom-metrics namespace. The parent DCF row determines section and unit compatibility; the caller does not choose an unrestricted role. This allows issuer-specific product, geography, operating-cost, and balance-sheet details without turning category names or dimensions into enums or permitting arbitrary mutation of fixed rows.
 
-Adding a revenue stream creates a **pair** of rows:
+Adding a forecastable revenue member creates a **pair** of rows:
 
 ```text
 revenue.<stream>          historical: actual   forecast: formula
 growth.revenue.<stream>   historical: formula  forecast: assumption
 ```
 
-with `YOY(revenue.<stream>)` over explicit actual periods and the default forecast formula `LAG(revenue.<stream>, 1) * (1 + growth.revenue.<stream>)`. The pair is created as a unit because a forecast revenue stream with no growth driver is always a modeling error. The caller may replace the forecast formula, or switch the stream to a direct `assumption` source when a stream is forecast in absolute amounts rather than growth rates; it may not replace the registry-owned historical growth formula.
+with `YOY(revenue.<stream>)` over explicit actual periods and the default forecast formula `LAG(revenue.<stream>, 1) * (1 + growth.revenue.<stream>)`. The pair is created as a unit because a forecast revenue member with no growth driver is always a modeling error. The Agent may replace the forecast formula, or switch the member to a direct `assumption` source when it is forecast in absolute amounts rather than growth rates; it may not replace the registry-owned historical growth formula. Non-revenue category members do not automatically receive growth rows; their forecast source and formula are explicit modeling decisions.
 
-`revenue.total` is an independently reviewed consolidated value in historical periods, resolved either from one direct committed fact or from a one-member source-statement mapping plan. A consolidated-only model uses the preinstalled `growth.revenue.total` assumption path and default formula `LAG(revenue.total, 1) * (1 + growth.revenue.total)`, so it needs neither a hard-coded growth literal nor an artificial segment row. When reviewed disaggregated revenue is available, `RevenueAggregationPlan` replaces that default formula only for its explicit forecast periods. `add` members are added, `subtract` members are subtracted, and `exclude` members remain visible disclosures but do not enter the formula. The normalized generated formula and the plan are both stored in the revision.
+`revenue.total` is an independently reviewed consolidated value in historical periods, resolved either from one direct committed fact or from a one-member source-statement mapping plan. A consolidated-only model uses the preinstalled `growth.revenue.total` assumption path and default formula `LAG(revenue.total, 1) * (1 + growth.revenue.total)`, so it needs neither a hard-coded growth literal nor an artificial segment row. When reviewed disaggregated revenue is available, one or more `DcfCategoryGroup` values may describe product, geography, segment, or any issuer-specific dimension. Each group reconciles independently to `revenue.total`; no predefined disclosure-set enum exists. A group that includes explicit forecast periods replaces the consolidated default there with its signed normalized formula. Several categories may overlap for historical reconciliation, but only one committed group may cover a given forecast parent-period cell.
 
-The caller in phase 1, and the Agent in phase 2, may propose classifications and an aggregation set. The calculation engine never asks a language model how to add values and never infers membership from labels or hierarchy: it validates the committed plan and executes its generated formula deterministically through the same DSL evaluator used by every other formula.
-
-For every historical period covered by a plan, the engine separately reconciles the signed member sum to the independently resolved `reportedTotalId` cell. Only one aggregation set may be active for a period. Product, geography, segment, subtotal, and disclosure-only rows therefore cannot be combined accidentally. Any residual must be an explicit `add` or `subtract` member such as `revenue.other` or `revenue.eliminations`, or the period remains blocked by `unresolved_reconciliation`. Formula DSL contains no hierarchy-summing function; all category aggregation is an explicit normalized formula produced from the reviewed plan.
+The Agent proposes category labels, DCF member rows, signs, exclusions, and period coverage during initial import/mapping. After review, the calculation engine validates the stored group and executes its generated formula deterministically through the same DSL evaluator used by every other formula. Any residual must be represented by an explicit `add` or `subtract` DCF member such as other revenue or eliminations; source captions are not consulted after mapping. Formula DSL contains no hierarchy-summing function: all category arithmetic is an explicit normalized formula produced from a committed `DcfCategoryGroup`.
 
 ### 4.5 Facts
 
@@ -469,7 +480,7 @@ type ModelOperation =
     }
   | { kind: "set_formula"; formula: Formula }
   | { kind: "set_statement_mapping_plan"; plan: StatementMappingPlan }
-  | { kind: "set_aggregation_plan"; plan: RevenueAggregationPlan | WorkingCapitalAggregationPlan }
+  | { kind: "set_category_group"; group: DcfCategoryGroup }
   | { kind: "set_valuation_config"; config: ValuationConfig }
   | {
       kind: "advance_stage";
@@ -481,9 +492,9 @@ A query selects exact cells or intersects any combination of line-item IDs, peri
 
 The service accepts a non-empty ordered array of mutations plus `expectedRevision`. It applies all operations to one cloned in-memory working snapshot, validates the final structure, and runs the commit pipeline once. Success produces exactly one full-snapshot revision; any invalid operation, compile failure, stage blocker, or storage conflict produces none. This permits one Agent step to set several related assumptions and formulas atomically without turning each field into a separate revision.
 
-`replace_fact` is an auditable convenience operation, not an overwrite: it creates the sourced replacement fact, performs the valid paired commit/supersede transition from §4.5, and retains both review decisions. `set_line_item_source` changes the source for the complete historical or forecast range and may be batched atomically with the assumptions or formulas that populate the new source. Historical ranges permit `actual`, `assumption`, `formula`, or `none`; historical assumptions are required for sourced overrides and explicit `not_applicable` bridge decisions at the valuation anchor. Forecast ranges permit `assumption`, `formula`, or `none`; `calculated` is engine-owned and cannot be selected. Switching a range removes current formula and assumption coverage for that range before later operations in the same batch are applied; facts and previous immutable revisions remain audit history. Registry-owned metric rows and engine-native rows reject source changes. `set_assumption` and `set_formula` then replace only their explicitly covered cells and reject overlapping coverage. `set_statement_mapping_plan` persists selected source rows, periods, signs, and exclusions and installs the compiler-owned historical formula for the target. `set_aggregation_plan` invokes the revenue or working-capital plan compiler; no language model participates during evaluation. `set_valuation_config` stores the sourced method decision from §4.7.
+`replace_fact` is an auditable convenience operation, not an overwrite: it creates the sourced replacement fact, performs the valid paired commit/supersede transition from §4.5, and retains both review decisions. `set_line_item_source` changes the source for the complete historical or forecast range and may be batched atomically with the assumptions or formulas that populate the new source. Historical ranges permit `actual`, `assumption`, `formula`, or `none`; historical assumptions are required for sourced overrides and explicit `not_applicable` bridge decisions at the valuation anchor. Forecast ranges permit `assumption`, `formula`, or `none`; `calculated` is engine-owned and cannot be selected. Switching a range removes current formula and assumption coverage for that range before later operations in the same batch are applied; facts and previous immutable revisions remain audit history. Registry-owned metric rows and engine-native rows reject source changes. `set_assumption` and `set_formula` then replace only their explicitly covered cells and reject overlapping coverage. `set_statement_mapping_plan` persists selected source rows, periods, signs, and exclusions and installs the compiler-owned historical formula for the DCF target. `set_category_group` stores one reviewed arbitrary DCF grouping, validates its semantic business key and explicit member signs, installs only its selected forecast parent coverage, and makes its historical coverage available to generic DCF-row reconciliation; no language model participates during evaluation. `set_valuation_config` stores the sourced method decision from §4.7.
 
-`add_line_item` may write only under a designated extensible parent. In phase 1 those are `revenue` and the custom-metrics namespace. Adding a stream atomically creates the value row, growth row, historical YoY formula, and default forecast formula described in §4.4. It cannot rename, delete, re-parent, or re-role a fixed skeleton or registry row. `add_metric` selects a parameterized formula from the registry and never accepts an Agent-authored expression. `advance_stage` is a separate operation so incremental model edits do not imply completion; it may be included with the final mutations needed to satisfy the destination stage gate.
+`add_line_item` may write only under an allowlisted DCF parent or in the custom-metrics namespace. A new DCF category member inherits compatible section/unit constraints and cannot choose a fixed valuation role. Adding a revenue member atomically creates the value row, growth row, historical YoY formula, and default forecast formula described in §4.4; non-revenue members receive no implicit forecast arithmetic. The operation cannot rename, delete, re-parent, or re-role a fixed skeleton or registry row. `add_metric` selects a parameterized formula from the registry and never accepts an Agent-authored expression. `advance_stage` is a separate operation so incremental model edits do not imply completion; it may be included with the final mutations needed to satisfy the destination stage gate.
 
 ## 5. Partial Models
 
@@ -515,9 +526,12 @@ Every non-empty Model Operations DSL mutation batch runs the same pipeline and d
 3. Compile all formulas: parse, unit-check, build the dependency graph.
       fails with invalid_formula / incompatible_units / circular_dependency
 4. Evaluate the whole grid, producing values and per-cell diagnostics.
-5. If the stage is `valued`, run valuation.ts, binding rows by role.
-6. Sort diagnostics into blockers and warnings.
-7. Blockers -> throw, writing nothing.
+5. Reconcile every committed DCF category group and every applicable built-in
+   accounting identity over DCF cells; never read source rows or fill missing detail.
+6. If the stage is `valued`, run valuation.ts, binding rows by role.
+7. Sort diagnostics into blockers and warnings. Only failed required history
+   reconciliations are reconciliation blockers.
+8. Blockers -> throw, writing nothing.
    Otherwise -> store.commit(expectedRevision, snapshot).
 ```
 
@@ -542,7 +556,7 @@ interface ModelStore {
 }
 ```
 
-`Snapshot` holds the lifecycle stage plus the complete content of one revision: periods, hidden source-statement rows, DCF line items, facts, fact review decisions, assumptions, statement/revenue/working-capital mapping plans, valuation configuration, formulas with their normalized ASTs, computed cells, diagnostics, and engine version.
+`Snapshot` holds the lifecycle stage plus the complete content of one revision: periods, hidden source-statement lineage rows, DCF line items, facts, fact review decisions, assumptions, statement-mapping plans, arbitrary DCF category groups, reconciliation results, valuation configuration, formulas with their normalized ASTs, computed cells, diagnostics, and engine version.
 
 Revisions are stored as full snapshots, not deltas. A model is tens of kilobytes, so an audit query is a single primary-key read with no replay, and immutability needs no reconstruction logic to be trustworthy.
 
@@ -582,7 +596,9 @@ Phase 1 stores no content or calculation-input hash. The immutable `(modelId, re
 type ReviewFactsInput = {
   decisions: FactReviewDecision[];
   selectedHistoricalPeriodIds: string[];
+  categoryLineItems: NewDcfCategoryLineItem[];
   statementMappingPlans: StatementMappingPlan[];
+  categoryGroups: DcfCategoryGroup[];
 };
 
 class FinancialModelService {
@@ -597,7 +613,7 @@ class FinancialModelService {
 }
 ```
 
-`ReviewFactsInput` contains fact decisions, the selected historical period IDs, and the initial reviewed statement-mapping plans so history review and construction of the canonical DCF table commit atomically as one revision. Later mapping corrections may use `set_statement_mapping_plan` in an ordinary operation batch.
+`ReviewFactsInput` contains fact decisions, the selected historical period IDs, Agent-created DCF category-member definitions, initial reviewed statement-mapping plans, and the Agent-classified DCF category groups so source-to-DCF mapping, DCF member creation, group persistence, and the first reconciliation run commit atomically as one revision. Later mapping corrections may use `set_statement_mapping_plan`; later member/group corrections use `add_line_item` and `set_category_group`.
 
 `CreateModelInput` contains the authoritative model periods, currency and stable metadata plus the already-prepared `PreparedStatementRow[]`. Phase 1 does not extract or classify raw taxonomy concepts; its caller supplies those rows and stages their facts.
 
@@ -616,9 +632,9 @@ ModelContextView
   currentWorkbook        complete effective workbook for current revision
 ```
 
-`CurrentWorkbookView` is row-oriented like an Excel sheet: one authoritative `periods` array, DCF rows grouped into `history`, `metrics`, `revenue`, `operations`, and `dcf`, and each row's `cells` object keyed by period ID. Rows carry identity, label, semantic unit, role, source classification, current active formula text, and current active sourced assumptions. Cells carry raw quantized value, status, compact source reference, and diagnostics. Every DCF row-period coordinate is materialized; source `none` becomes `value: null`, source `{ kind: "none" }`, and status `not_modeled` rather than disappearing.
+`CurrentWorkbookView` is row-oriented like an Excel sheet: one authoritative `periods` array, DCF rows grouped into `history`, `metrics`, `revenue`, `operations`, and `dcf`, and each row's `cells` object keyed by period ID. Rows carry identity, label, semantic unit, role, source classification, current active formula text, current active sourced assumptions, and compact DCF category-group references. Cells carry raw quantized value, status, compact source reference, and diagnostics. The workbook also carries ordered category groups and `ReconciliationResult` values. Every DCF row-period coordinate is materialized; source `none` becomes `value: null`, source `{ kind: "none" }`, and status `not_modeled` rather than disappearing.
 
-Before history is mapped, the same single workbook uses `mode: "statement_mapping"` and additionally exposes the three prepared source-statement sheets, selected periods, proposed mappings, and reconciliation results. A successful reviewed mapping stores `StatementMappingPlan` values and switches the normal projection to `mode: "dcf"`; source rows stay in the immutable snapshot but disappear from default context. They are projected again only for an unmapped row, restatement, statement/segment structure change, reconciliation failure, low-confidence mapping, or explicit source/lineage read. The model therefore pays the full source-table context cost once, then works from the DCF table.
+Before history is mapped, the same single workbook uses `mode: "statement_mapping"` and additionally exposes the three prepared source-statement sheets, selected periods, proposed mappings, proposed DCF category groups, and reconciliation results. A successful reviewed mapping stores `StatementMappingPlan` and `DcfCategoryGroup` values and switches the normal projection to `mode: "dcf"`; source rows stay in the immutable snapshot but disappear from default context and from all arithmetic. They are projected again only for an unmapped row, restatement, statement/category structure change, a failed required reconciliation, low-confidence mapping, or explicit source/lineage read. Insufficient data is shown on the DCF workbook and does not reopen source sheets automatically. The model therefore pays the full source-table context cost once, then works from the DCF table.
 
 The projection excludes rejected/staged/superseded facts, review-decision history, inactive assumptions/formulas, normalized ASTs, and full provenance. Those remain in the immutable snapshot and are available only through an explicit old-revision or `includeLineage` audit read. A view builder must never mutate, recalculate, or reinterpret the snapshot.
 
@@ -656,7 +672,7 @@ class FinancialModelError extends Error {
 }
 ```
 
-Phase 1 raises `financial_model_not_found`, `revision_conflict`, `invalid_snapshot`, `fact_conflict`, `invalid_model_operation`, `invalid_model_query`, `invalid_assumption`, `invalid_formula`, `circular_dependency`, `incompatible_units`, `incompatible_periods`, `history_review_required`, `unresolved_reconciliation`, `invalid_terminal_assumptions`, and `incomplete_equity_bridge`. `invalid_snapshot` means persisted snapshot JSON failed the strict schema or structural-reference checks and is distinct from an absent model. The `xbrl_*` codes belong to phase 4; `unsupported_model_type` requires filer resolution and belongs to phase 2.
+Phase 1 raises `financial_model_not_found`, `revision_conflict`, `invalid_snapshot`, `fact_conflict`, `invalid_model_operation`, `invalid_model_query`, `invalid_assumption`, `invalid_formula`, `circular_dependency`, `incompatible_units`, `incompatible_periods`, `history_review_required`, `unresolved_reconciliation`, `invalid_terminal_assumptions`, and `incomplete_equity_bridge`. `unresolved_reconciliation` is raised only when the requested history transition contains a `failed` result whose rule is required; `insufficient_data`, `not_applicable`, and informational failures are persisted results, not this exception. `invalid_snapshot` means persisted snapshot JSON failed the strict schema or structural-reference checks and is distinct from an absent model. The `xbrl_*` codes belong to phase 4; `unsupported_model_type` requires filer resolution and belongs to phase 2.
 
 `missing_formula_input` spans both kinds. It is a cell diagnostic during modeling and becomes a thrown blocker at the valuation gate, which is how §5 draws the line between an unfinished model and an unsound conclusion.
 
@@ -669,7 +685,7 @@ Every module gets pure-function tests. Four checks carry the phase:
 3. **Recalculation idempotence.** Committing again without changing any input leaves every cell unchanged. This guards the unconditional full recalculation in step 4 of the pipeline against order dependence.
 4. **Store behavior.** Run one shared contract against memory and SQLite: one complete row per successful mutating Agent step, latest-state derivation without a current pointer, one winner for concurrent commits, no gap after failure, cloned immutable reads/writes, superseded facts retained, and archived models still readable by revision.
 
-Beyond those: authoritative period-order preservation, rejection of malformed or out-of-order grids, Formula DSL parsing and precedence, rejection of comparison, boolean, conditional, fallback, and hierarchy-summing expressions, offset resolution across the actual/forecast boundary, TTM skipping, circular dependencies, missing-reference propagation, division by zero, every row of the unit algebra table, polymorphic `0` and identity `1` positive and negative cases, expression complexity limits, Model Operations DSL union validation, deterministic exact and multi-cell reads, read-without-revision behavior, atomic multi-operation commits, valid and invalid source-range switches, active-fact uniqueness, staged/rejected fact exclusion, atomic replacement and rejection, invalid supersede links, review-decision retention, extensible-row boundaries, numeric zero versus explicit N/A versus missing, N/A propagation through the Formula DSL, permitted equity-bridge N/A consumption, rejection of N/A for required valuation roles, revenue aggregation with simultaneous product/geography/segment disclosures, subtractive eliminations, period-specific plan changes, consolidated-only revenue through `growth.revenue.total`, working-capital classification and exclusion defaults, reconciliation against reported cash-flow working-capital changes without double counting, skeleton role cardinality and sign conventions, raw cash versus bridge-available cash, metric golden cases with negative and zero denominators, constant and changing WACC paths, anchor-relative cumulative year-end and mid-year discount factors, parallel WACC sensitivity shifts, both terminal methods, invalid WACC/growth combinations, and both sensitivity matrices.
+Beyond those: authoritative period-order preservation, rejection of malformed or out-of-order grids, Formula DSL parsing and precedence, rejection of comparison, boolean, conditional, fallback, and hierarchy-summing expressions, offset resolution across the actual/forecast boundary, TTM skipping, circular dependencies, missing-reference propagation, division by zero, every row of the unit algebra table, polymorphic `0` and identity `1` positive and negative cases, expression complexity limits, Model Operations DSL union validation, deterministic exact and multi-cell reads, read-without-revision behavior, atomic multi-operation commits, valid and invalid source-range switches, active-fact uniqueness, staged/rejected fact exclusion, atomic replacement and rejection, invalid supersede links, review-decision retention, extensible-row boundaries, numeric zero versus explicit N/A versus missing, N/A propagation through the Formula DSL, permitted equity-bridge N/A consumption, rejection of N/A for required valuation roles, arbitrary category names and dimensions, simultaneous product/geography/segment revenue groups, operating-cost and balance-sheet groups, subtractive eliminations, period-specific group changes, consolidated-only revenue through `growth.revenue.total`, DCF-table working-capital classification and exclusions, category-group and built-in cross-category reconciliation, all four reconciliation statuses, missing-detail-not-zero behavior, blocking only failed required checks, skeleton role cardinality and sign conventions, raw cash versus bridge-available cash, metric golden cases with negative and zero denominators, constant and changing WACC paths, anchor-relative cumulative year-end and mid-year discount factors, parallel WACC sensitivity shifts, both terminal methods, invalid WACC/growth combinations, and both sensitivity matrices.
 
 The `test` script in `package.json` enumerates test directories explicitly and does not currently include `src/financial-model/**`. That glob must be added before the first test file, otherwise the entire suite passes by not running.
 
@@ -680,15 +696,16 @@ Phase 1 is accepted when:
 1. A model can be created with prepared three-statement source rows, the documented canonical DCF mapping targets, fixed DCF spine, equity-bridge spine, configurable period grid, and validated role cardinality.
 2. Facts can be staged, rejected, committed, and atomically superseded; every active cell is unique, review decisions carry rationale, and superseded facts remain in revision lineage.
 3. Standard metric formula rows, including ROA and ROE, are installed at creation and recalculate automatically when their prerequisite cells change; the Agent neither supplies their values nor invokes a separate metric-calculation method.
-4. The Agent can select historical periods and vertical categories from prepared income-statement, balance-sheet, and cash-flow sheets exactly once, commit reusable statement-mapping plans, and let generated formulas populate the prebuilt DCF rows. Normal post-mapping context contains only the complete DCF workbook; source sheets return only for a mapping exception or explicit audit read. A consolidated-only model forecasts from the preinstalled `growth.revenue.total` driver without an artificial segment. Revenue streams can be added as pairs and forecast by formula or direct assumption; a reviewed aggregation plan selects exactly one non-overlapping disclosure set per period, generates `revenue.total`, and reconciles historical members to reported consolidated revenue. A separate reviewed working-capital plan classifies operating assets, operating liabilities, and exclusions, and generates operating NWC without re-adding the cash-flow-statement change.
-5. The typed Model Operations DSL can read exact or selected cells without committing, and can atomically replace facts, change an allowed historical or forecast source, set assumptions, add permitted line items or registered parameterized metrics, set formulas and statement/revenue/working-capital plans, change valuation configuration, and advance stages; one successful mutation batch produces one revision.
+4. The Agent can select historical periods and source categories from the prepared income-statement, balance-sheet, and cash-flow sheets exactly once, create issuer-specific DCF member rows, commit reusable statement mappings and arbitrary DCF category groups, and let generated formulas populate parent DCF rows. Category names and dimensions are free semantic strings rather than enums, and no caller plan ID exists. Normal post-mapping context and all subsequent calculation contain only the complete DCF workbook; source sheets return only for a mapping exception or explicit audit read. A consolidated-only model forecasts from the preinstalled `growth.revenue.total` driver without an artificial segment. Any committed group uses explicit `add`/`subtract`/`exclude` membership, reconciles its historical signed DCF member sum to its parent, and can generate selected forecast parent periods. Working capital is one such DCF-table group and never relies on a separately configured source evidence line.
+5. The typed Model Operations DSL can read exact or selected cells without committing, and can atomically replace facts, change an allowed historical or forecast source, set assumptions, add permitted DCF category members or registered parameterized metrics, set formulas, statement mappings, and DCF category groups, change valuation configuration, and advance stages; one successful mutation batch produces one revision.
 6. Assumptions support per-period paths and disjoint phase records, each carrying its own provenance.
 7. A partial model commits successfully, with uncomputable cells null and diagnosed.
-8. A valuation is refused, not defaulted, when required role-bound inputs are missing; optional equity-bridge components contribute zero only when a sourced assumption explicitly marks them `not_applicable`.
-9. The golden hand-computed DCF matches cell by cell.
-10. Reordered non-semantic inputs, a persisted-and-reloaded snapshot, and repeated calculation produce identical ordered cells, valuation outputs, and diagnostics under the same engine version; the authoritative period order is preserved and recalculation is idempotent.
-11. A stale `expected_revision` raises `revision_conflict` and leaves the model unchanged.
-12. The whole phase runs with no network access.
+8. Generic category-group reconciliation and built-in cross-category accounting identities return `passed`, `failed`, `insufficient_data`, or `not_applicable` over DCF rows. Missing detail is never zero, and only failed checks marked required block the history gate.
+9. A valuation is refused, not defaulted, when required role-bound inputs are missing; optional equity-bridge components contribute zero only when a sourced assumption explicitly marks them `not_applicable`.
+10. The golden hand-computed DCF matches cell by cell.
+11. Reordered non-semantic inputs, a persisted-and-reloaded snapshot, and repeated calculation produce identical ordered cells, valuation outputs, reconciliation results, and diagnostics under the same engine version; the authoritative period order is preserved and recalculation is idempotent.
+12. A stale `expected_revision` raises `revision_conflict` and leaves the model unchanged.
+13. The whole phase runs with no network access.
 
 ## 12. Deviations from the Parent Spec
 

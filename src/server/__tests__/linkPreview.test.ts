@@ -62,17 +62,17 @@ test("ignores a javascript: og:image", () => {
 test("a redirect into private space is refused", async () => {
   clearLinkPreviewCache();
   const fetchImpl = (async (url: string | URL | Request) => {
-    assert.equal(String(url), "https://example.com/a");
+    assert.equal(String(url), "https://8.8.8.8/a");
     return new Response(null, { status: 302, headers: { location: "http://169.254.169.254/" } });
   }) as unknown as typeof fetch;
-  assert.equal(await fetchLinkPreview("https://example.com/a", fetchImpl), null);
+  assert.equal(await fetchLinkPreview("https://8.8.8.8/a", fetchImpl), null);
 });
 
 test("a non-html response yields no preview", async () => {
   const fetchImpl = (async () =>
     new Response("%PDF-1.7", { status: 200, headers: { "content-type": "application/pdf" } })
   ) as unknown as typeof fetch;
-  assert.equal(await fetchLinkPreview("https://example.com/a.pdf", fetchImpl), null);
+  assert.equal(await fetchLinkPreview("https://8.8.8.8/a.pdf", fetchImpl), null);
 });
 
 test("reads metadata from a successful html response", async () => {
@@ -82,7 +82,7 @@ test("reads metadata from a successful html response", async () => {
       { status: 200, headers: { "content-type": "text/html; charset=utf-8" } },
     )
   ) as unknown as typeof fetch;
-  const preview = await fetchLinkPreview("https://example.com/a", fetchImpl);
+  const preview = await fetchLinkPreview("https://8.8.8.8/a", fetchImpl);
   assert.equal(preview?.title, "Hello");
   assert.equal(preview?.image, "https://cdn.example.com/i.png");
 });
