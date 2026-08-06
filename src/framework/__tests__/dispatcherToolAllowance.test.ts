@@ -48,7 +48,7 @@ function harness(): {
       seen.push({ request: ctx.request, allowedTools: ctx.allowedTools });
     },
   };
-  const dispatcher = new Dispatcher("s", subagents, runtime as never, tools, state);
+  const dispatcher = new Dispatcher("s", subagents, runtime as never, tools, state, "agent-1");
   return { dispatcher, seen, state, turn };
 }
 

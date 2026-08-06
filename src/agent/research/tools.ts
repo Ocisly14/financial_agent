@@ -70,7 +70,7 @@ export type ResearchToolStore = {
 /** The existing OrchestratorRuntime, seen through the only method this layer
  *  is allowed to use — the same one `handleChat` calls. */
 export type TopicOrchestrator = {
-  run(input: { sessionId: string; userMessage: string; allowUserInput?: boolean }): Promise<{ response: string }>;
+  run(input: { agentId: string; sessionId: string; userMessage: string; allowUserInput?: boolean }): Promise<{ response: string }>;
 };
 
 export type SessionAccess = Pick<SessionRegistry, "getOrCreate" | "loadEvents">;
@@ -375,7 +375,7 @@ export class ResearchToolset {
       let response: string;
       try {
         const result = await withTimeout(
-          this.ctx.orchestrator.run({ sessionId: topicId, userMessage: task }),
+          this.ctx.orchestrator.run({ agentId: this.ctx.agentId, sessionId: topicId, userMessage: task }),
           this.ctx.askTimeoutMs ?? ASK_TOPIC_TIMEOUT_MS,
           `ask_topic(${topicId})`,
         );

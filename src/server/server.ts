@@ -237,7 +237,7 @@ async function handleChat(
       // in; without this the sidebar would order Researches by creation only.
       app.eventStore.renameResearch(agentId, sessionId, research.name);
     } else {
-      await app.orchestrator.run({ sessionId, userMessage: message, ...(inputResponse ? { inputResponse } : {}) });
+      await app.orchestrator.run({ agentId, sessionId, userMessage: message, ...(inputResponse ? { inputResponse } : {}) });
     }
   } catch (error) {
     sseWrite(res, { type: "error", scope: "main", message: String(error) });

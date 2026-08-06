@@ -1,9 +1,18 @@
 import { SubagentRegistry } from "../../framework/subagent.ts";
-import { marketDataSubagentPrompt, marketResearchSubagentPrompt, tradingOperationsSubagentPrompt } from "../prompts/subagentPrompts.ts";
-import { MARKET_DATA_TOOLS, MARKET_RESEARCH_TOOLS, TRADING_OPERATIONS_TOOLS } from "../../../mcp_tools/registerTools.ts";
+import { financialModelingSubagentPrompt, marketDataSubagentPrompt, marketResearchSubagentPrompt, tradingOperationsSubagentPrompt } from "../prompts/subagentPrompts.ts";
+import { FINANCIAL_MODELING_TOOLS, MARKET_DATA_TOOLS, MARKET_RESEARCH_TOOLS, TRADING_OPERATIONS_TOOLS } from "../../../mcp_tools/registerTools.ts";
+import { DCF_PRIVATE_SUBAGENT_TOOL } from "../financial-modeling/subagentTool.ts";
 
 export function createSubagentRegistry(): SubagentRegistry {
   const registry = new SubagentRegistry();
+  registry.register({
+    name: "financial_modeling",
+    description: "Hierarchical DCF Agent that owns one revisioned model workflow and delegates statement extraction, mapping, forecast, and valuation analysis to private subagents.",
+    modelClass: "MEDIUM",
+    defaultTools: [...FINANCIAL_MODELING_TOOLS, DCF_PRIVATE_SUBAGENT_TOOL],
+    maxToolSteps: 12,
+    systemPrompt: financialModelingSubagentPrompt,
+  });
   registry.register({
     name: "market_data",
     description:

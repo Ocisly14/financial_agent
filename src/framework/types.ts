@@ -1,5 +1,5 @@
 import type { CitationSource } from "./citationSources.ts";
-export type AgentKind = "market_data" | "market_research" | "trading_operations";
+export type AgentKind = "market_data" | "market_research" | "trading_operations" | "financial_modeling";
 
 export type TaskStatus = "ok" | "failed" | "timeout";
 
@@ -61,6 +61,8 @@ export type UserInputRequestView = UserInputRequest & {
 export type TaskRequest = {
   agent: AgentKind;
   task: string;
+  /** Resumption handle for long-running revisioned workflows. */
+  model_id?: string;
   tools?: string[];
   timeout_ms?: number;
 };
@@ -105,6 +107,8 @@ export type JsonSchema = {
   items?: JsonSchema;
   enum?: string[];
   description?: string;
+  oneOf?: JsonSchema[];
+  additionalProperties?: boolean;
 };
 
 export type ToolDefinition = {

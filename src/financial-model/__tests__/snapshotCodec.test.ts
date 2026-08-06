@@ -101,6 +101,7 @@ function snapshot(): FinancialModelSnapshot {
   cells.set(cellKey("revenue.total", "FY2024"), cell(100, USD));
 
   return {
+    filingInsightSetId: null,
     lifecycleStage: "draft",
     periods: PERIODS.map((period) => ({ ...period })),
     lineItems: skeleton.lineItems.map((item) => ({ ...item, unit: { ...item.unit } })),

@@ -15,6 +15,7 @@ export type ModelReadSection = DcfWorkbookSection |
 
 export type RevisionChange =
   | { kind: "model_created" }
+  | { kind: "statements_staged"; rowCount: number; candidateCount: number; mappedLineItemIds: string[]; periodIds: string[] }
   | { kind: "facts_staged"; candidateCount: number; mappedLineItemIds: string[]; periodIds: string[] }
   | { kind: "facts_reviewed"; committed: number; rejected: number; superseded: number; lineItemIds: string[]; periodIds: string[] }
   | { kind: "fact_replaced"; lineItemId: string; periodId: string }
@@ -76,6 +77,7 @@ export type SourceStatementReviewView = {
 
 type CurrentWorkbookBase = {
   modelId: string; revision: number; lifecycleStage: LifecycleStage; engineVersion: string;
+  filingInsightSetId: string | null;
   periods: Period[];
   sections: Record<DcfWorkbookSection, WorkbookRowView[]>;
   categoryGroups: DcfCategoryGroup[];
@@ -101,6 +103,15 @@ export type WorkbookSliceView = {
 };
 export type ModelContextView = { model: ModelView; revisionHistory: RevisionSummary[]; currentWorkbook: CurrentWorkbookView };
 
+export type HistoricalDcfCompletenessView = {
+  selectedHistoricalPeriodIds: string[];
+  categories: Array<{
+    lineItemId: string;
+    role: LineItemRole;
+    periods: Array<{ periodId: string; status: "complete" | "missing" | "not_applicable"; refs: string[] }>;
+  }>;
+};
+
 export type WorkbookViewOptions = { includeSourceStatements?: boolean };
 
 const DCF_SECTIONS: readonly DcfWorkbookSection[] = ["history", "metrics", "revenue", "operations", "dcf"];
@@ -116,6 +127,7 @@ export function buildWorkbookView(
   }
   const base: CurrentWorkbookBase = {
     modelId, revision, lifecycleStage: snapshot.lifecycleStage, engineVersion: snapshot.engineVersion,
+    filingInsightSetId: snapshot.filingInsightSetId ?? null,
     periods: structuredClone(snapshot.periods), sections,
     categoryGroups: structuredClone([...snapshot.categoryGroups].sort((left, right) =>
       itemOrder(snapshot, left.parentLineItemId) - itemOrder(snapshot, right.parentLineItemId)
@@ -406,7 +418,8 @@ function validateSummary(summary: RevisionChangeSummary, snapshot: FinancialMode
     queryError("malformed revision change summary");
   }
   const validKinds = new Set([
-    "model_created", "facts_staged", "facts_reviewed", "fact_replaced", "assumption_set",
+    "model_created", "statements_staged", "facts_staged", "facts_reviewed",
+    "fact_replaced", "assumption_set",
     "line_item_source_set", "line_item_added", "metric_added", "formula_set",
     "statement_mapping_plan_set", "category_group_set", "valuation_config_set",
     "stage_advanced", "archived",
@@ -492,6 +505,12 @@ function validateChange(change: RevisionChange, snapshot: FinancialModelSnapshot
     case "model_created":
     case "valuation_config_set":
     case "archived":
+      return;
+    case "statements_staged":
+      if (!nonNegativeInteger(change.rowCount)
+        || !nonNegativeInteger(change.candidateCount)
+        || !validLineArray(change.mappedLineItemIds)
+        || !validPeriodArray(change.periodIds)) queryError("malformed statements_staged change");
       return;
     case "facts_staged":
       if (!nonNegativeInteger(change.candidateCount)

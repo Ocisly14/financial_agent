@@ -44,11 +44,13 @@ import type {
   ValuationConfig,
 } from "./types.ts";
 import { calculateValuation, validateValuationConfig } from "./valuation.ts";
+import type { JsonObject } from "../framework/types.ts";
 import {
   buildModelContextView,
   buildWorkbookSlice,
   buildWorkbookView,
   type CurrentWorkbookView,
+  type HistoricalDcfCompletenessView,
   type ModelContextView,
   type ModelReadSection,
   type RevisionChange,
@@ -65,6 +67,7 @@ export type {
   RevisionChangeSummary,
   RevisionSummary,
   WorkbookSliceView,
+  HistoricalDcfCompletenessView,
 } from "./views.ts";
 
 export type CreateModelInput = NewModelMeta & {
@@ -140,6 +143,7 @@ export class FinancialModelService {
     skeleton = addSourceStatementRows(skeleton, input.preparedStatementRows);
     skeleton = installDefaultMetrics(skeleton, input.periods);
     const snapshot: FinancialModelSnapshot = {
+      filingInsightSetId: null,
       lifecycleStage: "draft",
       periods: structuredClone(input.periods),
       lineItems: skeleton.lineItems,
@@ -199,6 +203,68 @@ export class FinancialModelService {
       calculated,
       makeSummary(calculated, [factsStagedChange(calculated, candidates)]),
     );
+  }
+
+  /**
+   * Atomically installs filing-derived source rows and their staged facts.
+   * Phase 2 creation uses this after a value-free revision 0 so the initial
+   * filing import remains an explicit, replayable revision 1 boundary.
+   */
+  stagePreparedStatements(
+    modelId: string,
+    expectedRevision: number,
+    rows: PreparedStatementRow[],
+    candidates: Fact[],
+    filingInsightSetId?: string,
+  ): CommitResult {
+    const parent = this.loadForMutation(modelId, expectedRevision);
+    if (expectedRevision !== 0
+      || parent.snapshot.facts.length > 0
+      || parent.snapshot.lineItems.some((item) => item.section.startsWith("source_"))) {
+      throw new FinancialModelError(
+        "invalid_model_operation",
+        "prepared statements may only be staged once against the value-free revision zero",
+      );
+    }
+    if (rows.length === 0 || candidates.length === 0) {
+      throw new FinancialModelError(
+        "invalid_model_operation",
+        "prepared statement staging requires source rows and fact candidates",
+      );
+    }
+    const rowIds = new Set(rows.map((row) => row.sourceLineItemId));
+    if (rowIds.size !== rows.length) {
+      throw new FinancialModelError("invalid_model_operation", "prepared statement rows repeat a source line-item id");
+    }
+    const periodIds = new Set(parent.snapshot.periods.map((period) => period.id));
+    for (const candidate of candidates) {
+      if (candidate.lineItemId === undefined || !rowIds.has(candidate.lineItemId)) {
+        throw new FinancialModelError(
+          "invalid_model_operation",
+          `prepared fact must reference a source row from the same import: ${candidate.factId}`,
+        );
+      }
+      if (!periodIds.has(candidate.periodId)) {
+        throw new FinancialModelError(
+          "invalid_model_operation",
+          `prepared fact references an unknown model period: ${candidate.periodId}`,
+        );
+      }
+    }
+    const working = structuredClone(parent.snapshot);
+    working.filingInsightSetId = filingInsightSetId ?? null;
+    const stagedSkeleton = addSourceStatementRows(skeletonOf(working), rows);
+    acceptSkeleton(working, stagedSkeleton);
+    working.facts = stageFactCandidates(working.facts, candidates);
+    const calculated = recalculate(working);
+    const factChange = factsStagedChange(calculated, candidates);
+    return this.commit(modelId, expectedRevision, calculated, makeSummary(calculated, [{
+      kind: "statements_staged",
+      rowCount: rows.length,
+      candidateCount: factChange.candidateCount,
+      mappedLineItemIds: factChange.mappedLineItemIds,
+      periodIds: factChange.periodIds,
+    }]));
   }
 
   reviewFacts(modelId: string, expectedRevision: number, input: ReviewFactsInput): CommitResult {
@@ -363,6 +429,10 @@ export class FinancialModelService {
       calculated,
       makeSummary(calculated, [{ kind: "archived" }]),
     );
+  }
+
+  historicalCompleteness(modelId: string, revision?: number): HistoricalDcfCompletenessView {
+    return historicalCompleteness(this.requireRevision(modelId, revision).snapshot);
   }
 
   private loadForMutation(
@@ -531,6 +601,17 @@ function historyGate(snapshot: FinancialModelSnapshot): void {
       { ruleIds: failedReconciliations.map((result) => result.ruleId) },
     );
   }
+  const completeness = historicalCompleteness(snapshot);
+  const missing = completeness.categories.flatMap((category) => category.periods
+    .filter((period) => period.status === "missing")
+    .map((period) => `${category.lineItemId}@${period.periodId}`));
+  if (missing.length > 0) {
+    throw new FinancialModelError(
+      "history_review_required",
+      "required high-level DCF history is incomplete",
+      { missing, historicalDcfCompleteness: completeness as unknown as JsonObject },
+    );
+  }
   for (const plan of snapshot.statementMappingPlans) {
     for (const periodId of plan.periodIds) {
       const value = snapshot.cells.get(cellKey(plan.targetLineItemId, periodId))?.value;
@@ -542,6 +623,31 @@ function historyGate(snapshot: FinancialModelSnapshot): void {
       }
     }
   }
+}
+
+const REQUIRED_HISTORY_LINE_ITEMS = [
+  "revenue.total", "cost_of_revenue", "gross_profit", "operating_expenses", "operating_income",
+  "depreciation_amortization", "ebitda", "pretax_income", "income_tax_expense", "net_income",
+  "nopat", "capital_expenditures", "operating_working_capital", "change_nwc", "fcff",
+] as const;
+
+function historicalCompleteness(snapshot: FinancialModelSnapshot): HistoricalDcfCompletenessView {
+  const selected = snapshot.periods.filter((period) => snapshot.selectedHistoricalPeriodIds.includes(period.id));
+  return {
+    selectedHistoricalPeriodIds: selected.map((period) => period.id),
+    categories: REQUIRED_HISTORY_LINE_ITEMS.map((lineItemId) => {
+      const item = snapshot.lineItems.find((candidate) => candidate.id === lineItemId)!;
+      return { lineItemId, role: item.role, periods: selected.map((period, index) => {
+        const key = cellKey(lineItemId, period.id);
+        if ((lineItemId === "change_nwc" || lineItemId === "fcff") && index === 0) {
+          return { periodId: period.id, status: "not_applicable" as const, refs: [key] };
+        }
+        const cell = snapshot.cells.get(key);
+        return { periodId: period.id, status: cell?.value === null || cell?.value === undefined ? "missing" as const : "complete" as const,
+          refs: [key, ...new Set(cell?.diagnostics.flatMap((diagnostic) => diagnostic.refs) ?? [])] };
+      }) };
+    }),
+  };
 }
 
 function requireRoleCells(

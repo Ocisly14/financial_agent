@@ -1,8 +1,14 @@
-// Standalone copy of the framework registry used by all mcp_tools/*.
-// Structurally identical to src/infra/mcp/toolRegistry.ts; TypeScript structural typing ensures compatibility.
+// Canonical registry shared by the framework and all mcp_tools/* handlers.
 import type { JsonObject, ToolDefinition, ToolExecutionResult } from "../src/framework/types.ts";
 
-export type ToolHandler = (input: JsonObject, context: { sessionId: string; taskId?: string }) => Promise<ToolExecutionResult>;
+export type ToolExecutionContext = {
+  sessionId: string;
+  /** Authenticated owner propagated by the HTTP/runtime boundary. */
+  agentId: string;
+  taskId?: string;
+};
+
+export type ToolHandler = (input: JsonObject, context: ToolExecutionContext) => Promise<ToolExecutionResult>;
 
 export type RegisteredTool = ToolDefinition & {
   execute: ToolHandler;
@@ -26,7 +32,7 @@ export class McpToolRegistry {
     return this.tools.get(name);
   }
 
-  async call(name: string, input: JsonObject, context: { sessionId: string; taskId?: string }): Promise<ToolExecutionResult> {
+  async call(name: string, input: JsonObject, context: ToolExecutionContext): Promise<ToolExecutionResult> {
     const tool = this.tools.get(name);
     if (!tool) throw new Error(`tool not found: ${name}`);
     return tool.execute(input, context);

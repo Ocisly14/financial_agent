@@ -10,7 +10,7 @@ test("requires an explicit query and does not call Tavily without one", async ()
     return [];
   });
 
-  const result = await tool.execute({ task: "find bank earnings" }, { sessionId: "test" });
+  const result = await tool.execute({ task: "find bank earnings" }, { sessionId: "test", agentId: "agent-1" });
 
   assert.equal(calls, 0);
   assert.deepEqual(result.error, { code: "invalid_query", message: "query is required" });
@@ -41,7 +41,7 @@ test("passes the subagent query and parameters directly to Tavily", async () => 
       search_depth: "advanced",
       task: "auto-supplied task must not shape the query",
     },
-    { sessionId: "test" },
+    { sessionId: "test", agentId: "agent-1" },
   );
 
   assert.deepEqual(received, {
@@ -61,7 +61,7 @@ test("uses generic defaults and clamps the result limit", async () => {
     return [];
   });
 
-  await tool.execute({ query: "global bond market outlook", limit: 100 }, { sessionId: "test" });
+  await tool.execute({ query: "global bond market outlook", limit: 100 }, { sessionId: "test", agentId: "agent-1" });
 
   assert.deepEqual(received, {
     query: "global bond market outlook",

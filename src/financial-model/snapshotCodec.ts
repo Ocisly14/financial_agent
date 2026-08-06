@@ -69,6 +69,7 @@ const SNAPSHOT_FIELDS = [
   "valuation",
   "engineVersion",
 ] as const;
+const SNAPSHOT_OPTIONAL_FIELDS = ["filingInsightSetId"] as const;
 
 const PERIOD_CLASSES = ["actual", "ttm", "forecast"] as const;
 const LIFECYCLE_STAGES = [
@@ -170,7 +171,7 @@ function normalizeSnapshot(
   value: unknown,
   representation: "runtime" | "wire",
 ): FinancialModelSnapshot {
-  const root = exactObject(value, "$", SNAPSHOT_FIELDS);
+  const root = exactObject(value, "$", SNAPSHOT_FIELDS, SNAPSHOT_OPTIONAL_FIELDS);
   const periods = array(root.periods, "$.periods", normalizePeriod);
   buildGrid(periods);
   const periodById = uniqueBy(periods, (period) => period.id, "$.periods", "period id");
@@ -192,7 +193,6 @@ function normalizeSnapshot(
     normalizeFactReviewDecision,
   );
   validateFactReviewDecisions(factReviewDecisions, factById, itemById);
-
   const assumptions = array(root.assumptions, "$.assumptions", normalizeAssumption);
   validateAssumptions(assumptions, itemById, periodById);
   const formulas = array(root.formulas, "$.formulas", normalizeFormula);
@@ -279,6 +279,9 @@ function normalizeSnapshot(
     : normalizeValuationOutput(root.valuation, "$.valuation", itemById, periodById);
 
   return {
+    filingInsightSetId: hasOwn(root, "filingInsightSetId")
+      ? root.filingInsightSetId === null ? null : nonemptyString(root.filingInsightSetId, "$.filingInsightSetId")
+      : null,
     lifecycleStage: enumValue(
       root.lifecycleStage,
       "$.lifecycleStage",
@@ -308,6 +311,7 @@ function normalizeSnapshot(
 
 function toWireSnapshot(snapshot: FinancialModelSnapshot): PlainObject {
   return {
+    filingInsightSetId: snapshot.filingInsightSetId ?? null,
     lifecycleStage: snapshot.lifecycleStage,
     periods: snapshot.periods,
     lineItems: snapshot.lineItems,

@@ -164,7 +164,7 @@ test("ask_topic runs the topic's own orchestrator and returns its final reply", 
 
   assert.equal(result.status, "ok");
   assert.equal(result.reply, "reply to 渠道库存怎么样？");
-  assert.deepEqual(h.runs, [{ sessionId: "room_a", userMessage: "渠道库存怎么样？" }],
+  assert.deepEqual(h.runs, [{ agentId: "default", sessionId: "room_a", userMessage: "渠道库存怎么样？" }],
     "the background Topic run must not surface an input card outside the current Research");
 });
 

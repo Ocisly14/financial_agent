@@ -81,6 +81,32 @@ test("mapping mode contains source sheets beside the complete DCF workbook", () 
   assert.deepEqual(Object.keys(revenue.cells), ["FY2024", "FY2025"]);
 });
 
+test("model context accepts prepared-statement and fact-review revision summaries", () => {
+  const fixture = contextFixture();
+  fixture.headers[0]!.changeSummary = {
+    changes: [{
+      kind: "statements_staged",
+      rowCount: 1,
+      candidateCount: 0,
+      mappedLineItemIds: ["source.income_statement.revenue"],
+      periodIds: ["FY2024"],
+    }],
+    changedSections: ["source_income_statement"],
+    warningCount: 0,
+    blockerCount: 0,
+  };
+  fixture.current.changeSummary = {
+    changes: [{ kind: "facts_reviewed", committed: 1, rejected: 0, superseded: 0,
+      lineItemIds: ["source.income_statement.revenue"], periodIds: ["FY2024"] }],
+    changedSections: ["history"],
+    warningCount: 0,
+    blockerCount: 0,
+  };
+  fixture.headers[1]!.changeSummary = structuredClone(fixture.current.changeSummary);
+
+  assert.doesNotThrow(() => buildModelContextView(fixture.meta, fixture.headers, fixture.current));
+});
+
 test("after history mapping the default workbook is DCF-only with compact mapping refs", () => {
   const view = buildWorkbookView("m", 1, snapshot(true));
   assert.equal(view.mode, "dcf");

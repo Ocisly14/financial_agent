@@ -153,6 +153,7 @@ function normalizeToolCalls(raw: unknown): OrchestratorToolCall[] | null {
 
 export type OrchestratorInput = {
   sessionId: string;
+  agentId: string;
   userMessage: string;
   inputResponse?: UserInputResponse;
   /** False for agent-to-agent Topic drives, where no human is watching that Topic stream. */
@@ -182,7 +183,7 @@ export class OrchestratorRuntime {
   private readonly renderer = new PromptRenderer();
   private readonly prompt: PromptTemplate;
   private readonly modelRouter: ModelRouter;
-  private readonly dispatcherFactory: (sessionId: string) => Dispatcher;
+  private readonly dispatcherFactory: (sessionId: string, agentId: string) => Dispatcher;
   private readonly subagents: SubagentRegistry;
   private readonly skills: SkillRegistry;
   private readonly tools: McpToolRegistry;
@@ -192,7 +193,7 @@ export class OrchestratorRuntime {
   constructor(
     prompt: PromptTemplate,
     modelRouter: ModelRouter,
-    dispatcherFactory: (sessionId: string) => Dispatcher,
+    dispatcherFactory: (sessionId: string, agentId: string) => Dispatcher,
     subagents: SubagentRegistry,
     skills: SkillRegistry,
     tools: McpToolRegistry,
@@ -215,7 +216,7 @@ export class OrchestratorRuntime {
     const turn = state.beginTurn(input.userMessage, input.inputResponse);
     await maybeCompact(state, this.modelRouter, turn);
 
-    const dispatcher = this.dispatcherFactory(input.sessionId);
+    const dispatcher = this.dispatcherFactory(input.sessionId, input.agentId);
     const validAgents = new Set(this.subagents.list().map((agent) => agent.name));
     const validSkills = new Set(this.skills.list().map((skill) => skill.name));
 
@@ -300,7 +301,8 @@ export class OrchestratorRuntime {
       // --- dispatch + tool_calls: independent of each other, so they share a step ---
       const tasks: TaskRequest[] = (stepObj.dispatch ?? [])
         .filter((t) => t && typeof t.task === "string" && t.task.trim() && validAgents.has(t.agent as AgentKind))
-        .map((t) => ({ agent: t.agent as AgentKind, task: t.task.trim() }));
+        .map((t) => ({ agent: t.agent as AgentKind, task: t.task.trim(),
+          ...(typeof t.model_id === "string" && t.model_id.trim() ? { model_id: t.model_id.trim() } : {}) }));
 
       const toolCalls = (stepObj.tool_calls ?? []).filter((call) => directTools.has(call.name));
 
@@ -321,7 +323,7 @@ export class OrchestratorRuntime {
         const [, toolOutcomes] = await Promise.all([
           // Subagents write their own task_result events.
           tasks.length > 0 ? dispatcher.dispatch(tasks) : Promise.resolve(),
-          Promise.all(toolCalls.map((call) => this.runOrchestratorTool(call, input.sessionId, state))),
+          Promise.all(toolCalls.map((call) => this.runOrchestratorTool(call, input.sessionId, input.agentId, state))),
         ]);
         if (toolOutcomes.some(Boolean)) {
           finalReply = status || "Please answer the questions below.";
@@ -384,12 +386,13 @@ export class OrchestratorRuntime {
   private async runOrchestratorTool(
     call: OrchestratorToolCall,
     sessionId: string,
+    agentId: string,
     state: SessionState,
   ): Promise<UserInputRequest | undefined> {
     const { name, input: toolInput } = call;
     state.record("orchestrator", "tool_use", { name, input: toolInput });
     try {
-      const output = await this.tools.call(name, { ...toolInput }, { sessionId });
+      const output = await this.tools.call(name, { ...toolInput }, { sessionId, agentId });
       const toolResultPayload: JsonObject = { name, summary: output.summary };
       if (output.generation_context) toolResultPayload.generation_context = output.generation_context as unknown as JsonObject;
       if (output.visualizations?.length) toolResultPayload.visualizations = output.visualizations;

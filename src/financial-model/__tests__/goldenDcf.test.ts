@@ -30,6 +30,8 @@ type SourceDefinition = PreparedStatementRow & { values: number[] };
 let nextSourceOrder = 1;
 const SOURCES: SourceDefinition[] = [
   source("income_statement", "revenue", "Revenue", [100, 110, 120]),
+  source("income_statement", "cost_of_revenue", "Cost of revenue", [66, 72.6, 79.2]),
+  source("income_statement", "gross_profit", "Gross profit", [34, 37.4, 40.8]),
   source("income_statement", "operating_income", "Operating income", [20, 22, 24]),
   source("income_statement", "da", "D&A", [5, 5.5, 6]),
   source("income_statement", "pretax", "Pretax income", [20, 22, 24]),
@@ -109,7 +111,7 @@ test("golden service workflow maps statements once and produces a deterministic 
 
   const sourceAudit = service.getModel("golden-dcf", { section: "source_income_statement" });
   assert.ok("rows" in sourceAudit);
-  assert.equal(sourceAudit.rows.length, 8);
+  assert.equal(sourceAudit.rows.length, 10);
 
   assert.equal(service.applyOperations("golden-dcf", 2, [
     { kind: "advance_stage", stage: "history_committed" },
@@ -257,6 +259,8 @@ function mappingPlans(): StatementMappingPlan[] {
   const id = (statement: PreparedStatementRow["statement"], slug: string) => `source.${statement}.${slug}`;
   return [
     one("revenue.total", id("income_statement", "revenue")),
+    one("cost_of_revenue", id("income_statement", "cost_of_revenue")),
+    one("gross_profit", id("income_statement", "gross_profit")),
     one("operating_income", id("income_statement", "operating_income")),
     one("depreciation_amortization", id("income_statement", "da")),
     one("pretax_income", id("income_statement", "pretax")),

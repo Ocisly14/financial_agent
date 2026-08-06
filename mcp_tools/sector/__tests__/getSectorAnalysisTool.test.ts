@@ -4,7 +4,7 @@ import type { BarRepository, DailyBar, Timeframe } from "../../../src/data/stock
 import { SECTOR_UNIVERSE } from "../../../src/data/sector/index.ts";
 import { createGetSectorAnalysisTool } from "../getSectorAnalysisTool.ts";
 
-const CTX = { sessionId: "sector-test" };
+const CTX = { sessionId: "sector-test", agentId: "agent-1" };
 
 function bars(dailyReturn: number, count = 261): DailyBar[] {
   const result: DailyBar[] = [];

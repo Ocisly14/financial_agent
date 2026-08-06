@@ -37,6 +37,7 @@ function harness(): { dispatcher: Dispatcher; seen: TaskRequest[]; state: Sessio
     runtime as never,
     new McpToolRegistry(),
     state,
+    "agent-1",
   );
   return { dispatcher, seen, state, turn };
 }

@@ -18,6 +18,8 @@ import { createSubagentRegistry } from "./subagents/registerSubagents.ts";
 import { ResearchRuntime } from "./research/researchRuntime.ts";
 import { TopicDigestScheduler } from "../server/topicDigestScheduler.ts";
 import { researchPrompt } from "./research/researchPrompt.ts";
+import { getDefaultFinancialModelToolDeps } from "../../mcp_tools/financial-model/financialModelTools.ts";
+import { createDcfSubagentTool } from "./financial-modeling/subagentTool.ts";
 
 export type FinancialAgentApp = Awaited<ReturnType<typeof createFinancialAgentApp>>;
 
@@ -25,9 +27,10 @@ export async function createFinancialAgentApp() {
   const eventStore = await resolveEventStore();
   const sessions = new SessionRegistry(eventStore);
   const toolRegistry = new McpToolRegistry();
-  registerAllTools(toolRegistry);
-
   const modelRouter = new ModelRouter(resolveLlmProvider());
+  const financialModelDeps = getDefaultFinancialModelToolDeps();
+  registerAllTools(toolRegistry, { financialModelDeps });
+  toolRegistry.register(createDcfSubagentTool({ modelRouter, financial: financialModelDeps }));
   const subagents = createSubagentRegistry();
   const subagentRuntime = new SubagentRuntime(modelRouter, toolRegistry);
   const skills = new SkillRegistry();
@@ -36,8 +39,8 @@ export async function createFinancialAgentApp() {
   toolRegistry.register(createReadSkillReferenceTool(skills));
   toolRegistry.register(createRunSkillScriptTool(skills));
 
-  const dispatcherFactory = (sessionId: string) =>
-    new Dispatcher(sessionId, subagents, subagentRuntime, toolRegistry, sessions.getExisting(sessionId));
+  const dispatcherFactory = (sessionId: string, agentId: string) =>
+    new Dispatcher(sessionId, subagents, subagentRuntime, toolRegistry, sessions.getExisting(sessionId), agentId);
 
   const orchestrator = new OrchestratorRuntime(
     orchestratorPrompt,

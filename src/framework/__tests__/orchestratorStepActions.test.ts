@@ -72,8 +72,8 @@ function harness(): Harness {
   }
 
   const sessions = new SessionRegistry();
-  const dispatcherFactory = (sessionId: string) =>
-    new Dispatcher(sessionId, subagents, subagentRuntime as never, tools, sessions.getExisting(sessionId));
+  const dispatcherFactory = (sessionId: string, agentId: string) =>
+    new Dispatcher(sessionId, subagents, subagentRuntime as never, tools, sessions.getExisting(sessionId), agentId);
 
   return {
     dispatched,
@@ -98,7 +98,7 @@ function harness(): Harness {
         tools,
         sessions,
       );
-      await orchestrator.run({ sessionId: "s", userMessage: "go", ...options });
+      await orchestrator.run({ agentId: "agent-1", sessionId: "s", userMessage: "go", ...options });
     },
   };
 }

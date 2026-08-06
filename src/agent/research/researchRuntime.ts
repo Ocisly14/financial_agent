@@ -334,7 +334,7 @@ export class ResearchRuntime {
       // Calls in one step run together: three `ask_topic`s issued at once is the
       // whole reason the concurrency guard exists.
       const outcomes = await mapWithConcurrency(parsed.toolCalls, MAX_PARALLEL_TOOL_CALLS, (call) =>
-        this.invokeTool(toolset, state, call),
+        this.invokeTool(toolset, state, input.agentId, call),
       );
       if (outcomes.some(Boolean)) {
         finalReply = status || "Please answer the questions below.";
@@ -526,11 +526,11 @@ export class ResearchRuntime {
    * Research's (§4.4). Bad arguments are reported back to the model in the same
    * shape, so it can correct itself on the next step rather than crash the turn.
    */
-  private async invokeTool(toolset: ResearchToolset, state: SessionState, call: ToolCall): Promise<UserInputRequest | undefined> {
+  private async invokeTool(toolset: ResearchToolset, state: SessionState, agentId: string, call: ToolCall): Promise<UserInputRequest | undefined> {
     state.record("orchestrator", "tool_use", { name: call.name, input: call.input });
     try {
       if (call.name === "ask_user") {
-        const output = await this.tools.call("ask_user", call.input, { sessionId: state.session_id });
+        const output = await this.tools.call("ask_user", call.input, { sessionId: state.session_id, agentId });
         const payload: JsonObject = { name: call.name, summary: output.summary };
         if (output.error) payload.error = output.error;
         state.record("orchestrator", "tool_result", payload);

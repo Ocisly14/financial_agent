@@ -101,7 +101,7 @@ test("an indicator reads the requested stock bars from the repository", async ()
 
   const result = await tool.execute(
     { symbol: " aapl ", timeframe: "1Day", period: 20, history_bars: 80 },
-    { sessionId: "test" },
+    { sessionId: "test", agentId: "agent-1" },
   );
 
   assert.deepEqual(calls, [{ symbol: "AAPL", timeframe: "1Day", count: 80 }]);
@@ -129,7 +129,7 @@ test("a custom minute indicator reads 1Min bars and returns the aggregated timef
 
   const result = await tool.execute(
     { symbol: "AAPL", timeframe: "15m", period: 2, history_bars: 3 },
-    { sessionId: "test" },
+    { sessionId: "test", agentId: "agent-1" },
   );
 
   assert.deepEqual(calls, [{ symbol: "AAPL", timeframe: "1Min", count: 390 }]);
@@ -147,7 +147,7 @@ test("every indicator returns structured stock data without a prompt template", 
   };
 
   for (const tool of createTechnicalIndicatorTools({ getRepository: async () => repository })) {
-    const result = await tool.execute({ symbol: "SPY" }, { sessionId: "test" });
+    const result = await tool.execute({ symbol: "SPY" }, { sessionId: "test", agentId: "agent-1" });
     assert.equal(result.error, undefined, `${tool.name}: ${result.summary}`);
     assert.equal(result.generation_context?.prompt, undefined, tool.name);
     assert.equal(result.generation_context?.data.symbol, "SPY", tool.name);
@@ -171,7 +171,7 @@ test("falls back to a direct Alpaca fetch when the stock database cannot be open
 
   const result = await tool.execute(
     { symbol: "AAPL", timeframe: "1Day", period: 20, history_bars: 80 },
-    { sessionId: "test" },
+    { sessionId: "test", agentId: "agent-1" },
   );
 
   assert.deepEqual(calls, [{ symbol: "AAPL", timeframe: "1Day" }]);
@@ -185,7 +185,7 @@ test("reports the database as unavailable only when the direct fetch also fails"
     fetchBars: async () => { throw new Error("alpaca down"); },
   })[0]!;
 
-  const result = await tool.execute({ symbol: "AAPL" }, { sessionId: "test" });
+  const result = await tool.execute({ symbol: "AAPL" }, { sessionId: "test", agentId: "agent-1" });
 
   assert.equal(result.error?.code, "stock_database_unavailable");
   assert.match(result.error?.message ?? "", /alpaca down/);
@@ -200,7 +200,7 @@ test("rejects a missing symbol before opening the stock repository", async () =>
     },
   })[0]!;
 
-  const result = await tool.execute({}, { sessionId: "test" });
+  const result = await tool.execute({}, { sessionId: "test", agentId: "agent-1" });
 
   assert.equal(opened, false);
   assert.equal(result.error?.code, "invalid_symbol");

@@ -62,7 +62,7 @@ The first release is backend-only. It includes persistent models, deterministic 
 
 ## 4. Why Filing-Level XBRL Is Required
 
-It is required for **segment-level fidelity**, not for the platform to function. A consolidated-revenue DCF built on Company Facts plus reviewed manual facts is a complete, auditable valuation; filing-level extraction raises the resolution of the revenue build. That is why it ships last (§19, phase 4) and stays optional at runtime (§6.1).
+It is required for the initial filing-grounded product. Company Facts remains useful for diagnostics, but it cannot reproduce a filing's complete three statements, custom taxonomy, table boundaries, dimensional disclosures, or note context. The bounded Arelle path therefore ships with phase 2; phase 4 hardens coverage rather than introducing extraction for the first time.
 
 The SEC Company Facts API aggregates facts that use non-custom taxonomies and apply to the entire reporting entity. It is appropriate for comparable consolidated values, but it does not provide the complete filing-specific custom taxonomy and dimensional context required for reliable product or segment modeling.
 
@@ -314,7 +314,7 @@ An explicit revision, section, selector, or `include_lineage` request may return
 
 ### 6.1 Arelle adapter
 
-Filing-level extraction is delivered last (§19, phase 4) and is **optional at runtime**. The platform must be fully usable without it: standardized Company Facts plus Agent-supplied manual facts are sufficient to build a consolidated-revenue DCF. When the adapter is missing or fails, `create_financial_model` still succeeds, returns the standardized candidates, and reports the extraction failure as a non-blocking warning. It must never turn model creation into an error.
+Filing-level extraction is part of phase 2 and is required for initial model creation. The initial release does not use standardized Company Facts, HTML scraping, model-extracted values, or manual facts to masquerade as a missing primary statement. If no attempted `10-K`/`10-K/A` filing set provides structurally usable candidates for all three statements, creation remains at revision 0 and returns `incomplete_financial_statements`; individual annual gaps remain non-blocking review issues.
 
 Use an isolated Python adapter backed by `arelle-release==2.42.1`.
 
@@ -344,6 +344,8 @@ Each filing-level fact must preserve:
 - presentation and calculation roles when available
 - extraction warnings
 
+The adapter also preserves every inline-HTML table containing a requested annual fact: deterministic source-table identity, nearby heading, filing and HTML order, complete row text/order, individual fact occurrences, contexts, and real source anchors. Arelle presentation roles and table-structure output are evidence only. They never decide whether a table is a primary statement, an appendix, or a note.
+
 ### 6.3 Candidate mapping
 
 The platform may use deterministic evidence to rank candidate mappings:
@@ -356,6 +358,10 @@ The platform may use deterministic evidence to rank candidate mappings:
 - arithmetic relationship to consolidated values
 
 Automatic mapping produces staging candidates only. It must not convert filing-specific segments into committed model rows without Agent review.
+
+Table selection happens before row-to-DCF mapping, in the `statement_extraction` curation loop (`2026-08-05-sec-table-curation-design.md`), and is verified deterministically there rather than committed as part of history review. The historical-mapping Agent receives already-curated face statements and maps their rows. The deterministic `sourceTableId` is source identity, not a caller-supplied plan ID.
+
+Equal QName/period/unit/dimension facts from different HTML tables remain separate staged source rows until review. This prevents a note value or segment-table occurrence from being silently substituted for a face-statement occurrence.
 
 Statement ingestion and DCF modeling are separate layers. Extracted values first remain on stable source rows in three read-only sheets: `income_statement`, `balance_sheet`, and `cash_flow_statement`. The Agent chooses the usable historical periods and commits a versioned mapping from those vertical source categories into the prebuilt DCF rows:
 
@@ -799,7 +805,7 @@ The `financial_modeling` subagent builds the model in explicit stages.
 ### Stage 1: Historical review
 
 1. Create the model and run automatic SEC/Arelle extraction.
-2. Review staged consolidated and dimensional facts.
+2. Classify every source table candidate, identify all three face statements, and review staged consolidated and dimensional facts.
 3. Resolve blockers and commit reviewed history.
 4. Inspect the automatically recalculated historical growth and operating metrics.
 
@@ -1349,10 +1355,10 @@ Done when an Agent can run create → review → inspect automatically recalcula
 
 Done when skill routing tests and the English-content verification script pass.
 
-### Phase 4: Filing-level XBRL extraction
+### Phase 4: Filing-level XBRL hardening and coverage expansion
 
-The Arelle adapter, filing-level extraction, candidate mapping, and reconciliation, plugged into the review pipeline that phases 1 and 2 have already stabilized.
+Broader taxonomy/version coverage, performance hardening, richer structured diagnostics, and any explicitly designed additional authoritative provider. The Arelle adapter and initial filing-level extraction already ship in phase 2.
 
-Done when the §16.4 fixture cases pass and the system verifiably degrades to Company-Facts-only when the adapter is absent.
+Done when the §16.4 fixture cases and an expanded real-filer corpus pass without weakening the three-statement gate or silently falling back to a non-authoritative source.
 
-**Why extraction is last.** It is the only component that can be omitted entirely: a consolidated-revenue DCF is a complete valuation, and segment decomposition improves precision rather than enabling the result. It also carries the project's only new language runtime, with taxonomy caching, multi-second parses, and a distinct class of operational failures — the three dedicated error codes in §15 are the evidence. Two further reasons are structural: the extracted-fact contract in §6.2 is easier to get right once the review-and-commit pipeline that consumes it exists, and §6.1 already requires graceful degradation, which building extraction last enforces by construction instead of by a retrofitted fallback branch.
+**Why hardening remains last.** The revisioned review-and-commit pipeline and an initial bounded Arelle path must exist together for a usable filing-grounded product. Broader filer coverage and alternate authoritative providers can then be added without changing the Agent-classification boundary or the core calculation engine.

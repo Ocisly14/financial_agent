@@ -18,7 +18,7 @@ function makeDispatcher(state: SessionState, seen: TaskRequest[]): Dispatcher {
   const runtime = {
     run: async (_definition: unknown, ctx: { request: TaskRequest }) => { seen.push(ctx.request); },
   };
-  return new Dispatcher("s", subagents, runtime as never, new McpToolRegistry(), state);
+  return new Dispatcher("s", subagents, runtime as never, new McpToolRegistry(), state, "agent-1");
 }
 
 test("a skill activated in one turn does not follow the next turn's dispatch", async () => {

@@ -166,6 +166,56 @@ test("staging facts creates one full revision but does not make candidates activ
   assert.equal(snapshot.cells.get(cellKey("source.income_statement.revenue", "FY2025"))?.value, null);
 });
 
+test("prepared statements are atomically imported after a value-free revision zero", () => {
+  const { store, service } = setup({ ...CREATE_INPUT, preparedStatementRows: [] });
+  const created = service.createModel({ ...CREATE_INPUT, preparedStatementRows: [] });
+  assert.equal(created.revision, 0);
+  assert.equal(current(store).lineItems.some((item) => item.section.startsWith("source_")), false);
+
+  const facts = [stagedRevenue("FY2024", 100), stagedRevenue("FY2025", 110)];
+  const imported = service.stagePreparedStatements(
+    "model-1",
+    0,
+    CREATE_INPUT.preparedStatementRows,
+    facts,
+  );
+
+  assert.equal(imported.revision, 1);
+  assert.deepEqual(imported.revisionSummary.changes, [{
+    kind: "statements_staged",
+    rowCount: 1,
+    candidateCount: 2,
+    mappedLineItemIds: ["source.income_statement.revenue"],
+    periodIds: ["FY2024", "FY2025"],
+  }]);
+  assert.ok(current(store).lineItems.some((item) => item.id === "source.income_statement.revenue"));
+  assert.deepEqual(current(store).facts.map((fact) => fact.status), ["staged", "staged"]);
+  assert.deepEqual(store.listRevisionHeaders("model-1").map((header) => header.revision), [0, 1]);
+
+  assert.throws(
+    () => service.stagePreparedStatements("model-1", 1, CREATE_INPUT.preparedStatementRows, facts),
+    invalidCode("invalid_model_operation"),
+  );
+});
+
+test("prepared statement import rejects candidates outside its rows or model periods", () => {
+  const { service } = setup({ ...CREATE_INPUT, preparedStatementRows: [] });
+  service.createModel({ ...CREATE_INPUT, preparedStatementRows: [] });
+  assert.throws(
+    () => service.stagePreparedStatements("model-1", 0, CREATE_INPUT.preparedStatementRows, [{
+      ...stagedRevenue("FY2024", 100),
+      lineItemId: "revenue.total",
+    }]),
+    invalidCode("invalid_model_operation"),
+  );
+  assert.throws(
+    () => service.stagePreparedStatements("model-1", 0, CREATE_INPUT.preparedStatementRows, [
+      stagedRevenue("FY1900", 100),
+    ]),
+    invalidCode("invalid_model_operation"),
+  );
+});
+
 test("reviewing facts resolves active history, maps it once, and recalculates metrics", () => {
   const { store, service } = setup();
   service.createModel(CREATE_INPUT);
@@ -463,19 +513,21 @@ test("stage gates run only on explicit advancement", () => {
   service.stageFacts("model-1", 0, facts);
   service.reviewFacts("model-1", 1, reviewInput(facts));
   assert.equal(current(store).lifecycleStage, "draft");
-  service.applyOperations("model-1", 2, [{
-    kind: "advance_stage",
-    stage: "history_committed",
-  }]);
-  assert.equal(current(store).lifecycleStage, "history_committed");
   assert.throws(
-    () => service.applyOperations("model-1", 3, [{
+    () => service.applyOperations("model-1", 2, [{
       kind: "advance_stage",
-      stage: "revenue_forecast",
+      stage: "history_committed",
     }]),
-    invalidCode("missing_formula_input"),
+    (error: unknown) => {
+      assert.ok(error instanceof FinancialModelError);
+      assert.equal(error.code, "history_review_required");
+      assert.ok(Array.isArray(error.details?.["missing"]));
+      assert.ok(error.details?.["historicalDcfCompleteness"]);
+      return true;
+    },
   );
-  assert.equal(store.getRevision("model-1")?.revision, 3);
+  assert.equal(store.getRevision("model-1")?.revision, 2);
+  assert.equal(current(store).lifecycleStage, "draft");
 });
 
 test("archive creates one immutable archived snapshot and listing derives latest state", () => {

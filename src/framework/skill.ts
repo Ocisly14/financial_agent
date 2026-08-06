@@ -9,6 +9,7 @@ const AGENT_KINDS: ReadonlySet<string> = new Set<AgentKind>([
   "market_data",
   "market_research",
   "trading_operations",
+  "financial_modeling",
 ]);
 
 const SKILL_LAYERS: ReadonlySet<string> = new Set<SkillLayer>(["topic", "research"]);

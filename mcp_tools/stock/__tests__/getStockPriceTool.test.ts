@@ -7,7 +7,7 @@ function bar(t: string, c: number): DailyBar {
   return { t, o: c, h: c, l: c, c, v: 1000, vw: c };
 }
 
-const CTX = { sessionId: "test-session" };
+const CTX = { sessionId: "test-session", agentId: "agent-1" };
 
 const SNAPSHOT: Snapshot = {
   symbol: "AAPL", price: 213.45, bidPrice: 213.4, askPrice: 213.5,
@@ -96,7 +96,7 @@ test("daily bars are condensed rather than passed through", async () => {
     repository: { getBars: async () => bars, getBarsBetween: async () => [] },
     snapshot: async () => { throw new Error("no snapshot"); },
   });
-  const result = await tool.execute({ symbol: "AAPL" }, { sessionId: "s" });
+  const result = await tool.execute({ symbol: "AAPL" }, { sessionId: "s", agentId: "agent-1" });
   const data = result.generation_context!.data as Record<string, unknown>;
 
   assert.equal(data["dailyBars"], undefined, "the raw array must not be injected");
@@ -115,7 +115,7 @@ test("historyDays is clamped and the clamp is reported", async () => {
     },
     snapshot: async () => { throw new Error("no snapshot"); },
   });
-  const result = await tool.execute({ symbol: "AAPL", historyDays: 99_999 }, { sessionId: "s" });
+  const result = await tool.execute({ symbol: "AAPL", historyDays: 99_999 }, { sessionId: "s", agentId: "agent-1" });
   const data = result.generation_context!.data as Record<string, unknown>;
 
   assert.equal(requested, 1260, "must not ask the repository for more than MAX_RANGE_DAYS");
@@ -131,7 +131,7 @@ test("a call with no historyDays asks for a year", async () => {
     },
     snapshot: async () => { throw new Error("no snapshot"); },
   });
-  await tool.execute({ symbol: "AAPL" }, { sessionId: "s" });
+  await tool.execute({ symbol: "AAPL" }, { sessionId: "s", agentId: "agent-1" });
   assert.equal(requested, 250);
 });
 
@@ -140,7 +140,7 @@ test("a historyDays within the limit produces no note", async () => {
     repository: { getBars: async () => [bar("2026-07-27", 100)], getBarsBetween: async () => [] },
     snapshot: async () => { throw new Error("no snapshot"); },
   });
-  const result = await tool.execute({ symbol: "AAPL", historyDays: 1260 }, { sessionId: "s" });
+  const result = await tool.execute({ symbol: "AAPL", historyDays: 1260 }, { sessionId: "s", agentId: "agent-1" });
   assert.equal((result.generation_context!.data as Record<string, unknown>)["historyDaysNote"], undefined);
 });
 
@@ -154,7 +154,7 @@ test("a window under the tail budget comes back entirely raw", async () => {
   });
   const result = await tool.execute(
     { symbol: "AAPL", window: { from: "2026-01-01", to: "2026-01-10" } },
-    { sessionId: "s" },
+    { sessionId: "s", agentId: "agent-1" },
   );
   const data = result.generation_context!.data as Record<string, unknown>;
   const window = data["window"] as { recentBars: unknown[]; trend?: unknown };
@@ -174,7 +174,7 @@ test("a window keeps every day distinct up to the trend budget", async () => {
   });
   const result = await tool.execute(
     { symbol: "AAPL", window: { from: "2026-01-01", to: "2026-06-01" } },
-    { sessionId: "s" },
+    { sessionId: "s", agentId: "agent-1" },
   );
   const window = (result.generation_context!.data as Record<string, unknown>)["window"] as {
     trend?: { bucketDays: number; t: string[] };
@@ -193,7 +193,7 @@ test("daily and window coexist without interfering", async () => {
   });
   const result = await tool.execute(
     { symbol: "AAPL", historyDays: 60, window: { from: "2026-01-01", to: "2026-01-10" } },
-    { sessionId: "s" },
+    { sessionId: "s", agentId: "agent-1" },
   );
   const data = result.generation_context!.data as Record<string, unknown>;
   assert.ok(data["daily"]);
@@ -211,7 +211,7 @@ test("a malformed window is rejected with a note instead of reaching the reposit
   });
   const result = await tool.execute(
     { symbol: "AAPL", window: { from: "Jan 5", to: "2026-01-10" } },
-    { sessionId: "s" },
+    { sessionId: "s", agentId: "agent-1" },
   );
   const data = result.generation_context!.data as Record<string, unknown>;
   assert.equal(getBarsBetweenCalled, false, "a malformed window must not reach the repository");
@@ -226,7 +226,7 @@ test("a window missing to/from is rejected with a note", async () => {
   });
   const result = await tool.execute(
     { symbol: "AAPL", window: { from: "2026-01-01" } },
-    { sessionId: "s" },
+    { sessionId: "s", agentId: "agent-1" },
   );
   const data = result.generation_context!.data as Record<string, unknown>;
   assert.equal(data["window"], undefined);
@@ -242,7 +242,7 @@ test("a fractional historyDays floors to at least 1 day, not 0", async () => {
     },
     snapshot: async () => { throw new Error("no snapshot"); },
   });
-  await tool.execute({ symbol: "AAPL", historyDays: 0.5 }, { sessionId: "s" });
+  await tool.execute({ symbol: "AAPL", historyDays: 0.5 }, { sessionId: "s", agentId: "agent-1" });
   assert.equal(requested, 1, "0.5 must floor to 1, not 0");
 });
 
@@ -251,7 +251,7 @@ test("the generation prompt names the condensed fields", async () => {
     repository: { getBars: async () => [bar("2026-07-27", 100)], getBarsBetween: async () => [] },
     snapshot: async () => { throw new Error("no snapshot"); },
   });
-  const result = await tool.execute({ symbol: "AAPL" }, { sessionId: "s" });
+  const result = await tool.execute({ symbol: "AAPL" }, { sessionId: "s", agentId: "agent-1" });
   const prompt = result.generation_context!.prompt!;
   for (const field of ["daily.recentBars", "daily.trend", "daily.stats"]) {
     assert.ok(prompt.includes(field), `prompt must explain ${field}`);

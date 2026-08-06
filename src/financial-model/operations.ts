@@ -95,6 +95,8 @@ export type MappingException = {
 };
 
 export type FinancialModelSnapshot = {
+  /** Immutable revision link; insight bodies are stored outside this snapshot. */
+  filingInsightSetId?: string | null;
   lifecycleStage: LifecycleStage;
   periods: Period[];
   lineItems: LineItem[];

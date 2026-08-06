@@ -31,7 +31,7 @@ import type { CompactionCache, EventStore } from "./eventStore.ts";
  * transport; the two are not the same concern.
  */
 
-export type Source = "user" | "orchestrator" | "market_data" | "market_research" | "trading_operations" | "skill";
+export type Source = "user" | "orchestrator" | "market_data" | "market_research" | "trading_operations" | "financial_modeling" | "skill";
 
 export interface SessionEvent {
   event_id: string;
@@ -54,6 +54,7 @@ const KINDS: Record<Source, ReadonlySet<string>> = {
   market_data: new Set(["task_result", "tool_use", "tool_result"]),
   market_research: new Set(["task_result", "tool_use", "tool_result"]),
   trading_operations: new Set(["task_result", "tool_use", "tool_result", "approval_required", "approval_resolved"]),
+  financial_modeling: new Set(["task_result", "tool_use", "tool_result"]),
   skill: new Set(["skill_invoke", "workflow_started", "workflow_step", "workflow_done"]),
 };
 

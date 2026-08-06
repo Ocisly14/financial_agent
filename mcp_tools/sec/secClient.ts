@@ -15,6 +15,8 @@ export type SecDataProvider = {
   resolveCompany: (symbol: string) => Promise<SecCompanyIdentifier | undefined>;
   getSubmissions: (cik: number) => Promise<Record<string, unknown>>;
   getCompanyFacts: (cik: number) => Promise<Record<string, unknown>>;
+  /** Older filing batches named by submissions.filings.files. */
+  getSubmissionFile?: (name: string) => Promise<Record<string, unknown>>;
 };
 
 export class SecApiError extends Error {
@@ -161,6 +163,12 @@ export function createSecClient(options: {
         FACTS_CACHE_MS,
       ));
       if (!value) throw new SecApiError("sec_request_failed", "SEC company-facts response had an unexpected shape.");
+      return value;
+    },
+    async getSubmissionFile(name) {
+      if (!/^[A-Za-z0-9._-]+\.json$/.test(name)) throw new SecApiError("sec_request_failed", "Invalid SEC submission filename.");
+      const value = asRecord(await getJson(`${SEC_DATA_BASE}/submissions/${name}`, SUBMISSIONS_CACHE_MS));
+      if (!value) throw new SecApiError("sec_request_failed", "SEC supplemental submissions response had an unexpected shape.");
       return value;
     },
   };
