@@ -4,8 +4,8 @@ import type { JsonSchema, JsonValue } from "../../framework/types.ts";
 import type { LlmMessage, ModelRouter } from "../../infra/llm/provider.ts";
 import type { Period } from "../../financial-model/types.ts";
 import { buildConceptInventory } from "../../infra/xbrl/conceptInventory.ts";
-import { buildUnifiedStatements, checkUnificationCompleteness,
-  type UnificationDecision, type UnifiedStatementsArtifact } from "../../infra/xbrl/unifiedStatements.ts";
+import { applyUnificationPatch, buildUnifiedStatements, checkUnificationCompleteness,
+  type UnificationDecision, type UnificationPatch, type UnifiedStatementsArtifact } from "../../infra/xbrl/unifiedStatements.ts";
 import type { PresentationExtract } from "../../infra/xbrl/types.ts";
 
 const log = createLogger("statement_unification");
@@ -44,12 +44,21 @@ const HELD_OUT = (extra: Record<string, JsonSchema>, required: string[]): JsonSc
     properties: { conceptQName: { type: "string" }, dimensionSignature: { type: "string" },
       openingBalance: { type: "boolean" }, reason: { type: "string" }, ...extra } } });
 
+const ROW: JsonSchema = { type: "object", additionalProperties: false,
+  required: ["rowId", "statement", "label", "components", "rationale"],
+  properties: { rowId: { type: "string" }, statement: { type: "string" }, label: { type: "string" },
+    components: { type: "array", items: COMPONENT }, perYearOverrides: { type: "array", items: OVERRIDE },
+    rationale: { type: "string" } } };
+
 const DECISION_SCHEMA: JsonSchema = { type: "object", additionalProperties: false, required: ["rows"], properties: {
-  rows: { type: "array", items: { type: "object", additionalProperties: false,
-    required: ["rowId", "statement", "label", "components", "rationale"],
-    properties: { rowId: { type: "string" }, statement: { type: "string" }, label: { type: "string" },
-      components: { type: "array", items: COMPONENT }, perYearOverrides: { type: "array", items: OVERRIDE },
-      rationale: { type: "string" } } } },
+  rows: { type: "array", items: ROW },
+  excluded: HELD_OUT({}, []),
+  supplemental: HELD_OUT({ label: { type: "string" } }, ["label"]),
+} };
+
+const PATCH_SCHEMA: JsonSchema = { type: "object", additionalProperties: false, required: [], properties: {
+  upsertRows: { type: "array", items: ROW },
+  deleteRowIds: { type: "array", items: { type: "string" } },
   excluded: HELD_OUT({}, []),
   supplemental: HELD_OUT({ label: { type: "string" } }, ["label"]),
 } };
@@ -74,8 +83,15 @@ export async function runStatementUnificationAgent(input: {
   let findings: string[] = [];
   let last: StatementUnificationRun | undefined;
 
+  let decision: UnificationDecision | undefined;
   for (let run = 1; run <= maxRuns; run += 1) {
-    const decision = await requestDecision(input.modelRouter, input.systemPrompt, inventory, input.requestedPeriods, findings);
+    // First run states the whole decision; later runs only correct it. A hundred-row decision costs
+    // minutes to regenerate and drifts between runs, while the fix for a handful of findings is a
+    // few rows long.
+    decision = decision === undefined
+      ? await requestDecision(input.modelRouter, input.systemPrompt, inventory, input.requestedPeriods)
+      : applyUnificationPatch(decision,
+        await requestPatch(input.modelRouter, input.systemPrompt, inventory, input.requestedPeriods, decision, findings));
     log.info(`run ${run}/${maxRuns}: decision has ${decision.rows.length} rows`);
     const completeness = checkUnificationCompleteness({ inventory, decision, requestedPeriods: input.requestedPeriods });
     if (completeness.length > 0) {
@@ -97,12 +113,41 @@ export async function runStatementUnificationAgent(input: {
   return last;
 }
 
-async function requestDecision(modelRouter: ModelRouter, systemPrompt: string, inventory: unknown,
-  requestedPeriods: readonly Period[], priorFindings: readonly string[]): Promise<UnificationDecision> {
-  const messages: LlmMessage[] = [
+const context = (inventory: unknown, requestedPeriods: readonly Period[]) =>
+  `[REQUESTED PERIODS]\n${JSON.stringify(requestedPeriods.map((p) => p.id))}\n\n[CONCEPT INVENTORY]\n${JSON.stringify(inventory)}`;
+
+function requestDecision(modelRouter: ModelRouter, systemPrompt: string, inventory: unknown,
+  requestedPeriods: readonly Period[]): Promise<UnificationDecision> {
+  return request(modelRouter, DECISION_SCHEMA, [
     { role: "system", content: `${systemPrompt}\n\nReturn EXACTLY one JSON object {"rows":[...]} and nothing else.` },
-    { role: "user", content: `[REQUESTED PERIODS]\n${JSON.stringify(requestedPeriods.map((p) => p.id))}\n\n[CONCEPT INVENTORY]\n${JSON.stringify(inventory)}${priorFindings.length > 0 ? `\n\n[FINDINGS FROM PREVIOUS RUN]\n${priorFindings.join("\n")}\n\nFix every finding and re-emit the FULL decision.` : ""}` },
-  ];
+    { role: "user", content: context(inventory, requestedPeriods) },
+  ]);
+}
+
+function requestPatch(modelRouter: ModelRouter, systemPrompt: string, inventory: unknown,
+  requestedPeriods: readonly Period[], previous: UnificationDecision,
+  findings: readonly string[]): Promise<UnificationPatch> {
+  return request(modelRouter, PATCH_SCHEMA, [
+    { role: "system", content: `${systemPrompt}
+
+You are CORRECTING an existing decision, not rewriting it. Return EXACTLY one JSON object:
+{"upsertRows":[<full row objects, replacing by rowId or adding new ones>],"deleteRowIds":[".."],"excluded":[..],"supplemental":[..]}
+Emit ONLY the rows the findings require you to change or add — every row you do not mention is kept
+as it is. A row you do upsert must be stated in full, since it replaces the previous one outright.
+Omit "excluded"/"supplemental" to keep them unchanged; include either one to replace that whole list.` },
+    { role: "user", content: `${context(inventory, requestedPeriods)}
+
+[YOUR PREVIOUS DECISION]
+${JSON.stringify(previous)}
+
+[FINDINGS AGAINST IT]
+${findings.join("\n")}
+
+Fix every finding with the smallest correction that resolves it.` },
+  ]);
+}
+
+async function request<T>(modelRouter: ModelRouter, schema: JsonSchema, messages: LlmMessage[]): Promise<T> {
   let schemaRetried = false;
   for (;;) {
     let completion;
@@ -117,15 +162,15 @@ async function requestDecision(modelRouter: ModelRouter, systemPrompt: string, i
     try {
       if (start < 0 || end < start) throw new Error("statement_unification did not return JSON");
       const parsed = JSON.parse(completion.text.slice(start, end + 1)) as JsonValue;
-      validate(parsed, DECISION_SCHEMA, "$", true);
-      return parsed as UnificationDecision;
+      validate(parsed, schema, "$", true);
+      return parsed as T;
     } catch (validationError) {
       const detail = validationError instanceof Error ? validationError.message : String(validationError);
       log.warn(`decision rejected (${completion.metrics.tokens_out} output tokens, retry=${schemaRetried}): ${detail}`);
       if (schemaRetried) throw validationError;
       schemaRetried = true;
       messages.push({ role: "assistant", content: completion.text });
-      messages.push({ role: "user", content: `[VALIDATION ERROR]\n${validationError instanceof Error ? validationError.message : String(validationError)}\n\nRe-emit the FULL corrected decision as one JSON object.` });
+      messages.push({ role: "user", content: `[VALIDATION ERROR]\n${validationError instanceof Error ? validationError.message : String(validationError)}\n\nRe-emit the corrected JSON object.` });
     }
   }
 }

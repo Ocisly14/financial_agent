@@ -34,13 +34,40 @@ test("a clean decision produces artifact facts and empty unresolved findings in 
   assert.equal(run.artifact.facts[0]!.value, 100e6);
 });
 
-test("completeness findings are fed back verbatim and the corrected second run succeeds", async () => {
+test("a re-run is asked for a patch over the previous decision, not a fresh one", async () => {
+  // Run 1 leaves the only inventory cell unconsumed; run 2 corrects it by adding one row.
   const empty = JSON.stringify({ rows: [] });
-  const { router, prompts } = scripted([empty, good]);
+  const patch = JSON.stringify({ upsertRows: [{ rowId: "revenues", statement: "income_statement",
+    label: "Revenues", components: [{ conceptQName: "us-gaap:Revenues", weight: 1 }], rationale: "added" }] });
+  const { router, prompts } = scripted([empty, patch]);
   const run = await runStatementUnificationAgent({ modelRouter: router, systemPrompt, filings, requestedPeriods: periods });
   assert.deepEqual(run.artifact.unresolvedFindings, []);
-  assert.ok(prompts()[1]!.includes("[FINDINGS FROM PREVIOUS RUN]"));
-  assert.ok(prompts()[1]!.includes("us-gaap:Revenues"));
+  assert.equal(run.decision.rows.length, 1);
+  assert.equal(run.artifact.facts[0]!.value, 100e6);
+  // The re-run sees what it previously decided, the findings against it, and is told to correct.
+  assert.ok(prompts()[1]!.includes("[YOUR PREVIOUS DECISION]"), prompts()[1]);
+  assert.ok(prompts()[1]!.includes("[FINDINGS AGAINST IT]"), prompts()[1]);
+  assert.ok(prompts()[1]!.includes("CORRECTING an existing decision"), prompts()[1]);
+});
+
+test("rows the patch does not mention survive the re-run untouched", async () => {
+  const three = [filing("acc-2025", "2026-01-30", [statement("income_statement", [
+    node(0, null, "us-gaap:Revenues", "Revenues", [fact("FY2025", 100e6)]),
+    node(1, null, "us-gaap:CostOfRevenue", "Cost of revenue", [fact("FY2025", 60e6)]),
+    node(2, null, "us-gaap:OperatingExpenses", "Opex", [fact("FY2025", 10e6)]),
+  ])])];
+  const row = (rowId: string, concept: string, label: string) =>
+    ({ rowId, statement: "income_statement", label, components: [{ conceptQName: concept, weight: 1 }], rationale: "r" });
+  // Run 1 leaves OperatingExpenses unconsumed -> dangling.
+  const partial = JSON.stringify({ rows: [row("revenues", "us-gaap:Revenues", "Revenues"),
+    row("cost_of_revenue", "us-gaap:CostOfRevenue", "Cost of revenue")] });
+  // The patch adds only the missing row and says nothing about the other two.
+  const patch = JSON.stringify({ upsertRows: [row("opex", "us-gaap:OperatingExpenses", "Opex")] });
+  const { router } = scripted([partial, patch]);
+  const run = await runStatementUnificationAgent({ modelRouter: router, systemPrompt, filings: three, requestedPeriods: periods });
+  assert.deepEqual(run.decision.rows.map((r) => r.rowId), ["revenues", "cost_of_revenue", "opex"]);
+  assert.deepEqual(run.decision.rows.map((r) => r.label), ["Revenues", "Cost of revenue", "Opex"]);
+  assert.deepEqual(run.artifact.unresolvedFindings, []);
 });
 
 test("after maxRuns a dirty run ships with its unresolved findings instead of looping or passing silently", async () => {
@@ -60,7 +87,8 @@ test("after maxRuns a dirty run ships with its unresolved findings instead of lo
     { rowId: "gross_profit", statement: "income_statement", label: "Gross profit",
       components: [{ conceptQName: "us-gaap:GrossProfit", weight: 1 }], rationale: "r" },
   ] });
-  const { router } = scripted([dirty, dirty, dirty]);
+  // Runs 2 and 3 answer with an empty patch: nothing to change, so the break persists to the end.
+  const { router } = scripted([dirty, "{}", "{}"]);
   const run = await runStatementUnificationAgent({ modelRouter: router, systemPrompt, filings: broken, requestedPeriods: periods, maxRuns: 3 });
   assert.ok(run.artifact.unresolvedFindings.some((f) => f.includes("roll-up break")));
 });

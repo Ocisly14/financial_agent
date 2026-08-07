@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { buildConceptInventory } from "../conceptInventory.ts";
 import type { UnificationDecision } from "../unifiedStatements.ts";
-import { buildUnifiedStatements, checkUnificationCompleteness } from "../unifiedStatements.ts";
+import { applyUnificationPatch, buildUnifiedStatements, checkUnificationCompleteness } from "../unifiedStatements.ts";
 import { fact, filing, node, period, statement } from "./spineFixture.ts";
 
 const periods = [period("FY2024", 2024), period("FY2025", 2025)];
@@ -270,6 +270,32 @@ test("consuming a dimensionless total and its members together is reported as a 
   assert.ok(artifact.findings.some((f) => f.includes("double-count risk") && f.includes(concept)), artifact.findings.join("\n"));
 });
 
+test("a patch replaces rows in place, appends new ones, and leaves the rest untouched", () => {
+  const base: UnificationDecision = {
+    rows: [decisionRow("a", "us-gaap:A"), decisionRow("b", "us-gaap:B"), decisionRow("c", "us-gaap:C")],
+    excluded: [{ conceptQName: "us-gaap:Old", reason: "abstract" }],
+  };
+  const patched = applyUnificationPatch(base, {
+    upsertRows: [{ ...decisionRow("b", "us-gaap:B2"), label: "corrected" }, decisionRow("d", "us-gaap:D")],
+    deleteRowIds: ["c"],
+  });
+  assert.deepEqual(patched.rows.map((r) => r.rowId), ["a", "b", "d"]);
+  assert.equal(patched.rows[1]!.label, "corrected");
+  assert.equal(patched.rows[1]!.components[0]!.conceptQName, "us-gaap:B2");
+  // Untouched rows keep their previous content, and an omitted list is carried forward.
+  assert.equal(patched.rows[0]!.components[0]!.conceptQName, "us-gaap:A");
+  assert.deepEqual(patched.excluded, base.excluded);
+});
+
+test("a patch that includes a held-out list replaces that list wholesale", () => {
+  const base: UnificationDecision = { rows: [decisionRow("a", "us-gaap:A")],
+    excluded: [{ conceptQName: "us-gaap:Old", reason: "abstract" }],
+    supplemental: [{ conceptQName: "us-gaap:Shares", label: "Shares", reason: "not a face line" }] };
+  const patched = applyUnificationPatch(base, { excluded: [] });
+  assert.deepEqual(patched.excluded, []);
+  assert.deepEqual(patched.supplemental, base.supplemental);
+});
+
 test("a merged row sums its components by weight", () => {
   const filings = simpleFilings();
   const inventory = buildConceptInventory({ filings, requestedPeriods: periods });
@@ -388,6 +414,39 @@ test("a statement-less amendment filed after the 10-K does not disable roll-up v
   const artifact = buildUnifiedStatements({ decision, filings: [annual, amendment], requestedPeriods: periods, inventory });
   assert.equal(artifact.rollupBreaks.length, 1);
   assert.equal(artifact.rollupBreaks[0]!.difference, 30e9);
+});
+
+test("each period is verified against the structure of the filing that still reports it", () => {
+  // Tesla's real shape: a line the early years had ("Customer deposits") is gone from the newest
+  // filing's balance sheet, so the newest structure cannot explain the older year's total.
+  const twoPeriods = [period("FY2021", 2021), period("FY2022", 2022)];
+  const relationsOld = [{ roleUri: "http://x/role/balance_sheet", parentConcept: "us-gaap:LiabilitiesCurrent",
+    children: [{ concept: "us-gaap:AccountsPayableCurrent", weight: 1, order: 1 },
+      { concept: "us-gaap:CustomerDepositsCurrent", weight: 1, order: 2 }] }];
+  const relationsNew = [{ roleUri: "http://x/role/balance_sheet", parentConcept: "us-gaap:LiabilitiesCurrent",
+    children: [{ concept: "us-gaap:AccountsPayableCurrent", weight: 1, order: 1 }] }];
+  const older = filing("acc-2021", "2022-02-07", [statement("balance_sheet", [
+    node(0, null, "us-gaap:AccountsPayableCurrent", "Accounts payable", [fact("FY2021", 10_025e6)]),
+    node(1, null, "us-gaap:CustomerDepositsCurrent", "Customer deposits", [fact("FY2021", 925e6)]),
+    node(2, null, "us-gaap:LiabilitiesCurrent", "Total current liabilities", [fact("FY2021", 10_950e6)]),
+  ])], relationsOld);
+  const latest = filing("acc-2022", "2023-01-31", [statement("balance_sheet", [
+    node(0, null, "us-gaap:AccountsPayableCurrent", "Accounts payable", [fact("FY2022", 15_255e6)]),
+    node(1, null, "us-gaap:LiabilitiesCurrent", "Total current liabilities", [fact("FY2022", 15_255e6)]),
+  ])], relationsNew);
+  const filings = [older, latest];
+  const inventory = buildConceptInventory({ filings, requestedPeriods: twoPeriods });
+  const decision: UnificationDecision = { rows: [
+    { rowId: "accounts_payable", statement: "balance_sheet", label: "Accounts payable", rationale: "",
+      components: [{ conceptQName: "us-gaap:AccountsPayableCurrent", weight: 1 }] },
+    { rowId: "customer_deposits", statement: "balance_sheet", label: "Customer deposits", rationale: "",
+      components: [{ conceptQName: "us-gaap:CustomerDepositsCurrent", weight: 1 }] },
+    { rowId: "total_current_liabilities", statement: "balance_sheet", label: "Total current liabilities", rationale: "",
+      components: [{ conceptQName: "us-gaap:LiabilitiesCurrent", weight: 1 }] },
+  ] };
+  const artifact = buildUnifiedStatements({ decision, filings, requestedPeriods: twoPeriods, inventory });
+  // FY2021 checks against the FY2021 filing's structure, which still knows about customer deposits.
+  assert.deepEqual(artifact.rollupBreaks, []);
 });
 
 test("a footnote role's calculation does not verify against face-statement values", () => {

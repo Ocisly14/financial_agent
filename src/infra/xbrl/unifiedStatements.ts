@@ -40,6 +40,35 @@ export type UnificationSupplemental = { conceptQName: string; dimensionSignature
 export type UnificationDecision = { rows: UnifiedRowDecision[];
   excluded?: UnificationExclusion[]; supplemental?: UnificationSupplemental[] };
 
+/**
+ * A correction to an existing decision. Findings normally touch a handful of rows out of a hundred,
+ * and re-emitting the whole decision costs far more to generate than it does to describe the change —
+ * so a re-run patches instead. `rows` is patched by rowId because it is the bulk; the held-out lists
+ * are small enough to restate wholesale, and omitting one leaves it untouched.
+ */
+export type UnificationPatch = {
+  upsertRows?: UnifiedRowDecision[];
+  deleteRowIds?: string[];
+  excluded?: UnificationExclusion[];
+  supplemental?: UnificationSupplemental[];
+};
+
+/** Applies a patch, preserving row order: replaced rows stay put, new ones append. */
+export function applyUnificationPatch(base: UnificationDecision, patch: UnificationPatch): UnificationDecision {
+  const deleted = new Set(patch.deleteRowIds ?? []);
+  const upserts = new Map((patch.upsertRows ?? []).map((row) => [row.rowId, row]));
+  const rows = base.rows
+    .filter((row) => !deleted.has(row.rowId))
+    .map((row) => upserts.get(row.rowId) ?? row);
+  const existing = new Set(rows.map((row) => row.rowId));
+  for (const row of patch.upsertRows ?? []) if (!existing.has(row.rowId) && !deleted.has(row.rowId)) rows.push(row);
+  return {
+    rows,
+    ...(patch.excluded ?? base.excluded ? { excluded: patch.excluded ?? base.excluded } : {}),
+    ...(patch.supplemental ?? base.supplemental ? { supplemental: patch.supplemental ?? base.supplemental } : {}),
+  };
+}
+
 /** Every concept name this component has answered to, preferred first. `sign` converts a value read
  *  under that name into the component's own polarity, so the primary name is always +1. */
 export function componentTags(component: UnifiedComponent): Array<{ conceptQName: string; sign: 1 | -1 }> {
@@ -417,35 +446,68 @@ export function buildUnifiedStatements(input: { decision: UnificationDecision;
     dimensionalBreaks.push(`double-count risk: ${conceptQName} is consumed both as the dimensionless total and as ${consumedMembers.length} dimensional member(s) (${consumedMembers.map((m) => m.dimensionSignature).join("; ")}); the members are the pieces of that total`);
   }
 
-  // Roll-up over the newest filing's relations; also the check on sign normalization (spec §3 point 1).
-  // Only the roles the face statements were selected from: a filing also carries calc relations for
-  // its footnote details (EPS computation, segment tables, lease maturities), which decompose the same
-  // parents differently than the face statements do. Verifying face values against a footnote's
-  // decomposition compares two different things and breaks every time.
+  // Roll-up verification, per filing rather than once over the newest one. A period's value comes
+  // from the newest filing that still reports it, so its calculation structure has to come from that
+  // same filing: an issuer that restructures its statements drops lines the older years genuinely
+  // had, and checking FY2021 against the FY2025 structure reports the vanished lines as a break.
+  // (Tesla's FY2021 current liabilities are short by exactly its "Customer deposits" line, which was
+  // separate in FY2021-22 and later folded into accrued liabilities.)
+  // Within a filing, only the roles its face statements came from: a filing also carries calc
+  // relations for footnote details (EPS computation, segment tables, lease maturities) that decompose
+  // the same parents differently, and those would break every time.
   const rollupBreaks: UnifiedStatementsArtifact["rollupBreaks"] = [];
   const materiality = input.rollupMateriality ?? DEFAULT_ROLLUP_MATERIALITY;
-  // The newest filing that actually carries statements: a 10-K/A amendment is often the most recent
-  // filing while containing no face statements and no calculation relations at all, and taking it as
-  // the reference silently disables this whole verification.
-  const latest = filings.find((f) => f.statements.length > 0);
-  const faceRoles = new Set((latest?.statements ?? []).map((s) => s.roleUri));
-  const seen = new Set<string>();
-  for (const relation of (latest?.calculationRelations ?? []).filter((r) => faceRoles.has(r.roleUri))) {
-    const parents = conceptValues.get(relation.parentConcept);
-    if (!parents) continue;
-    for (const [periodId, parent] of parents) {
-      const dedupe = `${relation.roleUri}|${relation.parentConcept}|${periodId}`;
-      if (seen.has(dedupe)) continue;
-      const present = relation.children.filter((child) => conceptValues.get(child.concept)?.has(periodId));
-      if (present.length === 0) continue;
-      seen.add(dedupe);
-      const computed = present.reduce((acc, child) => acc + child.weight * conceptValues.get(child.concept)!.get(periodId)!.value, 0);
-      const difference = parent.value - computed;
-      if (Math.abs(difference) <= valueTolerance(parent.value, parent.decimals)) continue;
-      rollupBreaks.push({ roleUri: relation.roleUri, parentConcept: relation.parentConcept, periodId,
-        reported: parent.value, computed, difference,
-        missingChildren: relation.children.filter((c) => !conceptValues.get(c.concept)?.has(periodId)).map((c) => c.concept),
-        material: Math.abs(difference) > Math.abs(parent.value) * materiality });
+  // The values verified are the orientation-normalized ones — the ones the unified statements
+  // actually carry, and the only ones that are comparable at all: an older filing can tag a repayment
+  // negative AND weight it -1, so its own raw figures do not satisfy its own equation.
+  //
+  // The STRUCTURE, though, must come from a filing that really reported that period. A role URI is
+  // stable across years while its children are not: Tesla's cash flow role lists ten children in the
+  // FY2023 10-K and five in the FY2025 one as digital-asset and solar lines come and go, so checking
+  // FY2021 against the FY2025 structure reports the vanished lines as a break. Authority is per
+  // statement, not per filing, because the statements of one filing reach back different distances —
+  // and a rollforward's opening balance does not count as reporting a period, or the filing that
+  // merely carries FY2021's closing cash would be treated as an FY2021 source.
+  // "Reports the period" has to mean a comparative column, not a stray fact. A closing-balance node
+  // dated at a year end doubles as the next year's opening instant, so the FY2024 10-K carries one
+  // FY2021 cash fact and would otherwise pass for an FY2021 source. A real comparative column fills
+  // most of the statement's lines, so the bar is set against the statement's own best-covered period.
+  const reportsPeriod = (stmt: PresentationExtract["statements"][number], periodId: string) => {
+    const counts = new Map<string, number>();
+    for (const node of stmt.nodes) {
+      if (node.openingBalance === true) continue;
+      for (const f of node.facts) if (f.dimensions.length === 0) counts.set(f.periodId, (counts.get(f.periodId) ?? 0) + 1);
+    }
+    const fullColumn = Math.max(0, ...counts.values());
+    return (counts.get(periodId) ?? 0) * 2 >= fullColumn;
+  };
+  const authority = new Map<string, string>();
+  for (const extraction of filings) {
+    for (const stmt of extraction.statements) for (const periodId of periods) {
+      const key = `${stmt.statement}|${periodId}`;
+      if (!authority.has(key) && reportsPeriod(stmt, periodId)) authority.set(key, extraction.filing.accession);
+    }
+  }
+
+  for (const extraction of filings) {
+    const statementOfRole = new Map(extraction.statements.map((s) => [s.roleUri, s.statement]));
+    for (const relation of extraction.calculationRelations) {
+      const statement = statementOfRole.get(relation.roleUri);
+      if (statement === undefined) continue; // a footnote role decomposes the same parent differently
+      for (const periodId of periods) {
+        if (authority.get(`${statement}|${periodId}`) !== extraction.filing.accession) continue;
+        const parent = conceptValues.get(relation.parentConcept)?.get(periodId);
+        if (parent === undefined) continue;
+        const present = relation.children.filter((child) => conceptValues.get(child.concept)?.has(periodId));
+        if (present.length === 0) continue;
+        const computed = present.reduce((acc, child) => acc + child.weight * conceptValues.get(child.concept)!.get(periodId)!.value, 0);
+        const difference = parent.value - computed;
+        if (Math.abs(difference) <= valueTolerance(parent.value, parent.decimals)) continue;
+        rollupBreaks.push({ roleUri: relation.roleUri, parentConcept: relation.parentConcept, periodId,
+          reported: parent.value, computed, difference,
+          missingChildren: relation.children.filter((c) => !conceptValues.get(c.concept)?.has(periodId)).map((c) => c.concept),
+          material: Math.abs(difference) > Math.abs(parent.value) * materiality });
+      }
     }
   }
 
