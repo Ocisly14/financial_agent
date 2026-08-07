@@ -26,7 +26,7 @@ test("period resolution reads supplemental submissions files for older annual hi
     getSubmissionFile: async (name) => { calls.push(name); return batch("old", "2024-02-01", "2023-12-31"); },
     getCompanyFacts: async () => ({}),
   };
-  const provider = createPreparedStatementProvider({ sec, arelle: async () => ({ protocolVersion: 2, filings: [], diagnostics: [] }) });
+  const provider = createPreparedStatementProvider({ sec, arelle: async () => ({ protocolVersion: 3, filings: [], diagnostics: [] }) });
   const source = await provider.resolve({ symbol: "TEST", historyYears: 3, forecastYears: 3, filingForms: ["10-K", "10-K/A"] });
   assert.deepEqual(calls, ["CIK0000000001-submissions-001.json"]);
   assert.deepEqual(source.filings.map((filing) => filing.accession), ["new", "old"]);
@@ -44,7 +44,7 @@ test("historyYears counts distinct report dates while preserving every selected 
     ]) } }),
     getCompanyFacts: async () => ({}),
   };
-  const provider = createPreparedStatementProvider({ sec, arelle: async () => ({ protocolVersion: 2, filings: [], diagnostics: [] }) });
+  const provider = createPreparedStatementProvider({ sec, arelle: async () => ({ protocolVersion: 3, filings: [], diagnostics: [] }) });
   const source = await provider.resolve({ symbol: "TEST", historyYears: 2, forecastYears: 1, filingForms: ["10-K", "10-K/A"] });
 
   assert.deepEqual(source.periods.filter((period) => period.cls === "actual").map((period) => period.id), ["FY2024", "FY2025"]);

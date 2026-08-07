@@ -484,12 +484,14 @@ export function applyModelOperations(
           || decisionIds.has(operation.supersedeDecision.decisionId)) {
           operationError("fact replacement decision id already exists");
         }
+        // The review clock belongs to the host: a caller-supplied reviewedAt is an assertion the
+        // ledger cannot check, and an agent asked for one simply invents it.
+        const reviewedAt = new Date().toISOString();
+        const decisions = [operation.commitDecision, operation.supersedeDecision]
+          .map((decision) => ({ ...structuredClone(decision), reviewedAt }));
         const staged = stageFacts(next.facts, [operation.replacement]);
-        next.facts = applyFactReview(staged, [operation.commitDecision, operation.supersedeDecision]);
-        next.factReviewDecisions.push(
-          structuredClone(operation.commitDecision),
-          structuredClone(operation.supersedeDecision),
-        );
+        next.facts = applyFactReview(staged, decisions);
+        next.factReviewDecisions.push(...decisions);
         break;
       }
       case "set_assumption": {

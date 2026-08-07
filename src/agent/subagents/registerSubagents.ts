@@ -1,7 +1,7 @@
 import { SubagentRegistry } from "../../framework/subagent.ts";
 import { financialModelingSubagentPrompt, marketDataSubagentPrompt, marketResearchSubagentPrompt, tradingOperationsSubagentPrompt } from "../prompts/subagentPrompts.ts";
 import { FINANCIAL_MODELING_TOOLS, MARKET_DATA_TOOLS, MARKET_RESEARCH_TOOLS, TRADING_OPERATIONS_TOOLS } from "../../../mcp_tools/registerTools.ts";
-import { DCF_PRIVATE_SUBAGENT_TOOL } from "../financial-modeling/subagentTool.ts";
+import { DCF_PRIVATE_SUBAGENT_TOOL } from "../../../mcp_tools/financial-model/dcfSubagentTool.ts";
 
 export function createSubagentRegistry(): SubagentRegistry {
   const registry = new SubagentRegistry();

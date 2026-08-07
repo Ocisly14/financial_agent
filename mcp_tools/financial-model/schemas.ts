@@ -8,6 +8,8 @@ const strings: JsonSchema = { type: "array", items: string() };
 const object = (properties: Record<string, JsonSchema>, required: string[] = []): JsonSchema =>
   ({ type: "object", properties, required, additionalProperties: false });
 const array = (items: JsonSchema): JsonSchema => ({ type: "array", items });
+/** Accepted for compatibility and then overwritten: the ledger's review clock is the host's. */
+const HOST_STAMPED = string("Ignored. The host stamps the review time.");
 
 export const unitSchema = object({ kind: { type: "string", enum: ["currency", "percent", "ratio", "shares", "per_share", "number"] }, code: string("Required for currency/per_share") }, ["kind"]);
 const mappingMember = object({ sourceLineItemId: string(), treatment: { type: "string", enum: ["add", "subtract", "exclude"] } }, ["sourceLineItemId", "treatment"]);
@@ -15,8 +17,8 @@ const groupMember = object({ lineItemId: string(), treatment: { type: "string", 
 export const reviewInputSchema = object({
   modelId: string(), expectedRevision: number, selectedHistoricalPeriodIds: strings,
   decisions: array(object({ decisionId: string(), factId: string(), action: { type: "string", enum: ["commit", "reject", "supersede"] },
-    mappedLineItemId: string(), replacementFactId: string(), rationale: string(), reviewedBy: string(), reviewedAt: string() },
-  ["decisionId", "factId", "action", "rationale", "reviewedBy", "reviewedAt"])),
+    mappedLineItemId: string(), replacementFactId: string(), rationale: string(), reviewedBy: string(), reviewedAt: HOST_STAMPED },
+  ["decisionId", "factId", "action", "rationale", "reviewedBy"])),
   categoryLineItems: array(object({ id: string(), label: string(), parentLineItemId: string() }, ["id", "label", "parentLineItemId"])),
   statementMappingPlans: array(object({ targetLineItemId: string(), periodIds: strings, members: array(mappingMember), reviewDecisionId: string() },
     ["targetLineItemId", "periodIds", "members", "reviewDecisionId"])),
@@ -29,7 +31,7 @@ const provenance = object({ sourceType: string(), sourceRefs: strings, asOfDate:
 const fact = object({ factId: string(), status: { type: "string", enum: ["staged"] }, lineItemId: string(), periodId: string(), value: number,
   unit: unitSchema, provenance }, ["factId", "status", "periodId", "value", "unit", "provenance"]);
 const decision = (actions: string[]) => object({ decisionId: string(), factId: string(), action: { type: "string", enum: actions }, mappedLineItemId: string(),
-  replacementFactId: string(), rationale: string(), reviewedBy: string(), reviewedAt: string() }, ["decisionId", "factId", "action", "rationale", "reviewedBy", "reviewedAt"]);
+  replacementFactId: string(), rationale: string(), reviewedBy: string(), reviewedAt: HOST_STAMPED }, ["decisionId", "factId", "action", "rationale", "reviewedBy"]);
 const assumption = object({ assumptionId: string(), lineItemId: string(), periods: strings,
   payload: { type: "object", oneOf: [object({ kind: { type: "string", enum: ["values"] }, values: array(number), unit: unitSchema }, ["kind", "values", "unit"]),
     object({ kind: { type: "string", enum: ["not_applicable"] } }, ["kind"])] },

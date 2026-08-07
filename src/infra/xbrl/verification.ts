@@ -175,7 +175,7 @@ function factPeriodIds(table: FilingTable): string[] {
   return table.rows.flatMap((row) => row.cells.flatMap((cell) => cell.fact ? [cell.fact.periodId] : []));
 }
 
-function tolerance(reported: number): number {
+export function tolerance(reported: number): number {
   return Math.max(ABSOLUTE_TOLERANCE, Math.abs(reported) * RELATIVE_TOLERANCE);
 }
 

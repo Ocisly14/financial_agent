@@ -270,3 +270,35 @@ test("periods no curated table covers stay review issues rather than failures", 
   assert.deepEqual(merged.coverage.requestedPeriodIds, ["FY2023", "FY2024", "FY2025"]);
   assert.deepEqual(STATEMENTS.map((statement) => merged.statementViews[statement].filingPresentations.length), [1, 1, 1]);
 });
+
+test("a stray instant fact does not let a filing claim a period its columns never report", () => {
+  // A cash-flow rollforward's "beginning of period" instant is dated the year
+  // before the earliest duration column, so its fact lands one period earlier
+  // than the column it sits in. That single cell must not lock the whole prior
+  // year out of the older filings that actually report it.
+  const latest = table({ id: "new:cf", accession: "new", filedAt: "2026-03-01", periodIds: ["FY2024", "FY2025"], rows: [
+    { label: "Net cash provided by operating activities", values: { FY2024: 100, FY2025: 120 } },
+    { label: "Cash and cash equivalents, beginning of period", values: { FY2024: 50, FY2025: 60 } },
+  ] });
+  const beginning = latest.rows[1]!.cells.find((cell) => cell.fact?.periodId === "FY2024")!;
+  beginning.fact = { ...beginning.fact!, periodId: "FY2023" };
+
+  const old = table({ id: "old:cf", accession: "old", filedAt: "2025-03-01", periodIds: ["FY2023", "FY2024"], rows: [
+    { label: "Net cash provided by operating activities", values: { FY2023: 80, FY2024: 100 } },
+  ] });
+
+  const merged = merge([
+    { tables: [latest], curations: [curation("new:cf", "cash_flow_statement", "face")] },
+    { tables: [old], curations: [curation("old:cf", "cash_flow_statement", "face")] },
+    { tables: [
+      table({ id: "new:is", accession: "new", filedAt: "2026-03-01", periodIds: ["FY2025"], rows: [{ label: "Net sales", values: { FY2025: 1 } }] }),
+      table({ id: "new:bs", accession: "new", filedAt: "2026-03-01", periodIds: ["FY2025"], rows: [{ label: "Total assets", values: { FY2025: 1 } }] }),
+    ], curations: [curation("new:is", "income_statement", "face"), curation("new:bs", "balance_sheet", "face")] },
+  ], [identity("old", "2025-03-01"), identity("new", "2026-03-01")]);
+
+  const operating = merged.rows.find((row) => row.label === "Net cash provided by operating activities")!;
+  assert.deepEqual(merged.facts.filter((fact) => fact.lineItemId === operating.sourceLineItemId)
+    .map((fact) => [fact.periodId, fact.value, fact.provenance.accession]), [
+    ["FY2024", 100, "new"], ["FY2025", 120, "new"], ["FY2023", 80, "old"],
+  ]);
+});

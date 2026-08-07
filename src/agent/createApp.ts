@@ -19,7 +19,7 @@ import { ResearchRuntime } from "./research/researchRuntime.ts";
 import { TopicDigestScheduler } from "../server/topicDigestScheduler.ts";
 import { researchPrompt } from "./research/researchPrompt.ts";
 import { getDefaultFinancialModelToolDeps } from "../../mcp_tools/financial-model/financialModelTools.ts";
-import { createDcfSubagentTool } from "./financial-modeling/subagentTool.ts";
+import { createDcfSubagentTool } from "../../mcp_tools/financial-model/dcfSubagentTool.ts";
 
 export type FinancialAgentApp = Awaited<ReturnType<typeof createFinancialAgentApp>>;
 

@@ -144,6 +144,13 @@ export function mergeCuratedTables(input: MergeCuratedTablesInput): PreparedFili
     // presentations of the same year.
     const claimed = new Set<string>();
     for (const group of groupsByStatement.get(statement)!) {
+      // What a filing *reports* is what its columns declare. A cash-flow
+      // rollforward's "beginning of period" instant is dated the year before
+      // the earliest duration column, so its fact lands outside that window;
+      // letting it claim the period would lock every older filing out of a
+      // year this one never actually presented.
+      const declared = new Set(group.tables.flatMap((table) =>
+        table.columns.flatMap((column) => column.periodId === undefined ? [] : [column.periodId])));
       const contributed = new Set<string>();
       for (const table of group.tables) {
         const columnPeriods = new Map(table.columns.flatMap((column) =>
@@ -212,7 +219,7 @@ export function mergeCuratedTables(input: MergeCuratedTablesInput): PreparedFili
           if (rowIdentity !== undefined) ancestry.push({ indentLevel: row.indentLevel, sourceLineItemId: rowIdentity });
         }
       }
-      for (const periodId of contributed) claimed.add(periodId);
+      for (const periodId of contributed) if (declared.has(periodId)) claimed.add(periodId);
     }
   }
 

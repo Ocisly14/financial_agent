@@ -17,7 +17,7 @@ export type FaceStatementSelection = {
 /**
  * Select standard face statements without an LLM. Arelle's presentation hint is
  * primary evidence; filing headings and structural quality break ties. The
- * selected source tables remain reviewable by historical_mapping.
+ * selected source tables remain reviewable by mapping_review.
  */
 export function selectFaceStatements(input: {
   runId: string;

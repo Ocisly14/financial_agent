@@ -16,11 +16,14 @@ import type {
   ResolvedFinancialModelSource,
 } from "../../infra/xbrl/preparedStatementProvider.ts";
 import type { FilingIngestionArtifact, FilingIngestionStore } from "../../infra/xbrl/sourceReviewStore.ts";
-import type { FilingExtraction, PreparedFilingStatements, StatementCoverageView } from "../../infra/xbrl/types.ts";
+import type { FilingExtraction, PreparedFilingStatements, PresentationExtract, StatementCoverageView } from "../../infra/xbrl/types.ts";
 import type { VerificationReport } from "../../infra/xbrl/verification.ts";
+import { decompositionReducePrompt, filingDecompositionPrompt, mappingReviewPrompt, readOnlyProposalPrompt,
+  spineMappingPrompt, statementExtractionPrompt, statementUnificationPrompt } from "../prompts/dcfSubagentPrompts.ts";
 
-export type DcfSubagentKind = "statement_extraction" | "historical_mapping" | "forecast_modeling" | "valuation_review";
-export type ModelingProposalSubagent = Exclude<DcfSubagentKind, "statement_extraction">;
+export type DcfSubagentKind = "statement_extraction" | "filing_decomposition" | "decomposition_reduce"
+  | "statement_unification" | "spine_mapping" | "mapping_review" | "forecast_modeling" | "valuation_review";
+export type ModelingProposalSubagent = Exclude<DcfSubagentKind, "statement_extraction" | "filing_decomposition" | "decomposition_reduce" | "statement_unification" | "spine_mapping">;
 
 export type DcfSubagentProposal<T extends JsonValue = JsonValue> = {
   subagent: ModelingProposalSubagent;
@@ -75,6 +78,8 @@ export async function runStatementExtraction(
     const source = await deps.provider.resolve(request);
     resolvedSource = source;
     const extractions = await deps.provider.extract(source);
+    const presentationExtracts: PresentationExtract[] = extractions.map(
+      ({ filing, calculationRelations, negatedConcepts, statements }) => ({ filing, calculationRelations, negatedConcepts, statements }));
     const curation = selectFilingTables(deps, ingestionRunId, source, extractions);
     const prepared = prepareCuratedStatements(source, extractions, curation);
     let insights: FilingInsightContextView;
@@ -94,7 +99,7 @@ export async function runStatementExtraction(
     const diagnostics = [...extractions.flatMap((filing) => filing.diagnostics), ...curation.diagnostics];
     deps.ingestionStore.saveIngestion({ ingestionRunId, modelId, ownerAgentId, symbol: request.symbol.toUpperCase(), status: "ready",
       source, ...(prepared ? { prepared } : {}), filingInsightSetId: insights.insightSetId, diagnostics,
-      curatedTables: curation.curatedTables, curations: curation.curations, verification: curation.verification });
+      curatedTables: curation.curatedTables, curations: curation.curations, verification: curation.verification, presentationExtracts });
     return { subagent: "statement_extraction", ingestionRunId, modelId, status: "ready", accessions: source.filings.map((filing) => filing.accession),
       diagnostics, ...(prepared ? { statementCoverage: prepared.coverage } : {}), filingInsights: insights,
       curation: { outcome: curation.outcome, steps: 0, curatedTables: curation.curations.length,
@@ -173,7 +178,7 @@ export function projectForDcfSubagent(
   filingInsights: FilingInsightContextView | null,
 ): DcfSubagentProjection {
   const workbook = context.currentWorkbook;
-  const sections = subagent === "historical_mapping"
+  const sections = subagent === "mapping_review"
     ? Object.fromEntries(Object.entries(workbook.sections).map(([section, rows]) => [section, rows.map((row) => ({
       lineItemId: row.lineItemId, label: row.label, section: row.section, role: row.role, unit: row.unit, order: row.order,
     }))]))
@@ -182,10 +187,10 @@ export function projectForDcfSubagent(
       : { operations: workbook.sections.operations, dcf: workbook.sections.dcf };
   const projected: DcfSubagentProjection = { subagent, modelId: context.model.modelId, baseRevision: workbook.revision,
     lifecycleStage: workbook.lifecycleStage, workbook: { periods: workbook.periods, sections, diagnostics: workbook.diagnostics,
-      reconciliationResults: subagent === "historical_mapping" ? [] : workbook.reconciliationResults,
+      reconciliationResults: subagent === "mapping_review" ? [] : workbook.reconciliationResults,
       valuationConfig: workbook.valuationConfig,
       ...(subagent === "valuation_review" ? { valuation: workbook.valuation } : {}) }, filingInsights };
-  if (subagent === "historical_mapping") {
+  if (subagent === "mapping_review") {
     projected.workbook["diagnostics"] = Object.entries(workbook.diagnostics.reduce<Record<string, number>>((counts, diagnostic) => {
       counts[diagnostic.code] = (counts[diagnostic.code] ?? 0) + 1; return counts;
     }, {})).map(([code, count]) => ({ code, count }));
@@ -212,13 +217,14 @@ export type DcfSubagentDefinition = {
 export class DcfSubagentRegistry {
   private readonly subagents = new Map<DcfSubagentKind, DcfSubagentDefinition>();
   constructor() {
-    this.register({ name: "statement_extraction", modelClass: "SMALL", authority: "ingestion_store_only",
-      prompt: "Extract source-grounded filing statements and insights only; never propose modeling decisions." });
-    this.register({ name: "historical_mapping", modelClass: "MEDIUM", authority: "read_only_proposal",
-      prompt: `You are the private historical_mapping subagent of the DCF Agent. The host already selected and normalized the three face statements. Use the supplied private tools to inspect only the rows and facts needed for the DCF, review source conflicts, and then propose reviewed facts, periods, DCF categories, statement mappings, and category groups. Never write a source number yourself: every decision and mapping must reference a staged factId or sourceLineItemId returned by a tool. Return JSON {rationale,payload,sourceRefs}, where payload exactly matches review_financial_model_history without modelId or expectedRevision. Never mutate the model, advance lifecycle, or perform arithmetic; the parent DCF Agent and deterministic engine commit and reconcile the proposal.` });
+    this.register({ name: "statement_extraction", modelClass: "SMALL", authority: "ingestion_store_only", prompt: statementExtractionPrompt });
+    this.register({ name: "filing_decomposition", modelClass: "MEDIUM", authority: "read_only_proposal", prompt: filingDecompositionPrompt });
+    this.register({ name: "decomposition_reduce", modelClass: "MEDIUM", authority: "read_only_proposal", prompt: decompositionReducePrompt });
+    this.register({ name: "statement_unification", modelClass: "MEDIUM", authority: "read_only_proposal", prompt: statementUnificationPrompt });
+    this.register({ name: "spine_mapping", modelClass: "MEDIUM", authority: "read_only_proposal", prompt: spineMappingPrompt });
+    this.register({ name: "mapping_review", modelClass: "MEDIUM", authority: "read_only_proposal", prompt: mappingReviewPrompt });
     for (const name of ["forecast_modeling", "valuation_review"] as const) {
-      this.register({ name, modelClass: "MEDIUM", authority: "read_only_proposal",
-        prompt: `You are the private ${name} subagent of the DCF Agent. Read only the supplied projection. Return JSON {rationale,payload,sourceRefs}. Never call tools, mutate a model, advance lifecycle, or calculate arithmetic. Your payload is a proposal that the financial_modeling parent may accept, modify, or reject.` });
+      this.register({ name, modelClass: "MEDIUM", authority: "read_only_proposal", prompt: readOnlyProposalPrompt(name) });
     }
   }
   register(definition: DcfSubagentDefinition): void {

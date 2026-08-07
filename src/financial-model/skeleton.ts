@@ -60,7 +60,8 @@ const REVENUE_TOTAL_FORECAST =
 const OPERATING_NWC_FORECAST =
   "revenue.total * ratio.operating_nwc_to_revenue";
 
-const CANONICAL_MAPPING_IDS = new Set([
+/** Every spine target a statement mapping may claim. The premap reports each of these as mapped, demoted, or unmapped. */
+export const CANONICAL_MAPPING_IDS = new Set([
   "revenue.total",
   "operating_income",
   "depreciation_amortization",

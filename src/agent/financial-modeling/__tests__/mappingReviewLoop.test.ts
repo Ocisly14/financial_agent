@@ -3,7 +3,7 @@ import test from "node:test";
 import { ModelRouter, type LlmProvider } from "../../../infra/llm/provider.ts";
 import { InMemoryFilingTableStore } from "../../../infra/xbrl/filingTableStore.ts";
 import type { SourceReviewArtifact } from "../../../infra/xbrl/sourceReviewStore.ts";
-import { runHistoricalMappingLoop } from "../historicalMappingLoop.ts";
+import { runMappingReviewLoop } from "../mappingReviewLoop.ts";
 
 const finalProposal = { rationale: "mapped", payload: { selectedHistoricalPeriodIds: ["FY2025"], decisions: [],
   categoryLineItems: [], statementMappingPlans: [], categoryGroups: [] }, sourceRefs: ["fact-1"] };
@@ -22,7 +22,7 @@ function source(): SourceReviewArtifact {
     coverage: { requestedPeriodIds: ["FY2025"], statements: [], issues: [] } } as unknown as SourceReviewArtifact;
 }
 
-const projection = { subagent: "historical_mapping" as const, modelId: "m1", baseRevision: 1,
+const projection = { subagent: "mapping_review" as const, modelId: "m1", baseRevision: 1,
   lifecycleStage: "draft" as const, workbook: { periods: [], sections: {}, diagnostics: [] }, filingInsights: null };
 
 test("historical mapping injects all row/column titles once and retains the complete tool transcript", async () => {
@@ -37,7 +37,7 @@ test("historical mapping injects all row/column titles once and retains the comp
     return { text: JSON.stringify(replies.shift()), metrics: { tokens_in: 1, tokens_out: 1, ms: 0,
       model_class: "MEDIUM" as const, provider: "scripted" } };
   } };
-  const result = await runHistoricalMappingLoop({ modelRouter: new ModelRouter(provider), projection, sourceReview: source(),
+  const result = await runMappingReviewLoop({ modelRouter: new ModelRouter(provider), projection, sourceReview: source(),
     tableStore: new InMemoryFilingTableStore(), task: "map", systemPrompt: "system", maxSteps: 3 });
   assert.deepEqual(result, finalProposal);
   assert.match(prompts[0]!, /"tool":"<allowed-tool-name>","input":\{\}/);
@@ -52,7 +52,7 @@ test("historical mapping rejects nonstandard toolName/args rather than adding a 
     text: JSON.stringify({ action: "call_tool", calls: [{ toolName: "list_statement_rows", args: {} }] }),
     metrics: { tokens_in: 1, tokens_out: 1, ms: 0, model_class: "MEDIUM" as const, provider: "scripted" },
   }) };
-  await assert.rejects(() => runHistoricalMappingLoop({ modelRouter: new ModelRouter(provider), projection, sourceReview: source(),
+  await assert.rejects(() => runMappingReviewLoop({ modelRouter: new ModelRouter(provider), projection, sourceReview: source(),
     tableStore: new InMemoryFilingTableStore(), task: "map", systemPrompt: "system", maxSteps: 1 }),
   /expected calls\[\]\.tool and calls\[\]\.input/);
 });

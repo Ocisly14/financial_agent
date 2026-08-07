@@ -13,7 +13,7 @@ const MAX_STEPS = 24;
 const MAX_DETAIL_ROWS = 20;
 
 /** Tool-driven source review with durable row/column titles and full loop memory. */
-export async function runHistoricalMappingLoop(input: {
+export async function runMappingReviewLoop(input: {
   modelRouter: ModelRouter;
   projection: DcfSubagentProjection;
   sourceReview: SourceReviewArtifact;
@@ -22,9 +22,9 @@ export async function runHistoricalMappingLoop(input: {
   systemPrompt: string;
   maxSteps?: number;
 }): Promise<JsonObject> {
-  const tools = createHistoricalMappingTools(input.sourceReview, input.tableStore);
+  const tools = createMappingReviewTools(input.sourceReview, input.tableStore);
   const toolBlock = formatAllowedTools([...tools.values()]);
-  const payloadSchema = historicalMappingPayloadSchema();
+  const payloadSchema = mappingReviewPayloadSchema();
   const factsByLine = factsByLineItem(input.sourceReview);
   const tableById = new Map(input.sourceReview.curatedTables.map((table) => [table.sourceTableId, table]));
   const baseContext = {
@@ -53,6 +53,8 @@ export async function runHistoricalMappingLoop(input: {
           columnTitle: column?.headerText ?? "" };
       }),
       waivedColumnConflicts: input.tableStore.listColumnConflictWaivers(input.sourceReview.ingestionRunId),
+      decomposition: input.sourceReview.decomposition ?? null,
+      premap: input.sourceReview.premap ?? null,
     },
   };
   const messages: LlmMessage[] = [
@@ -63,17 +65,17 @@ export async function runHistoricalMappingLoop(input: {
     let completion;
     try {
       completion = await input.modelRouter.generate(messages,
-        { modelClass: "MEDIUM", temperature: 0.1, metadata: { mode: "dcf_subagent", subagent: "historical_mapping" } });
+        { modelClass: "MEDIUM", temperature: 0.1, metadata: { mode: "dcf_subagent", subagent: "mapping_review" } });
     } catch (firstError) {
       try {
         completion = await input.modelRouter.generate(messages,
-          { modelClass: "MEDIUM", temperature: 0.1, metadata: { mode: "dcf_subagent", subagent: "historical_mapping", retry: "malformed_response" } });
+          { modelClass: "MEDIUM", temperature: 0.1, metadata: { mode: "dcf_subagent", subagent: "mapping_review", retry: "malformed_response" } });
       } catch { throw firstError; }
     }
     const parsed = parseObject(completion.text);
     if (parsed["action"] !== "call_tool") return parsed;
     const action = parseSubagentStep(completion.text);
-    if (action.action !== "call_tool") throw new Error("historical_mapping returned an invalid tool envelope; expected calls[].tool and calls[].input");
+    if (action.action !== "call_tool") throw new Error("mapping_review returned an invalid tool envelope; expected calls[].tool and calls[].input");
     const toolResults = action.calls.map((call) => {
       const tool = tools.get(call.tool);
       if (!tool) return { tool: call.tool, error: { code: "invalid_tool", message: `unknown tool: ${call.tool}` } };
@@ -83,10 +85,10 @@ export async function runHistoricalMappingLoop(input: {
     messages.push({ role: "assistant", content: completion.text });
     messages.push({ role: "user", content: `[TOOL RESULTS]\n${JSON.stringify(toolResults)}\n\nContinue with another exact-row tool step or the final proposal.` });
   }
-  throw new Error(`historical_mapping did not produce a proposal after ${input.maxSteps ?? MAX_STEPS} tool steps`);
+  throw new Error(`mapping_review did not produce a proposal after ${input.maxSteps ?? MAX_STEPS} tool steps`);
 }
 
-export function createHistoricalMappingTools(source: SourceReviewArtifact, tableStore: FilingTableStore): Map<string, MappingTool> {
+export function createMappingReviewTools(source: SourceReviewArtifact, tableStore: FilingTableStore): Map<string, MappingTool> {
   const string = (): JsonSchema => ({ type: "string" });
   const strings: JsonSchema = { type: "array", items: string() };
   const number: JsonSchema = { type: "number" };
@@ -139,13 +141,13 @@ export function createHistoricalMappingTools(source: SourceReviewArtifact, table
 
 function parseObject(text: string): JsonObject {
   const start = text.indexOf("{"); const end = text.lastIndexOf("}");
-  if (start < 0 || end < start) throw new Error("historical_mapping did not return JSON");
+  if (start < 0 || end < start) throw new Error("mapping_review did not return JSON");
   const parsed: unknown = JSON.parse(text.slice(start, end + 1));
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("historical_mapping response must be an object");
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("mapping_review response must be an object");
   return parsed as JsonObject;
 }
 
-function historicalMappingPayloadSchema(): JsonSchema {
+function mappingReviewPayloadSchema(): JsonSchema {
   const properties = { ...(reviewInputSchema.properties ?? {}) };
   delete properties["modelId"];
   delete properties["expectedRevision"];

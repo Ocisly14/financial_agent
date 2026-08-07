@@ -6,7 +6,7 @@ import test from "node:test";
 const SCRIPT = fileURLToPath(new URL("../../../../scripts/xbrl/arelle_companion.py", import.meta.url));
 const FIXTURE = fileURLToPath(new URL("../../../../scripts/xbrl/fixtures/minimal-response.json", import.meta.url));
 const REQUEST = JSON.stringify({
-  protocolVersion: 2,
+  protocolVersion: 3,
   filings: [{ accession: "request", form: "10-K", filedAt: "2026-02-01", reportDate: "2025-12-31",
     primaryDocumentUrl: "https://example.test/request.htm" }],
   periods: [{ id: "FY2025", label: "FY2025", start: "2025-01-01", end: "2025-12-31", cls: "actual" }],
@@ -18,11 +18,12 @@ test("Python companion emits exactly one valid fixture protocol response on stdo
   assert.equal(result.stderr, "");
   assert.equal(result.stdout.trim().split("\n").length, 1);
   const output = JSON.parse(result.stdout) as Record<string, unknown>;
-  assert.equal(output["protocolVersion"], 2);
+  assert.equal(output["protocolVersion"], 3);
   const filings = output["filings"] as Array<Record<string, unknown>>;
   assert.equal(filings.length, 1);
   assert.equal((filings[0]!["tables"] as unknown[]).length, 1);
   assert.deepEqual(filings[0]!["negatedConcepts"], []);
+  assert.deepEqual(filings[0]!["statements"], []);
 });
 
 test("Python companion reports an explicit unavailable runtime without Arelle", () => {

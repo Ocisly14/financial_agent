@@ -1,10 +1,13 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import type { DimensionalDisclosureView, PreparedFilingStatements, StatementCoverageView } from "./types.ts";
+import type { DimensionalDisclosureView, PreparedFilingStatements, PresentationExtract, StatementCoverageView } from "./types.ts";
 import type { FilingTable, TableCuration } from "./tableTypes.ts";
 import type { ResolvedFinancialModelSource } from "./preparedStatementProvider.ts";
 import type { VerificationReport } from "./verification.ts";
+import type { DecompositionSummary } from "./decompositionTypes.ts";
+import type { UnifiedStatementsArtifact } from "./unifiedStatements.ts";
+import type { PremapSummary } from "../../financial-model/autoPremap.ts";
 
 export type SourceReviewArtifact = Pick<PreparedFilingStatements, "statementViews" | "filings" | "facts"> & {
   ingestionRunId: string;
@@ -14,6 +17,14 @@ export type SourceReviewArtifact = Pick<PreparedFilingStatements, "statementView
   curatedTables: FilingTable[];
   curations: TableCuration[];
   verification?: VerificationReport;
+  /** Present after the parent accepts a revenue decomposition (spec §6). */
+  decomposition?: DecompositionSummary;
+  /** Deterministic engine pre-mapping (auto-premapping design spec §5). */
+  premap?: PremapSummary;
+  /** Absent on artifacts saved before two-stage spine mapping (spec §6); re-run statement_extraction. */
+  presentationExtracts?: PresentationExtract[];
+  /** Present after statement_unification ran (spec §6); consumed by spine_mapping. */
+  unifiedStatements?: UnifiedStatementsArtifact;
 };
 
 export interface SourceReviewStore { save(modelId: string, artifact: SourceReviewArtifact): void; get(modelId: string): SourceReviewArtifact | undefined; }
@@ -31,6 +42,8 @@ export type FilingIngestionArtifact = {
   curatedTables?: FilingTable[];
   curations?: TableCuration[];
   verification?: VerificationReport;
+  /** Absent on ingestions saved before two-stage spine mapping (spec §6). */
+  presentationExtracts?: PresentationExtract[];
   diagnostics: string[];
   error?: { code: string; message: string };
   consumedAt?: string;

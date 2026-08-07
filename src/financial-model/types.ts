@@ -109,6 +109,8 @@ export type Provenance = {
   accession?: string;
   concept?: string;
   filingUrl?: string;
+  /** True when deterministic sign orientation negated at least one source value. */
+  signFlipped?: boolean;
 };
 
 export type FactStatus = "staged" | "committed" | "rejected" | "superseded";

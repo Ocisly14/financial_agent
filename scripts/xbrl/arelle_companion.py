@@ -18,11 +18,12 @@ import os
 import re
 import sys
 from collections import Counter
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 STATEMENTS = ("income_statement", "balance_sheet", "cash_flow_statement")
 # A statement is suggested only when this share of the table's concepts sits in
 # its presentation tree; a raw intersection tags every face table with two.
@@ -157,13 +158,25 @@ def matching_periods(context: Any, requested_periods: list[dict[str, Any]]) -> l
         end = iso_date(getattr(context, "endDatetime", None), subtract_day=True)
         exact = [period for period in requested_periods if period.get("cls") == "actual"
                  and period.get("start") == start and period.get("end") == end]
-        # 52/53-week issuers do not match a synthetic one-year start date. End
-        # date plus an annual-duration guard is the deterministic fallback.
+        # A residual start-date drift (52/53-week roll, a filer's own rounding) still has to match.
+        # The guard is relative to the requested period's own length rather than a fixed annual
+        # window, so a transition period after a fiscal-year change is matched on its real duration
+        # instead of being silently dropped for being shorter than a year.
         days = None
         if start and end:
             days = (dt.date.fromisoformat(end) - dt.date.fromisoformat(start)).days + 1
-        return exact or [period for period in requested_periods if period.get("cls") == "actual"
-                         and period.get("end") == end and days is not None and 300 <= days <= 400]
+        if exact or days is None:
+            return exact
+
+        def close_enough(period: dict[str, Any]) -> bool:
+            period_start, period_end = period.get("start"), period.get("end")
+            if not period_start or not period_end:
+                return False
+            expected = (dt.date.fromisoformat(period_end) - dt.date.fromisoformat(period_start)).days + 1
+            return abs(days - expected) <= 20
+
+        return [period for period in requested_periods if period.get("cls") == "actual"
+                and period.get("end") == end and close_enough(period)]
     return []
 
 
@@ -732,10 +745,11 @@ def extract_filing(model_manager: Any, parent_child: str, summation_item: str, f
                                else "statement_role_not_found:" + ",".join(missing))
         return {"filing": filing, "tables": tables,
                 "calculationRelations": calculation_relations(model_xbrl, summation_item),
-                "negatedConcepts": sorted(negated_concepts), "diagnostics": diagnostics}
+                "negatedConcepts": sorted(negated_concepts), "diagnostics": diagnostics,
+                "statements": presentation_statements(model_xbrl, parent_child, periods)}
     except Exception as error:
         return {"filing": filing, "tables": [], "calculationRelations": [], "negatedConcepts": [],
-                "diagnostics": [f"xbrl_extraction_failed:{type(error).__name__}:{error}"]}
+                "diagnostics": [f"xbrl_extraction_failed:{type(error).__name__}:{error}"], "statements": []}
     finally:
         if model_xbrl is not None:
             try:
@@ -772,6 +786,208 @@ def extract(request: dict[str, Any]) -> dict[str, Any]:
             pass
 
 
+def finer(candidate: Any, kept: Any) -> bool:
+    """`decimals` is precision: -6 (millions) is finer than -7 (ten millions). None is unknown."""
+    if candidate is None:
+        return False
+    return kept is None or int(candidate) > int(kept)
+
+
+PERIOD_START_LABEL = "http://www.xbrl.org/2003/role/periodStartLabel"
+
+
+def build_statement_nodes(spec: dict[str, Any]) -> list[dict[str, Any]]:
+    """Pre-order walk of one presentation role. Pure, so it is testable without Arelle."""
+    children: dict[str, list[dict[str, Any]]] = {}
+    for relation in spec.get("relationships", ()):
+        children.setdefault(relation["parent"], []).append(relation)
+    for group in children.values():
+        group.sort(key=lambda relation: (float(relation.get("order") or 0), relation["child"]))
+    abstract = set(spec.get("abstractConcepts", ()))
+
+    declared_axes = set(spec.get("declaredAxisQNames", ()))
+
+    # An XBRL fact is (concept, context, unit). An inline document tags the same fact
+    # everywhere it appears, so the raw list repeats it — without this collapse a line
+    # tagged three times looks like three competing candidates and blanks out.
+    by_context: dict[tuple[str, str], dict[str, Any]] = {}
+    for entry in spec.get("facts", ()):
+        key = (entry["conceptQName"], entry["contextId"])
+        kept = by_context.get(key)
+        if kept is None or finer(entry.get("decimals"), kept.get("decimals")):
+            by_context[key] = entry
+
+    by_concept: dict[str, list[dict[str, Any]]] = {}
+    for entry in by_context.values():
+        by_concept.setdefault(entry["conceptQName"], []).append(entry)
+
+    def resolve(concept: str, preferred_label_role: str) -> tuple[list[dict[str, Any]], list[str]]:
+        # A periodStartLabel row shows the instant that OPENS the column's period — the prior
+        # period's close. Both rollforward rows are the same concept, so without this they
+        # resolve identically and the opening row prints the closing balance.
+        period_key = "startsPeriodId" if preferred_label_role == PERIOD_START_LABEL else "periodId"
+        dimensionless: dict[str, list[dict[str, Any]]] = {}
+        dimensional: dict[str, list[dict[str, Any]]] = {}
+        for entry in by_concept.get(concept, ()):
+            period_id = entry.get(period_key)
+            if period_id is None:
+                continue
+            dims = entry.get("dimensions") or []
+            if not dims:
+                dimensionless.setdefault(period_id, []).append(entry)
+            # A fact on an axis this role never declares belongs to some other disclosure;
+            # putting it on a consolidated line would be a wrong number.
+            elif all(dim["axisQName"] in declared_axes for dim in dims):
+                dimensional.setdefault(period_id, []).append(entry)
+
+        resolved: list[dict[str, Any]] = []
+        ambiguous: list[str] = []
+        for period_id in sorted(set(dimensionless) | set(dimensional)):
+            # The consolidated line is the dimensionless fact; members are its breakdown and
+            # are consulted only when the filer reported the line solely on a member.
+            candidates = dimensionless.get(period_id) or dimensional.get(period_id, [])
+            if len(candidates) == 1:
+                emitted = dict(candidates[0])
+                emitted.pop("startsPeriodId", None)
+                emitted["periodId"] = period_id
+                resolved.append(emitted)
+            else:
+                ambiguous.append(period_id)
+        return resolved, ambiguous
+
+    nodes: list[dict[str, Any]] = []
+
+    def visit(concept: str, label: str, role: str, parent_node_id: int | None, ancestry: frozenset[str]) -> None:
+        # A presentation linkbase may declare a cycle; the ancestry set bounds the walk
+        # without dropping a concept that legitimately appears under two parents.
+        if concept in ancestry:
+            return
+        node_id = len(nodes)
+        resolved, ambiguous = ([], []) if concept in abstract else resolve(concept, role)
+        nodes.append({
+            "nodeId": node_id,
+            "parentNodeId": parent_node_id,
+            "conceptQName": concept,
+            "label": label or concept,
+            "abstract": concept in abstract,
+            # A rollforward states the same concept twice — opening and closing balance. Only the
+            # label role tells them apart, so consumers that key facts by concept alone would merge
+            # the two rows and read the opening balance as the closing one.
+            "openingBalance": role == PERIOD_START_LABEL,
+            "facts": resolved,
+            "ambiguousPeriodIds": ambiguous,
+        })
+        for relation in children.get(concept, ()):
+            visit(relation["child"], relation.get("preferredLabel") or "",
+                  relation.get("preferredLabelRole") or "", node_id, ancestry | {concept})
+
+    for root in spec.get("roots", ()):
+        visit(root, root, "", None, frozenset())
+    return nodes
+
+
+def presentation_spec(model_xbrl: Any, parent_child: str, role: str, periods: list[dict[str, Any]]) -> dict[str, Any]:
+    """Adapt one Arelle presentation role into the pure walker's input."""
+    relationship_set = model_xbrl.relationshipSet(parent_child, role)
+    relationships: list[dict[str, Any]] = []
+    abstract_concepts: list[str] = []
+    seen: set[str] = set()
+
+    def collect(concept: Any) -> None:
+        name = qname_text(getattr(concept, "qname", None))
+        if not name or name in seen:
+            return
+        seen.add(name)
+        if getattr(concept, "isAbstract", False):
+            abstract_concepts.append(name)
+        for relation in sorted_relationships(relationship_set, concept):
+            child = getattr(relation, "toModelObject", None)
+            if child is None:
+                continue
+            child_name = qname_text(getattr(child, "qname", None))
+            if not child_name:
+                continue
+            preferred = getattr(relation, "preferredLabel", None)
+            relationships.append({
+                "parent": name,
+                "child": child_name,
+                "order": float(getattr(relation, "order", 0) or 0),
+                "preferredLabel": child.label(preferredLabel=preferred) if preferred else child.label(),
+                "preferredLabelRole": str(preferred) if preferred else "",
+                "abstract": bool(getattr(child, "isAbstract", False)),
+            })
+            collect(child)
+
+    roots: list[str] = []
+    for root in relationship_set.rootConcepts:
+        root_name = qname_text(getattr(root, "qname", None))
+        if root_name:
+            roots.append(root_name)
+            collect(root)
+
+    declared_axes = sorted({name for name in seen if name.endswith("Axis")})
+    period_by_date = {period["end"]: period["id"] for period in periods}
+    # An instant dated the day before a period's start is that period's opening balance.
+    period_by_opening = {
+        (dt.date.fromisoformat(period["start"]) - dt.timedelta(days=1)).isoformat(): period["id"]
+        for period in periods
+    }
+    facts: list[dict[str, Any]] = []
+    for fact in model_xbrl.factsInInstance:
+        context = getattr(fact, "context", None)
+        if context is None or getattr(fact, "isNil", False):
+            continue
+        value = getattr(fact, "xValue", None)
+        if not isinstance(value, (int, float, Decimal)):
+            continue
+        moment = context.instantDatetime if context.isInstantPeriod else context.endDatetime
+        moment_date = iso_date(moment, subtract_day=True) or ""
+        period_id = period_by_date.get(moment_date)
+        starts_period_id = period_by_opening.get(moment_date) if context.isInstantPeriod else None
+        if period_id is None and starts_period_id is None:
+            continue
+        concept_name = qname_text(getattr(fact.concept, "qname", None))
+        if concept_name not in seen:
+            continue
+        facts.append({
+            "conceptQName": concept_name,
+            "periodId": period_id,
+            "startsPeriodId": starts_period_id,
+            "value": float(value),
+            "unit": unit_value(fact),
+            "decimals": int(fact.decimals) if str(getattr(fact, "decimals", "")).lstrip("-").isdigit() else None,
+            "contextId": str(context.id),
+            "sourceAnchor": f"{fact.modelDocument.uri}#{fact.id}" if getattr(fact, "id", None) else str(fact.modelDocument.uri),
+            "dimensions": sorted(
+                ({"axisQName": qname_text(value.dimensionQname), "memberQName": qname_text(value.memberQname)}
+                 for value in context.qnameDims.values()),
+                key=lambda dim: (dim["axisQName"], dim["memberQName"]),
+            ),
+        })
+
+    return {"roots": roots, "relationships": relationships, "abstractConcepts": abstract_concepts,
+            "declaredAxisQNames": declared_axes, "facts": facts}
+
+
+def presentation_statements(model_xbrl: Any, parent_child: str, periods: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    statements: list[dict[str, Any]] = []
+    for statement, role in choose_statement_roles(model_xbrl, parent_child).items():
+        spec = presentation_spec(model_xbrl, parent_child, role, periods)
+        statements.append({
+            "statement": statement,
+            "roleUri": role,
+            "roleLabel": role_label(model_xbrl, role),
+            "declaredAxisQNames": spec["declaredAxisQNames"],
+            "nodes": build_statement_nodes(spec),
+        })
+    return statements
+
+
+def walk_presentation_cli() -> list[dict[str, Any]]:
+    """Debug CLI so §5.1 of the design is testable without Arelle."""
+    return build_statement_nodes(json.load(sys.stdin))
+
+
 def expand_table_cli() -> dict[str, Any]:
     """Grid expansion over one stdin table, so §5.1 is testable without Arelle or lxml."""
     from xml.etree import ElementTree
@@ -791,9 +1007,13 @@ def expand_table_cli() -> dict[str, Any]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Arelle JSON companion")
     parser.add_argument("--fixture-response", type=Path, help="emit a checked fixture response; used only by protocol tests")
+    parser.add_argument("--walk-presentation", action="store_true", help="walk one stdin presentation spec into node JSON; debug only")
     parser.add_argument("--expand-table", action="store_true", help="expand one stdin HTML table into grid JSON; debug only")
     args = parser.parse_args()
     try:
+        if args.walk_presentation:
+            sys.stdout.write(json.dumps(walk_presentation_cli(), separators=(",", ":"), allow_nan=False) + "\n")
+            return
         if args.expand_table:
             sys.stdout.write(json.dumps(expand_table_cli(), separators=(",", ":"), allow_nan=False) + "\n")
             return

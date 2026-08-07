@@ -18,7 +18,7 @@ function provider(filingTables = TABLES): PreparedStatementProvider {
     extract: async () => [{
       filing: { accession: "fixture", form: "10-K", filedAt: REPORT_DATES[1]!, reportDate: REPORT_DATES[1]!,
         primaryDocumentUrl: "https://example.test/fixture.htm" },
-      tables: filingTables, calculationRelations: [], negatedConcepts: [], diagnostics: ["arelle_ok"],
+      tables: filingTables, calculationRelations: [], negatedConcepts: [], diagnostics: ["arelle_ok"], statements: [],
     }],
     // Insight extraction is out of scope here; failing it exercises the
     // unavailable-insight fallback and keeps the test offline.
@@ -44,6 +44,10 @@ test("extraction persists every table and deterministically selects complete fac
   assert.deepEqual(ingestion.diagnostics, ["arelle_ok"]);
   assert.deepEqual(ingestion.curatedTables?.map((table) => table.sourceTableId).sort(), ["bs0", "bs1", "cf0", "cf1", "is0", "is1"]);
   assert.equal(ingestion.curations?.length, 6);
+  assert.equal(ingestion.presentationExtracts?.length, 1);
+  const extract = ingestion.presentationExtracts![0]!;
+  assert.equal(extract.filing.accession, "fixture");
+  assert.deepEqual(Object.keys(extract).sort(), ["calculationRelations", "filing", "negatedConcepts", "statements"]);
 });
 
 test("an incomplete deterministic selection is still a ready ingestion carrying its diagnostics", async () => {

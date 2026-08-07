@@ -144,7 +144,7 @@ json.dump({"concepts": sorted(concepts), "negated": sorted(negated)}, sys.stdout
 
 const STUB_MODEL = `def stub(role_definitions):
     empty = SimpleNamespace(linkRoleUris=[], modelRelationships=[], rootConcepts=[])
-    return SimpleNamespace(modelDocument=object(), ixdsHtmlElements=[], facts=[], errors=[],
+    return SimpleNamespace(modelDocument=object(), ixdsHtmlElements=[], facts=[], factsInInstance=[], errors=[],
                            qnameConcepts={},
                            roleTypes={uri: [SimpleNamespace(definition=text)] for uri, text in role_definitions.items()},
                            relationshipSet=lambda arc, role=None: empty, close=lambda: None)

@@ -576,3 +576,24 @@ test("the core create, stage, review, and read flow persists through SQLite reop
     110,
   );
 });
+
+test("the host stamps reviewedAt, so an agent-supplied timestamp never reaches the ledger", () => {
+  const { store, service } = setup();
+  service.createModel(CREATE_INPUT);
+  const facts = [stagedRevenue("FY2024", 100), stagedRevenue("FY2025", 110)];
+  service.stageFacts("model-1", 0, facts);
+  const before = new Date().toISOString();
+
+  const input = reviewInput(facts);
+  service.reviewFacts("model-1", 1, {
+    ...input,
+    decisions: input.decisions.map((decision) => ({ ...decision, reviewedAt: "2019-01-01T00:00:00.000Z" })),
+  });
+
+  const after = new Date().toISOString();
+  const stamps = current(store).factReviewDecisions.map((decision) => decision.reviewedAt);
+  assert.equal(stamps.length, 2);
+  for (const stamp of stamps) {
+    assert.ok(stamp >= before && stamp <= after, `${stamp} must be stamped by the host, not the agent`);
+  }
+});

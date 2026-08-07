@@ -1,5 +1,6 @@
 import path from "node:path";
 import type { JsonObject, JsonSchema, JsonValue, ToolExecutionResult } from "../../src/framework/types.ts";
+import { buildPremap } from "../../src/financial-model/autoPremap.ts";
 import { FinancialModelError } from "../../src/financial-model/errors.ts";
 import type { FinancialModelSnapshot, ModelOperation, ModelQuery } from "../../src/financial-model/operations.ts";
 import { FinancialModelService, type RevisionChangeSummary } from "../../src/financial-model/service.ts";
@@ -8,12 +9,14 @@ import { SqliteModelStore, type ModelFilter, type ModelStore } from "../../src/f
 import { SqliteFilingInsightStore, type FilingInsightStore } from "../../src/infra/filing-insights/store.ts";
 import type { FilingInsightContextView } from "../../src/infra/filing-insights/types.ts";
 import { SqliteSourceReviewStore, type FilingIngestionStore, type SourceReviewStore } from "../../src/infra/xbrl/sourceReviewStore.ts";
+import { SqliteDecompositionStore, type DecompositionStore } from "../../src/infra/xbrl/decompositionStore.ts";
+import { materializeDecomposition } from "../../src/infra/xbrl/materializeDecomposition.ts";
 import type { RegisteredTool, ToolExecutionContext } from "../toolRegistry.ts";
 import { operationsInputSchema, parseHistoryReviewInput, parseOperations, reviewInputSchema, validate } from "./schemas.ts";
 
 export const FINANCIAL_MODELING_TOOLS = [
   "create_financial_model", "review_financial_model_history", "apply_financial_model_operations",
-  "get_financial_model", "list_financial_models", "archive_financial_model",
+  "get_financial_model", "list_financial_models", "archive_financial_model", "apply_revenue_decomposition",
 ] as const;
 
 export type FinancialModelToolDeps = {
@@ -21,6 +24,7 @@ export type FinancialModelToolDeps = {
   insightStore: FilingInsightStore;
   sourceReviewStore: SourceReviewStore;
   ingestionStore: FilingIngestionStore;
+  decompositionStore: DecompositionStore;
 };
 
 let defaults: FinancialModelToolDeps | undefined;
@@ -32,6 +36,7 @@ export function getDefaultFinancialModelToolDeps(): FinancialModelToolDeps {
     insightStore: SqliteFilingInsightStore.open(databasePath),
     sourceReviewStore: SqliteSourceReviewStore.open(databasePath),
     ingestionStore: SqliteSourceReviewStore.open(databasePath),
+    decompositionStore: SqliteDecompositionStore.open(databasePath),
   };
   return defaults;
 }
@@ -70,6 +75,10 @@ export function createFinancialModelTools(injected?: FinancialModelToolDeps): Re
     tool("list_financial_models", "List financial models owned by the current Agent.", {
       symbol: { type: "string" }, lifecycleStage: { type: "string" }, includeArchived: { type: "boolean" },
     }, [], async (input, context) => listModels(deps, input, context)),
+    tool("apply_revenue_decomposition", "Accept revenue decomposition schemes proposed by the private revenue_decomposition pipeline and materialize their child rows into the source review.", {
+      modelId: { type: "string" }, acceptedSchemeIds: { type: "array", items: { type: "string" } },
+      driverSchemeId: { type: "string" }, rationale: { type: "string" },
+    }, ["modelId", "acceptedSchemeIds", "rationale"], async (input, context) => applyRevenueDecomposition(deps, input, context)),
     tool("archive_financial_model", "Archive an owned financial model without deleting revision history.", {
       modelId: { type: "string" }, expectedRevision: { type: "number" },
     }, ["modelId", "expectedRevision"], async (input, context) => mutate(deps, input, context,
@@ -102,15 +111,24 @@ async function createModel(deps: FinancialModelToolDeps, input: JsonObject, cont
     const prepared = ingestion.prepared;
     const filingInsights = ingestion.filingInsightSetId ? deps.insightStore.getContext(ingestion.filingInsightSetId) : undefined;
     const imported = service.stagePreparedStatements(modelId, 0, prepared.rows, prepared.facts, ingestion.filingInsightSetId);
+    // Layer 1 + Layer 2(a) of the auto-premapping spec (§6): deterministic mapping runs before the
+    // first workbook is returned, so historical values and YoY growth are already computed here.
+    const historicalPeriodIds = source.periods.filter((period) => period.cls === "actual").map((period) => period.id);
+    const premap = buildPremap({ statementViews: prepared.statementViews, facts: prepared.facts, historicalPeriodIds });
+    const premapped = premap.plans.length === 0 ? imported : service.applyAutoPremap(modelId, imported.revision, {
+      plans: premap.plans, streams: premap.streams, historicalPeriodIds,
+      reviewedBy: context.agentId, rationale: "Deterministic auto pre-mapping at import (auto-premap-v1)" });
     deps.sourceReviewStore.save(modelId, { ingestionRunId, statementViews: prepared.statementViews, facts: prepared.facts,
       curatedTables: ingestion.curatedTables ?? [], curations: ingestion.curations ?? [],
       ...(ingestion.verification ? { verification: ingestion.verification } : {}),
+      ...(ingestion.presentationExtracts ? { presentationExtracts: ingestion.presentationExtracts } : {}),
       dimensionalDisclosures: prepared.dimensionalDisclosures,
-      coverage: prepared.coverage, filings: prepared.filings });
-    const currentWorkbook = enrichWorkbook(imported.currentWorkbook, deps.sourceReviewStore.get(modelId));
-    return success(`Created ${symbol} financial model ${modelId} at revision 1.`, { model_id: modelId, revision: imported.revision,
-      lifecycle_stage: imported.status, revision_summary: imported.revisionSummary, filing_insights: filingInsights ?? null,
-      statement_coverage: prepared.coverage, current_workbook: currentWorkbook, warnings: imported.warnings });
+      coverage: prepared.coverage, filings: prepared.filings, premap: premap.summary });
+    const currentWorkbook = enrichWorkbook(premapped.currentWorkbook, deps.sourceReviewStore.get(modelId));
+    return success(`Created ${symbol} financial model ${modelId} at revision ${premapped.revision}.`, { model_id: modelId, revision: premapped.revision,
+      lifecycle_stage: premapped.status, revision_summary: premapped.revisionSummary, filing_insights: filingInsights ?? null,
+      statement_coverage: prepared.coverage, premap: premap.summary as unknown as JsonValue,
+      current_workbook: currentWorkbook, warnings: premapped.warnings });
   } catch (error) {
     if (error instanceof FinancialModelError) return toolError(error);
     return failure("financial_model_creation_failed", error instanceof Error ? error.message : String(error), { model_id: modelId, retryable: true });
@@ -152,6 +170,47 @@ async function getModel(deps: FinancialModelToolDeps, input: JsonObject, context
     }
     return success(`Loaded financial model ${id} revision ${view.revision}.`, { model_id: id, revision: view.revision,
       filing_insights: insightContext(deps, stored.snapshot.filingInsightSetId ?? null), workbook_slice: view });
+  } catch (error) { return toolError(error); }
+}
+
+async function applyRevenueDecomposition(deps: FinancialModelToolDeps, input: JsonObject, context: ToolExecutionContext): Promise<ToolExecutionResult> {
+  try {
+    const modelId = requireString(input, "modelId"); requireOwner(deps, modelId, context.agentId);
+    const rationale = requireString(input, "rationale");
+    const acceptedSchemeIds = requireArray(input, "acceptedSchemeIds").map((entry) => {
+      if (typeof entry !== "string" || !entry.trim()) throw new Error("acceptedSchemeIds must contain scheme ids");
+      return entry;
+    });
+    const driverSchemeId = input["driverSchemeId"] === undefined ? undefined : requireString(input, "driverSchemeId");
+    if (driverSchemeId !== undefined && !acceptedSchemeIds.includes(driverSchemeId)) {
+      return failure("invalid_driver_scheme", "driverSchemeId must be one of acceptedSchemeIds", { model_id: modelId });
+    }
+    const artifact = deps.sourceReviewStore.get(modelId);
+    if (!artifact) return failure("source_review_unavailable", "apply_revenue_decomposition requires a prepared source review", { model_id: modelId });
+    const candidates = deps.decompositionStore.listCandidates(artifact.ingestionRunId);
+    const decision = { acceptedSchemeIds, driverSchemeId: driverSchemeId ?? null, decidedBy: context.agentId, rationale };
+    const next = materializeDecomposition({ artifact, candidates, decision });
+    deps.sourceReviewStore.save(modelId, next);
+    deps.decompositionStore.saveFinalDecision(artifact.ingestionRunId, decision);
+    // Layer 2(b) of the auto-premapping spec (§4b, §6): re-run the engine over the post-materialization
+    // artifact and hand the whole engine-owned plan set to the service, which replaces its own previous
+    // output and leaves agent-authored plans untouched. An unchanged decision produces an empty diff.
+    const stored = deps.modelStore.getRevision(modelId);
+    if (!stored) return failure("financial_model_not_found", `model not found: ${modelId}`, { model_id: modelId });
+    const historicalPeriodIds = stored.snapshot.periods.filter((period) => period.cls === "actual").map((period) => period.id);
+    const premap = buildPremap({ statementViews: next.statementViews, facts: next.facts,
+      ...(next.decomposition ? { decomposition: next.decomposition } : {}), historicalPeriodIds });
+    const result = new FinancialModelService(deps.modelStore, context.sessionId).applyAutoPremap(modelId, stored.revision, {
+      plans: premap.plans, streams: premap.streams,
+      sourceRows: Object.values(next.statementViews).flatMap((view) => view.candidate.rows),
+      facts: next.facts, historicalPeriodIds, reviewedBy: context.agentId,
+      rationale: `Deterministic auto pre-mapping after revenue decomposition (auto-premap-v1): ${rationale}` });
+    deps.sourceReviewStore.save(modelId, { ...next, premap: premap.summary });
+    return success(`Applied ${acceptedSchemeIds.length} revenue decomposition scheme(s) to ${modelId}.`,
+      { model_id: modelId, revision: result.revision, decomposition: next.decomposition as unknown as JsonValue,
+        premap: premap.summary as unknown as JsonValue, demoted: premap.summary.demoted as unknown as JsonValue,
+        current_workbook: enrichWorkbook(result.currentWorkbook, deps.sourceReviewStore.get(modelId)),
+        warnings: result.warnings as unknown as JsonValue });
   } catch (error) { return toolError(error); }
 }
 

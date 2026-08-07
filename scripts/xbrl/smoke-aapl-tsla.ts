@@ -7,9 +7,10 @@ import { financialModelSnapshotCodec } from "../../src/financial-model/snapshotC
 import { SqliteModelStore } from "../../src/financial-model/store.ts";
 import { SqliteFilingInsightStore } from "../../src/infra/filing-insights/store.ts";
 import { resolveLlmProvider } from "../../src/agent/createApp.ts";
-import { createDcfSubagentTool } from "../../src/agent/financial-modeling/subagentTool.ts";
+import { createDcfSubagentTool } from "../../mcp_tools/financial-model/dcfSubagentTool.ts";
 import { ModelRouter } from "../../src/infra/llm/provider.ts";
 import { createArelleProcessRunner } from "../../src/infra/xbrl/arelleAdapter.ts";
+import { SqliteDecompositionStore } from "../../src/infra/xbrl/decompositionStore.ts";
 import { SqliteFilingTableStore } from "../../src/infra/xbrl/filingTableStore.ts";
 import { createPreparedStatementProvider } from "../../src/infra/xbrl/preparedStatementProvider.ts";
 import { SqliteSourceReviewStore } from "../../src/infra/xbrl/sourceReviewStore.ts";
@@ -36,11 +37,13 @@ const modelStore = SqliteModelStore.open<FinancialModelSnapshot, RevisionChangeS
 const insightStore = SqliteFilingInsightStore.open(databasePath);
 const sourceStore = SqliteSourceReviewStore.open(databasePath);
 const tableStore = SqliteFilingTableStore.open(databasePath);
+const decompositionStore = SqliteDecompositionStore.open(databasePath);
 const financialDeps = {
   modelStore,
   insightStore,
   sourceReviewStore: sourceStore,
   ingestionStore: sourceStore,
+  decompositionStore,
 };
 const createTool = createFinancialModelTools(financialDeps).find((tool) => tool.name === "create_financial_model")!;
 const extractionTool = createDcfSubagentTool({
@@ -48,7 +51,7 @@ const extractionTool = createDcfSubagentTool({
   financial: financialDeps,
   provider,
   tableStore,
-  ...(skipInsights ? { generateInsights: async () => [] } : {}),
+  ...(skipInsights ? { generateInsights: async () => ({ insights: [] }) } : {}),
 });
 const summaries: Array<Record<string, unknown>> = [];
 
@@ -147,6 +150,7 @@ try {
   tableStore.close();
   insightStore.close();
   modelStore.close();
+  decompositionStore.close();
 }
 
 function parseArgs(value: string): string[] {

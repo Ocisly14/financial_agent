@@ -1,3 +1,4 @@
+import { AUTO_PREMAP_PLAN_PREFIX, isAutoPremapPlan } from "./autoPremap.ts";
 import { cellKey, splitCellKey, type CellKey } from "./dsl/graph.ts";
 import { parseFormula } from "./dsl/parser.ts";
 import { ENGINE_VERSION, evaluate } from "./engine.ts";
@@ -75,6 +76,18 @@ export type CreateModelInput = NewModelMeta & {
   periods: Period[];
   preparedStatementRows: PreparedStatementRow[];
   valuationConfig?: ValuationConfig;
+};
+
+export type AutoPremapInput = {
+  plans: readonly StatementMappingPlan[];
+  streams: readonly { id: string; label: string }[];
+  /** Rows the engine may still have to install (decomposition children); installed only when referenced. */
+  sourceRows?: readonly PreparedStatementRow[];
+  /** Staged candidates for the rows above; installed only for rows this call adds. */
+  facts?: readonly Fact[];
+  historicalPeriodIds: readonly string[];
+  reviewedBy: string;
+  rationale: string;
 };
 
 export type ReviewFactsInput = {
@@ -267,6 +280,157 @@ export class FinancialModelService {
     }]));
   }
 
+  /**
+   * Commits deterministic pre-mapping output (auto-premapping spec §6). The engine owns its plans and
+   * the streams they target as one replaceable set: each run installs the current engine output and
+   * drops the engine artifacts it no longer produces, while agent-authored plans and streams — and
+   * every target an agent has already claimed through `set_statement_mapping_plan` — are left alone.
+   * Re-running with unchanged engine output commits nothing and returns the current revision, which
+   * is what keeps a repeated `apply_revenue_decomposition` idempotent.
+   */
+  applyAutoPremap(modelId: string, expectedRevision: number, input: AutoPremapInput): CommitResult {
+    const parent = this.loadForMutation(modelId, expectedRevision);
+    const working = structuredClone(parent.snapshot);
+    if (working.selectedHistoricalPeriodIds.length === 0) {
+      working.selectedHistoricalPeriodIds = normalizeSelectedPeriods(
+        working.periods,
+        [...input.historicalPeriodIds],
+      );
+    }
+    const selected = new Set(working.selectedHistoricalPeriodIds);
+    const knownPeriods = new Set(working.periods.map((period) => period.id));
+    const existingItemIds = new Set(working.lineItems.map((item) => item.id));
+    const autoPlans = working.statementMappingPlans.filter(isAutoPremapPlan);
+    const agentPlans = working.statementMappingPlans.filter((plan) => !isAutoPremapPlan(plan));
+    const agentTargets = new Set(agentPlans.map((plan) => plan.targetLineItemId));
+    const engineStreamIds = new Set(autoPlans
+      .map((plan) => plan.targetLineItemId)
+      .filter(isRevenueStreamId));
+    const desiredStreamIds = new Set(input.streams.map((stream) => `revenue.${stream.id}`));
+    const candidateRows = new Map((input.sourceRows ?? []).map((row) => [row.sourceLineItemId, row]));
+
+    const incoming: StatementMappingPlan[] = [];
+    for (const plan of input.plans) {
+      if (agentTargets.has(plan.targetLineItemId)) continue;
+      if (isRevenueStreamId(plan.targetLineItemId)
+        && existingItemIds.has(plan.targetLineItemId)
+        && !engineStreamIds.has(plan.targetLineItemId)) continue;
+      if (plan.members.some((member) => !existingItemIds.has(member.sourceLineItemId)
+        && !candidateRows.has(member.sourceLineItemId))) continue;
+      const periodIds = orderedPeriods(working, plan.periodIds.filter((id) => selected.has(id)));
+      if (periodIds.length === 0) continue;
+      incoming.push({ ...structuredClone(plan), periodIds });
+    }
+
+    const newRows = [...new Set(incoming.flatMap((plan) =>
+      plan.members.map((member) => member.sourceLineItemId)))]
+      .filter((id) => !existingItemIds.has(id))
+      .map((id) => candidateRows.get(id)!);
+    const installedRowIds = new Set(newRows.map((row) => row.sourceLineItemId));
+    const existingFactIds = new Set(working.facts.map((fact) => fact.factId));
+    const activeCells = new Set(working.facts
+      .filter((fact) => fact.status === "committed")
+      .map((fact) => `${fact.lineItemId} ${fact.periodId}`));
+    const newFacts = (input.facts ?? []).filter((fact) => fact.status === "staged"
+      && fact.lineItemId !== undefined
+      && installedRowIds.has(fact.lineItemId)
+      && knownPeriods.has(fact.periodId)
+      && !existingFactIds.has(fact.factId)
+      && !activeCells.has(`${fact.lineItemId} ${fact.periodId}`));
+
+    let skeleton = skeletonOf(working);
+    if (newRows.length > 0) skeleton = addSourceStatementRows(skeleton, newRows);
+    const staleStreamIds = new Set([...engineStreamIds].filter((id) =>
+      !desiredStreamIds.has(id) && !streamIsReferenced(working, skeleton, id)));
+    skeleton = removeRevenueStreams(skeleton, staleStreamIds);
+    working.assumptions = working.assumptions.filter((assumption) =>
+      !staleStreamIds.has(assumption.lineItemId.replace(/^growth\./, "")));
+    const presentIds = new Set(skeleton.lineItems.map((item) => item.id));
+    const addedStreams = input.streams.filter((stream) => !presentIds.has(`revenue.${stream.id}`));
+    for (const stream of addedStreams) {
+      skeleton = addRevenueStream(skeleton, { id: stream.id, label: stream.label });
+    }
+    const incomingKeys = new Set(incoming.map(planKey));
+    const stalePlans = autoPlans.filter((plan) => !incomingKeys.has(planKey(plan)));
+    skeleton = dropHistoricalPlanFormulas(skeleton, stalePlans);
+
+    const stagedByCell = new Map<string, Fact>();
+    for (const fact of [...working.facts, ...newFacts]) {
+      if (fact.status !== "staged" || fact.lineItemId === undefined) continue;
+      stagedByCell.set(`${fact.lineItemId} ${fact.periodId}`, fact);
+    }
+    const decisionIds = new Set(working.factReviewDecisions.map((decision) => decision.decisionId));
+    const reviewedAt = new Date().toISOString();
+    const decisions: FactReviewDecision[] = [];
+    for (const plan of incoming) {
+      for (const member of plan.members) {
+        if (member.treatment === "exclude") continue;
+        for (const periodId of plan.periodIds) {
+          const fact = stagedByCell.get(`${member.sourceLineItemId} ${periodId}`);
+          const decisionId = fact === undefined
+            ? undefined
+            : `${AUTO_PREMAP_PLAN_PREFIX}commit-${fact.factId}`;
+          if (fact === undefined || decisionId === undefined || decisionIds.has(decisionId)) continue;
+          decisionIds.add(decisionId);
+          decisions.push({
+            decisionId,
+            factId: fact.factId,
+            action: "commit",
+            mappedLineItemId: member.sourceLineItemId,
+            rationale: input.rationale,
+            reviewedBy: input.reviewedBy,
+            reviewedAt,
+          });
+        }
+      }
+    }
+
+    const planSetChanged = stalePlans.length > 0 || incoming.length !== autoPlans.length;
+    if (!planSetChanged
+      && newRows.length === 0
+      && newFacts.length === 0
+      && decisions.length === 0
+      && addedStreams.length === 0
+      && staleStreamIds.size === 0
+      && working.selectedHistoricalPeriodIds.length === parent.snapshot.selectedHistoricalPeriodIds.length) {
+      return commitResult(parent);
+    }
+
+    acceptSkeleton(working, skeleton);
+    working.facts = stageFactCandidates(working.facts, newFacts);
+    if (decisions.length > 0) {
+      working.facts = applyFactReview(working.facts, decisions);
+      working.factReviewDecisions.push(...structuredClone(decisions));
+    }
+    validateMappingPeriods(working, incoming);
+    acceptSkeleton(working, applyStatementMappingPlans(skeletonOf(working), incoming));
+    working.statementMappingPlans = sortStatementPlans(working, [...agentPlans, ...incoming]);
+    working.mappingException = null;
+    const calculated = recalculate(working);
+    const changes: RevisionChange[] = [];
+    if (newRows.length > 0) {
+      changes.push({
+        kind: "statements_staged",
+        rowCount: newRows.length,
+        candidateCount: newFacts.length,
+        mappedLineItemIds: orderedLineItems(calculated, newRows.map((row) => row.sourceLineItemId)),
+        periodIds: orderedPeriods(calculated, newFacts.map((fact) => fact.periodId)),
+      });
+    }
+    if (decisions.length > 0) changes.push(factsReviewedChange(calculated, decisions));
+    changes.push(...addedStreams.map((stream) => ({
+      kind: "line_item_added" as const,
+      lineItemId: `revenue.${stream.id}`,
+      parentId: "revenue",
+    })));
+    changes.push(...incoming.map((plan) => ({
+      kind: "statement_mapping_plan_set" as const,
+      targetLineItemId: plan.targetLineItemId,
+      periodIds: orderedPeriods(calculated, plan.periodIds),
+    })));
+    return this.commit(modelId, expectedRevision, calculated, makeSummary(calculated, changes));
+  }
+
   reviewFacts(modelId: string, expectedRevision: number, input: ReviewFactsInput): CommitResult {
     const parent = this.loadForMutation(modelId, expectedRevision);
     if (input.decisions.length === 0
@@ -277,19 +441,29 @@ export class FinancialModelService {
       throw new FinancialModelError("invalid_model_operation", "fact review mutation must not be empty");
     }
     const working = structuredClone(parent.snapshot);
-    ensureUniqueDecisionIds(working.factReviewDecisions, input.decisions);
-    working.facts = applyFactReview(working.facts, input.decisions);
-    working.factReviewDecisions.push(...structuredClone(input.decisions));
+    // When the review time is left to the agent it invents one. The ledger's clock is the host's,
+    // the same as on the deterministic premap path above.
+    const reviewedAt = new Date().toISOString();
+    const decisions = input.decisions.map((decision) => ({ ...structuredClone(decision), reviewedAt }));
+    ensureUniqueDecisionIds(working.factReviewDecisions, decisions);
+    working.facts = applyFactReview(working.facts, decisions);
+    working.factReviewDecisions.push(...decisions);
     working.selectedHistoricalPeriodIds = normalizeSelectedPeriods(
       working.periods,
       input.selectedHistoricalPeriodIds,
     );
+    const enginePlans = working.statementMappingPlans.filter(isAutoPremapPlan);
+    const engineStreamIds = new Set(enginePlans
+      .map((plan) => plan.targetLineItemId)
+      .filter(isRevenueStreamId));
     let importSkeleton = skeletonOf(working);
     for (const item of input.categoryLineItems) {
       if (item.parentLineItemId === "revenue") {
         const slug = item.id.startsWith("revenue.")
           ? item.id.slice("revenue.".length)
           : item.id;
+        // Confirming a stream the engine already pre-mapped is a no-op, not a duplicate definition.
+        if (engineStreamIds.has(`revenue.${slug}`)) continue;
         importSkeleton = addRevenueStream(importSkeleton, { id: slug, label: item.label });
       } else {
         importSkeleton = addDcfDetailLineItem(importSkeleton, item);
@@ -301,12 +475,19 @@ export class FinancialModelService {
       ...structuredClone(plan),
       periodIds: orderedPeriods(working, plan.periodIds),
     }));
-    if (working.statementMappingPlans.length > 0 && normalizedPlans.length > 0) {
+    // Engine-authored premap plans are not an agent commit: the deterministic import fills the
+    // workbook before the mapping_review agent ever sees it, so they must not close the one-shot
+    // initial-mapping window. Only agent-authored plans do. The agent's proposal is then a delta
+    // over the premap (spec §5): engine plans it does not restate are retained below.
+    const agentAuthoredPlans = working.statementMappingPlans.filter((plan) => !isAutoPremapPlan(plan));
+    if (agentAuthoredPlans.length > 0 && normalizedPlans.length > 0) {
       throw new FinancialModelError(
         "invalid_model_operation",
         "initial statement mappings are already committed; use set_statement_mapping_plan",
       );
     }
+    const supersededTargets = new Set(normalizedPlans.map((plan) => plan.targetLineItemId));
+    const retainedEnginePlans = enginePlans.filter((plan) => !supersededTargets.has(plan.targetLineItemId));
     let compiled = applyStatementMappingPlans(skeletonOf(working), normalizedPlans);
     const normalizedGroups = input.categoryGroups.map((group) => ({
       ...structuredClone(group),
@@ -320,7 +501,7 @@ export class FinancialModelService {
     }
     compiled = applyDcfCategoryGroups(compiled, normalizedGroups);
     acceptSkeleton(working, compiled);
-    working.statementMappingPlans = sortStatementPlans(working, normalizedPlans);
+    working.statementMappingPlans = sortStatementPlans(working, [...retainedEnginePlans, ...normalizedPlans]);
     working.categoryGroups = sortCategoryGroups(working, normalizedGroups);
     working.mappingException = null;
     const calculated = recalculate(working);
@@ -721,6 +902,75 @@ function ensureUniqueDecisionIds(
     }
     ids.add(decision.decisionId);
   }
+}
+
+function isRevenueStreamId(lineItemId: string): boolean {
+  return lineItemId.startsWith("revenue.") && lineItemId !== "revenue.total";
+}
+
+function planKey(plan: StatementMappingPlan): string {
+  return `${plan.targetLineItemId} ${[...plan.periodIds].sort().join(",")}`;
+}
+
+function referencesLineItem(source: string, lineItemId: string): boolean {
+  const escaped = lineItemId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^A-Za-z0-9_.])${escaped}(?![A-Za-z0-9_.])`).test(source);
+}
+
+/** A stream the engine no longer produces is only retired when nothing else in the model needs it. */
+function streamIsReferenced(
+  snapshot: FinancialModelSnapshot,
+  skeleton: Skeleton,
+  streamId: string,
+): boolean {
+  const growthId = `growth.${streamId}`;
+  if (snapshot.categoryGroups.some((group) => group.members.some((member) =>
+    member.lineItemId === streamId || member.lineItemId === growthId))) return true;
+  return skeleton.formulas.some((formula) => formula.lineItemId !== streamId
+    && formula.lineItemId !== growthId
+    && (referencesLineItem(formula.source, streamId)
+      || referencesLineItem(formula.source, growthId)));
+}
+
+function removeRevenueStreams(skeleton: Skeleton, streamIds: ReadonlySet<string>): Skeleton {
+  if (streamIds.size === 0) return skeleton;
+  const removed = new Set<string>();
+  for (const id of streamIds) {
+    removed.add(id);
+    removed.add(`growth.${id}`);
+  }
+  return {
+    periods: skeleton.periods,
+    lineItems: skeleton.lineItems.filter((item) => !removed.has(item.id)),
+    formulas: skeleton.formulas.filter((formula) => !removed.has(formula.lineItemId)),
+  };
+}
+
+/**
+ * Strips the historical coverage a superseded engine plan compiled, so the next plan set is written
+ * onto a clean target instead of colliding with the previous run's partially overlapping coverage.
+ */
+function dropHistoricalPlanFormulas(
+  skeleton: Skeleton,
+  plans: readonly StatementMappingPlan[],
+): Skeleton {
+  if (plans.length === 0) return skeleton;
+  const dropped = new Map<string, Set<string>>();
+  for (const plan of plans) {
+    const periods = dropped.get(plan.targetLineItemId) ?? new Set<string>();
+    for (const periodId of plan.periodIds) periods.add(periodId);
+    dropped.set(plan.targetLineItemId, periods);
+  }
+  return {
+    ...skeleton,
+    formulas: skeleton.formulas.filter((formula) => {
+      const periods = dropped.get(formula.lineItemId);
+      if (periods === undefined || formula.appliesTo !== "historical") return true;
+      const coverage = formula.periodIds;
+      if (coverage === undefined || coverage.length === 0) return true;
+      return !coverage.every((periodId) => periods.has(periodId));
+    }),
+  };
 }
 
 function skeletonOf(snapshot: FinancialModelSnapshot): Skeleton {

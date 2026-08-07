@@ -16,7 +16,7 @@ test("only financial_modeling is top-level; the four DCF subagents remain privat
   assert.ok(financial.defaultTools.includes("run_dcf_subagent"));
   assert.equal(new DcfSubagentRegistry().get("statement_extraction").authority, "ingestion_store_only");
   assert.ok(new DcfSubagentRegistry().list().every((subagent) => new DcfSubagentRegistry().get(subagent).authority !== "read_write_model" as never));
-  assert.throws(() => createSubagentRegistry().get("historical_mapping" as never), /subagent not found/);
+  assert.throws(() => createSubagentRegistry().get("mapping_review" as never), /subagent not found/);
 });
 
 test("a resumed financial_modeling run refreshes the supplied model and pauses after 12 steps without recreating", async () => {

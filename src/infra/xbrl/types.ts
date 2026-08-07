@@ -49,6 +49,37 @@ export type CalculationRelation = {
   children: Array<{ concept: string; weight: number; order: number }>;
 };
 
+export type PresentationFactPayload = {
+  periodId: string;
+  value: number;
+  unit: Unit;
+  decimals?: number;
+  contextId: string;
+  sourceAnchor: string;
+  dimensions: XbrlDimension[];
+};
+
+export type PresentationNodePayload = {
+  nodeId: number;
+  parentNodeId: number | null;
+  conceptQName: string;
+  label: string;
+  abstract: boolean;
+  /** True on a rollforward's opening-balance row (periodStartLabel). The closing row carries the
+   *  same concept, so this is the only thing separating two genuinely different numbers. */
+  openingBalance?: boolean;
+  facts: PresentationFactPayload[];
+  ambiguousPeriodIds: string[];
+};
+
+export type PresentationStatementPayload = {
+  statement: StatementKind;
+  roleUri: string;
+  roleLabel: string;
+  declaredAxisQNames: string[];
+  nodes: PresentationNodePayload[];
+};
+
 export type FilingExtraction = {
   filing: FilingIdentity;
   tables: FilingTable[];
@@ -56,16 +87,21 @@ export type FilingExtraction = {
   /** Presentation-linkbase concepts whose relationship uses a negated label. */
   negatedConcepts: string[];
   diagnostics: string[];
+  statements: PresentationStatementPayload[];
 };
 
+/** Trimmed extraction persisted for later pipeline stages; `tables`/`diagnostics` are stored elsewhere. */
+export type PresentationExtract =
+  Pick<FilingExtraction, "filing" | "calculationRelations" | "negatedConcepts" | "statements">;
+
 export type ArelleExtractionRequest = {
-  protocolVersion: 2;
+  protocolVersion: 3;
   filings: FilingIdentity[];
   periods: Period[];
 };
 
 export type ArelleExtractionResponse = {
-  protocolVersion: 2;
+  protocolVersion: 3;
   filings: FilingExtraction[];
   diagnostics: string[];
 };

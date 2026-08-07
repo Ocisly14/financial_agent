@@ -104,13 +104,13 @@ function companionError(stderr: string): { code: ArelleAdapterError["code"]; mes
 }
 
 function validateResponse(value: ArelleExtractionResponse): void {
-  if (!value || value.protocolVersion !== 2 || !Array.isArray(value.filings) || !Array.isArray(value.diagnostics)) {
-    throw new ArelleAdapterError("xbrl_protocol_error", "Arelle adapter response does not match protocol version 2");
+  if (!value || value.protocolVersion !== 3 || !Array.isArray(value.filings) || !Array.isArray(value.diagnostics)) {
+    throw new ArelleAdapterError("xbrl_protocol_error", "Arelle adapter response does not match protocol version 3");
   }
   for (const filing of value.filings) {
     if (!filing?.filing?.accession || !Array.isArray(filing.tables)
       || !Array.isArray(filing.calculationRelations) || !Array.isArray(filing.negatedConcepts)
-      || !Array.isArray(filing.diagnostics)) {
+      || !Array.isArray(filing.diagnostics) || !Array.isArray(filing.statements)) {
       throw new ArelleAdapterError("xbrl_protocol_error", "Arelle adapter returned a malformed filing");
     }
     for (const table of filing.tables) {

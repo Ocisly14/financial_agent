@@ -4,14 +4,14 @@ import { chunkFilingDocument } from "./chunker.ts";
 import type { FilingInsightStore } from "./store.ts";
 import type { FilingDocument, FilingInsight, FilingInsightCandidate, FilingInsightContextView, FilingInsightFailure } from "./types.ts";
 
-export const FILING_INSIGHT_PROMPT_VERSION = "filing-insight-v1";
+export const FILING_INSIGHT_PROMPT_VERSION = "filing-insight-v2";
 export const FILING_INSIGHT_EXTRACTOR_VERSION = `small:${FILING_INSIGHT_PROMPT_VERSION}`;
 
 export type ChunkInsightGenerator = (content: string, section: string) => Promise<unknown>;
 
 export function createSmallModelInsightGenerator(router: ModelRouter): ChunkInsightGenerator {
   return async (content, section) => (await router.generate([
-    { role: "system", content: "Extract only source-grounded filing disclosures. Never propose DCF categories, mappings, formulas, assumptions, WACC, terminal inputs, valuation conclusions, or source line-item IDs. Return JSON {insights:[{topic,summary,importanceReason,periodRefs,conceptRefs,shortEvidence,confidence}]}. Use only concept names or labels actually present in the chunk." },
+    { role: "system", content: "Extract only source-grounded filing disclosures. Quality over quantity: report only disclosures that are material to understanding the business or its financials, or unusual for a company of this kind — one-off items, changed accounting treatments, atypical risks, surprising segment shifts. Skip boilerplate, generic risk-factor language, and routine disclosures every issuer repeats; an empty insights array is better than padding. Never propose DCF categories, mappings, formulas, assumptions, WACC, terminal inputs, valuation conclusions, or source line-item IDs. Return JSON {insights:[{topic,summary,importanceReason,periodRefs,conceptRefs,shortEvidence,confidence}]}. Use only concept names or labels actually present in the chunk." },
     { role: "user", content: `SECTION: ${section}\n\n${content}` },
   ], { modelClass: "SMALL", temperature: 0, timeoutMs: 45_000, metadata: { mode: "filing_insight" } })).text;
 }

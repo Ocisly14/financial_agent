@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { createDcfSubagentTool } from "../../src/agent/financial-modeling/subagentTool.ts";
+import { createDcfSubagentTool } from "../../mcp_tools/financial-model/dcfSubagentTool.ts";
 import { resolveLlmProvider } from "../../src/agent/createApp.ts";
 import type { FinancialModelSnapshot } from "../../src/financial-model/operations.ts";
 import type { RevisionChangeSummary } from "../../src/financial-model/service.ts";
@@ -8,6 +8,7 @@ import { financialModelSnapshotCodec } from "../../src/financial-model/snapshotC
 import { SqliteModelStore } from "../../src/financial-model/store.ts";
 import { SqliteFilingInsightStore } from "../../src/infra/filing-insights/store.ts";
 import { ModelRouter } from "../../src/infra/llm/provider.ts";
+import { SqliteDecompositionStore } from "../../src/infra/xbrl/decompositionStore.ts";
 import { SqliteSourceReviewStore } from "../../src/infra/xbrl/sourceReviewStore.ts";
 import { SqliteFilingTableStore } from "../../src/infra/xbrl/filingTableStore.ts";
 
@@ -16,7 +17,7 @@ const runDirectory = resolve(process.env["SMOKE_RUN_DIR"]?.trim()
 const symbol = (process.env["SMOKE_SYMBOL"]?.trim() || "AAPL").toUpperCase();
 const modelId = process.env["SMOKE_MODEL_ID"]?.trim() || `smoke-${symbol.toLowerCase()}`;
 const databasePath = join(runDirectory, "financial-models.sqlite");
-const outputPath = join(runDirectory, symbol.toLowerCase(), "historical-mapping-proposal.json");
+const outputPath = join(runDirectory, symbol.toLowerCase(), "mapping-review-proposal.json");
 
 const modelStore = SqliteModelStore.open<FinancialModelSnapshot, RevisionChangeSummary>(
   databasePath,
@@ -25,6 +26,7 @@ const modelStore = SqliteModelStore.open<FinancialModelSnapshot, RevisionChangeS
 const insightStore = SqliteFilingInsightStore.open(databasePath);
 const sourceReviewStore = SqliteSourceReviewStore.open(databasePath);
 const tableStore = SqliteFilingTableStore.open(databasePath);
+const decompositionStore = SqliteDecompositionStore.open(databasePath);
 const tool = createDcfSubagentTool({
   modelRouter: new ModelRouter(resolveLlmProvider()),
   financial: {
@@ -32,6 +34,7 @@ const tool = createDcfSubagentTool({
     insightStore,
     sourceReviewStore,
     ingestionStore: sourceReviewStore,
+    decompositionStore,
   },
   tableStore,
 });
@@ -39,7 +42,7 @@ const tool = createDcfSubagentTool({
 try {
   const startedAt = new Date().toISOString();
   const result = await tool.execute({
-    subagent: "historical_mapping",
+    subagent: "mapping_review",
     modelId,
     task: `Use the already-curated filing statements to propose the complete initial historical DCF mapping for ${symbol}.`,
   }, {
@@ -78,4 +81,5 @@ try {
   sourceReviewStore.close();
   insightStore.close();
   modelStore.close();
+  decompositionStore.close();
 }

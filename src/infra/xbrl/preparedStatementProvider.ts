@@ -66,8 +66,15 @@ export function createPreparedStatementProvider(options: {
       // original/amended filing for a selected report date so the extractor can
       // preserve presentation versions and apply filedAt precedence.
       const selectedFilings = annual.filter((filing) => selectedReportDates.has(filing.reportDate));
-      const actual = reportDates.map((end): Period => ({ id: `FY${end.slice(0, 4)}`, label: `FY${end.slice(0, 4)}`,
-        start: yearBeforePlusDay(end), end, cls: "actual" }));
+      // A fiscal year starts the day after the previous one ended. Deriving it as "one calendar year
+      // back" instead breaks every 52/53-week filer: Apple's FY2023 really ran 371 days, and the
+      // synthetic start both understates it and leaves gaps and overlaps between consecutive years.
+      // Only the earliest period has no predecessor to anchor on.
+      const actual = reportDates.map((end, index): Period => {
+        const priorEnd = reportDates[index - 1];
+        return { id: `FY${end.slice(0, 4)}`, label: `FY${end.slice(0, 4)}`,
+          start: priorEnd === undefined ? yearBeforePlusDay(end) : nextDay(priorEnd), end, cls: "actual" };
+      });
       const latestEnd = actual.at(-1)?.end ?? annual[0]!.reportDate;
       const forecast = Array.from({ length: request.forecastYears }, (_, index): Period => {
         const end = addYears(latestEnd, index + 1);
@@ -77,7 +84,7 @@ export function createPreparedStatementProvider(options: {
         periods: [...actual, ...forecast], filings: selectedFilings };
     },
     async extract(source) {
-      const output = await arelle({ protocolVersion: 2, filings: source.filings, periods: source.periods });
+      const output = await arelle({ protocolVersion: 3, filings: source.filings, periods: source.periods });
       return output.filings;
     },
     async filingDocuments(source) {
@@ -127,6 +134,9 @@ function submissionFileNames(submissions: Record<string, unknown>): string[] {
 
 function addYears(date: string, years: number): string {
   const value = new Date(`${date}T00:00:00Z`); value.setUTCFullYear(value.getUTCFullYear() + years); return value.toISOString().slice(0, 10);
+}
+function nextDay(date: string): string {
+  const value = new Date(`${date}T00:00:00Z`); value.setUTCDate(value.getUTCDate() + 1); return value.toISOString().slice(0, 10);
 }
 function yearBeforePlusDay(end: string): string {
   const value = new Date(`${end}T00:00:00Z`); value.setUTCFullYear(value.getUTCFullYear() - 1); value.setUTCDate(value.getUTCDate() + 1); return value.toISOString().slice(0, 10);

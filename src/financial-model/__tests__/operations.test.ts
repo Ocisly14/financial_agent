@@ -348,3 +348,33 @@ test("category groups reject source-statement rows as DCF members", () => {
     },
   }]), FinancialModelError);
 });
+
+test("replace_fact decisions are stamped by the host, not by the caller", () => {
+  const base = snapshot({ sources: true });
+  base.facts.push({
+    factId: "old", status: "committed", lineItemId: "source.income_statement.revenue",
+    periodId: "FY2025", value: 100, unit: { kind: "currency", code: "USD" },
+    provenance: { sourceType: "filing", sourceRefs: ["old"], asOfDate: "2025-12-31" },
+  });
+  const audit = (decisionId: string): Omit<FactReviewDecision, "action" | "factId"> => ({
+    decisionId, rationale: "Restatement", reviewedBy: "agent", reviewedAt: "2019-01-01T00:00:00.000Z",
+  });
+  const before = new Date().toISOString();
+
+  const next = applyModelOperations(base, [{
+    kind: "replace_fact",
+    replacement: {
+      factId: "new", status: "staged", periodId: "FY2025", value: 105,
+      unit: { kind: "currency", code: "USD" }, supersedesFactId: "old",
+      provenance: { sourceType: "filing", sourceRefs: ["new"], asOfDate: "2026-01-31" },
+    },
+    commitDecision: { ...audit("commit"), factId: "new", action: "commit", mappedLineItemId: "source.income_statement.revenue" },
+    supersedeDecision: { ...audit("supersede"), factId: "old", action: "supersede", replacementFactId: "new" },
+  }]);
+
+  const after = new Date().toISOString();
+  for (const decision of next.factReviewDecisions) {
+    assert.ok(decision.reviewedAt >= before && decision.reviewedAt <= after,
+      `${decision.decisionId} kept the caller's timestamp ${decision.reviewedAt}`);
+  }
+});
