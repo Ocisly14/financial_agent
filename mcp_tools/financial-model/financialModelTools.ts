@@ -8,8 +8,12 @@ import { SqliteModelStore, type ModelFilter, type ModelStore } from "../../src/f
 import { SqliteFilingInsightStore, type FilingInsightStore } from "../../src/infra/filing-insights/store.ts";
 import type { FilingInsightContextView } from "../../src/infra/filing-insights/types.ts";
 import { SqliteSourceReviewStore, type FilingIngestionStore, type SourceReviewStore } from "../../src/infra/xbrl/sourceReviewStore.ts";
+import { SqliteFilingTableStore, type FilingTableStore } from "../../src/infra/xbrl/filingTableStore.ts";
 import type { RegisteredTool, ToolExecutionContext } from "../toolRegistry.ts";
 import { operationsInputSchema, parseHistoryReviewInput, parseOperations, reviewInputSchema, validate } from "./schemas.ts";
+import { describeWaccStatus, refreshWaccParameters, waccStatusData } from "../../src/financial-model/waccRefresh.ts";
+import { SqliteWaccParameterStore, type WaccParameterStore } from "../../src/financial-model/waccStore.ts";
+import { getSharedBarRepository, type BarRepository } from "../../src/data/stock/index.ts";
 
 export const FINANCIAL_MODELING_TOOLS = [
   "create_financial_model", "review_financial_model_history", "apply_financial_model_operations",
@@ -21,6 +25,11 @@ export type FinancialModelToolDeps = {
   insightStore: FilingInsightStore;
   sourceReviewStore: SourceReviewStore;
   ingestionStore: FilingIngestionStore;
+  waccParameterStore: WaccParameterStore;
+  /** Price source for the derived beta and equity value. Absent in tests that do not exercise them. */
+  barRepository?: () => Promise<BarRepository | undefined>;
+  /** Dimension exploration's data source; absent means statement_unification does not build breakdowns. */
+  tableStore?: FilingTableStore;
 };
 
 let defaults: FinancialModelToolDeps | undefined;
@@ -32,6 +41,9 @@ export function getDefaultFinancialModelToolDeps(): FinancialModelToolDeps {
     insightStore: SqliteFilingInsightStore.open(databasePath),
     sourceReviewStore: SqliteSourceReviewStore.open(databasePath),
     ingestionStore: SqliteSourceReviewStore.open(databasePath),
+    waccParameterStore: SqliteWaccParameterStore.open(databasePath),
+    barRepository: getSharedBarRepository,
+    tableStore: SqliteFilingTableStore.open(databasePath),
   };
   return defaults;
 }
@@ -58,7 +70,8 @@ export function createFinancialModelTools(injected?: FinancialModelToolDeps): Re
       ...(reviewInputSchema.properties as unknown as Record<string, JsonObject>),
     }, reviewInputSchema.required ?? [],
     async (input, context) => mutate(deps, input, context,
-      (service, id, revision) => service.reviewFacts(id, revision, parseHistoryReviewInput(input)))),
+      (service, id, revision) => service.reviewFacts(id, revision, parseHistoryReviewInput(input)),
+      { refreshWacc: true })),
     tool("apply_financial_model_operations", "Apply an ordered batch of DCF assumptions, formulas, categories, configuration, and stage changes.", {
       ...(operationsInputSchema.properties as unknown as Record<string, JsonObject>),
     }, operationsInputSchema.required ?? [], async (input, context) => mutate(deps, input, context,
@@ -122,15 +135,30 @@ async function createModel(deps: FinancialModelToolDeps, input: JsonObject, cont
 }
 
 async function mutate(deps: FinancialModelToolDeps, input: JsonObject, context: ToolExecutionContext,
-  action: (service: FinancialModelService, id: string, revision: number) => ReturnType<FinancialModelService["archive"]>): Promise<ToolExecutionResult> {
+  action: (service: FinancialModelService, id: string, revision: number) => ReturnType<FinancialModelService["archive"]>,
+  options: { refreshWacc?: boolean } = {}): Promise<ToolExecutionResult> {
   try {
     const id = requireString(input, "modelId"); requireOwner(deps, id, context.agentId);
     const result = action(new FinancialModelService(deps.modelStore, context.sessionId), id, requireInteger(input, "expectedRevision"));
     const insights = insightContext(deps, result.currentWorkbook.filingInsightSetId ?? null);
-    return success(`Updated financial model ${id} to revision ${result.revision}.`, { model_id: id, revision: result.revision,
-      lifecycle_stage: result.status, revision_summary: result.revisionSummary, filing_insights: insights,
-      current_workbook: enrichWorkbook(result.currentWorkbook, deps.sourceReviewStore.get(id)), warnings: result.warnings });
+    // Committing facts is what makes WACC terms derivable, so the engine works them out here rather
+    // than waiting to be asked. The agent reads where it stands off the commit it already made.
+    const wacc = options.refreshWacc === true ? await waccStatus(deps, id) : undefined;
+    return success(`Updated financial model ${id} to revision ${result.revision}.${describeWaccStatus(wacc)}`,
+      { model_id: id, revision: result.revision,
+        lifecycle_stage: result.status, revision_summary: result.revisionSummary, filing_insights: insights,
+        current_workbook: enrichWorkbook(result.currentWorkbook, deps.sourceReviewStore.get(id)),
+        ...waccStatusData(wacc), warnings: result.warnings });
   } catch (error) { return toolError(error); }
+}
+
+async function waccStatus(deps: FinancialModelToolDeps, modelId: string) {
+  const meta = deps.modelStore.getMeta(modelId);
+  const stored = deps.modelStore.getRevision(modelId);
+  if (!meta || !stored) return undefined;
+  return refreshWaccParameters(
+    { parameterStore: deps.waccParameterStore, ...(deps.barRepository ? { barRepository: deps.barRepository } : {}) },
+    { modelId, symbol: meta.symbol, snapshot: stored.snapshot });
 }
 
 async function getModel(deps: FinancialModelToolDeps, input: JsonObject, context: ToolExecutionContext): Promise<ToolExecutionResult> {
@@ -150,9 +178,13 @@ async function getModel(deps: FinancialModelToolDeps, input: JsonObject, context
       ...(input["selector"] && typeof input["selector"] === "object" ? { selector: input["selector"] as ModelQuery["selector"] } : {}),
       includeLineage: input["includeLineage"] === true, reopenSources: input["reopenSources"] === true });
     if ("currentWorkbook" in view) {
-      return success(`Loaded financial model ${id} revision ${view.currentWorkbook.revision}.`, { model_id: id, revision: view.currentWorkbook.revision,
-        revision_history: view.revisionHistory, filing_insights: insightContext(deps, view.currentWorkbook.filingInsightSetId),
-        current_workbook: enrichWorkbook(view.currentWorkbook, deps.sourceReviewStore.get(id)) });
+      // The full read carries the WACC picture too, so the agent can see where the model stands
+      // without a separate call — the workbook, and what the discount rate still needs.
+      const wacc = revision === undefined ? await waccStatus(deps, id) : undefined;
+      return success(`Loaded financial model ${id} revision ${view.currentWorkbook.revision}.${describeWaccStatus(wacc)}`,
+        { model_id: id, revision: view.currentWorkbook.revision,
+          revision_history: view.revisionHistory, filing_insights: insightContext(deps, view.currentWorkbook.filingInsightSetId),
+          current_workbook: enrichWorkbook(view.currentWorkbook, deps.sourceReviewStore.get(id)), ...waccStatusData(wacc) });
     }
     return success(`Loaded financial model ${id} revision ${view.revision}.`, { model_id: id, revision: view.revision,
       filing_insights: insightContext(deps, stored.snapshot.filingInsightSetId ?? null), workbook_slice: view });

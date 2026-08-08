@@ -2,10 +2,28 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { buildConceptInventory } from "../conceptInventory.ts";
 import { buildSpineFromUnified, checkSpineCompleteness, type SpineDecision } from "../spineFromUnified.ts";
-import { buildUnifiedStatements, type UnificationDecision, type UnifiedStatementsArtifact } from "../unifiedStatements.ts";
+import { buildUnifiedStatements, type BreakdownRow, type UnificationDecision, type UnifiedStatementsArtifact } from "../unifiedStatements.ts";
 import { fact, filing, node, period, statement } from "./spineFixture.ts";
 
 const periods = [period("FY2024", 2024), period("FY2025", 2025)];
+
+/** A breakdown row with every field defaulted except the ones the test cares about. */
+function breakdownRow(over: Partial<BreakdownRow> & Pick<BreakdownRow, "rowId" | "parentRowId" | "axisQName" | "memberQName" | "label" | "values">): BreakdownRow {
+  return { unit: null, rationale: "r", asOfDate: "2026-01-30", ...over };
+}
+
+/** A single-row unified artifact, just enough to hang breakdownRows off of "net_sales". */
+function makeUnifiedWithNetSales(): UnifiedStatementsArtifact {
+  const filings = [filing("acc-2025", "2026-01-30", [statement("income_statement", [
+    node(0, null, "us-gaap:SalesRevenueNet", "Net sales", [fact("FY2024", 80e9), fact("FY2025", 90e9)]),
+  ])])];
+  const inventory = buildConceptInventory({ filings, requestedPeriods: periods });
+  const decision: UnificationDecision = { rows: [
+    { rowId: "net_sales", statement: "income_statement", label: "Net sales", rationale: "",
+      components: [{ conceptQName: "us-gaap:SalesRevenueNet", weight: 1 }] },
+  ] };
+  return buildUnifiedStatements({ decision, filings, requestedPeriods: periods, inventory });
+}
 
 /** Built through the real ① → ②/③ pipeline: cost_of_revenues is FY2025-only, so its FY2024 cell is null. */
 function makeUnified(): UnifiedStatementsArtifact {
@@ -168,4 +186,134 @@ test("a mapping mixing null and non-null rows sums the non-null ones without rai
   assert.deepEqual(result.findings, []);
   assert.deepEqual(result.coverageGaps, []);
   assert.equal(result.facts.find((f) => f.periodId === "FY2025")!.value, 155e9);
+});
+
+test("breakdown rows are rejected inside mappings", () => {
+  const unified = makeUnifiedWithNetSales();
+  unified.breakdownRows = [breakdownRow({ rowId: "net_sales.seg.a", parentRowId: "net_sales", axisQName: "seg",
+    memberQName: "x:AMember", label: "A", values: { FY2025: 1 } })];
+  const decision: SpineDecision = {
+    mappings: [{ targetId: "revenue.total", rowIds: ["net_sales", "net_sales.seg.a"], rationale: "r" }],
+    detailRows: [], excluded: [], spineGaps: [],
+  };
+  const findings = checkSpineCompleteness({ unified, decision, spineIds: new Set(["revenue.total"]) });
+  assert.ok(findings.some((f) => f.includes("only be used as a detailRow")));
+});
+
+test("revenue detail rows from two axes raise a finding", () => {
+  const unified = makeUnifiedWithNetSales();
+  unified.breakdownRows = [
+    breakdownRow({ rowId: "net_sales.seg.a", parentRowId: "net_sales", axisQName: "us-gaap:SegmentAxis",
+      memberQName: "x:AMember", label: "A", values: { FY2025: 1 } }),
+    breakdownRow({ rowId: "net_sales.channel.b", parentRowId: "net_sales", axisQName: "us-gaap:ChannelAxis",
+      memberQName: "x:BMember", label: "B", values: { FY2025: 2 } }),
+  ];
+  const decision: SpineDecision = {
+    mappings: [{ targetId: "revenue.total", rowIds: ["net_sales"], rationale: "r" }],
+    detailRows: [
+      { parentTargetId: "revenue.total", rowId: "net_sales.seg.a", rationale: "r" },
+      { parentTargetId: "revenue.total", rowId: "net_sales.channel.b", rationale: "r" },
+    ],
+    excluded: [], spineGaps: [],
+  };
+  const findings = checkSpineCompleteness({ unified, decision, spineIds: new Set(["revenue.total"]) });
+  assert.ok(findings.some((f) => f.includes("single axis")));
+});
+
+test("revenue detail rows from two axes raise a finding even split across 'revenue' and 'revenue.total' parents", () => {
+  // detailLineItemId collapses every revenue-ish parentTargetId onto the single `revenue` node, so the
+  // single-axis guard has to group them the same way, or two spellings of "under revenue" dodge it.
+  const unified = makeUnifiedWithNetSales();
+  unified.breakdownRows = [
+    breakdownRow({ rowId: "net_sales.seg.a", parentRowId: "net_sales", axisQName: "us-gaap:SegmentAxis",
+      memberQName: "x:AMember", label: "A", values: { FY2025: 1 } }),
+    breakdownRow({ rowId: "net_sales.channel.b", parentRowId: "net_sales", axisQName: "us-gaap:ChannelAxis",
+      memberQName: "x:BMember", label: "B", values: { FY2025: 2 } }),
+  ];
+  const decision: SpineDecision = {
+    mappings: [{ targetId: "revenue.total", rowIds: ["net_sales"], rationale: "r" }],
+    detailRows: [
+      { parentTargetId: "revenue", rowId: "net_sales.seg.a", rationale: "r" },
+      { parentTargetId: "revenue.total", rowId: "net_sales.channel.b", rationale: "r" },
+    ],
+    excluded: [], spineGaps: [],
+  };
+  const findings = checkSpineCompleteness({ unified, decision, spineIds: new Set(["revenue.total"]) });
+  assert.ok(findings.some((f) => f.includes("single axis")), findings.join("\n"));
+});
+
+test("revenue streams that nest an aggregate over its own piece raise a finding", () => {
+  const unified = makeUnifiedWithNetSales();
+  unified.breakdownRows = [
+    breakdownRow({ rowId: "net_sales.seg.product", parentRowId: "net_sales", axisQName: "us-gaap:SegmentAxis",
+      memberQName: "x:ProductMember", label: "Product", values: { FY2025: 3 } }),
+    breakdownRow({ rowId: "net_sales.seg.phone", parentRowId: "net_sales", axisQName: "us-gaap:SegmentAxis",
+      memberQName: "x:PhoneMember", label: "Phone", values: { FY2025: 2 }, parentMemberQName: "x:ProductMember" }),
+    breakdownRow({ rowId: "net_sales.seg.service", parentRowId: "net_sales", axisQName: "us-gaap:SegmentAxis",
+      memberQName: "x:ServiceMember", label: "Service", values: { FY2025: 1 } }),
+  ];
+  const nested: SpineDecision = {
+    mappings: [{ targetId: "revenue.total", rowIds: ["net_sales"], rationale: "r" }],
+    detailRows: [
+      { parentTargetId: "revenue", rowId: "net_sales.seg.product", rationale: "r" },
+      { parentTargetId: "revenue", rowId: "net_sales.seg.phone", rationale: "r" },
+    ],
+    excluded: [], spineGaps: [],
+  };
+  const findings = checkSpineCompleteness({ unified, decision: nested, spineIds: new Set(["revenue.total"]) });
+  assert.ok(findings.some((f) => f.includes("must not nest") && f.includes("x:ProductMember")), findings.join("\n"));
+  // Picking one level — the piece and its sibling root, but not the aggregate — is legal.
+  const antichain: SpineDecision = { ...nested, detailRows: [
+    { parentTargetId: "revenue", rowId: "net_sales.seg.phone", rationale: "r" },
+    { parentTargetId: "revenue", rowId: "net_sales.seg.service", rationale: "r" },
+  ] };
+  const clean = checkSpineCompleteness({ unified, decision: antichain, spineIds: new Set(["revenue.total"]) });
+  assert.ok(!clean.some((f) => f.includes("must not nest")), clean.join("\n"));
+});
+
+test("a breakdown detailRow materializes staged facts from its stored values, with a non-empty asOfDate", () => {
+  const unified = makeUnifiedWithNetSales();
+  unified.breakdownRows = [breakdownRow({ rowId: "net_sales.seg.a", parentRowId: "net_sales", axisQName: "seg",
+    memberQName: "x:AMember", label: "A", values: { FY2025: 1 }, asOfDate: "2026-03-15" })];
+  const result = buildSpineFromUnified({ decision: {
+    mappings: [{ targetId: "revenue.total", rowIds: ["net_sales"], rationale: "r" }],
+    detailRows: [{ parentTargetId: "revenue", rowId: "net_sales.seg.a", rationale: "r" }],
+    excluded: [], spineGaps: [] }, unified, spineIds: new Set(["revenue.total"]) });
+  const detail = result.facts.find((f) => f.lineItemId === "revenue.net_sales_seg_a");
+  assert.ok(detail);
+  assert.equal(detail!.value, 1);
+  assert.deepEqual(detail!.provenance.sourceRefs, []);
+  // A breakdown row has no unified fact to draw provenance from — it must fall back to the row's own
+  // asOfDate, never the empty string (an empty asOfDate fails snapshotCodec.normalizeProvenance).
+  assert.equal(detail!.provenance.asOfDate, "2026-03-15");
+});
+
+test("a breakdown rowId inside a mapping is excluded from the mapping's sum, not merely flagged", () => {
+  // checkSpineCompleteness raises a finding for this, but runSpineMappingAgent ships a dirty decision
+  // after maxRuns anyway — the exclusion from the sum has to be mechanical here, independent of the
+  // finding being resolved.
+  const unified = makeUnifiedWithNetSales();
+  unified.breakdownRows = [breakdownRow({ rowId: "net_sales.seg.a", parentRowId: "net_sales", axisQName: "seg",
+    memberQName: "x:AMember", label: "A", values: { FY2025: 1 } })];
+  const decision: SpineDecision = {
+    mappings: [{ targetId: "revenue.total", rowIds: ["net_sales", "net_sales.seg.a"], rationale: "r" }],
+    detailRows: [], excluded: [], spineGaps: [],
+  };
+  const result = buildSpineFromUnified({ decision, unified, spineIds: new Set(["revenue.total"]) });
+  const fy2025 = result.facts.find((f) => f.lineItemId === "revenue.total" && f.periodId === "FY2025");
+  assert.ok(fy2025);
+  // net_sales alone is 90e9; had the breakdown slice also summed in, this would be 90e9 + 1.
+  assert.equal(fy2025!.value, 90e9);
+});
+
+test("unplaced breakdown rows are not findings", () => {
+  const unified = makeUnifiedWithNetSales();
+  unified.breakdownRows = [breakdownRow({ rowId: "net_sales.seg.a", parentRowId: "net_sales", axisQName: "seg",
+    memberQName: "x:AMember", label: "A", values: { FY2025: 1 } })];
+  const decision: SpineDecision = {
+    mappings: [{ targetId: "revenue.total", rowIds: ["net_sales"], rationale: "r" }],
+    detailRows: [], excluded: [], spineGaps: [],
+  };
+  const findings = checkSpineCompleteness({ unified, decision, spineIds: new Set(["revenue.total"]) });
+  assert.deepEqual(findings, []);
 });

@@ -10,7 +10,7 @@ import { runSpineMappingAgent } from "../../../src/agent/financial-modeling/spin
 import type { StatementUnificationRun } from "../../../src/agent/financial-modeling/statementUnificationAgent.ts";
 import { DcfSubagentRegistry } from "../../../src/agent/financial-modeling/subagents.ts";
 import { ModelRouter } from "../../../src/infra/llm/provider.ts";
-import { outputDirectory, readStep, symbol, writeStep } from "./common.ts";
+import { fileLoader, outputDirectory, readStep, symbol, writeStep } from "./common.ts";
 
 const { artifact: unified } = readStep<StatementUnificationRun>("step2-unified-statements.json");
 
@@ -20,6 +20,8 @@ console.log(`Unified rows in: ${unified.rows.length}`);
 const spine = await runSpineMappingAgent({
   modelRouter: new ModelRouter(resolveLlmProvider()),
   systemPrompt: new DcfSubagentRegistry().get("spine_mapping").prompt,
+  task: `Map ${symbol}'s unified statements onto the canonical spine.`,
+  tools: fileLoader("load_unified_statements", { symbol, periods: unified.periods, rows: unified.rows }),
   unified,
 });
 

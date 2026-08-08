@@ -1,4 +1,4 @@
-import type { Fact } from "../../financial-model/types.ts";
+import type { Fact, StatementKind, Unit } from "../../financial-model/types.ts";
 import type { UnifiedStatementsArtifact } from "./unifiedStatements.ts";
 
 export type SpineDecision = {
@@ -57,7 +57,10 @@ export function checkSpineCompleteness(input: { unified: UnifiedStatementsArtifa
   decision: SpineDecision; spineIds: ReadonlySet<string>; requiredIds?: ReadonlySet<string> }): string[] {
   const findings: string[] = [];
   const { decision, spineIds } = input;
-  const knownRows = new Set(input.unified.rows.map((r) => r.rowId));
+  const unifiedRowIds = new Set(input.unified.rows.map((r) => r.rowId));
+  const breakdownRows = input.unified.breakdownRows ?? [];
+  const breakdownRowIds = new Set(breakdownRows.map((r) => r.rowId));
+  const knownRows = new Set([...unifiedRowIds, ...breakdownRowIds]);
   const requireKnownRow = (rowId: string, where: string) => {
     if (!knownRows.has(rowId)) findings.push(`unknown rowId "${rowId}" referenced in ${where}`);
   };
@@ -75,17 +78,56 @@ export function checkSpineCompleteness(input: { unified: UnifiedStatementsArtifa
     for (const rowId of mapping.rowIds) {
       requireKnownRow(rowId, `mapping "${mapping.targetId}"`);
       place(rowId, `mapping "${mapping.targetId}"`);
+      // A breakdown row's total is already supplied by its parent's dimensionless fact — mapping the
+      // slice too would count the same money twice.
+      if (breakdownRowIds.has(rowId)) {
+        findings.push(`breakdown row "${rowId}" may only be used as a detailRow, never in a spine mapping`);
+      }
     }
   }
   for (const exclusion of decision.excluded) {
     requireKnownRow(exclusion.rowId, "excluded");
     place(exclusion.rowId, "excluded");
   }
+  const breakdownById = new Map(breakdownRows.map((r) => [r.rowId, r]));
+  // Every revenue-ish parent collapses onto the single `revenue` node at materialization time
+  // (detailLineItemId below), so the single-axis guard must group them the same way — otherwise
+  // "revenue" and "revenue.total" each pass their own check while jointly violating it.
+  const revenueAxes = new Set<string>();
+  const revenueBreakdowns: Array<(typeof breakdownRows)[number]> = [];
   for (const detail of decision.detailRows) {
     if (!spineIds.has(detail.parentTargetId)) findings.push(`detail row "${detail.rowId}" has unknown parentTargetId "${detail.parentTargetId}"`);
     requireKnownRow(detail.rowId, `detail row under "${detail.parentTargetId}"`);
+    // Revenue detail rows become summable streams; two axes at once would double-count. Detail rows
+    // under any other parent are pure supplements, so mixed axes there are fine.
+    const isRevenue = detail.parentTargetId === "revenue" || detail.parentTargetId.startsWith("revenue.");
+    const breakdown = breakdownById.get(detail.rowId);
+    if (isRevenue && breakdown) { revenueAxes.add(breakdown.axisQName); revenueBreakdowns.push(breakdown); }
   }
-  for (const rowId of knownRows) {
+  if (revenueAxes.size > 1) {
+    findings.push(`revenue streams must come from a single axis; found ${[...revenueAxes].sort().join(" and ")}`);
+  }
+  // Within the one axis, the agent-declared member tree still allows nesting: an aggregate and its
+  // own pieces chosen together sum the same money twice, so streams must be an antichain of the tree.
+  const memberByQName = new Map(breakdownRows.map((r) => [`${r.parentRowId}|${r.axisQName}|${r.memberQName}`, r]));
+  const ancestors = (row: (typeof breakdownRows)[number]): Set<string> => {
+    const seen = new Set<string>();
+    let parent = row.parentMemberQName;
+    while (parent !== undefined && !seen.has(parent)) {
+      seen.add(parent);
+      parent = memberByQName.get(`${row.parentRowId}|${row.axisQName}|${parent}`)?.parentMemberQName;
+    }
+    return seen;
+  };
+  const chosenMembers = new Set(revenueBreakdowns.map((r) => r.memberQName));
+  for (const row of revenueBreakdowns) {
+    for (const ancestor of ancestors(row)) {
+      if (chosenMembers.has(ancestor)) {
+        findings.push(`revenue streams must not nest: ${ancestor} already contains ${row.memberQName}`);
+      }
+    }
+  }
+  for (const rowId of unifiedRowIds) {
     const uses = placements.get(rowId) ?? [];
     if (uses.length === 0) findings.push(`dangling: unified row "${rowId}" is in neither mappings nor excluded`);
     if (uses.length > 1) findings.push(`double-placement: unified row "${rowId}" appears in ${uses.join(" and ")}`);
@@ -136,21 +178,31 @@ export function buildSpineFromUnified(input: { decision: SpineDecision;
   requiredIds?: ReadonlySet<string> }): SpineFromUnifiedResult {
   const { decision, unified, spineIds } = input;
   const required = input.requiredIds ?? spineIds;
-  const rowsById = new Map(unified.rows.map((r) => [r.rowId, r]));
+  type SpineRow = { statement?: StatementKind; unit?: Unit | null; values: Record<string, number | null>; asOfDate?: string };
+  const rowsById = new Map<string, SpineRow>(unified.rows.map((r) => [r.rowId, r]));
+  const breakdownRowIds = new Set((unified.breakdownRows ?? []).map((r) => r.rowId));
+  for (const row of unified.breakdownRows ?? []) {
+    // Breakdown rows have no home statement — they never went through step ③'s fact provenance —
+    // so `materialize` below must skip the unified-fact lookup for them, and fall back to the row's
+    // own `asOfDate` (there is no source fact to draw one from).
+    rowsById.set(row.rowId, { unit: row.unit, values: row.values, asOfDate: row.asOfDate });
+  }
   const unifiedFacts = new Map(unified.facts.map((f) => [`${f.lineItemId}|${f.periodId}`, f]));
   const facts: Fact[] = [];
   const findings: string[] = [];
   const covered = new Set<string>(); // `${targetId}|${periodId}` with a materialized fact
 
-  const materialize = (rowIds: readonly string[], periodId: string, lineItemId: string, factId: string, label: string): Fact | null => {
-    const contributing: Array<{ rowId: string; value: number; fact: Fact | undefined }> = [];
+  const materialize = (rowIds: readonly string[], periodId: string, lineItemId: string, factId: string): Fact | null => {
+    const contributing: Array<{ rowId: string; value: number; fact: Fact | undefined;
+      unit: Unit | null | undefined; asOfDate: string | undefined }> = [];
     const nullRows: string[] = [];
     for (const rowId of rowIds) {
       const row = rowsById.get(rowId);
       const value = row?.values[periodId] ?? null;
       if (value === null) { nullRows.push(rowId); continue; }
       contributing.push({ rowId, value,
-        fact: row ? unifiedFacts.get(`unified.${row.statement}.${rowId}|${periodId}`) : undefined });
+        fact: row?.statement ? unifiedFacts.get(`unified.${row.statement}.${rowId}|${periodId}`) : undefined,
+        unit: row?.unit, asOfDate: row?.asOfDate });
     }
     if (contributing.length === 0) return null;
     // A null contributing row is a line the issuer stopped reporting, not a resolution failure —
@@ -158,25 +210,34 @@ export function buildSpineFromUnified(input: { decision: SpineDecision;
     // is structurally absent. Its figure has normally been folded into a sibling line, which means
     // the shorter sum is the comparable one; warning about it every year is noise.
     const sourceFacts = contributing.map((c) => c.fact).filter((f): f is Fact => f !== undefined);
-    const asOfDate = sourceFacts.map((f) => f.provenance.asOfDate).reduce((a, b) => (b > a ? b : a), "");
+    const rowUnit = contributing.find((c) => c.unit)?.unit;
+    // Prefer the latest of the contributing unified facts' own provenance; a breakdown row has none,
+    // so fall back to its own asOfDate (the winning occurrence's filedAt) — never the empty string.
+    const asOfDate = [...sourceFacts.map((f) => f.provenance.asOfDate),
+      ...contributing.map((c) => c.asOfDate).filter((d): d is string => d !== undefined)]
+      .reduce((a, b) => (b > a ? b : a), "");
     return { factId, status: "staged", lineItemId, periodId,
       value: contributing.reduce((acc, c) => acc + c.value, 0),
-      unit: sourceFacts[0]?.unit ?? { kind: "number" },
+      unit: sourceFacts[0]?.unit ?? rowUnit ?? { kind: "number" },
       provenance: { sourceType: "unified_statements", sourceRefs: sourceFacts.map((f) => f.factId),
         asOfDate, concept: rowIds.join("+") } };
   };
 
   for (const mapping of decision.mappings) {
+    // A breakdown row's total is already inside its parent's dimensionless fact — summing it into
+    // the mapping too would double-count. checkSpineCompleteness raises a finding for this, but a
+    // dirty decision still ships after maxRuns, so the exclusion has to be mechanical here as well.
+    const rowIds = mapping.rowIds.filter((rowId) => !breakdownRowIds.has(rowId));
     for (const periodId of unified.periods) {
-      const built = materialize(mapping.rowIds, periodId,
-        mapping.targetId, `spine.${mapping.targetId}.${periodId}`, mapping.targetId);
+      const built = materialize(rowIds, periodId,
+        mapping.targetId, `spine.${mapping.targetId}.${periodId}`);
       if (built) { facts.push(built); covered.add(`${mapping.targetId}|${periodId}`); }
     }
   }
   for (const detail of decision.detailRows) {
     for (const periodId of unified.periods) {
       const lineItemId = detailLineItemId(detail.parentTargetId, detail.rowId);
-      const built = materialize([detail.rowId], periodId, lineItemId, `spine.${lineItemId}.${periodId}`, lineItemId);
+      const built = materialize([detail.rowId], periodId, lineItemId, `spine.${lineItemId}.${periodId}`);
       if (built) facts.push(built); // supplementary: no coverage-gap tracking
     }
   }

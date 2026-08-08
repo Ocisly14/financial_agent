@@ -6,6 +6,7 @@ import type { FinancialModelToolDeps } from "./financialModelTools.ts";
 import { parseOperations } from "./schemas.ts";
 import { validate } from "./schemas.ts";
 import type { JsonSchema } from "../../src/framework/types.ts";
+import { createSpineMappingTools, createStatementUnificationTools, type LoadedWorkingSet } from "./mappingSubagentTools.ts";
 import { detailLineItemId } from "../../src/infra/xbrl/spineFromUnified.ts";
 import { runSpineMappingAgent } from "../../src/agent/financial-modeling/spineMappingAgent.ts";
 import { runStatementUnificationAgent } from "../../src/agent/financial-modeling/statementUnificationAgent.ts";
@@ -56,9 +57,16 @@ export function createDcfSubagentTool(deps: {
           if (!sourceReview.presentationExtracts?.length) return { summary: "Presentation extracts unavailable.",
             error: { code: "presentation_extract_unavailable", message: "statement_unification needs presentationExtracts; re-run extract_filing_statements" } };
           const requestedPeriods = sourceReview.statementViews.income_statement.candidate.periods;
+          const loader = createStatementUnificationTools({ modelStore: deps.financial.modelStore,
+            sourceReviewStore: deps.financial.sourceReviewStore, ownerAgentId: context.agentId,
+            ...(deps.financial.tableStore ? { tableStore: deps.financial.tableStore } : {}) });
           const run = await runStatementUnificationAgent({ modelRouter: deps.modelRouter,
             systemPrompt: subagents.get("statement_unification").prompt,
-            filings: sourceReview.presentationExtracts, requestedPeriods });
+            task: requiredString(input, "task"), tools: loader.tools,
+            filings: sourceReview.presentationExtracts, requestedPeriods,
+            tables: deps.financial.tableStore?.getRunTables(sourceReview.ingestionRunId) ?? [] });
+          const mismatch = wrongIssuer(loader.loaded(), modelId);
+          if (mismatch) return { summary: mismatch, error: { code: "subagent_loaded_wrong_issuer", message: mismatch } };
           // The artifact goes to the store; the DCF Agent gets an account of it. Returning several
           // hundred unified rows would spend the parent's context on data spine_mapping reads from
           // the store anyway.
@@ -67,28 +75,40 @@ export function createDcfSubagentTool(deps: {
             counts[row.statement] = (counts[row.statement] ?? 0) + 1; return counts;
           }, {});
           const material = run.artifact.rollupBreaks.filter((issue) => issue.material !== false).length;
+          const breakdownRows = run.artifact.breakdownRows ?? [];
           return { summary: composeSubagentReport(`statement_unification unified ${run.artifact.rows.length} row(s) over `
             + `${run.artifact.periods.length} period(s) [${Object.entries(byStatement).map(([statement, count]) => `${statement} ${count}`).join(", ")}]`
             + `${run.artifact.restatements.length === 0 ? "" : `, ${run.artifact.restatements.length} restatement(s)`}`
             + `${material === 0 ? "" : `, ${material} material roll-up break(s)`}`
+            + `${breakdownRows.length === 0 ? "" : `, ${breakdownRows.length} breakdown row(s) on ${new Set(breakdownRows.map((r) => r.axisQName)).size} axis/axes`}`
             + `${run.artifact.unresolvedFindings.length === 0 ? ". Stored; run spine_mapping next."
               : ` — SHIPPED WITH ${run.artifact.unresolvedFindings.length} unresolved finding(s).`}`, run.notes),
           generation_context: { data: { unifiedStatements: { periods: run.artifact.periods, rowsByStatement: byStatement,
             restatements: run.artifact.restatements.length, rollupBreaks: run.artifact.rollupBreaks.length,
+            breakdownRows: breakdownRows.length,
             unresolvedFindings: run.artifact.unresolvedFindings } as unknown as JsonObject } } };
         }
         if (!sourceReview.unifiedStatements) return { summary: "Unified statements unavailable.",
           error: { code: "unified_statements_unavailable", message: "spine_mapping needs unifiedStatements; run statement_unification first" } };
+        const loader = createSpineMappingTools({ modelStore: deps.financial.modelStore,
+          sourceReviewStore: deps.financial.sourceReviewStore, ownerAgentId: context.agentId });
         const run = await runSpineMappingAgent({ modelRouter: deps.modelRouter,
-          systemPrompt: subagents.get("spine_mapping").prompt, unified: sourceReview.unifiedStatements });
+          systemPrompt: subagents.get("spine_mapping").prompt, task: requiredString(input, "task"),
+          tools: loader.tools, unified: sourceReview.unifiedStatements });
+        const mismatch = wrongIssuer(loader.loaded(), modelId);
+        if (mismatch) return { summary: mismatch, error: { code: "subagent_loaded_wrong_issuer", message: mismatch } };
         // Facts land as candidates, never committed: the subagent has no authority over a revision.
         // The owning agent accepts them with review_financial_model_history.
         const service = new FinancialModelService(deps.financial.modelStore, context.sessionId);
         const current = service.getModel(modelId);
         if (!("currentWorkbook" in current)) throw new Error("default model context expected");
+        // Breakdown rows (segment/product/geography members) live in breakdownRows, not rows — a
+        // detail row can point at either, so the label lookup has to search both.
+        const unified = sourceReview.unifiedStatements!;
+        const labelByRowId = new Map([...unified.rows, ...(unified.breakdownRows ?? [])].map((row) => [row.rowId, row.label]));
         const labels = Object.fromEntries(run.decision.detailRows.map((detail) => [
           detailLineItemId(detail.parentTargetId, detail.rowId),
-          sourceReview.unifiedStatements!.rows.find((row) => row.rowId === detail.rowId)?.label ?? detail.rowId,
+          labelByRowId.get(detail.rowId) ?? detail.rowId,
         ]));
         const staged = run.facts.length === 0 ? current.currentWorkbook
           : service.stageSpineFacts(modelId, current.currentWorkbook.revision, { facts: run.facts, labels,
@@ -142,6 +162,19 @@ function validateProposalPayload(subagent: ModelingProposalSubagent, payload: Js
   const operations = (payload as JsonObject)["operations"];
   parseOperations({ modelId, expectedRevision: revision, operations: operations ?? payload });
   return { operations: operations ?? payload };
+}
+
+/**
+ * The subagent picks its own ticker out of the orchestrator's instruction, so a garbled instruction
+ * can point it at the wrong company. Every downstream check would still pass — the statements are
+ * internally consistent, just not this model's issuer — so the mismatch has to be caught here.
+ */
+function wrongIssuer(loaded: LoadedWorkingSet | undefined, modelId: string): string | undefined {
+  if (!loaded) return "The subagent never loaded a working set.";
+  if (loaded.modelId !== modelId) {
+    return `The subagent loaded ${loaded.symbol}, which is not the issuer of model ${modelId}. Restate the instruction with the right ticker.`;
+  }
+  return undefined;
 }
 
 /**

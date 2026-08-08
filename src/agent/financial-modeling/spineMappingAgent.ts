@@ -1,4 +1,6 @@
 import { validate } from "../../../mcp_tools/financial-model/schemas.ts";
+import type { LoopTool } from "../../../mcp_tools/financial-model/mappingSubagentTools.ts";
+import { loadWorkingSet } from "./loadWorkingSet.ts";
 import type { JsonSchema, JsonValue } from "../../framework/types.ts";
 import type { LlmMessage, ModelRouter } from "../../infra/llm/provider.ts";
 import type { Fact } from "../../financial-model/types.ts";
@@ -53,11 +55,18 @@ export async function runSpineMappingAgent(input: {
   modelRouter: ModelRouter;
   /** The registry definition's prompt: new DcfSubagentRegistry().get("spine_mapping").prompt. */
   systemPrompt: string;
+  /** The orchestrator's instruction. Names the ticker the subagent loads through its tool. */
+  task: string;
+  /** From createSpineMappingTools: the subagent's initialization tool. */
+  tools: Map<string, LoopTool>;
   unified: UnifiedStatementsArtifact;
   spineIds?: readonly string[];
   /** Initial run + findings-driven re-runs. Spec §5: 3 (initial + 2). */
   maxRuns?: number;
 }): Promise<SpineMappingRun> {
+  // The subagent asks for its own working set, the unified statements the previous stage stored.
+  await loadWorkingSet({ modelRouter: input.modelRouter, subagent: "spine_mapping",
+    systemPrompt: input.systemPrompt, task: input.task, tools: input.tools });
   const spineIds: ReadonlySet<string> = new Set(input.spineIds ?? [...CANONICAL_MAPPING_IDS]);
   const requiredIds: ReadonlySet<string> = new Set([...REQUIRED_MAPPING_IDS].filter((id) => spineIds.has(id)));
   const maxRuns = input.maxRuns ?? 3;
@@ -88,7 +97,10 @@ export async function runSpineMappingAgent(input: {
 }
 
 const context = (unified: UnifiedStatementsArtifact, spineIds: ReadonlySet<string>, requiredIds: ReadonlySet<string>) =>
-  `[REQUIRED SPINE IDS]\n${JSON.stringify([...requiredIds])}\n\n[OPTIONAL SPINE IDS]\n${JSON.stringify([...spineIds].filter((id) => !requiredIds.has(id)))}\n\n[UNIFIED STATEMENTS]\n${JSON.stringify({ rows: unified.rows, periods: unified.periods })}`;
+  `[REQUIRED SPINE IDS]\n${JSON.stringify([...requiredIds])}\n\n[OPTIONAL SPINE IDS]\n${JSON.stringify([...spineIds].filter((id) => !requiredIds.has(id)))}\n\n[UNIFIED STATEMENTS]\n${JSON.stringify({ rows: unified.rows, periods: unified.periods,
+    breakdownRows: (unified.breakdownRows ?? []).map(({ rowId, parentRowId, axisQName, label, values, parentMemberQName }) =>
+      ({ rowId, parentRowId, axisQName, label, values,
+        ...(parentMemberQName !== undefined ? { parentMemberQName } : {}) })) })}`;
 
 function requestDecision(modelRouter: ModelRouter, systemPrompt: string, unified: UnifiedStatementsArtifact,
   spineIds: ReadonlySet<string>, requiredIds: ReadonlySet<string>): Promise<SpineDecision> {

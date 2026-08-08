@@ -28,7 +28,11 @@ export const cellRef = (conceptQName: string, signature: string, openingBalance 
 /** Replaces the row's shared components in one period. `components: []` means the row has no value that year. */
 export type UnifiedRowOverride = { periodId: string; components: UnifiedComponent[]; reason: string };
 export type UnifiedRowDecision = { rowId: string; statement: StatementKind; label: string;
-  components: UnifiedComponent[]; perYearOverrides?: UnifiedRowOverride[]; rationale: string };
+  components: UnifiedComponent[]; perYearOverrides?: UnifiedRowOverride[]; rationale: string;
+  /** ≤3 axes. The agent declares the axis and concept — and, when the axis mixes hierarchy levels,
+   *  the member tree via `members` (parent links) — values always come from materializeBreakdowns. */
+  breakdowns?: Array<{ axisQName: string; conceptQName: string; rationale: string;
+    members?: Array<{ memberQName: string; parentMemberQName?: string }> }> };
 /** A concept carrying no information for the statements — dropped outright, reason on the record. */
 export type UnificationExclusion = { conceptQName: string; dimensionSignature?: string;
   openingBalance?: boolean; reason: string };
@@ -140,7 +144,17 @@ export type UnifiedStatementsArtifact = {
     reported: number; computed: number; difference: number; missingChildren: string[]; material: boolean }>;
   findings: string[];
   unresolvedFindings: string[];
-};
+  /** 维度拆分行。老 artifact 无此字段，读取处一律 `?? []`。 */
+  breakdownRows?: BreakdownRow[] };
+export type BreakdownRow = { rowId: string; parentRowId: string; axisQName: string;
+  memberQName: string; label: string; unit: Unit | null;
+  values: Record<string, number | null>; rationale: string;
+  /** Position in the agent-declared member tree; absent on flat breakdowns and on roots. */
+  parentMemberQName?: string;
+  /** Latest `filedAt` among the filings this member's values were drawn from. A breakdown row has no
+   *  unified fact of its own to carry provenance, so `materialize` (spineFromUnified.ts) falls back to
+   *  this when staging its detail fact — never the empty string, or snapshotCodec rejects the batch. */
+  asOfDate: string };
 
 const SLUG_PATTERN = /^[a-z0-9_]+$/;
 

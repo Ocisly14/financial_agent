@@ -1,14 +1,19 @@
 import { validate } from "../../../mcp_tools/financial-model/schemas.ts";
+import type { LoopTool } from "../../../mcp_tools/financial-model/mappingSubagentTools.ts";
+import { loadWorkingSet } from "./loadWorkingSet.ts";
 import { createLogger } from "../../infra/logger/logger.ts";
-import { correctionInstruction, schemaCorrectionInstruction, statementUnificationCorrectionPrompt,
-  statementUnificationEnvelope } from "../prompts/dcfSubagentPrompts.ts";
+import { correctionInstruction, dimensionBreakdownsInstruction, schemaCorrectionInstruction,
+  statementUnificationCorrectionPrompt, statementUnificationEnvelope } from "../prompts/dcfSubagentPrompts.ts";
 import type { JsonSchema, JsonValue } from "../../framework/types.ts";
 import type { LlmMessage, ModelRouter } from "../../infra/llm/provider.ts";
 import type { Period } from "../../financial-model/types.ts";
 import { buildConceptInventory } from "../../infra/xbrl/conceptInventory.ts";
+import { materializeBreakdowns } from "../../infra/xbrl/dimensionInventory.ts";
 import { applyUnificationPatch, buildUnifiedStatements, checkUnificationCompleteness,
   type UnificationDecision, type UnificationPatch, type UnifiedStatementsArtifact } from "../../infra/xbrl/unifiedStatements.ts";
 import type { PresentationExtract } from "../../infra/xbrl/types.ts";
+import type { FilingTable } from "../../infra/xbrl/tableTypes.ts";
+import { exploreDimensions } from "./dimensionExploration.ts";
 
 const log = createLogger("statement_unification");
 
@@ -50,6 +55,11 @@ const ROW: JsonSchema = { type: "object", additionalProperties: false,
   required: ["rowId", "statement", "label", "components", "rationale"],
   properties: { rowId: { type: "string" }, statement: { type: "string" }, label: { type: "string" },
     components: { type: "array", items: COMPONENT }, perYearOverrides: { type: "array", items: OVERRIDE },
+    breakdowns: { type: "array", items: { type: "object", additionalProperties: false,
+      required: ["axisQName", "conceptQName", "rationale"],
+      properties: { axisQName: { type: "string" }, conceptQName: { type: "string" }, rationale: { type: "string" },
+        members: { type: "array", items: { type: "object", additionalProperties: false, required: ["memberQName"],
+          properties: { memberQName: { type: "string" }, parentMemberQName: { type: "string" } } } } } } },
     rationale: { type: "string" } } };
 
 const DECISION_SCHEMA: JsonSchema = { type: "object", additionalProperties: false, required: ["rows"], properties: {
@@ -79,11 +89,27 @@ export async function runStatementUnificationAgent(input: {
   modelRouter: ModelRouter;
   /** The registry definition's prompt: new DcfSubagentRegistry().get("statement_unification").prompt. */
   systemPrompt: string;
+  /** The orchestrator's instruction. Names the ticker the subagent loads through its tool. */
+  task: string;
+  /** From createStatementUnificationTools: the subagent's initialization tool. */
+  tools: Map<string, LoopTool>;
   filings: readonly PresentationExtract[];
   requestedPeriods: readonly Period[];
+  /** Segment/dimension tables for the same filings; enables the exploration phase and breakdown materialization. */
+  tables?: readonly FilingTable[];
   /** Initial run + findings-driven re-runs. Spec §3: 3 (initial + 2). */
   maxRuns?: number;
 }): Promise<StatementUnificationRun> {
+  // The subagent asks for its own working set. What comes back is the store's inventory; the copy
+  // below is the same build over the same extracts, kept so the host can verify the decision against
+  // an inventory the subagent had no hand in producing.
+  await loadWorkingSet({ modelRouter: input.modelRouter, subagent: "statement_unification",
+    systemPrompt: input.systemPrompt, task: input.task, tools: input.tools });
+  const tables = input.tables ?? [];
+  const digest = input.tools.has("list_dimension_axes") && tables.length > 0
+    ? (await exploreDimensions({ modelRouter: input.modelRouter, subagent: "statement_unification",
+        systemPrompt: input.systemPrompt, task: input.task, tools: input.tools })).digest
+    : "";
   const inventory = buildConceptInventory({ filings: input.filings, requestedPeriods: input.requestedPeriods });
   const maxRuns = input.maxRuns ?? 3;
   let findings: string[] = [];
@@ -95,9 +121,9 @@ export async function runStatementUnificationAgent(input: {
     // minutes to regenerate and drifts between runs, while the fix for a handful of findings is a
     // few rows long.
     decision = decision === undefined
-      ? await requestDecision(input.modelRouter, input.systemPrompt, inventory, input.requestedPeriods)
+      ? await requestDecision(input.modelRouter, input.systemPrompt, inventory, input.requestedPeriods, digest)
       : applyUnificationPatch(decision,
-        await requestPatch(input.modelRouter, input.systemPrompt, inventory, input.requestedPeriods, decision, findings));
+        await requestPatch(input.modelRouter, input.systemPrompt, inventory, input.requestedPeriods, decision, findings, digest));
     log.info(`run ${run}/${maxRuns}: decision has ${decision.rows.length} rows`);
     const completeness = checkUnificationCompleteness({ inventory, decision, requestedPeriods: input.requestedPeriods });
     if (completeness.length > 0) {
@@ -108,8 +134,12 @@ export async function runStatementUnificationAgent(input: {
     }
     const artifact = buildUnifiedStatements({ decision, filings: input.filings, requestedPeriods: input.requestedPeriods, inventory });
     if (artifact.findings.length > 0) logFindings(`run ${run}/${maxRuns} build`, artifact.findings);
-    findings = [...completeness, ...artifact.findings];
-    last = { decision, notes: decision.notes ?? "", artifact: { ...artifact, unresolvedFindings: findings } };
+    const bd = materializeBreakdowns({ decision, tables, requestedPeriods: input.requestedPeriods,
+      parentValues: Object.fromEntries(artifact.rows.map((row) => [row.rowId, row.values])) });
+    if (bd.findings.length > 0) logFindings(`run ${run}/${maxRuns} breakdowns`, bd.findings);
+    findings = [...completeness, ...artifact.findings, ...bd.findings];
+    last = { decision, notes: decision.notes ?? "",
+      artifact: { ...artifact, breakdownRows: bd.breakdownRows, unresolvedFindings: findings } };
     if (findings.length === 0) {
       log.info(`run ${run}/${maxRuns}: clean`);
       return last;
@@ -119,23 +149,31 @@ export async function runStatementUnificationAgent(input: {
   return last;
 }
 
-const context = (inventory: unknown, requestedPeriods: readonly Period[]) =>
-  `[REQUESTED PERIODS]\n${JSON.stringify(requestedPeriods.map((p) => p.id))}\n\n[CONCEPT INVENTORY]\n${JSON.stringify(inventory)}`;
+const context = (inventory: unknown, requestedPeriods: readonly Period[], digest: string) =>
+  `[REQUESTED PERIODS]\n${JSON.stringify(requestedPeriods.map((p) => p.id))}\n\n[CONCEPT INVENTORY]\n${JSON.stringify(inventory)}`
+  + (digest.length > 0 ? `\n\n[DIMENSION BREAKDOWNS EXPLORED]\n${digest}` : "");
+
+// The DIMENSION BREAKDOWNS paragraph tells the model it explored the issuer's axes and that the
+// digest is available to read — true only when exploration actually ran (same condition `context`
+// uses for the digest itself). Appending it unconditionally would claim exploration happened when
+// there was no tableStore, and the model's `breakdowns` declarations would then find no facts.
+const withDimensionInstruction = (systemPrompt: string, digest: string): string =>
+  digest.length > 0 ? `${systemPrompt}\n\n${dimensionBreakdownsInstruction}` : systemPrompt;
 
 function requestDecision(modelRouter: ModelRouter, systemPrompt: string, inventory: unknown,
-  requestedPeriods: readonly Period[]): Promise<UnificationDecision> {
+  requestedPeriods: readonly Period[], digest: string): Promise<UnificationDecision> {
   return request(modelRouter, DECISION_SCHEMA, [
-    { role: "system", content: `${systemPrompt}\n\n${statementUnificationEnvelope}` },
-    { role: "user", content: context(inventory, requestedPeriods) },
+    { role: "system", content: `${withDimensionInstruction(systemPrompt, digest)}\n\n${statementUnificationEnvelope}` },
+    { role: "user", content: context(inventory, requestedPeriods, digest) },
   ]);
 }
 
 function requestPatch(modelRouter: ModelRouter, systemPrompt: string, inventory: unknown,
   requestedPeriods: readonly Period[], previous: UnificationDecision,
-  findings: readonly string[]): Promise<UnificationPatch> {
+  findings: readonly string[], digest: string): Promise<UnificationPatch> {
   return request(modelRouter, PATCH_SCHEMA, [
-    { role: "system", content: `${systemPrompt}\n\n${statementUnificationCorrectionPrompt}` },
-    { role: "user", content: `${context(inventory, requestedPeriods)}
+    { role: "system", content: `${withDimensionInstruction(systemPrompt, digest)}\n\n${statementUnificationCorrectionPrompt}` },
+    { role: "user", content: `${context(inventory, requestedPeriods, digest)}
 
 [YOUR PREVIOUS DECISION]
 ${JSON.stringify(previous)}

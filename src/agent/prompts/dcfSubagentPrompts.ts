@@ -58,8 +58,31 @@ Rules:
 - rowId is a stable lowercase slug (a-z0-9_), unique across rows; label is the display label, normally the latest
   filing's; rationale is required whenever a row merges >1 component or spans a re-tag.
 - You never output values. Values are resolved from the filings by code; samples are for judgment only.
+
 Output EXACTLY one JSON object:
-{"rows":[{"rowId","statement","label","components":[{"conceptQName","alsoTaggedAs?":[{"conceptQName","sign?":-1}],"dimensionSignature?","openingBalance?","weight"}],"perYearOverrides?":[{"periodId","components":[...],"reason"}],"rationale"}],"supplemental":[{"conceptQName","dimensionSignature?","label","reason"}],"excluded":[{"conceptQName","dimensionSignature?","reason"}]}.`;
+{"rows":[{"rowId","statement","label","components":[{"conceptQName","alsoTaggedAs?":[{"conceptQName","sign?":-1}],"dimensionSignature?","openingBalance?","weight"}],"perYearOverrides?":[{"periodId","components":[...],"reason"}],"breakdowns?":[{"axisQName","conceptQName","rationale"}],"rationale"}],"supplemental":[{"conceptQName","dimensionSignature?","label","reason"}],"excluded":[{"conceptQName","dimensionSignature?","reason"}]}.`;
+
+/**
+ * Appended to the system prompt only when the exploration phase actually ran (dimension tools were
+ * available AND there were tables to explore — statementUnificationAgent.ts's `digest.length > 0`
+ * condition). Unconditional text here would tell the model it explored when it never did, and a model
+ * that still declares "breakdowns" on faith gets a "found no facts" finding it can never correct.
+ */
+export const dimensionBreakdownsInstruction =
+  `DIMENSION BREAKDOWNS. Before deciding you explored the issuer's dimension axes; the breakdowns you fetched
+are shown under [DIMENSION BREAKDOWNS EXPLORED]. Attach to a row at most 3 "breakdowns" entries
+({axisQName, conceptQName, rationale}) for axes whose members disaggregate that row into real economic
+drivers — revenue by product/segment/geography and the like. Code resolves the member values; you never
+copy them. A breakdown is supplementary: it never changes the row's own components or total. Declare only
+axes you actually saw in exploration, with the conceptQName the members were reported under.
+An axis is often one flat partition, and then {axisQName, conceptQName, rationale} is the whole entry —
+code checks that the members sum to the parent row within ±10% (reconciling items cost a few percent;
+that is fine). But when an axis carries a HIERARCHY — the exploration data shows both aggregates and
+their pieces, e.g. Product beside iPhone/Mac/iPad — you must also declare the tree in "members":
+every member you keep as {memberQName, parentMemberQName?}, where a piece points at its aggregate and
+roots have no parent. Code validates the tree bottom-up: each node's children must sum to it, and the
+roots must sum to the parent row, each within ±10%. A flat declaration over a mixed hierarchy fails
+that check — the finding tells you to come back with the tree.`;
 
 export const spineMappingPrompt = `You are the private spine_mapping subagent of the DCF Agent. You select which lines of an issuer's unified multi-year statements the DCF engine models, under which canonical spine id.
 You receive the unified statements (per row: rowId, label, statement, per-year values) and the list of canonical spine
@@ -83,6 +106,13 @@ Rules:
   another; state that issuer-specific reasoning in the rationale.
 - detailRows are for material issuer-specific lines worth modeling separately; immaterial residual lines belong in
   excluded with a reason, not in detailRows.
+- BREAKDOWN rows (rowId shaped parent.axis.member, listed after the unified rows with their axis) are
+  dimensional slices of their parent row. Use them ONLY as detailRows; never inside a mapping — the
+  parent already supplies the total, and mapping a slice would count the money twice. Under revenue,
+  pick ONE axis (the one that best explains the top line) and add its members as detailRows; members
+  of the other axes stay unused, which is fine. Where a breakdown row carries parentMemberQName it is a
+  piece of that other member: never pick a member AND one of its pieces as revenue streams — choose one
+  level of the tree. They are exempt from the "every row must land somewhere" rule.
 Output EXACTLY one JSON object: {"mappings":[{"targetId","rowIds":[..],"rationale"}],"detailRows":[{"parentTargetId","rowId","rationale"}],"excluded":[{"rowId","reason"}],"spineGaps":[{"targetId","reason"}]}.`;
 
 
@@ -102,6 +132,16 @@ export const notesInstruction =
   `"notes" is your report to the DCF orchestrator, which does NOT see your rows. Write at most 120 words `
   + `of plain prose: what you did, the judgment calls that were not obvious, and anything it should `
   + `check. Do not list ids or repeat counts — the host reports those. No JSON, no markdown.`;
+
+/**
+ * The first turn of both mapping subagents. They are given the orchestrator's instruction and nothing
+ * else — the working set comes from the store, through this call, so it is always what extraction
+ * actually persisted rather than a copy pasted into a prompt.
+ */
+export const loadInstruction = (toolName: string) =>
+  `Your first move is to load your working set. Return EXACTLY one JSON object and nothing else:\n`
+  + `{"tool":"${toolName}","input":{"symbol":"<the ticker named in the instruction>"}}\n`
+  + `Do not decide anything yet, and do not invent a ticker the instruction does not name.`;
 
 /** Appended to the first-run system prompt: names the exact envelope the loop parses. */
 export const statementUnificationEnvelope =
@@ -130,3 +170,15 @@ export const correctionInstruction = "Fix every finding with the smallest correc
 
 /** Sent when the model's JSON fails schema validation, with the validator's message. */
 export const schemaCorrectionInstruction = "Re-emit the corrected JSON object.";
+
+export const exploreInstruction = (toolNames: readonly string[]) =>
+  `DIMENSION EXPLORATION. You may now discover segment/product/geography breakdowns for this issuer.
+Available tools: ${toolNames.join(", ")}. Each turn return EXACTLY one JSON object and nothing else:
+either {"tool":"<name>","input":{...}} or {"done":true}.
+Start with list_dimension_axes. Fetch a breakdown ONLY for an axis that disaggregates a real driver of
+this issuer's economics — revenue by product/segment/geography, segment operating income, and the like.
+Fair-value levels, share-based-compensation buckets, debt instruments and similar disclosure mechanics
+are never useful here. Fetch at most 3 axes per statement line you intend to break down. On a large
+axis, get_axis_breakdown also takes an optional "memberFilter" (case-insensitive substring over member
+label/QName) and, when a response carries nextCursor, an optional "cursor" to page further. When you
+have what you need — or nothing useful exists — return {"done":true}.`;

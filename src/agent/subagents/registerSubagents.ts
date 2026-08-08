@@ -3,6 +3,7 @@ import { financialModelingSubagentPrompt, marketDataSubagentPrompt, marketResear
 import { FINANCIAL_MODELING_TOOLS, MARKET_DATA_TOOLS, MARKET_RESEARCH_TOOLS, TRADING_OPERATIONS_TOOLS } from "../../../mcp_tools/registerTools.ts";
 import { DCF_PRIVATE_SUBAGENT_TOOL } from "../../../mcp_tools/financial-model/dcfSubagentTool.ts";
 import { STATEMENT_EXTRACTION_TOOL } from "../../../mcp_tools/financial-model/statementExtractionTool.ts";
+import { COMPUTE_WACC_TOOL } from "../../../mcp_tools/financial-model/waccTool.ts";
 
 export function createSubagentRegistry(): SubagentRegistry {
   const registry = new SubagentRegistry();
@@ -10,7 +11,8 @@ export function createSubagentRegistry(): SubagentRegistry {
     name: "financial_modeling",
     description: "Hierarchical DCF Agent that owns one revisioned model workflow and delegates statement extraction, mapping, forecast, and valuation analysis to private subagents.",
     modelClass: "MEDIUM",
-    defaultTools: [...FINANCIAL_MODELING_TOOLS, STATEMENT_EXTRACTION_TOOL, DCF_PRIVATE_SUBAGENT_TOOL],
+    defaultTools: [...FINANCIAL_MODELING_TOOLS, STATEMENT_EXTRACTION_TOOL, COMPUTE_WACC_TOOL,
+      DCF_PRIVATE_SUBAGENT_TOOL, "financial_search"],
     maxToolSteps: 12,
     systemPrompt: financialModelingSubagentPrompt,
   });

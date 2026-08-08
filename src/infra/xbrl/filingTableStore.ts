@@ -29,6 +29,7 @@ export type RowHit = { sourceTableId: string; heading: string; rows: Array<{ row
 
 export interface FilingTableStore {
   saveTables(runId: string, tables: readonly FilingTable[]): void;
+  getRunTables(runId: string): FilingTable[];
   listTables(runId: string, query: ListTablesQuery): ListTablesPage;
   getTables(runId: string, sourceTableIds: readonly string[]): FilingTable[];
   findRows(runId: string, query: { query: string; scope?: readonly string[]; limit?: number }): RowHit[];
@@ -138,6 +139,10 @@ export class InMemoryFilingTableStore implements FilingTableStore {
     for (const table of tables) run.tables.set(table.sourceTableId, structuredClone(table) as FilingTable);
   }
 
+  getRunTables(runId: string): FilingTable[] {
+    return [...this.run(runId).tables.values()].map((t) => structuredClone(t) as FilingTable);
+  }
+
   listTables(runId: string, query: ListTablesQuery): ListTablesPage {
     const run = this.run(runId);
     return queryRun([...run.tables.values()], run.curations, run.annotations, query);
@@ -233,6 +238,10 @@ export class SqliteFilingTableStore implements FilingTableStore {
     const statement = this.db.prepare(
       "INSERT INTO filing_tables VALUES (?, ?, ?, ?) ON CONFLICT(ingestion_run_id, source_table_id) DO UPDATE SET table_json=excluded.table_json");
     for (const table of tables) statement.run(runId, table.sourceTableId, table.accession, JSON.stringify(table));
+  }
+
+  getRunTables(runId: string): FilingTable[] {
+    return this.tables(runId);
   }
 
   listTables(runId: string, query: ListTablesQuery): ListTablesPage {

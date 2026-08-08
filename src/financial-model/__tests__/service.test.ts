@@ -15,6 +15,8 @@ import {
 import { financialModelSnapshotCodec } from "../snapshotCodec.ts";
 import { InMemoryModelStore, SqliteModelStore } from "../store.ts";
 import type { Fact, FactReviewDecision, Period } from "../types.ts";
+import { buildSpineFromUnified } from "../../infra/xbrl/spineFromUnified.ts";
+import type { UnifiedStatementsArtifact } from "../../infra/xbrl/unifiedStatements.ts";
 
 const PERIODS: Period[] = [
   { id: "FY2024", label: "FY2024", start: "2024-01-01", end: "2024-12-31", cls: "actual" },
@@ -645,4 +647,42 @@ test("a detail row whose parent refuses children costs that row, not the batch",
   assert.ok("currentWorkbook" in view);
   assert.equal(view.currentWorkbook.revision, result.revision);
   assert.ok(!view.currentWorkbook.sections.dcf.some((row) => row.lineItemId === "free_cash_flow.invented"));
+});
+
+// Regression for a Critical finding: a breakdown-derived fact from buildSpineFromUnified must carry a
+// non-empty provenance.asOfDate, or snapshotCodec.normalizeProvenance rejects it and stageSpineFacts
+// throws for the whole batch — not just the offending detail row.
+test("a breakdown detail row's fact stages cleanly end to end through buildSpineFromUnified", () => {
+  const netSalesFact: Fact = { factId: "unified.income_statement.net_sales.FY2024", status: "staged",
+    lineItemId: "unified.income_statement.net_sales", periodId: "FY2024", value: 90,
+    unit: { kind: "currency", code: "USD" },
+    provenance: { sourceType: "filing", sourceRefs: [], asOfDate: "2026-01-30" } };
+  const unified: UnifiedStatementsArtifact = {
+    periods: ["FY2024"], rows: [{ rowId: "net_sales", statement: "income_statement", label: "Net sales",
+      rationale: "", values: { FY2024: 90 } }],
+    supplementalRows: [], excluded: [], facts: [netSalesFact], restatements: [], rollupBreaks: [],
+    findings: [], unresolvedFindings: [],
+    breakdownRows: [{ rowId: "net_sales.seg.products", parentRowId: "net_sales", axisQName: "seg",
+      memberQName: "x:ProductsMember", label: "Products", unit: { kind: "currency", code: "USD" },
+      values: { FY2024: 60 }, rationale: "product mix", asOfDate: "2026-03-15" }],
+  };
+  const { facts } = buildSpineFromUnified({ decision: {
+    mappings: [{ targetId: "revenue.total", rowIds: ["net_sales"], rationale: "r" }],
+    detailRows: [{ parentTargetId: "revenue", rowId: "net_sales.seg.products", rationale: "r" }],
+    excluded: [], spineGaps: [] }, unified, spineIds: new Set(["revenue.total"]) });
+  const detail = facts.find((f) => f.lineItemId === "revenue.net_sales_seg_products");
+  assert.ok(detail);
+  assert.equal(detail!.provenance.asOfDate, "2026-03-15");
+
+  const { service } = setup();
+  service.createModel(CREATE_INPUT);
+  // Must not throw: this is exactly the path snapshotCodec.normalizeProvenance used to reject when
+  // the breakdown row's asOfDate fell back to "".
+  const result = service.stageSpineFacts("model-1", 0, { facts, historicalPeriodIds: ["FY2024"],
+    labels: { "revenue.net_sales_seg_products": "Products" } });
+  const view = service.getModel("model-1");
+  assert.ok("currentWorkbook" in view);
+  assert.equal(view.currentWorkbook.revision, result.revision);
+  const stream = view.currentWorkbook.sections.revenue.find((row) => row.lineItemId === "revenue.net_sales_seg_products");
+  assert.equal(stream?.label, "Products");
 });

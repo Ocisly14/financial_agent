@@ -4,6 +4,7 @@
 // Needs a live LLM provider for both agent decisions.
 import { readFileSync } from "node:fs";
 import { resolveLlmProvider } from "../../src/agent/createApp.ts";
+import { fileLoader } from "./e2e_test/common.ts";
 import { runSpineMappingAgent } from "../../src/agent/financial-modeling/spineMappingAgent.ts";
 import { runStatementUnificationAgent } from "../../src/agent/financial-modeling/statementUnificationAgent.ts";
 import { DcfSubagentRegistry } from "../../src/agent/financial-modeling/subagents.ts";
@@ -31,6 +32,8 @@ console.log(`# Two-stage spine mapping smoke — ${periodIds.join(", ")}`);
 console.log(`\nFilings: ${response.filings.map((f) => `${f.filing.accession} (${f.filing.filedAt})`).join(", ")}`);
 
 const unification = await runStatementUnificationAgent({ modelRouter,
+  task: `Unify ${symbol}'s extracted filings into multi-year statements.`,
+  tools: fileLoader("load_concept_inventory", { symbol }),
   systemPrompt: registry.get("statement_unification").prompt,
   filings: response.filings, requestedPeriods });
 const unified = unification.artifact;
@@ -70,6 +73,8 @@ if (unified.unresolvedFindings.length === 0) console.log("None.");
 for (const finding of unified.unresolvedFindings) console.log(`- ${finding}`);
 
 const spine = await runSpineMappingAgent({ modelRouter,
+  task: `Map ${symbol}'s unified statements onto the canonical spine.`,
+  tools: fileLoader("load_unified_statements", { symbol }),
   systemPrompt: registry.get("spine_mapping").prompt, unified });
 const factByLine = new Map(spine.facts.map((f) => [`${f.lineItemId}|${f.periodId}`, f]));
 
