@@ -1,4 +1,4 @@
-import type { BarFetcher, DailyBar, Timeframe } from "./alpacaClient.ts";
+import type { BarFeed, BarFetcher, DailyBar, Timeframe } from "./alpacaClient.ts";
 import type { BarStore } from "./barStore.ts";
 
 const DEFAULT_BACKFILL_YEARS = 5;
@@ -13,14 +13,17 @@ const FIVE_MIN_BACKFILL_DAYS = 10;
 const SPLIT_EPSILON = 0.0001;
 
 export type BarRepository = {
-  getBars(symbol: string, timeframe: Timeframe, count: number): Promise<DailyBar[]>;
-  /** Bars for an absolute, inclusive date range. `from > to` yields an empty array. */
-  getBarsBetween(symbol: string, timeframe: Timeframe, from: string, to: string): Promise<DailyBar[]>;
+  getBars(symbol: string, timeframe: Timeframe, count: number, feed?: BarFeed): Promise<DailyBar[]>;
+  /** Bars for an absolute, inclusive date range. `from > to` yields an empty array.
+   *  Reaching back before what is cached widens the cache rather than returning a short series. */
+  getBarsBetween(symbol: string, timeframe: Timeframe, from: string, to: string, feed?: BarFeed): Promise<DailyBar[]>;
 };
 
 export type BarRepositoryDeps = {
   store: BarStore;
   client: BarFetcher;
+  /** Tape used when a caller does not name one. */
+  defaultFeed?: BarFeed;
   now?: () => Date;
   backfillYears?: number;
   /** Test override; production uses 1m / 5m / 30m depending on timeframe. */
@@ -82,21 +85,26 @@ export function createBarRepository(deps: BarRepositoryDeps): BarRepository {
   const { store, client } = deps;
   const now = deps.now ?? ((): Date => new Date());
   const backfillYears = deps.backfillYears ?? DEFAULT_BACKFILL_YEARS;
+  const defaultFeed: BarFeed = deps.defaultFeed ?? "iex";
 
   /** Full backfill. Minute bars keep enough history to support local aggregation into any minute period. */
   async function backfill(
     symbol: string,
     timeframe: Timeframe,
+    feed: BarFeed,
     today: string,
     nowIso: string,
+    earliest?: string,
   ): Promise<boolean> {
-    const from = fullWindow(timeframe, today, backfillYears);
-    const bars = await client.fetchBars(symbol, timeframe, from, today);
+    const window = fullWindow(timeframe, today, backfillYears);
+    const from = earliest !== undefined && earliest < window ? earliest : window;
+    const bars = await client.fetchBars(symbol, timeframe, from, today, feed);
     if (bars.length === 0) return false;
-    await store.putBars(symbol, timeframe, bars);
+    await store.putBars(symbol, timeframe, feed, bars);
     await store.putCoverage({
       symbol,
       timeframe,
+      feed,
       firstDate: bars[0]!.t,
       lastDate: bars[bars.length - 1]!.t,
       backfilledAt: nowIso,
@@ -108,15 +116,25 @@ export function createBarRepository(deps: BarRepositoryDeps): BarRepository {
   /** Bring the local store up to date for this symbol/timeframe, then leave the
    *  reading to the caller. Shared by both public readers so their freshness
    *  behaviour cannot drift apart. */
-  async function ensureFresh(symbol: string, timeframe: Timeframe): Promise<void> {
+  async function ensureFresh(symbol: string, timeframe: Timeframe, feed: BarFeed, earliest?: string): Promise<void> {
     const current = now();
     const nowIso = current.toISOString();
     const today = isoDate(current);
-    const coverage = await store.getCoverage(symbol, timeframe);
+    const coverage = await store.getCoverage(symbol, timeframe, feed);
 
     if (!coverage) {
-      await backfill(symbol, timeframe, today, nowIso);
+      await backfill(symbol, timeframe, feed, today, nowIso, earliest);
       return;
+    }
+
+    // A request reaching before what was cached is answered by widening the cache, not by silently
+    // returning a shorter series: a 10-year beta over a 5-year backfill is a different number.
+    if (earliest !== undefined && earliest < coverage.firstDate) {
+      const older = await client.fetchBars(symbol, timeframe, earliest, coverage.firstDate, feed);
+      if (older.length > 0) {
+        await store.putBars(symbol, timeframe, feed, older);
+        await store.putCoverage({ ...coverage, firstDate: older[0]!.t, lastCheckedAt: nowIso });
+      }
     }
 
     const checkedAgeMs = current.getTime() - new Date(coverage.lastCheckedAt).getTime();
@@ -124,21 +142,21 @@ export function createBarRepository(deps: BarRepositoryDeps): BarRepository {
     if (checkedAgeMs < freshnessMs) return;
 
     const from = incrementalFrom(timeframe, coverage.lastDate);
-    const fetched = await client.fetchBars(symbol, timeframe, from, today);
+    const fetched = await client.fetchBars(symbol, timeframe, from, today, feed);
 
     if (fetched.length === 0) {
       await store.putCoverage({ ...coverage, lastCheckedAt: nowIso });
       return;
     }
 
-    const overlap = await store.getBarsOnOrAfter(symbol, timeframe, from);
+    const overlap = await store.getBarsOnOrAfter(symbol, timeframe, feed, from);
     if (hasSplitDivergence(overlap, fetched)) {
-      await store.clearSymbol(symbol, timeframe);
-      await backfill(symbol, timeframe, today, nowIso);
+      await store.clearSymbol(symbol, timeframe, feed);
+      await backfill(symbol, timeframe, feed, today, nowIso, earliest ?? coverage.firstDate);
       return;
     }
 
-    await store.putBars(symbol, timeframe, fetched);
+    await store.putBars(symbol, timeframe, feed, fetched);
     const newest = fetched[fetched.length - 1]!.t;
     await store.putCoverage({
       ...coverage,
@@ -148,9 +166,9 @@ export function createBarRepository(deps: BarRepositoryDeps): BarRepository {
   }
 
   return {
-    async getBars(symbol: string, timeframe: Timeframe, count: number): Promise<DailyBar[]> {
-      await ensureFresh(symbol, timeframe);
-      return store.getBars(symbol, timeframe, count);
+    async getBars(symbol: string, timeframe: Timeframe, count: number, feed: BarFeed = defaultFeed): Promise<DailyBar[]> {
+      await ensureFresh(symbol, timeframe, feed);
+      return store.getBars(symbol, timeframe, feed, count);
     },
 
     async getBarsBetween(
@@ -158,12 +176,13 @@ export function createBarRepository(deps: BarRepositoryDeps): BarRepository {
       timeframe: Timeframe,
       from: string,
       to: string,
+      feed: BarFeed = defaultFeed,
     ): Promise<DailyBar[]> {
       if (from > to) return [];
       // Same freshness and backfill path as getBars: a second, divergent copy of
       // that logic is a worse cost than the one coverage comparison it saves.
-      await ensureFresh(symbol, timeframe);
-      const onOrAfter = await store.getBarsOnOrAfter(symbol, timeframe, from);
+      await ensureFresh(symbol, timeframe, feed, from);
+      const onOrAfter = await store.getBarsOnOrAfter(symbol, timeframe, feed, from);
       return onOrAfter.filter((bar) => bar.t <= to);
     },
   };

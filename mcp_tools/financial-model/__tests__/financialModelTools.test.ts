@@ -6,7 +6,6 @@ import { financialModelSnapshotCodec } from "../../../src/financial-model/snapsh
 import { InMemoryModelStore } from "../../../src/financial-model/store.ts";
 import { InMemoryFilingInsightStore } from "../../../src/infra/filing-insights/store.ts";
 import { InMemorySourceReviewStore, type FilingIngestionArtifact } from "../../../src/infra/xbrl/sourceReviewStore.ts";
-import { InMemoryDecompositionStore } from "../../../src/infra/xbrl/decompositionStore.ts";
 import type { FilingTable, TableCuration } from "../../../src/infra/xbrl/tableTypes.ts";
 import type { PreparedFilingStatements, PresentationExtract } from "../../../src/infra/xbrl/types.ts";
 import { createFinancialModelTools, type FinancialModelToolDeps } from "../financialModelTools.ts";
@@ -29,8 +28,7 @@ function fixture(): { deps: FinancialModelToolDeps; ingestion: InMemorySourceRev
   const prepared: PreparedFilingStatements = { filings: [], periods, rows, facts, statementViews, dimensionalDisclosures: [], diagnostics: [],
     coverage: { requestedPeriodIds: ["FY2024"], statements: rows.map((row) => ({ statement: row.statement, availablePeriodIds: ["FY2024"], missingPeriodIds: [] })), issues: [] } };
   return { ingestion, prepared, deps: { modelStore: new InMemoryModelStore<FinancialModelSnapshot, RevisionChangeSummary>(financialModelSnapshotCodec),
-    insightStore: new InMemoryFilingInsightStore(), sourceReviewStore: ingestion, ingestionStore: ingestion,
-    decompositionStore: new InMemoryDecompositionStore() } };
+    insightStore: new InMemoryFilingInsightStore(), sourceReviewStore: ingestion, ingestionStore: ingestion } };
 }
 
 const CURATED_STATEMENTS = ["income_statement", "balance_sheet", "cash_flow_statement"] as const;

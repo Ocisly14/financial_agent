@@ -1,5 +1,7 @@
 import { validate } from "../../../mcp_tools/financial-model/schemas.ts";
 import { createLogger } from "../../infra/logger/logger.ts";
+import { correctionInstruction, schemaCorrectionInstruction, statementUnificationCorrectionPrompt,
+  statementUnificationEnvelope } from "../prompts/dcfSubagentPrompts.ts";
 import type { JsonSchema, JsonValue } from "../../framework/types.ts";
 import type { LlmMessage, ModelRouter } from "../../infra/llm/provider.ts";
 import type { Period } from "../../financial-model/types.ts";
@@ -54,6 +56,7 @@ const DECISION_SCHEMA: JsonSchema = { type: "object", additionalProperties: fals
   rows: { type: "array", items: ROW },
   excluded: HELD_OUT({}, []),
   supplemental: HELD_OUT({ label: { type: "string" } }, ["label"]),
+  notes: { type: "string" },
 } };
 
 const PATCH_SCHEMA: JsonSchema = { type: "object", additionalProperties: false, required: [], properties: {
@@ -61,10 +64,13 @@ const PATCH_SCHEMA: JsonSchema = { type: "object", additionalProperties: false, 
   deleteRowIds: { type: "array", items: { type: "string" } },
   excluded: HELD_OUT({}, []),
   supplemental: HELD_OUT({ label: { type: "string" } }, ["label"]),
+  notes: { type: "string" },
 } };
 
 export type StatementUnificationRun = {
   decision: UnificationDecision;
+  /** The subagent's own short account of what it did, for the DCF orchestrator. */
+  notes: string;
   /** Stage ②/③ output; `unresolvedFindings` filled by this loop. Empty on a clean run, never silently empty on a dirty one. */
   artifact: UnifiedStatementsArtifact;
 };
@@ -103,7 +109,7 @@ export async function runStatementUnificationAgent(input: {
     const artifact = buildUnifiedStatements({ decision, filings: input.filings, requestedPeriods: input.requestedPeriods, inventory });
     if (artifact.findings.length > 0) logFindings(`run ${run}/${maxRuns} build`, artifact.findings);
     findings = [...completeness, ...artifact.findings];
-    last = { decision, artifact: { ...artifact, unresolvedFindings: findings } };
+    last = { decision, notes: decision.notes ?? "", artifact: { ...artifact, unresolvedFindings: findings } };
     if (findings.length === 0) {
       log.info(`run ${run}/${maxRuns}: clean`);
       return last;
@@ -119,7 +125,7 @@ const context = (inventory: unknown, requestedPeriods: readonly Period[]) =>
 function requestDecision(modelRouter: ModelRouter, systemPrompt: string, inventory: unknown,
   requestedPeriods: readonly Period[]): Promise<UnificationDecision> {
   return request(modelRouter, DECISION_SCHEMA, [
-    { role: "system", content: `${systemPrompt}\n\nReturn EXACTLY one JSON object {"rows":[...]} and nothing else.` },
+    { role: "system", content: `${systemPrompt}\n\n${statementUnificationEnvelope}` },
     { role: "user", content: context(inventory, requestedPeriods) },
   ]);
 }
@@ -128,13 +134,7 @@ function requestPatch(modelRouter: ModelRouter, systemPrompt: string, inventory:
   requestedPeriods: readonly Period[], previous: UnificationDecision,
   findings: readonly string[]): Promise<UnificationPatch> {
   return request(modelRouter, PATCH_SCHEMA, [
-    { role: "system", content: `${systemPrompt}
-
-You are CORRECTING an existing decision, not rewriting it. Return EXACTLY one JSON object:
-{"upsertRows":[<full row objects, replacing by rowId or adding new ones>],"deleteRowIds":[".."],"excluded":[..],"supplemental":[..]}
-Emit ONLY the rows the findings require you to change or add — every row you do not mention is kept
-as it is. A row you do upsert must be stated in full, since it replaces the previous one outright.
-Omit "excluded"/"supplemental" to keep them unchanged; include either one to replace that whole list.` },
+    { role: "system", content: `${systemPrompt}\n\n${statementUnificationCorrectionPrompt}` },
     { role: "user", content: `${context(inventory, requestedPeriods)}
 
 [YOUR PREVIOUS DECISION]
@@ -143,7 +143,7 @@ ${JSON.stringify(previous)}
 [FINDINGS AGAINST IT]
 ${findings.join("\n")}
 
-Fix every finding with the smallest correction that resolves it.` },
+${correctionInstruction}` },
   ]);
 }
 
@@ -170,7 +170,7 @@ async function request<T>(modelRouter: ModelRouter, schema: JsonSchema, messages
       if (schemaRetried) throw validationError;
       schemaRetried = true;
       messages.push({ role: "assistant", content: completion.text });
-      messages.push({ role: "user", content: `[VALIDATION ERROR]\n${validationError instanceof Error ? validationError.message : String(validationError)}\n\nRe-emit the corrected JSON object.` });
+      messages.push({ role: "user", content: `[VALIDATION ERROR]\n${validationError instanceof Error ? validationError.message : String(validationError)}\n\n${schemaCorrectionInstruction}` });
     }
   }
 }

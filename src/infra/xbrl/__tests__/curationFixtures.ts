@@ -1,5 +1,5 @@
 import type { Period, StatementKind } from "../../../financial-model/types.ts";
-import type { FilingTable } from "../../../infra/xbrl/tableTypes.ts";
+import type { FilingTable } from "../tableTypes.ts";
 
 /** Two fiscal years of minimal but structurally complete v2 tables. */
 export const REPORT_DATES = ["2024-09-28", "2025-09-27"];

@@ -60,7 +60,39 @@ const REVENUE_TOTAL_FORECAST =
 const OPERATING_NWC_FORECAST =
   "revenue.total * ratio.operating_nwc_to_revenue";
 
-/** Every spine target a statement mapping may claim. The premap reports each of these as mapped, demoted, or unmapped. */
+/**
+ * The spine targets the model cannot be built without: every one is read by a forecast formula or an
+ * accounting identity below. A mapping decision must place each of these or say in writing why the
+ * issuer has none — being wrong here changes the valuation.
+ *
+ * The working-capital components are here for a reason worth stating: `operating_working_capital` is
+ * derived from them by an identity rather than mapped directly, so what counts as working capital
+ * stays declared and checkable instead of becoming an invisible judgment inside one number.
+ */
+export const REQUIRED_MAPPING_IDS = new Set([
+  // Forecast formula inputs.
+  "revenue.total",
+  "operating_income",
+  "pretax_income",
+  "income_tax_expense",
+  "depreciation_amortization",
+  "capital_expenditures",
+  // Operating working capital identity.
+  "accounts_receivable",
+  "inventory",
+  "other_operating_current_assets",
+  "accounts_payable",
+  "deferred_revenue",
+  "accrued_operating_liabilities",
+  "other_operating_current_liabilities",
+]);
+
+/**
+ * Every spine target a statement mapping MAY claim. Beyond REQUIRED_MAPPING_IDS these are optional:
+ * useful when the issuer reports them, not worth a written justification when it does not. Anything
+ * an issuer reports and this list does not name is not lost — the unified statements keep it, and a
+ * material one belongs in detailRows.
+ */
 export const CANONICAL_MAPPING_IDS = new Set([
   "revenue.total",
   "operating_income",

@@ -19,18 +19,18 @@ const TF = "1Day" as const;
 
 test("sqlite: putBars dedupes and returns ascending by date", async () => {
   const s = store();
-  await s.putBars("AAPL", TF, [bar("2026-07-03", 103), bar("2026-07-01", 101)]);
-  await s.putBars("AAPL", TF, [bar("2026-07-02", 102)]);
-  const bars = await s.getBars("AAPL", TF, 10);
+  await s.putBars("AAPL", TF, "iex", [bar("2026-07-03", 103), bar("2026-07-01", 101)]);
+  await s.putBars("AAPL", TF, "iex", [bar("2026-07-02", 102)]);
+  const bars = await s.getBars("AAPL", TF, "iex", 10);
   assert.deepEqual(bars.map((b) => b.t), ["2026-07-01", "2026-07-02", "2026-07-03"]);
   s.close();
 });
 
 test("sqlite: upsert for the same date overwrites the old value (split refetch depends on this)", async () => {
   const s = store();
-  await s.putBars("AAPL", TF, [bar("2026-07-01", 101)]);
-  await s.putBars("AAPL", TF, [bar("2026-07-01", 50.5)]);
-  const bars = await s.getBars("AAPL", TF, 10);
+  await s.putBars("AAPL", TF, "iex", [bar("2026-07-01", 101)]);
+  await s.putBars("AAPL", TF, "iex", [bar("2026-07-01", 50.5)]);
+  const bars = await s.getBars("AAPL", TF, "iex", 10);
   assert.equal(bars.length, 1);
   assert.equal(bars[0]!.c, 50.5);
   s.close();
@@ -38,16 +38,16 @@ test("sqlite: upsert for the same date overwrites the old value (split refetch d
 
 test("sqlite: getBars takes the most recent N bars, still ascending", async () => {
   const s = store();
-  await s.putBars("AAPL", TF, [bar("2026-07-01", 1), bar("2026-07-02", 2), bar("2026-07-03", 3)]);
-  assert.deepEqual((await s.getBars("AAPL", TF, 2)).map((b) => b.t), ["2026-07-02", "2026-07-03"]);
+  await s.putBars("AAPL", TF, "iex", [bar("2026-07-01", 1), bar("2026-07-02", 2), bar("2026-07-03", 3)]);
+  assert.deepEqual((await s.getBars("AAPL", TF, "iex", 2)).map((b) => b.t), ["2026-07-02", "2026-07-03"]);
   s.close();
 });
 
 test("sqlite: getBarsOnOrAfter treats fromDate as inclusive", async () => {
   const s = store();
-  await s.putBars("AAPL", TF, [bar("2026-07-01", 1), bar("2026-07-02", 2), bar("2026-07-03", 3)]);
+  await s.putBars("AAPL", TF, "iex", [bar("2026-07-01", 1), bar("2026-07-02", 2), bar("2026-07-03", 3)]);
   assert.deepEqual(
-    (await s.getBarsOnOrAfter("AAPL", TF, "2026-07-02")).map((b) => b.t),
+    (await s.getBarsOnOrAfter("AAPL", TF, "iex", "2026-07-02")).map((b) => b.t),
     ["2026-07-02", "2026-07-03"],
   );
   s.close();
@@ -55,43 +55,43 @@ test("sqlite: getBarsOnOrAfter treats fromDate as inclusive", async () => {
 
 test("sqlite: symbols don't interfere with each other", async () => {
   const s = store();
-  await s.putBars("AAPL", TF, [bar("2026-07-01", 1)]);
-  await s.putBars("MSFT", TF, [bar("2026-07-01", 400)]);
-  assert.equal((await s.getBars("AAPL", TF, 10))[0]!.c, 1);
-  assert.equal((await s.getBars("MSFT", TF, 10))[0]!.c, 400);
+  await s.putBars("AAPL", TF, "iex", [bar("2026-07-01", 1)]);
+  await s.putBars("MSFT", TF, "iex", [bar("2026-07-01", 400)]);
+  assert.equal((await s.getBars("AAPL", TF, "iex", 10))[0]!.c, 1);
+  assert.equal((await s.getBars("MSFT", TF, "iex", 10))[0]!.c, 400);
   s.close();
 });
 
 test("sqlite: clearSymbol clears that symbol's bars and coverage", async () => {
   const s = store();
-  await s.putBars("AAPL", TF, [bar("2026-07-01", 1)]);
-  await s.putBars("MSFT", TF, [bar("2026-07-01", 400)]);
+  await s.putBars("AAPL", TF, "iex", [bar("2026-07-01", 1)]);
+  await s.putBars("MSFT", TF, "iex", [bar("2026-07-01", 400)]);
   await s.putCoverage({
-    symbol: "AAPL", timeframe: TF, firstDate: "2026-07-01", lastDate: "2026-07-01",
+    symbol: "AAPL", timeframe: TF, feed: "iex", firstDate: "2026-07-01", lastDate: "2026-07-01",
     backfilledAt: "2026-07-28T00:00:00Z", lastCheckedAt: "2026-07-28T00:00:00Z",
   });
-  await s.clearSymbol("AAPL", TF);
-  assert.deepEqual(await s.getBars("AAPL", TF, 10), []);
-  assert.equal(await s.getCoverage("AAPL", TF), undefined);
-  assert.equal((await s.getBars("MSFT", TF, 10)).length, 1); // did not mistakenly delete other symbols
+  await s.clearSymbol("AAPL", TF, "iex");
+  assert.deepEqual(await s.getBars("AAPL", TF, "iex", 10), []);
+  assert.equal(await s.getCoverage("AAPL", TF, "iex"), undefined);
+  assert.equal((await s.getBars("MSFT", TF, "iex", 10)).length, 1); // did not mistakenly delete other symbols
   s.close();
 });
 
 test("sqlite: coverage can be written, read back, and overwritten with updates", async () => {
   const s = store();
   await s.putCoverage({
-    symbol: "AAPL", timeframe: TF, firstDate: "2021-07-28", lastDate: "2026-07-27",
+    symbol: "AAPL", timeframe: TF, feed: "iex", firstDate: "2021-07-28", lastDate: "2026-07-27",
     backfilledAt: "2026-07-28T00:00:00Z", lastCheckedAt: "2026-07-28T00:00:00Z",
   });
-  assert.equal((await s.getCoverage("AAPL", TF))?.lastDate, "2026-07-27");
+  assert.equal((await s.getCoverage("AAPL", TF, "iex"))?.lastDate, "2026-07-27");
   await s.putCoverage({
-    symbol: "AAPL", timeframe: TF, firstDate: "2021-07-28", lastDate: "2026-07-28",
+    symbol: "AAPL", timeframe: TF, feed: "iex", firstDate: "2021-07-28", lastDate: "2026-07-28",
     backfilledAt: "2026-07-28T00:00:00Z", lastCheckedAt: "2026-07-28T14:00:00Z",
   });
-  const coverage = await s.getCoverage("AAPL", TF);
+  const coverage = await s.getCoverage("AAPL", TF, "iex");
   assert.equal(coverage?.lastDate, "2026-07-28");
   assert.equal(coverage?.lastCheckedAt, "2026-07-28T14:00:00Z");
-  assert.equal(await s.getCoverage("MSFT", TF), undefined);
+  assert.equal(await s.getCoverage("MSFT", TF, "iex"), undefined);
   s.close();
 });
 
@@ -102,17 +102,17 @@ test("sqlite: bulk write of 1260 bars (5-year backfill scale)", async () => {
     const d = new Date(Date.UTC(2021, 0, 1) + i * 86_400_000);
     bars.push(bar(d.toISOString().slice(0, 10), 100 + i * 0.1));
   }
-  await s.putBars("AAPL", TF, bars);
-  assert.equal((await s.getBars("AAPL", TF, 5000)).length, 1260);
+  await s.putBars("AAPL", TF, "iex", bars);
+  assert.equal((await s.getBars("AAPL", TF, "iex", 5000)).length, 1260);
   s.close();
 });
 
 test("sqlite: timeframes don't interfere with each other", async () => {
   const s = store();
-  await s.putBars("AAPL", "1Day", [bar("2026-07-01", 100)]);
-  await s.putBars("AAPL", "1Min", [bar("2026-07-01T13:30:00Z", 101)]);
-  assert.equal((await s.getBars("AAPL", "1Day", 10))[0]!.c, 100);
-  assert.equal((await s.getBars("AAPL", "1Min", 10))[0]!.c, 101);
+  await s.putBars("AAPL", "1Day", "iex", [bar("2026-07-01", 100)]);
+  await s.putBars("AAPL", "1Min", "iex", [bar("2026-07-01T13:30:00Z", 101)]);
+  assert.equal((await s.getBars("AAPL", "1Day", "iex", 10))[0]!.c, 100);
+  assert.equal((await s.getBars("AAPL", "1Min", "iex", 10))[0]!.c, 101);
   s.close();
 });
 
@@ -125,7 +125,7 @@ test("sqlite: legacy schema is dropped and rebuilt on startup", async () => {
   legacy.close();
 
   const s = SqliteBarStore.open(path);
-  await s.putBars("AAPL", "1Day", [bar("2026-07-01", 100)]);
-  assert.equal((await s.getBars("AAPL", "1Day", 10)).length, 1);
+  await s.putBars("AAPL", "1Day", "iex", [bar("2026-07-01", 100)]);
+  assert.equal((await s.getBars("AAPL", "1Day", "iex", 10)).length, 1);
   s.close();
 });

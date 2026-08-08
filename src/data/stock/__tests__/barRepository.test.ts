@@ -2,14 +2,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createBarRepository } from "../barRepository.ts";
 import { InMemoryBarStore } from "./inMemoryBarStore.ts";
-import type { DailyBar, Timeframe } from "../alpacaClient.ts";
+import type { DailyBar, BarFeed, Timeframe } from "../alpacaClient.ts";
 
 function bar(t: string, c: number): DailyBar {
   return { t, o: c, h: c, l: c, c, v: 1000, vw: c };
 }
 
 function fakeClient(script: DailyBar[][]) {
-  const calls: { symbol: string; timeframe: Timeframe; from: string; to: string }[] = [];
+  const calls: { symbol: string; timeframe: Timeframe; feed: BarFeed; from: string; to: string }[] = [];
   let index = 0;
   return {
     calls,
@@ -19,8 +19,9 @@ function fakeClient(script: DailyBar[][]) {
         timeframe: Timeframe,
         from: string,
         to: string,
+        feed: BarFeed = "iex",
       ): Promise<DailyBar[]> => {
-        calls.push({ symbol, timeframe, from, to });
+        calls.push({ symbol, timeframe, feed, from, to });
         return script[index++] ?? [];
       },
     },
@@ -38,10 +39,10 @@ test("first daily request uses the five-year full backfill window", async () => 
   const bars = await repo.getBars("AAPL", "1Day", 60);
 
   assert.deepEqual(calls[0], {
-    symbol: "AAPL", timeframe: "1Day", from: "2021-07-28", to: "2026-07-28",
+    symbol: "AAPL", timeframe: "1Day", feed: "iex", from: "2021-07-28", to: "2026-07-28",
   });
   assert.deepEqual(bars.map((b) => b.t), ["2026-07-24", "2026-07-27"]);
-  assert.equal((await store.getCoverage("AAPL", "1Day"))?.timeframe, "1Day");
+  assert.equal((await store.getCoverage("AAPL", "1Day", "iex"))?.timeframe, "1Day");
 });
 
 test("different timeframes use their own full backfill windows", async () => {
@@ -61,9 +62,9 @@ test("different timeframes use their own full backfill windows", async () => {
 
 test("does not request upstream when store data is fresh", async () => {
   const store = new InMemoryBarStore();
-  await store.putBars("AAPL", "1Day", [bar("2026-07-27", 101)]);
+  await store.putBars("AAPL", "1Day", "iex", [bar("2026-07-27", 101)]);
   await store.putCoverage({
-    symbol: "AAPL", timeframe: "1Day", firstDate: "2026-07-27", lastDate: "2026-07-27",
+    symbol: "AAPL", timeframe: "1Day", feed: "iex", firstDate: "2026-07-27", lastDate: "2026-07-27",
     backfilledAt: "2026-07-28T13:50:00Z", lastCheckedAt: "2026-07-28T13:50:00Z",
   });
   const { client, calls } = fakeClient([]);
@@ -75,9 +76,9 @@ test("does not request upstream when store data is fresh", async () => {
 
 test("daily incremental fetch only goes back ten days before the last bar", async () => {
   const store = new InMemoryBarStore();
-  await store.putBars("AAPL", "1Day", [bar("2026-07-20", 95), bar("2026-07-24", 100)]);
+  await store.putBars("AAPL", "1Day", "iex", [bar("2026-07-20", 95), bar("2026-07-24", 100)]);
   await store.putCoverage({
-    symbol: "AAPL", timeframe: "1Day", firstDate: "2026-07-20", lastDate: "2026-07-24",
+    symbol: "AAPL", timeframe: "1Day", feed: "iex", firstDate: "2026-07-20", lastDate: "2026-07-24",
     backfilledAt: "2026-07-24T20:00:00Z", lastCheckedAt: "2026-07-24T20:00:00Z",
   });
   const { client, calls } = fakeClient([
@@ -93,9 +94,9 @@ test("daily incremental fetch only goes back ten days before the last bar", asyn
 
 test("minute incremental fetch goes back five minutes before the last bar's timestamp", async () => {
   const store = new InMemoryBarStore();
-  await store.putBars("AAPL", "1Min", [bar("2026-07-28T13:40:00.000Z", 100)]);
+  await store.putBars("AAPL", "1Min", "iex", [bar("2026-07-28T13:40:00.000Z", 100)]);
   await store.putCoverage({
-    symbol: "AAPL", timeframe: "1Min", firstDate: "2026-07-28T13:40:00.000Z",
+    symbol: "AAPL", timeframe: "1Min", feed: "iex", firstDate: "2026-07-28T13:40:00.000Z",
     lastDate: "2026-07-28T13:40:00.000Z", backfilledAt: "2026-07-28T13:40:00Z",
     lastCheckedAt: "2026-07-28T13:40:00Z",
   });
@@ -110,15 +111,15 @@ test("minute incremental fetch goes back five minutes before the last bar's time
 test("split price divergence clears only the affected timeframe and does a full refetch", async () => {
   class TrackingStore extends InMemoryBarStore {
     clears: Array<[string, Timeframe]> = [];
-    override async clearSymbol(symbol: string, timeframe: Timeframe): Promise<void> {
+    override async clearSymbol(symbol: string, timeframe: Timeframe, feed: BarFeed): Promise<void> {
       this.clears.push([symbol, timeframe]);
-      await super.clearSymbol(symbol, timeframe);
+      await super.clearSymbol(symbol, timeframe, feed);
     }
   }
   const store = new TrackingStore();
-  await store.putBars("AAPL", "1Day", [bar("2026-07-20", 190), bar("2026-07-24", 200)]);
+  await store.putBars("AAPL", "1Day", "iex", [bar("2026-07-20", 190), bar("2026-07-24", 200)]);
   await store.putCoverage({
-    symbol: "AAPL", timeframe: "1Day", firstDate: "2026-07-20", lastDate: "2026-07-24",
+    symbol: "AAPL", timeframe: "1Day", feed: "iex", firstDate: "2026-07-20", lastDate: "2026-07-24",
     backfilledAt: "2026-07-24T20:00:00Z", lastCheckedAt: "2026-07-24T20:00:00Z",
   });
   const { client, calls } = fakeClient([
@@ -154,19 +155,19 @@ test("count limits the number of bars returned and an empty backfill does not wr
   const repo = createBarRepository({ store, client, now: fixedNow });
   assert.deepEqual((await repo.getBars("AAPL", "1Day", 2)).map((b) => b.c), [2, 3]);
   assert.deepEqual(await repo.getBars("NOSUCH", "1Day", 60), []);
-  assert.equal(await store.getCoverage("NOSUCH", "1Day"), undefined);
+  assert.equal(await store.getCoverage("NOSUCH", "1Day", "iex"), undefined);
 });
 
 test("getBarsBetween returns the inclusive range in ascending order", async () => {
   const store = new InMemoryBarStore();
-  await store.putBars("AAPL", "1Day", [
+  await store.putBars("AAPL", "1Day", "iex", [
     bar("2026-01-05", 10),
     bar("2026-01-06", 20),
     bar("2026-01-07", 30),
     bar("2026-01-08", 40),
   ]);
   await store.putCoverage({
-    symbol: "AAPL", timeframe: "1Day", firstDate: "2026-01-05", lastDate: "2026-01-08",
+    symbol: "AAPL", timeframe: "1Day", feed: "iex", firstDate: "2026-01-05", lastDate: "2026-01-08",
     backfilledAt: "2026-01-08T00:00:00.000Z", lastCheckedAt: "2026-01-08T00:00:00.000Z",
   });
   const repo = createBarRepository({
@@ -181,9 +182,9 @@ test("getBarsBetween returns the inclusive range in ascending order", async () =
 
 test("getBarsBetween returns nothing when from is after to", async () => {
   const store = new InMemoryBarStore();
-  await store.putBars("AAPL", "1Day", [bar("2026-01-05", 10)]);
+  await store.putBars("AAPL", "1Day", "iex", [bar("2026-01-05", 10)]);
   await store.putCoverage({
-    symbol: "AAPL", timeframe: "1Day", firstDate: "2026-01-05", lastDate: "2026-01-05",
+    symbol: "AAPL", timeframe: "1Day", feed: "iex", firstDate: "2026-01-05", lastDate: "2026-01-05",
     backfilledAt: "2026-01-05T00:00:00.000Z", lastCheckedAt: "2026-01-05T00:00:00.000Z",
   });
   const repo = createBarRepository({
@@ -197,9 +198,9 @@ test("getBarsBetween returns nothing when from is after to", async () => {
 
 test("getBarsBetween returns nothing when the range misses local coverage", async () => {
   const store = new InMemoryBarStore();
-  await store.putBars("AAPL", "1Day", [bar("2026-01-05", 10)]);
+  await store.putBars("AAPL", "1Day", "iex", [bar("2026-01-05", 10)]);
   await store.putCoverage({
-    symbol: "AAPL", timeframe: "1Day", firstDate: "2026-01-05", lastDate: "2026-01-05",
+    symbol: "AAPL", timeframe: "1Day", feed: "iex", firstDate: "2026-01-05", lastDate: "2026-01-05",
     backfilledAt: "2026-01-05T00:00:00.000Z", lastCheckedAt: "2026-01-05T00:00:00.000Z",
   });
   const repo = createBarRepository({

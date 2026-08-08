@@ -597,3 +597,52 @@ test("the host stamps reviewedAt, so an agent-supplied timestamp never reaches t
     assert.ok(stamp >= before && stamp <= after, `${stamp} must be stamped by the host, not the agent`);
   }
 });
+
+const spineFact = (lineItemId: string, periodId: string, value: number): Fact => ({
+  factId: `spine.${lineItemId}.${periodId}`, status: "staged", lineItemId, periodId, value,
+  unit: { kind: "currency", code: "USD" },
+  provenance: { sourceType: "unified_statements", sourceRefs: [`unified.${lineItemId}.${periodId}`], asOfDate: "2026-08-07" },
+});
+
+test("stageSpineFacts stages onto canonical targets and selects the actual periods", () => {
+  const { store, service } = setup();
+  service.createModel(CREATE_INPUT);
+  const facts = [spineFact("revenue.total", "FY2024", 100), spineFact("revenue.total", "FY2025", 120)];
+  const result = service.stageSpineFacts("model-1", 0, { facts, historicalPeriodIds: ["FY2024", "FY2025"] });
+  assert.equal(result.revision, 1);
+
+  const snapshot = store.getRevision("model-1")!.snapshot;
+  assert.deepEqual(snapshot.selectedHistoricalPeriodIds, ["FY2024", "FY2025"]);
+  // Staged, never committed: the subagent has no authority to accept its own numbers.
+  const landed = snapshot.facts.filter((fact) => fact.lineItemId === "revenue.total");
+  assert.equal(landed.length, 2);
+  assert.ok(landed.every((fact) => fact.status === "staged"), JSON.stringify(landed.map((f) => f.status)));
+});
+
+test("a revenue detail row is installed as a revenue stream and carries its label", () => {
+  const { service } = setup();
+  service.createModel(CREATE_INPUT);
+  service.stageSpineFacts("model-1", 0, {
+    facts: [spineFact("revenue.automotive", "FY2024", 80)],
+    labels: { "revenue.automotive": "Automotive revenues" },
+    historicalPeriodIds: ["FY2024"],
+  });
+  const view = service.getModel("model-1");
+  assert.ok("currentWorkbook" in view);
+  const stream = view.currentWorkbook.sections.revenue.find((row) => row.lineItemId === "revenue.automotive");
+  assert.equal(stream?.label, "Automotive revenues");
+});
+
+test("a detail row whose parent refuses children costs that row, not the batch", () => {
+  const { service } = setup();
+  service.createModel(CREATE_INPUT);
+  // `free_cash_flow` is a computed DCF node, not a safe detail parent.
+  const result = service.stageSpineFacts("model-1", 0, {
+    facts: [spineFact("free_cash_flow.invented", "FY2024", 5), spineFact("revenue.total", "FY2024", 100)],
+    historicalPeriodIds: ["FY2024"],
+  });
+  const view = service.getModel("model-1");
+  assert.ok("currentWorkbook" in view);
+  assert.equal(view.currentWorkbook.revision, result.revision);
+  assert.ok(!view.currentWorkbook.sections.dcf.some((row) => row.lineItemId === "free_cash_flow.invented"));
+});

@@ -1,4 +1,3 @@
-import { AUTO_PREMAP_PLAN_PREFIX, isAutoPremapPlan } from "./autoPremap.ts";
 import { cellKey, splitCellKey, type CellKey } from "./dsl/graph.ts";
 import { parseFormula } from "./dsl/parser.ts";
 import { ENGINE_VERSION, evaluate } from "./engine.ts";
@@ -78,16 +77,12 @@ export type CreateModelInput = NewModelMeta & {
   valuationConfig?: ValuationConfig;
 };
 
-export type AutoPremapInput = {
-  plans: readonly StatementMappingPlan[];
-  streams: readonly { id: string; label: string }[];
-  /** Rows the engine may still have to install (decomposition children); installed only when referenced. */
-  sourceRows?: readonly PreparedStatementRow[];
-  /** Staged candidates for the rows above; installed only for rows this call adds. */
-  facts?: readonly Fact[];
+export type StageSpineFactsInput = {
+  /** Canonical spine and detail facts from `buildSpineFromUnified`, all still `staged`. */
+  facts: readonly Fact[];
   historicalPeriodIds: readonly string[];
-  reviewedBy: string;
-  rationale: string;
+  /** Display labels for detail line items this call has to install, keyed by line item id. */
+  labels?: Readonly<Record<string, string>>;
 };
 
 export type ReviewFactsInput = {
@@ -281,14 +276,16 @@ export class FinancialModelService {
   }
 
   /**
-   * Commits deterministic pre-mapping output (auto-premapping spec §6). The engine owns its plans and
-   * the streams they target as one replaceable set: each run installs the current engine output and
-   * drops the engine artifacts it no longer produces, while agent-authored plans and streams — and
-   * every target an agent has already claimed through `set_statement_mapping_plan` — are left alone.
-   * Re-running with unchanged engine output commits nothing and returns the current revision, which
-   * is what keeps a repeated `apply_revenue_decomposition` idempotent.
+   * Stages the canonical spine facts the `spine_mapping` subagent produced from the unified
+   * statements. Staging, not committing: the subagent has no authority over a revision, so the facts
+   * land as candidates and the owning agent accepts them through `review_financial_model_history`.
+   *
+   * Supplementary detail rows arrive as ids the skeleton does not carry yet. A revenue detail becomes
+   * a revenue stream; any other detail becomes a DCF detail line item under its parent. A detail whose
+   * parent refuses children is dropped rather than failing the whole batch — it is supplementary by
+   * definition, and losing one must not cost the issuer its spine.
    */
-  applyAutoPremap(modelId: string, expectedRevision: number, input: AutoPremapInput): CommitResult {
+  stageSpineFacts(modelId: string, expectedRevision: number, input: StageSpineFactsInput): CommitResult {
     const parent = this.loadForMutation(modelId, expectedRevision);
     const working = structuredClone(parent.snapshot);
     if (working.selectedHistoricalPeriodIds.length === 0) {
@@ -297,138 +294,38 @@ export class FinancialModelService {
         [...input.historicalPeriodIds],
       );
     }
-    const selected = new Set(working.selectedHistoricalPeriodIds);
     const knownPeriods = new Set(working.periods.map((period) => period.id));
-    const existingItemIds = new Set(working.lineItems.map((item) => item.id));
-    const autoPlans = working.statementMappingPlans.filter(isAutoPremapPlan);
-    const agentPlans = working.statementMappingPlans.filter((plan) => !isAutoPremapPlan(plan));
-    const agentTargets = new Set(agentPlans.map((plan) => plan.targetLineItemId));
-    const engineStreamIds = new Set(autoPlans
-      .map((plan) => plan.targetLineItemId)
-      .filter(isRevenueStreamId));
-    const desiredStreamIds = new Set(input.streams.map((stream) => `revenue.${stream.id}`));
-    const candidateRows = new Map((input.sourceRows ?? []).map((row) => [row.sourceLineItemId, row]));
-
-    const incoming: StatementMappingPlan[] = [];
-    for (const plan of input.plans) {
-      if (agentTargets.has(plan.targetLineItemId)) continue;
-      if (isRevenueStreamId(plan.targetLineItemId)
-        && existingItemIds.has(plan.targetLineItemId)
-        && !engineStreamIds.has(plan.targetLineItemId)) continue;
-      if (plan.members.some((member) => !existingItemIds.has(member.sourceLineItemId)
-        && !candidateRows.has(member.sourceLineItemId))) continue;
-      const periodIds = orderedPeriods(working, plan.periodIds.filter((id) => selected.has(id)));
-      if (periodIds.length === 0) continue;
-      incoming.push({ ...structuredClone(plan), periodIds });
-    }
-
-    const newRows = [...new Set(incoming.flatMap((plan) =>
-      plan.members.map((member) => member.sourceLineItemId)))]
-      .filter((id) => !existingItemIds.has(id))
-      .map((id) => candidateRows.get(id)!);
-    const installedRowIds = new Set(newRows.map((row) => row.sourceLineItemId));
-    const existingFactIds = new Set(working.facts.map((fact) => fact.factId));
-    const activeCells = new Set(working.facts
-      .filter((fact) => fact.status === "committed")
-      .map((fact) => `${fact.lineItemId} ${fact.periodId}`));
-    const newFacts = (input.facts ?? []).filter((fact) => fact.status === "staged"
-      && fact.lineItemId !== undefined
-      && installedRowIds.has(fact.lineItemId)
-      && knownPeriods.has(fact.periodId)
-      && !existingFactIds.has(fact.factId)
-      && !activeCells.has(`${fact.lineItemId} ${fact.periodId}`));
-
     let skeleton = skeletonOf(working);
-    if (newRows.length > 0) skeleton = addSourceStatementRows(skeleton, newRows);
-    const staleStreamIds = new Set([...engineStreamIds].filter((id) =>
-      !desiredStreamIds.has(id) && !streamIsReferenced(working, skeleton, id)));
-    skeleton = removeRevenueStreams(skeleton, staleStreamIds);
-    working.assumptions = working.assumptions.filter((assumption) =>
-      !staleStreamIds.has(assumption.lineItemId.replace(/^growth\./, "")));
-    const presentIds = new Set(skeleton.lineItems.map((item) => item.id));
-    const addedStreams = input.streams.filter((stream) => !presentIds.has(`revenue.${stream.id}`));
-    for (const stream of addedStreams) {
-      skeleton = addRevenueStream(skeleton, { id: stream.id, label: stream.label });
+    const present = () => new Set(skeleton.lineItems.map((item) => item.id));
+    for (const lineItemId of new Set(input.facts.map((fact) => fact.lineItemId))) {
+      if (lineItemId === undefined || present().has(lineItemId)) continue;
+      const separator = lineItemId.lastIndexOf(".");
+      const parentId = separator < 0 ? "" : lineItemId.slice(0, separator);
+      const slug = lineItemId.slice(separator + 1);
+      try {
+        skeleton = parentId === "revenue"
+          ? addRevenueStream(skeleton, { id: slug, label: input.labels?.[lineItemId] ?? slug })
+          : addDcfDetailLineItem(skeleton, { id: slug, label: input.labels?.[lineItemId] ?? slug, parentLineItemId: parentId });
+      } catch { /* supplementary by definition: a parent that refuses children costs one detail row, not the spine */ }
     }
-    const incomingKeys = new Set(incoming.map(planKey));
-    const stalePlans = autoPlans.filter((plan) => !incomingKeys.has(planKey(plan)));
-    skeleton = dropHistoricalPlanFormulas(skeleton, stalePlans);
-
-    const stagedByCell = new Map<string, Fact>();
-    for (const fact of [...working.facts, ...newFacts]) {
-      if (fact.status !== "staged" || fact.lineItemId === undefined) continue;
-      stagedByCell.set(`${fact.lineItemId} ${fact.periodId}`, fact);
-    }
-    const decisionIds = new Set(working.factReviewDecisions.map((decision) => decision.decisionId));
-    const reviewedAt = new Date().toISOString();
-    const decisions: FactReviewDecision[] = [];
-    for (const plan of incoming) {
-      for (const member of plan.members) {
-        if (member.treatment === "exclude") continue;
-        for (const periodId of plan.periodIds) {
-          const fact = stagedByCell.get(`${member.sourceLineItemId} ${periodId}`);
-          const decisionId = fact === undefined
-            ? undefined
-            : `${AUTO_PREMAP_PLAN_PREFIX}commit-${fact.factId}`;
-          if (fact === undefined || decisionId === undefined || decisionIds.has(decisionId)) continue;
-          decisionIds.add(decisionId);
-          decisions.push({
-            decisionId,
-            factId: fact.factId,
-            action: "commit",
-            mappedLineItemId: member.sourceLineItemId,
-            rationale: input.rationale,
-            reviewedBy: input.reviewedBy,
-            reviewedAt,
-          });
-        }
-      }
-    }
-
-    const planSetChanged = stalePlans.length > 0 || incoming.length !== autoPlans.length;
-    if (!planSetChanged
-      && newRows.length === 0
-      && newFacts.length === 0
-      && decisions.length === 0
-      && addedStreams.length === 0
-      && staleStreamIds.size === 0
-      && working.selectedHistoricalPeriodIds.length === parent.snapshot.selectedHistoricalPeriodIds.length) {
-      return commitResult(parent);
-    }
-
     acceptSkeleton(working, skeleton);
-    working.facts = stageFactCandidates(working.facts, newFacts);
-    if (decisions.length > 0) {
-      working.facts = applyFactReview(working.facts, decisions);
-      working.factReviewDecisions.push(...structuredClone(decisions));
-    }
-    validateMappingPeriods(working, incoming);
-    acceptSkeleton(working, applyStatementMappingPlans(skeletonOf(working), incoming));
-    working.statementMappingPlans = sortStatementPlans(working, [...agentPlans, ...incoming]);
-    working.mappingException = null;
+
+    const installed = new Set(working.lineItems.map((item) => item.id));
+    const existingFactIds = new Set(working.facts.map((fact) => fact.factId));
+    const candidates = input.facts.filter((fact) => fact.lineItemId !== undefined
+      && installed.has(fact.lineItemId)
+      && knownPeriods.has(fact.periodId)
+      && !existingFactIds.has(fact.factId));
+    working.facts = stageFactCandidates(working.facts, candidates);
     const calculated = recalculate(working);
-    const changes: RevisionChange[] = [];
-    if (newRows.length > 0) {
-      changes.push({
-        kind: "statements_staged",
-        rowCount: newRows.length,
-        candidateCount: newFacts.length,
-        mappedLineItemIds: orderedLineItems(calculated, newRows.map((row) => row.sourceLineItemId)),
-        periodIds: orderedPeriods(calculated, newFacts.map((fact) => fact.periodId)),
-      });
-    }
-    if (decisions.length > 0) changes.push(factsReviewedChange(calculated, decisions));
-    changes.push(...addedStreams.map((stream) => ({
-      kind: "line_item_added" as const,
-      lineItemId: `revenue.${stream.id}`,
-      parentId: "revenue",
-    })));
-    changes.push(...incoming.map((plan) => ({
-      kind: "statement_mapping_plan_set" as const,
-      targetLineItemId: plan.targetLineItemId,
-      periodIds: orderedPeriods(calculated, plan.periodIds),
-    })));
-    return this.commit(modelId, expectedRevision, calculated, makeSummary(calculated, changes));
+    const factChange = factsStagedChange(calculated, candidates);
+    return this.commit(modelId, expectedRevision, calculated, makeSummary(calculated, [{
+      kind: "statements_staged",
+      rowCount: candidates.length,
+      candidateCount: factChange.candidateCount,
+      mappedLineItemIds: factChange.mappedLineItemIds,
+      periodIds: factChange.periodIds,
+    }]));
   }
 
   reviewFacts(modelId: string, expectedRevision: number, input: ReviewFactsInput): CommitResult {
@@ -441,8 +338,7 @@ export class FinancialModelService {
       throw new FinancialModelError("invalid_model_operation", "fact review mutation must not be empty");
     }
     const working = structuredClone(parent.snapshot);
-    // When the review time is left to the agent it invents one. The ledger's clock is the host's,
-    // the same as on the deterministic premap path above.
+    // When the review time is left to the agent it invents one. The ledger's clock is the host's.
     const reviewedAt = new Date().toISOString();
     const decisions = input.decisions.map((decision) => ({ ...structuredClone(decision), reviewedAt }));
     ensureUniqueDecisionIds(working.factReviewDecisions, decisions);
@@ -452,20 +348,17 @@ export class FinancialModelService {
       working.periods,
       input.selectedHistoricalPeriodIds,
     );
-    const enginePlans = working.statementMappingPlans.filter(isAutoPremapPlan);
-    const engineStreamIds = new Set(enginePlans
-      .map((plan) => plan.targetLineItemId)
-      .filter(isRevenueStreamId));
+    const presentIds = new Set(working.lineItems.map((item) => item.id));
     let importSkeleton = skeletonOf(working);
     for (const item of input.categoryLineItems) {
       if (item.parentLineItemId === "revenue") {
         const slug = item.id.startsWith("revenue.")
           ? item.id.slice("revenue.".length)
           : item.id;
-        // Confirming a stream the engine already pre-mapped is a no-op, not a duplicate definition.
-        if (engineStreamIds.has(`revenue.${slug}`)) continue;
+        // Confirming a stream `stageSpineFacts` already installed is a no-op, not a redefinition.
+        if (presentIds.has(`revenue.${slug}`)) continue;
         importSkeleton = addRevenueStream(importSkeleton, { id: slug, label: item.label });
-      } else {
+      } else if (!presentIds.has(item.id)) {
         importSkeleton = addDcfDetailLineItem(importSkeleton, item);
       }
     }
@@ -475,19 +368,14 @@ export class FinancialModelService {
       ...structuredClone(plan),
       periodIds: orderedPeriods(working, plan.periodIds),
     }));
-    // Engine-authored premap plans are not an agent commit: the deterministic import fills the
-    // workbook before the mapping_review agent ever sees it, so they must not close the one-shot
-    // initial-mapping window. Only agent-authored plans do. The agent's proposal is then a delta
-    // over the premap (spec §5): engine plans it does not restate are retained below.
-    const agentAuthoredPlans = working.statementMappingPlans.filter((plan) => !isAutoPremapPlan(plan));
-    if (agentAuthoredPlans.length > 0 && normalizedPlans.length > 0) {
+    // The initial mapping is one shot: once plans exist, further changes go through
+    // `set_statement_mapping_plan` so each one is its own auditable operation.
+    if (working.statementMappingPlans.length > 0 && normalizedPlans.length > 0) {
       throw new FinancialModelError(
         "invalid_model_operation",
         "initial statement mappings are already committed; use set_statement_mapping_plan",
       );
     }
-    const supersededTargets = new Set(normalizedPlans.map((plan) => plan.targetLineItemId));
-    const retainedEnginePlans = enginePlans.filter((plan) => !supersededTargets.has(plan.targetLineItemId));
     let compiled = applyStatementMappingPlans(skeletonOf(working), normalizedPlans);
     const normalizedGroups = input.categoryGroups.map((group) => ({
       ...structuredClone(group),
@@ -501,7 +389,7 @@ export class FinancialModelService {
     }
     compiled = applyDcfCategoryGroups(compiled, normalizedGroups);
     acceptSkeleton(working, compiled);
-    working.statementMappingPlans = sortStatementPlans(working, [...retainedEnginePlans, ...normalizedPlans]);
+    working.statementMappingPlans = sortStatementPlans(working, normalizedPlans);
     working.categoryGroups = sortCategoryGroups(working, normalizedGroups);
     working.mappingException = null;
     const calculated = recalculate(working);

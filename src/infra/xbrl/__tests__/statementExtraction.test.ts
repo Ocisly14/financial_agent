@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { InMemoryFilingInsightStore } from "../../../infra/filing-insights/store.ts";
-import { InMemoryFilingTableStore } from "../../../infra/xbrl/filingTableStore.ts";
-import { InMemorySourceReviewStore } from "../../../infra/xbrl/sourceReviewStore.ts";
-import type { PreparedStatementProvider } from "../../../infra/xbrl/preparedStatementProvider.ts";
-import { runStatementExtraction } from "../subagents.ts";
+import { InMemoryFilingInsightStore } from "../../filing-insights/store.ts";
+import { InMemoryFilingTableStore } from "../filingTableStore.ts";
+import { InMemorySourceReviewStore } from "../sourceReviewStore.ts";
+import type { PreparedStatementProvider } from "../preparedStatementProvider.ts";
+import { runStatementExtraction } from "../statementExtraction.ts";
 import { filingTable, PERIODS, REPORT_DATES } from "./curationFixtures.ts";
 
 const TABLES = REPORT_DATES.flatMap((reportDate, index) => ["is", "bs", "cf"]

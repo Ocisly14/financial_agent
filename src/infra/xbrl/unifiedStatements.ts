@@ -38,7 +38,9 @@ export type UnificationExclusion = { conceptQName: string; dimensionSignature?: 
 export type UnificationSupplemental = { conceptQName: string; dimensionSignature?: string;
   openingBalance?: boolean; label: string; reason: string };
 export type UnificationDecision = { rows: UnifiedRowDecision[];
-  excluded?: UnificationExclusion[]; supplemental?: UnificationSupplemental[] };
+  excluded?: UnificationExclusion[]; supplemental?: UnificationSupplemental[];
+  /** The agent's prose account of the decision. Not consumed here; reported to the DCF orchestrator. */
+  notes?: string };
 
 /**
  * A correction to an existing decision. Findings normally touch a handful of rows out of a hundred,
@@ -49,6 +51,8 @@ export type UnificationDecision = { rows: UnifiedRowDecision[];
 export type UnificationPatch = {
   upsertRows?: UnifiedRowDecision[];
   deleteRowIds?: string[];
+  /** Replaces the notes wholesale: a corrected decision needs a corrected account of itself. */
+  notes?: string;
   excluded?: UnificationExclusion[];
   supplemental?: UnificationSupplemental[];
 };
@@ -66,6 +70,7 @@ export function applyUnificationPatch(base: UnificationDecision, patch: Unificat
     rows,
     ...(patch.excluded ?? base.excluded ? { excluded: patch.excluded ?? base.excluded } : {}),
     ...(patch.supplemental ?? base.supplemental ? { supplemental: patch.supplemental ?? base.supplemental } : {}),
+    ...(patch.notes ?? base.notes ? { notes: patch.notes ?? base.notes } : {}),
   };
 }
 

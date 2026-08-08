@@ -1,5 +1,23 @@
 const ALPACA_BASE = "https://data.alpaca.markets/v2";
 const FEED = "iex";
+/** Consolidated tape: every exchange, and history well before IEX's own 2020 start. Beta needs both,
+ *  so it opts in explicitly rather than changing what the chart and indicator tools already fetch. */
+export type BarFeed = "iex" | "sip";
+
+/**
+ * Days of the consolidated tape this subscription may not query. Asking for anything more recent is
+ * a 403, not an empty page, so the window is clamped rather than retried. Everything SIP is wanted
+ * for — long histories for beta — is unaffected by ending a few days early.
+ */
+const SIP_EMBARGO_DAYS = 4;
+
+function clampToFeedWindow(to: string, feed: BarFeed): string {
+  if (feed !== "sip") return to;
+  const latest = new Date();
+  latest.setUTCDate(latest.getUTCDate() - SIP_EMBARGO_DAYS);
+  const iso = latest.toISOString().slice(0, 10);
+  return to > iso ? iso : to;
+}
 
 function requiredEnv(key: string): string {
   const value = process.env[key];
@@ -33,7 +51,7 @@ export type Snapshot = {
 };
 
 export type BarFetcher = {
-  fetchBars: (symbol: string, timeframe: Timeframe, from: string, to: string) => Promise<DailyBar[]>;
+  fetchBars: (symbol: string, timeframe: Timeframe, from: string, to: string, feed?: BarFeed) => Promise<DailyBar[]>;
 };
 
 function asRecord(val: unknown): Record<string, unknown> | undefined {
@@ -102,8 +120,11 @@ export async function fetchBars(
   timeframe: Timeframe,
   from: string,
   to: string,
+  feed: BarFeed = FEED,
 ): Promise<DailyBar[]> {
-  const qs = `timeframe=${timeframe}&start=${encodeURIComponent(from)}&end=${encodeURIComponent(to)}&adjustment=all&limit=10000&feed=${FEED}`;
+  const end = clampToFeedWindow(to, feed);
+  if (from > end) return [];
+  const qs = `timeframe=${timeframe}&start=${encodeURIComponent(from)}&end=${encodeURIComponent(end)}&adjustment=all&limit=10000&feed=${feed}`;
   return fetchBarsPaged(`/stocks/${encodeURIComponent(symbol)}/bars?${qs}`, timeframe === "1Day");
 }
 

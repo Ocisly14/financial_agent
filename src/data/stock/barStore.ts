@@ -1,11 +1,14 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import type { DailyBar, Timeframe } from "./alpacaClient.ts";
+import type { BarFeed, DailyBar, Timeframe } from "./alpacaClient.ts";
 
 export type Coverage = {
   symbol: string;
   timeframe: Timeframe;
+  /** Which tape the bars came from. IEX and SIP disagree on the same day's close — one is a single
+   *  exchange, the other the consolidated tape — so they are cached side by side, never merged. */
+  feed: BarFeed;
   firstDate: string;
   lastDate: string;
   backfilledAt: string;
@@ -13,14 +16,14 @@ export type Coverage = {
 };
 
 export interface BarStore {
-  getCoverage(symbol: string, timeframe: Timeframe): Promise<Coverage | undefined>;
+  getCoverage(symbol: string, timeframe: Timeframe, feed: BarFeed): Promise<Coverage | undefined>;
   putCoverage(coverage: Coverage): Promise<void>;
   /** The most recent `limit` bars, ascending by date (oldest first). */
-  getBars(symbol: string, timeframe: Timeframe, limit: number): Promise<DailyBar[]>;
+  getBars(symbol: string, timeframe: Timeframe, feed: BarFeed, limit: number): Promise<DailyBar[]>;
   /** All bars from fromDate onward (inclusive), ascending by date. */
-  getBarsOnOrAfter(symbol: string, timeframe: Timeframe, fromDate: string): Promise<DailyBar[]>;
-  putBars(symbol: string, timeframe: Timeframe, bars: DailyBar[]): Promise<void>;
-  clearSymbol(symbol: string, timeframe: Timeframe): Promise<void>;
+  getBarsOnOrAfter(symbol: string, timeframe: Timeframe, feed: BarFeed, fromDate: string): Promise<DailyBar[]>;
+  putBars(symbol: string, timeframe: Timeframe, feed: BarFeed, bars: DailyBar[]): Promise<void>;
+  clearSymbol(symbol: string, timeframe: Timeframe, feed: BarFeed): Promise<void>;
 }
 
 type BarRow = { t: string; o: number; h: number; l: number; c: number; v: number; vw: number };
@@ -29,6 +32,7 @@ const SCHEMA = `
 CREATE TABLE IF NOT EXISTS stock_bars (
   symbol TEXT NOT NULL,
   timeframe TEXT NOT NULL,
+  feed   TEXT NOT NULL,
   t      TEXT NOT NULL,
   o      REAL NOT NULL,
   h      REAL NOT NULL,
@@ -37,24 +41,28 @@ CREATE TABLE IF NOT EXISTS stock_bars (
   v      REAL NOT NULL,
   vw     REAL NOT NULL,
   updated_at TEXT NOT NULL,
-  PRIMARY KEY (symbol, timeframe, t)
+  PRIMARY KEY (symbol, timeframe, feed, t)
 );
 CREATE TABLE IF NOT EXISTS stock_bar_coverage (
   symbol         TEXT NOT NULL,
   timeframe      TEXT NOT NULL,
+  feed           TEXT NOT NULL,
   first_date     TEXT NOT NULL,
   last_date      TEXT NOT NULL,
   backfilled_at  TEXT NOT NULL,
   last_checked_at TEXT NOT NULL,
-  PRIMARY KEY (symbol, timeframe)
+  PRIMARY KEY (symbol, timeframe, feed)
 );
 `;
 
+/** Cached bars are a rebuildable copy of a vendor API, so a missing column is dropped and refetched
+ *  rather than migrated. */
 function hasLegacySchema(db: DatabaseSync, table: string): boolean {
   const exists = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
   if (!exists) return false;
   const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
-  return !columns.some((column) => column.name === "timeframe");
+  const names = new Set(columns.map((column) => column.name));
+  return !names.has("timeframe") || !names.has("feed");
 }
 
 /**
@@ -87,16 +95,17 @@ export class SqliteBarStore implements BarStore {
     this.db.close();
   }
 
-  async getCoverage(symbol: string, timeframe: Timeframe): Promise<Coverage | undefined> {
+  async getCoverage(symbol: string, timeframe: Timeframe, feed: BarFeed): Promise<Coverage | undefined> {
     const row = this.db
       .prepare(
-        "SELECT symbol, timeframe, first_date, last_date, backfilled_at, last_checked_at FROM stock_bar_coverage WHERE symbol = ? AND timeframe = ?",
+        "SELECT symbol, timeframe, feed, first_date, last_date, backfilled_at, last_checked_at FROM stock_bar_coverage WHERE symbol = ? AND timeframe = ? AND feed = ?",
       )
-      .get(symbol, timeframe) as Record<string, string> | undefined;
+      .get(symbol, timeframe, feed) as Record<string, string> | undefined;
     if (!row) return undefined;
     return {
       symbol: row["symbol"]!,
       timeframe: row["timeframe"]! as Timeframe,
+      feed: row["feed"]! as BarFeed,
       firstDate: row["first_date"]!,
       lastDate: row["last_date"]!,
       backfilledAt: row["backfilled_at"]!,
@@ -107,9 +116,9 @@ export class SqliteBarStore implements BarStore {
   async putCoverage(coverage: Coverage): Promise<void> {
     this.db
       .prepare(
-        `INSERT INTO stock_bar_coverage (symbol, timeframe, first_date, last_date, backfilled_at, last_checked_at)
-         VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT(symbol, timeframe) DO UPDATE SET
+        `INSERT INTO stock_bar_coverage (symbol, timeframe, feed, first_date, last_date, backfilled_at, last_checked_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(symbol, timeframe, feed) DO UPDATE SET
            first_date = excluded.first_date,
            last_date = excluded.last_date,
            backfilled_at = excluded.backfilled_at,
@@ -118,6 +127,7 @@ export class SqliteBarStore implements BarStore {
       .run(
         coverage.symbol,
         coverage.timeframe,
+        coverage.feed,
         coverage.firstDate,
         coverage.lastDate,
         coverage.backfilledAt,
@@ -125,26 +135,26 @@ export class SqliteBarStore implements BarStore {
       );
   }
 
-  async getBars(symbol: string, timeframe: Timeframe, limit: number): Promise<DailyBar[]> {
+  async getBars(symbol: string, timeframe: Timeframe, feed: BarFeed, limit: number): Promise<DailyBar[]> {
     const rows = this.db
-      .prepare("SELECT t, o, h, l, c, v, vw FROM stock_bars WHERE symbol = ? AND timeframe = ? ORDER BY t DESC LIMIT ?")
-      .all(symbol, timeframe, limit) as BarRow[];
+      .prepare("SELECT t, o, h, l, c, v, vw FROM stock_bars WHERE symbol = ? AND timeframe = ? AND feed = ? ORDER BY t DESC LIMIT ?")
+      .all(symbol, timeframe, feed, limit) as BarRow[];
     return rows.reverse();
   }
 
-  async getBarsOnOrAfter(symbol: string, timeframe: Timeframe, fromDate: string): Promise<DailyBar[]> {
+  async getBarsOnOrAfter(symbol: string, timeframe: Timeframe, feed: BarFeed, fromDate: string): Promise<DailyBar[]> {
     return this.db
-      .prepare("SELECT t, o, h, l, c, v, vw FROM stock_bars WHERE symbol = ? AND timeframe = ? AND t >= ? ORDER BY t ASC")
-      .all(symbol, timeframe, fromDate) as BarRow[];
+      .prepare("SELECT t, o, h, l, c, v, vw FROM stock_bars WHERE symbol = ? AND timeframe = ? AND feed = ? AND t >= ? ORDER BY t ASC")
+      .all(symbol, timeframe, feed, fromDate) as BarRow[];
   }
 
-  async putBars(symbol: string, timeframe: Timeframe, bars: DailyBar[]): Promise<void> {
+  async putBars(symbol: string, timeframe: Timeframe, feed: BarFeed, bars: DailyBar[]): Promise<void> {
     if (bars.length === 0) return;
     const updatedAt = new Date().toISOString();
     const stmt = this.db.prepare(
-      `INSERT INTO stock_bars (symbol, timeframe, t, o, h, l, c, v, vw, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(symbol, timeframe, t) DO UPDATE SET
+      `INSERT INTO stock_bars (symbol, timeframe, feed, t, o, h, l, c, v, vw, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(symbol, timeframe, feed, t) DO UPDATE SET
          o = excluded.o, h = excluded.h, l = excluded.l, c = excluded.c,
          v = excluded.v, vw = excluded.vw, updated_at = excluded.updated_at`,
     );
@@ -152,7 +162,7 @@ export class SqliteBarStore implements BarStore {
     this.db.exec("BEGIN");
     try {
       for (const bar of bars) {
-        stmt.run(symbol, timeframe, bar.t, bar.o, bar.h, bar.l, bar.c, bar.v, bar.vw, updatedAt);
+        stmt.run(symbol, timeframe, feed, bar.t, bar.o, bar.h, bar.l, bar.c, bar.v, bar.vw, updatedAt);
       }
       this.db.exec("COMMIT");
     } catch (err) {
@@ -161,8 +171,8 @@ export class SqliteBarStore implements BarStore {
     }
   }
 
-  async clearSymbol(symbol: string, timeframe: Timeframe): Promise<void> {
-    this.db.prepare("DELETE FROM stock_bars WHERE symbol = ? AND timeframe = ?").run(symbol, timeframe);
-    this.db.prepare("DELETE FROM stock_bar_coverage WHERE symbol = ? AND timeframe = ?").run(symbol, timeframe);
+  async clearSymbol(symbol: string, timeframe: Timeframe, feed: BarFeed): Promise<void> {
+    this.db.prepare("DELETE FROM stock_bars WHERE symbol = ? AND timeframe = ? AND feed = ?").run(symbol, timeframe, feed);
+    this.db.prepare("DELETE FROM stock_bar_coverage WHERE symbol = ? AND timeframe = ? AND feed = ?").run(symbol, timeframe, feed);
   }
 }

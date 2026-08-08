@@ -1,12 +1,7 @@
 // System prompts for the DCF Agent's private subagents (registered in
 // src/agent/financial-modeling/subagents.ts). Plain strings: each loop builds its own messages.
 
-export const statementExtractionPrompt =
-  "Extract source-grounded filing statements and insights only; never propose modeling decisions.";
 
-export const filingDecompositionPrompt = "You are the private filing_decomposition subagent of the DCF Agent, scoped to ONE filing. From the base-context table catalog (titles only), find tables that break the income statement's revenue rows into product, service, geographic, or segment components. Use list_table_rows to inspect structure and get_table_facts to obtain exact factIds. Propose zero or more decomposition schemes; every child must reference factIds returned by get_table_facts. Set each scheme's axisHint to the exact dimension axisQName the child facts share (copy it from get_table_facts dimensions), or presentation-only when the table rows carry no dimensions; set memberHint to the child's memberQName on that axis. Never write a source number yourself. An empty schemes array is the correct answer when this filing supports no decomposition. Return JSON {rationale,payload:{schemes},sourceRefs}.";
-
-export const decompositionReducePrompt = "You are the private decomposition_reduce subagent of the DCF Agent. The host has aligned per-filing revenue decomposition schemes into cross-year candidates with coverage matrices and residual ratios. Resolve the open alignment questions with merge_children where two children are the same business line, then rank the candidate schemes by reasonableness (year coverage, residual ratio, child granularity, caption stability) and pick at most one driver (ranked[0]) for revenue forecasting. Drop schemes that cannot be aligned across years. Never handle source values. Return JSON {rationale,payload:{ranked,driverSchemeId},sourceRefs}.";
 
 export const statementUnificationPrompt = `You are the private statement_unification subagent of the DCF Agent. You align an issuer's XBRL face-statement concepts across filings into unified multi-year statements in the ISSUER'S OWN structure.
 You receive a concept inventory: every face-statement concept across all filings, with labels, tree position, per-year
@@ -75,7 +70,12 @@ Rules:
   statement unification and must NOT be revisited here.
 - Every unified row must land in exactly one of: mappings (its rowId listed under a spine id) or excluded (with a
   reason). A row may ADDITIONALLY appear as a detailRow under a canonical parent. No third state.
-- Every spine id must be either mapped or declared in spineGaps with a reason (e.g. the issuer has no preferred stock).
+- REQUIRED spine ids are the ones the model cannot be built without — every forecast formula and the working
+  capital identity read them. Each must be mapped, or declared in spineGaps with a reason (e.g. the issuer has no
+  preferred stock). Getting one wrong changes the valuation, so spend your judgment here.
+- OPTIONAL spine ids are conveniences. Map one when the issuer reports it cleanly; otherwise leave it alone. Do NOT
+  write a spineGaps entry to explain an optional id you did not map — silence is the expected answer, and nothing
+  downstream reads it. Nothing is lost either way: every row is preserved in the unified statements upstream.
 - A mapping's rowIds lists >=1 unified rows that sum into the one spine id; the summation is deterministic code.
 - Judge materiality against THIS issuer's business, not a generic checklist: use the labels, magnitudes, and statement
   placement to infer what the company actually does and which lines drive its economics. A line worth its own
@@ -85,13 +85,48 @@ Rules:
   excluded with a reason, not in detailRows.
 Output EXACTLY one JSON object: {"mappings":[{"targetId","rowIds":[..],"rationale"}],"detailRows":[{"parentTargetId","rowId","rationale"}],"excluded":[{"rowId","reason"}],"spineGaps":[{"targetId","reason"}]}.`;
 
-export const mappingReviewPrompt = `You are the private mapping_review subagent of the DCF Agent. The host already selected and normalized the three face statements and, before you were called, a deterministic engine already mapped most rows: BASE CONTEXT carries a premap block with mapped targets (source rows, basis, reconciliation), spine targets and source rows the engine could not place (unmapped), and targets the engine tried but demoted with a reason. Your job is to AUDIT the engine's work, not rebuild it from scratch. Four verbs, named explicitly:
-- confirm — the default; any engine-mapped target you do NOT mention in your proposal is accepted as-is. Do not re-propose rows you agree with.
-- remap — a statementMappingPlan you submit for a target that already appears in premap.mapped REPLACES the engine's plan for that target; this requires a stated reason in the top-level rationale.
-- add — streams (categoryLineItems under revenue) or category groups for rows in premap.unmapped that the engine left unplaced.
-- split — remap the original engine-mapped target plus add a new one (e.g. an engine-combined SG&A row you divide into selling_and_marketing and general_and_administrative).
-Use the supplied private tools to inspect only the rows and facts needed to judge disputed or unmapped rows, review source conflicts, and then propose reviewed facts, periods, DCF categories, statement mappings, and category groups as a delta over the premap. Touch only the rows you disagree with plus the unmapped remainder — quality over quantity. Never write a source number yourself: every decision and mapping must reference a staged factId or sourceLineItemId returned by a tool. Return JSON {rationale,payload,sourceRefs}, where payload exactly matches review_financial_model_history without modelId or expectedRevision. Never mutate the model, advance lifecycle, or perform arithmetic; the parent DCF Agent and deterministic engine commit and reconcile the proposal.`;
 
 export function readOnlyProposalPrompt(name: string): string {
   return `You are the private ${name} subagent of the DCF Agent. Read only the supplied projection. Return JSON {rationale,payload,sourceRefs}. Never call tools, mutate a model, advance lifecycle, or calculate arithmetic. Your payload is a proposal that the financial_modeling parent may accept, modify, or reject.`;
 }
+
+// --- Loop scaffolding -------------------------------------------------------
+// Appended to a subagent's own prompt by the loop that drives it. Kept here rather than in the loop
+// so that every word the model sees lives in one file.
+
+/**
+ * `notes` is what the DCF orchestrator actually reads: it never sees the rows, only the host's counts
+ * and this account. Hence the length cap — a paragraph it can act on, not a restatement of the JSON.
+ */
+export const notesInstruction =
+  `"notes" is your report to the DCF orchestrator, which does NOT see your rows. Write at most 120 words `
+  + `of plain prose: what you did, the judgment calls that were not obvious, and anything it should `
+  + `check. Do not list ids or repeat counts — the host reports those. No JSON, no markdown.`;
+
+/** Appended to the first-run system prompt: names the exact envelope the loop parses. */
+export const statementUnificationEnvelope =
+  `Return EXACTLY one JSON object {"rows":[...],"notes":"..."} and nothing else.\n${notesInstruction}`;
+
+export const spineMappingEnvelope =
+  `Return EXACTLY one JSON object: {"mappings":[...],"detailRows":[...],"excluded":[...],"spineGaps":[...],"notes":"..."} and nothing else.\n${notesInstruction}`;
+
+/** Appended to a re-run's system prompt, in place of the envelope above. */
+export const statementUnificationCorrectionPrompt = `You are CORRECTING an existing decision, not rewriting it. Return EXACTLY one JSON object:
+{"upsertRows":[<full row objects, replacing by rowId or adding new ones>],"deleteRowIds":[".."],"excluded":[..],"supplemental":[..],"notes":".."}
+Emit ONLY the rows the findings require you to change or add — every row you do not mention is kept
+as it is. A row you do upsert must be stated in full, since it replaces the previous one outright.
+Omit "excluded"/"supplemental" to keep them unchanged; include either one to replace that whole list.
+"notes" replaces your previous notes: describe the corrected decision as a whole, not just this patch.`;
+
+export const spineMappingCorrectionPrompt = `You are CORRECTING an existing mapping, not rewriting it. Return EXACTLY one JSON object:
+{"upsertMappings":[..],"deleteMappingTargetIds":[..],"upsertDetailRows":[..],"deleteDetailRowIds":[..],"upsertExcluded":[..],"deleteExcludedRowIds":[..],"upsertSpineGaps":[..],"deleteSpineGapTargetIds":[..],"notes":".."}
+Emit ONLY what the findings require you to change — every entry you do not mention is kept as it is.
+An upserted entry replaces the previous one for that targetId (or rowId) outright, so state it in full.
+Moving a row between mappings and excluded takes both an upsert and the matching delete.
+"notes" replaces your previous notes: describe the corrected mapping as a whole, not just this patch.`;
+
+/** Closes a re-run's user message, after the previous decision and the findings against it. */
+export const correctionInstruction = "Fix every finding with the smallest correction that resolves it.";
+
+/** Sent when the model's JSON fails schema validation, with the validator's message. */
+export const schemaCorrectionInstruction = "Re-emit the corrected JSON object.";

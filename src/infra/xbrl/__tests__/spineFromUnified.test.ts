@@ -94,7 +94,7 @@ test("a mapping sums its unified rows and chains provenance to the unified facts
   assert.equal(result.facts.find((f) => f.periodId === "FY2024")!.value, 90e9);
 });
 
-test("an undeclared empty period is a coverage gap; a declared spine gap is not", () => {
+test("an undeclared empty period on a required target is a coverage gap; a declared spine gap is not", () => {
   const unified = makeUnified();
   const decision: SpineDecision = {
     mappings: [
@@ -103,13 +103,33 @@ test("an undeclared empty period is a coverage gap; a declared spine gap is not"
     ],
     detailRows: [], excluded: [], spineGaps: [{ targetId: "debt", reason: "no debt disclosed" }],
   };
-  const result = buildSpineFromUnified({ decision, unified, spineIds: new Set(["revenue.total", "cost_of_revenue", "debt"]) });
+  const spineIds = new Set(["revenue.total", "cost_of_revenue", "debt"]);
+  const result = buildSpineFromUnified({ decision, unified, spineIds,
+    requiredIds: new Set(["revenue.total", "cost_of_revenue"]) });
   assert.deepEqual(result.coverageGaps, [{ targetId: "cost_of_revenue", periodId: "FY2024" }]);
-  assert.deepEqual(result.findings, ["coverage_gap: cost_of_revenue has no value in FY2024 and is not declared a spine gap"]);
+  assert.deepEqual(result.findings, ["coverage_gap: required cost_of_revenue has no value in FY2024 and is not declared a spine gap"]);
   assert.ok(!result.facts.some((f) => f.lineItemId === "cost_of_revenue" && f.periodId === "FY2024"));
+
+  // The same gap on an OPTIONAL target the decision DID claim is still recorded, but raises nothing.
+  const optional = buildSpineFromUnified({ decision, unified, spineIds, requiredIds: new Set(["revenue.total"]) });
+  assert.deepEqual(optional.coverageGaps, [{ targetId: "cost_of_revenue", periodId: "FY2024" }]);
+  assert.deepEqual(optional.findings, []);
 });
 
-test("detail rows materialize under detail ids without coverage tracking", () => {
+test("an optional target nobody mapped is not a coverage gap", () => {
+  const unified = makeUnified();
+  const decision: SpineDecision = {
+    mappings: [{ targetId: "revenue.total", rowIds: ["auto_revenues", "services_revenues"], rationale: "r" }],
+    detailRows: [], excluded: [{ rowId: "cost_of_revenues", reason: "r" }], spineGaps: [],
+  };
+  // "debt" is optional and unclaimed: unused, not missing. "cost_of_revenue" likewise.
+  const result = buildSpineFromUnified({ decision, unified,
+    spineIds: new Set(["revenue.total", "cost_of_revenue", "debt"]), requiredIds: new Set(["revenue.total"]) });
+  assert.deepEqual(result.coverageGaps, []);
+  assert.deepEqual(result.findings, []);
+});
+
+test("detail rows materialize as installable line items under their parent, without coverage tracking", () => {
   const unified = makeUnified();
   const decision: SpineDecision = {
     mappings: [{ targetId: "revenue.total", rowIds: ["auto_revenues", "services_revenues"], rationale: "r" }],
@@ -120,17 +140,19 @@ test("detail rows materialize under detail ids without coverage tracking", () =>
     excluded: [{ rowId: "cost_of_revenues", reason: "kept only as detail" }], spineGaps: [],
   };
   const result = buildSpineFromUnified({ decision, unified, spineIds: new Set(["revenue.total"]) });
-  const services = result.facts.filter((f) => f.lineItemId === "detail.revenue.total.services_revenues");
+  // A revenue detail collapses onto the single `revenue` parent, because that is where the workbook
+  // hangs revenue streams — there is no `revenue.total` node to parent it to.
+  const services = result.facts.filter((f) => f.lineItemId === "revenue.services_revenues");
   assert.deepEqual(services.map((f) => f.factId).sort(),
-    ["spine.detail.revenue.total.services_revenues.FY2024", "spine.detail.revenue.total.services_revenues.FY2025"]);
+    ["spine.revenue.services_revenues.FY2024", "spine.revenue.services_revenues.FY2025"]);
   assert.equal(services.find((f) => f.periodId === "FY2025")!.value, 12e9);
   // The null FY2024 detail cell produces no fact, no coverage gap, no finding.
-  assert.deepEqual(result.facts.filter((f) => f.lineItemId === "detail.revenue.total.cost_of_revenues").map((f) => f.periodId), ["FY2025"]);
+  assert.deepEqual(result.facts.filter((f) => f.lineItemId === "revenue.cost_of_revenues").map((f) => f.periodId), ["FY2025"]);
   assert.deepEqual(result.coverageGaps, []);
   assert.deepEqual(result.findings, []);
 });
 
-test("a mapping mixing null and non-null rows sums the non-null ones and flags a partial sum", () => {
+test("a mapping mixing null and non-null rows sums the non-null ones without raising a finding", () => {
   const unified = makeUnified();
   const decision: SpineDecision = {
     mappings: [{ targetId: "revenue.total", rowIds: ["auto_revenues", "cost_of_revenues"], rationale: "contrived" }],
@@ -141,8 +163,9 @@ test("a mapping mixing null and non-null rows sums the non-null ones and flags a
   assert.equal(fy2024.value, 80e9); // cost_of_revenues is null in FY2024
   assert.deepEqual(fy2024.provenance.sourceRefs, ["unified.income_statement.auto_revenues.FY2024"]);
   assert.equal(fy2024.provenance.concept, "auto_revenues+cost_of_revenues");
-  assert.ok(result.findings.some((f) => f.startsWith("partial_sum:") && f.includes("FY2024") && f.includes("cost_of_revenues")),
-    result.findings.join("\n"));
+  // A null contributing row is a line the issuer stopped reporting; step 2 already reported anything
+  // it genuinely failed to resolve, so there is nothing to say here.
+  assert.deepEqual(result.findings, []);
   assert.deepEqual(result.coverageGaps, []);
   assert.equal(result.facts.find((f) => f.periodId === "FY2025")!.value, 155e9);
 });
