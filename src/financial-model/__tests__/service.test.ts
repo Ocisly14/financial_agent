@@ -635,6 +635,25 @@ test("a revenue detail row is installed as a revenue stream and carries its labe
   assert.equal(stream?.label, "Automotive revenues");
 });
 
+test("a nested stream batch installs the child under its parent stream, whatever the input order", () => {
+  const { service } = setup();
+  service.createModel(CREATE_INPUT);
+  // Child listed before its parent: staging must still create revenue.product first.
+  service.stageSpineFacts("model-1", 0, {
+    facts: [spineFact("revenue.product.iphone", "FY2024", 60), spineFact("revenue.product", "FY2024", 100)],
+    labels: { "revenue.product": "Product", "revenue.product.iphone": "iPhone" },
+    historicalPeriodIds: ["FY2024"],
+  });
+  const view = service.getModel("model-1");
+  assert.ok("currentWorkbook" in view);
+  const revenue = view.currentWorkbook.sections.revenue;
+  const stream = revenue.find((row) => row.lineItemId === "revenue.product");
+  const child = revenue.find((row) => row.lineItemId === "revenue.product.iphone");
+  assert.equal(stream?.label, "Product");
+  assert.equal(child?.label, "iPhone");
+  assert.equal(child?.parentId, "revenue.product");
+});
+
 test("a detail row whose parent refuses children costs that row, not the batch", () => {
   const { service } = setup();
   service.createModel(CREATE_INPUT);
@@ -670,7 +689,7 @@ test("a breakdown detail row's fact stages cleanly end to end through buildSpine
     mappings: [{ targetId: "revenue.total", rowIds: ["net_sales"], rationale: "r" }],
     detailRows: [{ parentTargetId: "revenue", rowId: "net_sales.seg.products", rationale: "r" }],
     excluded: [], spineGaps: [] }, unified, spineIds: new Set(["revenue.total"]) });
-  const detail = facts.find((f) => f.lineItemId === "revenue.net_sales_seg_products");
+  const detail = facts.find((f) => f.lineItemId === "revenue.products");
   assert.ok(detail);
   assert.equal(detail!.provenance.asOfDate, "2026-03-15");
 
@@ -679,10 +698,10 @@ test("a breakdown detail row's fact stages cleanly end to end through buildSpine
   // Must not throw: this is exactly the path snapshotCodec.normalizeProvenance used to reject when
   // the breakdown row's asOfDate fell back to "".
   const result = service.stageSpineFacts("model-1", 0, { facts, historicalPeriodIds: ["FY2024"],
-    labels: { "revenue.net_sales_seg_products": "Products" } });
+    labels: { "revenue.products": "Products" } });
   const view = service.getModel("model-1");
   assert.ok("currentWorkbook" in view);
   assert.equal(view.currentWorkbook.revision, result.revision);
-  const stream = view.currentWorkbook.sections.revenue.find((row) => row.lineItemId === "revenue.net_sales_seg_products");
+  const stream = view.currentWorkbook.sections.revenue.find((row) => row.lineItemId === "revenue.products");
   assert.equal(stream?.label, "Products");
 });

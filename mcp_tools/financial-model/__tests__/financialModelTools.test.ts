@@ -62,14 +62,21 @@ function run(ready = true) {
   return { ...value, tools: new Map(createFinancialModelTools(value.deps).map((tool) => [tool.name, tool])) };
 }
 
-test("create consumes an owned ingestion exactly once and writes explicit revisions zero and one", async () => {
-  const { deps, tools } = run();
+test("create writes explicit revisions zero and one, and the same run can seed further model versions", async () => {
+  const { deps, ingestion, tools } = run();
   const result = await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1" }, { agentId: "owner-1", sessionId: "s1" });
   assert.equal(result.error, undefined);
   assert.equal(result.generation_context?.data["revision"], 1);
   assert.deepEqual(deps.modelStore.listRevisionHeaders("model-1").map((header) => header.revision), [0, 1]);
-  const duplicate = await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1" }, { agentId: "owner-1", sessionId: "s1" });
-  assert.equal(duplicate.error?.code, "filing_ingestion_not_found");
+  // A second create from the same extraction mints an independent model version of the same issuer.
+  const second = await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1" }, { agentId: "owner-1", sessionId: "s1" });
+  assert.equal(second.error, undefined);
+  const secondId = second.generation_context?.data["model_id"] as string;
+  assert.notEqual(secondId, "model-1");
+  assert.deepEqual(deps.modelStore.listRevisionHeaders(secondId).map((header) => header.revision), [0, 1]);
+  // Each version carries its own source review artifact.
+  assert.ok(ingestion.get(secondId));
+  assert.ok(ingestion.get("model-1"));
 });
 
 test("failed three-statement ingestion leaves a durable revision zero", async () => {
@@ -90,7 +97,7 @@ test("all reads and mutations are owner scoped without disclosing another owner'
   assert.deepEqual(list.generation_context?.data["models"], []);
 });
 
-test("ingestion ownership/symbol checks do not consume the artifact, but successful use does", async () => {
+test("ingestion ownership/symbol checks still gate every create, and use never consumes the artifact", async () => {
   const { tools } = run();
   const wrongOwner = await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1" }, { agentId: "owner-2", sessionId: "s" });
   const wrongSymbol = await tools.get("create_financial_model")!.execute({ symbol: "NOPE", ingestionRunId: "ing-1" }, { agentId: "owner-1", sessionId: "s" });
@@ -98,6 +105,8 @@ test("ingestion ownership/symbol checks do not consume the artifact, but success
   assert.equal(wrongSymbol.error?.code, "filing_ingestion_not_found");
   const valid = await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1" }, { agentId: "owner-1", sessionId: "s" });
   assert.equal(valid.error, undefined);
+  const wrongOwnerAfterUse = await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1" }, { agentId: "owner-2", sessionId: "s" });
+  assert.equal(wrongOwnerAfterUse.error?.code, "filing_ingestion_not_found");
 });
 
 test("create carries the curation loop's tables and decisions into the source review artifact", async () => {

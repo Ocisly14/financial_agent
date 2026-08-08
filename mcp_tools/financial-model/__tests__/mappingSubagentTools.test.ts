@@ -75,6 +75,16 @@ test("the unification subagent's load tool resolves the ticker it was told to wo
   assert.deepEqual(loader.loaded(), { symbol: "TSLA", modelId: modelIds[0] });
 });
 
+test("a pinned modelId resolves among multiple versions of one ticker, and catches a wrong-ticker instruction", () => {
+  const { sourceReviewStore, modelIds, deps } = setup(["TST", "TST"]);
+  sourceReviewStore.save(modelIds[1]!, review({ presentationExtracts: [{ filing: { accession: "a" },
+    calculationRelations: [], negatedConcepts: [], statements: [] } as never] }));
+  const { tools } = createStatementUnificationTools({ ...deps, modelId: modelIds[1]! });
+  const loaded = tools.get("load_concept_inventory")!.execute({ symbol: "TST" }) as { symbol: string };
+  assert.equal(loaded.symbol, "TST");
+  assert.throws(() => tools.get("load_concept_inventory")!.execute({ symbol: "NOPE" }), /not the issuer|NOPE/);
+});
+
 test("two models for one ticker is refused rather than guessed at", () => {
   const { sourceReviewStore, modelIds, deps } = setup(["TSLA", "TSLA"]);
   for (const modelId of modelIds) sourceReviewStore.save(modelId, review({ presentationExtracts: [{} as never] }));

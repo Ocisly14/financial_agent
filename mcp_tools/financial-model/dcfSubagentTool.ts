@@ -7,7 +7,7 @@ import { parseOperations } from "./schemas.ts";
 import { validate } from "./schemas.ts";
 import type { JsonSchema } from "../../src/framework/types.ts";
 import { createSpineMappingTools, createStatementUnificationTools, type LoadedWorkingSet } from "./mappingSubagentTools.ts";
-import { detailLineItemId } from "../../src/infra/xbrl/spineFromUnified.ts";
+import { resolveDetailLineItemIds } from "../../src/infra/xbrl/spineFromUnified.ts";
 import { runSpineMappingAgent } from "../../src/agent/financial-modeling/spineMappingAgent.ts";
 import { runStatementUnificationAgent } from "../../src/agent/financial-modeling/statementUnificationAgent.ts";
 import {
@@ -58,7 +58,7 @@ export function createDcfSubagentTool(deps: {
             error: { code: "presentation_extract_unavailable", message: "statement_unification needs presentationExtracts; re-run extract_filing_statements" } };
           const requestedPeriods = sourceReview.statementViews.income_statement.candidate.periods;
           const loader = createStatementUnificationTools({ modelStore: deps.financial.modelStore,
-            sourceReviewStore: deps.financial.sourceReviewStore, ownerAgentId: context.agentId,
+            sourceReviewStore: deps.financial.sourceReviewStore, ownerAgentId: context.agentId, modelId,
             ...(deps.financial.tableStore ? { tableStore: deps.financial.tableStore } : {}) });
           const run = await runStatementUnificationAgent({ modelRouter: deps.modelRouter,
             systemPrompt: subagents.get("statement_unification").prompt,
@@ -91,7 +91,7 @@ export function createDcfSubagentTool(deps: {
         if (!sourceReview.unifiedStatements) return { summary: "Unified statements unavailable.",
           error: { code: "unified_statements_unavailable", message: "spine_mapping needs unifiedStatements; run statement_unification first" } };
         const loader = createSpineMappingTools({ modelStore: deps.financial.modelStore,
-          sourceReviewStore: deps.financial.sourceReviewStore, ownerAgentId: context.agentId });
+          sourceReviewStore: deps.financial.sourceReviewStore, ownerAgentId: context.agentId, modelId });
         const run = await runSpineMappingAgent({ modelRouter: deps.modelRouter,
           systemPrompt: subagents.get("spine_mapping").prompt, task: requiredString(input, "task"),
           tools: loader.tools, unified: sourceReview.unifiedStatements });
@@ -106,8 +106,10 @@ export function createDcfSubagentTool(deps: {
         // detail row can point at either, so the label lookup has to search both.
         const unified = sourceReview.unifiedStatements!;
         const labelByRowId = new Map([...unified.rows, ...(unified.breakdownRows ?? [])].map((row) => [row.rowId, row.label]));
+        // The same resolver the fact builder used, so a nested stream's label lands on the same id.
+        const detailIds = resolveDetailLineItemIds(run.decision, unified);
         const labels = Object.fromEntries(run.decision.detailRows.map((detail) => [
-          detailLineItemId(detail.parentTargetId, detail.rowId),
+          detailIds[detail.rowId]!,
           labelByRowId.get(detail.rowId) ?? detail.rowId,
         ]));
         const staged = run.facts.length === 0 ? current.currentWorkbook

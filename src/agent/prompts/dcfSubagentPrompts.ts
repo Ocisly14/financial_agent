@@ -111,8 +111,10 @@ Rules:
   parent already supplies the total, and mapping a slice would count the money twice. Under revenue,
   pick ONE axis (the one that best explains the top line) and add its members as detailRows; members
   of the other axes stay unused, which is fine. Where a breakdown row carries parentMemberQName it is a
-  piece of that other member: never pick a member AND one of its pieces as revenue streams — choose one
-  level of the tree. They are exempt from the "every row must land somewhere" rule.
+  piece of that other member. Picking a member AND its pieces together models a two-level stream tree:
+  code nests each piece under its parent's stream automatically (keep parentTargetId "revenue" for all
+  of them; never compute ids). A piece whose parent you did not pick becomes a top-level stream. They
+  are exempt from the "every row must land somewhere" rule.
 Output EXACTLY one JSON object: {"mappings":[{"targetId","rowIds":[..],"rationale"}],"detailRows":[{"parentTargetId","rowId","rationale"}],"excluded":[{"rowId","reason"}],"spineGaps":[{"targetId","reason"}]}.`;
 
 

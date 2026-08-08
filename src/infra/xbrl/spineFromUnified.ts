@@ -107,26 +107,9 @@ export function checkSpineCompleteness(input: { unified: UnifiedStatementsArtifa
   if (revenueAxes.size > 1) {
     findings.push(`revenue streams must come from a single axis; found ${[...revenueAxes].sort().join(" and ")}`);
   }
-  // Within the one axis, the agent-declared member tree still allows nesting: an aggregate and its
-  // own pieces chosen together sum the same money twice, so streams must be an antichain of the tree.
-  const memberByQName = new Map(breakdownRows.map((r) => [`${r.parentRowId}|${r.axisQName}|${r.memberQName}`, r]));
-  const ancestors = (row: (typeof breakdownRows)[number]): Set<string> => {
-    const seen = new Set<string>();
-    let parent = row.parentMemberQName;
-    while (parent !== undefined && !seen.has(parent)) {
-      seen.add(parent);
-      parent = memberByQName.get(`${row.parentRowId}|${row.axisQName}|${parent}`)?.parentMemberQName;
-    }
-    return seen;
-  };
-  const chosenMembers = new Set(revenueBreakdowns.map((r) => r.memberQName));
-  for (const row of revenueBreakdowns) {
-    for (const ancestor of ancestors(row)) {
-      if (chosenMembers.has(ancestor)) {
-        findings.push(`revenue streams must not nest: ${ancestor} already contains ${row.memberQName}`);
-      }
-    }
-  }
+  // Nesting an aggregate over its own pieces is legitimate — resolveDetailLineItemIds mirrors the
+  // agent-declared member tree into a stream tree, so the piece hangs UNDER the aggregate instead of
+  // summing beside it. No antichain guard is needed: the tree was already partition-checked upstream.
   for (const rowId of unifiedRowIds) {
     const uses = placements.get(rowId) ?? [];
     if (uses.length === 0) findings.push(`dangling: unified row "${rowId}" is in neither mappings nor excluded`);
@@ -163,6 +146,51 @@ export function detailLineItemId(parentTargetId: string, rowId: string): string 
   const parent = parentTargetId === "revenue" || parentTargetId.startsWith("revenue.") ? "revenue" : parentTargetId;
   const slug = rowId.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").replace(/^([0-9])/, "d$1");
   return `${parent}.${slug || "detail"}`;
+}
+
+/**
+ * The one place a detailRow's line-item id is decided, shared by the fact builder and the host's
+ * label map. A revenue detail backed by a breakdown row gets the member's own slug, and when its
+ * declared parent member is ALSO a chosen revenue detail it nests under that parent's stream —
+ * `revenue.product.iphone` — mirroring the member tree the unification stage already
+ * partition-checked. The agent never computes these ids; it just picks rows.
+ */
+export function resolveDetailLineItemIds(decision: SpineDecision, unified: UnifiedStatementsArtifact): Record<string, string> {
+  const breakdownById = new Map((unified.breakdownRows ?? []).map((row) => [row.rowId, row]));
+  const revenueish = (targetId: string) => targetId === "revenue" || targetId.startsWith("revenue.");
+  const chosenByMember = new Map(decision.detailRows
+    .filter((detail) => revenueish(detail.parentTargetId) && breakdownById.has(detail.rowId))
+    .map((detail) => { const row = breakdownById.get(detail.rowId)!;
+      return [`${row.parentRowId}|${row.axisQName}|${row.memberQName}`, detail.rowId]; }));
+  const memberSlug = (rowId: string) => {
+    const segment = rowId.split(".").pop() ?? rowId;
+    return segment.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").replace(/^([0-9])/, "d$1") || "detail";
+  };
+  const resolved = new Map<string, string>();
+  const resolve = (rowId: string, trail: ReadonlySet<string>): string => {
+    const cached = resolved.get(rowId);
+    if (cached !== undefined) return cached;
+    const row = breakdownById.get(rowId)!;
+    const parentRowId = row.parentMemberQName !== undefined && !trail.has(rowId)
+      ? chosenByMember.get(`${row.parentRowId}|${row.axisQName}|${row.parentMemberQName}`) : undefined;
+    const id = parentRowId !== undefined && parentRowId !== rowId
+      ? `${resolve(parentRowId, new Set([...trail, rowId]))}.${memberSlug(rowId)}`
+      : `revenue.${memberSlug(rowId)}`;
+    resolved.set(rowId, id);
+    return id;
+  };
+  const ids: Record<string, string> = {};
+  const taken = new Set<string>();
+  for (const detail of decision.detailRows) {
+    let id = revenueish(detail.parentTargetId) && breakdownById.has(detail.rowId)
+      ? resolve(detail.rowId, new Set())
+      : detailLineItemId(detail.parentTargetId, detail.rowId);
+    // Two members can share a last segment; the full-rowId slug is the collision-proof fallback.
+    if (taken.has(id)) id = detailLineItemId(detail.parentTargetId, detail.rowId);
+    taken.add(id);
+    ids[detail.rowId] = id;
+  }
+  return ids;
 }
 
 export type SpineFromUnifiedResult = {
@@ -234,9 +262,10 @@ export function buildSpineFromUnified(input: { decision: SpineDecision;
       if (built) { facts.push(built); covered.add(`${mapping.targetId}|${periodId}`); }
     }
   }
+  const detailIds = resolveDetailLineItemIds(decision, unified);
   for (const detail of decision.detailRows) {
     for (const periodId of unified.periods) {
-      const lineItemId = detailLineItemId(detail.parentTargetId, detail.rowId);
+      const lineItemId = detailIds[detail.rowId]!;
       const built = materialize([detail.rowId], periodId, lineItemId, `spine.${lineItemId}.${periodId}`);
       if (built) facts.push(built); // supplementary: no coverage-gap tracking
     }

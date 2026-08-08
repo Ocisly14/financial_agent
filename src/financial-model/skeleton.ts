@@ -419,11 +419,14 @@ export function addDcfDetailLineItem(
   skeleton: Skeleton,
   input: AddDcfDetailLineItemInput,
 ): Skeleton {
-  if (!SAFE_DCF_DETAIL_PARENTS.has(input.parentLineItemId) || input.parentLineItemId === "revenue") {
-    invalid(`line items cannot be added under: ${input.parentLineItemId}`);
-  }
+  if (input.parentLineItemId === "revenue") invalid(`line items cannot be added under: ${input.parentLineItemId}`);
   const parent = skeleton.lineItems.find((item) => item.id === input.parentLineItemId);
   if (!parent || isSourceRow(parent)) invalid(`unknown DCF detail parent: ${input.parentLineItemId}`);
+  // A revenue stream may carry its own pieces (revenue.product.iphone): the stream tree mirrors the
+  // issuer's member tree. Everything else stays restricted to the safe parents.
+  if (!SAFE_DCF_DETAIL_PARENTS.has(input.parentLineItemId) && parent.role !== "revenue_stream") {
+    invalid(`line items cannot be added under: ${input.parentLineItemId}`);
+  }
   const prefix = `${parent.id}.`;
   const slug = input.id.startsWith(prefix) ? input.id.slice(prefix.length) : input.id;
   if (!/^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(slug)) invalid(`invalid DCF detail slug: ${slug}`);

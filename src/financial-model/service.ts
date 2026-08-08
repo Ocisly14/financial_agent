@@ -297,8 +297,13 @@ export class FinancialModelService {
     const knownPeriods = new Set(working.periods.map((period) => period.id));
     let skeleton = skeletonOf(working);
     const present = () => new Set(skeleton.lineItems.map((item) => item.id));
-    for (const lineItemId of new Set(input.facts.map((fact) => fact.lineItemId))) {
-      if (lineItemId === undefined || present().has(lineItemId)) continue;
+    // Parents before children: a nested stream batch may list revenue.product.iphone ahead of
+    // revenue.product, and the child can only install once its parent stream exists.
+    const newLineItemIds = [...new Set(input.facts.map((fact) => fact.lineItemId))]
+      .filter((id): id is string => id !== undefined)
+      .sort((a, b) => a.split(".").length - b.split(".").length || a.localeCompare(b));
+    for (const lineItemId of newLineItemIds) {
+      if (present().has(lineItemId)) continue;
       const separator = lineItemId.lastIndexOf(".");
       const parentId = separator < 0 ? "" : lineItemId.slice(0, separator);
       const slug = lineItemId.slice(separator + 1);

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { JsonObject, JsonSchema, JsonValue, ToolExecutionResult } from "../../src/framework/types.ts";
 import { FinancialModelError } from "../../src/financial-model/errors.ts";
@@ -95,20 +96,20 @@ async function createModel(deps: FinancialModelToolDeps, input: JsonObject, cont
   const ingestionRunId = typeof input["ingestionRunId"] === "string" ? input["ingestionRunId"] : "";
   if (!ingestionRunId) return failure("statement_extraction_required", "Run the private statement_extraction subagent before creating the model.", { retryable: true });
   const ingestion = deps.ingestionStore.getIngestion(ingestionRunId);
-  if (!ingestion || ingestion.ownerAgentId !== context.agentId || ingestion.symbol !== symbol || ingestion.consumedAt) {
+  if (!ingestion || ingestion.ownerAgentId !== context.agentId || ingestion.symbol !== symbol) {
     return failure("filing_ingestion_not_found", "Owned filing ingestion run not found.");
   }
   const source = ingestion.source;
   if (!source) return failure("filing_source_resolution_failed", ingestion.error?.message ?? "Filing source metadata is unavailable.",
     { retryable: true, ingestion_run_id: ingestionRunId });
-  const modelId = ingestion.modelId;
+  // A run is reusable: the first create keeps the run's own modelId, every later one mints a fresh id,
+  // so one extraction can seed several independent model versions of the same issuer.
+  const modelId = deps.modelStore.getMeta(ingestion.modelId) ? `fm_${randomUUID()}` : ingestion.modelId;
   const service = new FinancialModelService(deps.modelStore, context.sessionId);
   try {
     const created = service.createModel({ modelId, ownerAgentId: context.agentId, originSessionId: context.sessionId, symbol,
       metadata: { cik: String(source.company.cik), companyName: source.company.title, fiscalYearEnd: source.fiscalYearEnd },
       reportingCurrency: source.reportingCurrency, periods: source.periods, preparedStatementRows: [] });
-    const consumed = deps.ingestionStore.consumeIngestion(ingestionRunId, context.agentId, symbol);
-    if (!consumed) return failure("filing_ingestion_already_consumed", "Filing ingestion was consumed concurrently.", { model_id: modelId, revision: 0 });
     if (ingestion.status !== "ready" || !ingestion.prepared) return failure(ingestion.error?.code ?? "incomplete_financial_statements",
       ingestion.error?.message ?? "Filing preprocessing did not produce complete statements.", { model_id: modelId, revision: created.revision,
         retryable: true, ingestion_run_id: ingestionRunId, diagnostics: ingestion.diagnostics });

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildConceptInventory } from "../conceptInventory.ts";
-import { buildSpineFromUnified, checkSpineCompleteness, type SpineDecision } from "../spineFromUnified.ts";
+import { buildSpineFromUnified, checkSpineCompleteness, resolveDetailLineItemIds, type SpineDecision } from "../spineFromUnified.ts";
 import { buildUnifiedStatements, type BreakdownRow, type UnificationDecision, type UnifiedStatementsArtifact } from "../unifiedStatements.ts";
 import { fact, filing, node, period, statement } from "./spineFixture.ts";
 
@@ -242,33 +242,49 @@ test("revenue detail rows from two axes raise a finding even split across 'reven
   assert.ok(findings.some((f) => f.includes("single axis")), findings.join("\n"));
 });
 
-test("revenue streams that nest an aggregate over its own piece raise a finding", () => {
+test("revenue streams mirror the member tree: a piece nests under its chosen parent's stream", () => {
   const unified = makeUnifiedWithNetSales();
   unified.breakdownRows = [
     breakdownRow({ rowId: "net_sales.seg.product", parentRowId: "net_sales", axisQName: "us-gaap:SegmentAxis",
-      memberQName: "x:ProductMember", label: "Product", values: { FY2025: 3 } }),
+      memberQName: "x:ProductMember", label: "Product", values: { FY2024: 3, FY2025: 3 } }),
     breakdownRow({ rowId: "net_sales.seg.phone", parentRowId: "net_sales", axisQName: "us-gaap:SegmentAxis",
-      memberQName: "x:PhoneMember", label: "Phone", values: { FY2025: 2 }, parentMemberQName: "x:ProductMember" }),
+      memberQName: "x:PhoneMember", label: "Phone", values: { FY2024: 2, FY2025: 2 }, parentMemberQName: "x:ProductMember" }),
     breakdownRow({ rowId: "net_sales.seg.service", parentRowId: "net_sales", axisQName: "us-gaap:SegmentAxis",
-      memberQName: "x:ServiceMember", label: "Service", values: { FY2025: 1 } }),
+      memberQName: "x:ServiceMember", label: "Service", values: { FY2024: 1, FY2025: 1 } }),
   ];
   const nested: SpineDecision = {
     mappings: [{ targetId: "revenue.total", rowIds: ["net_sales"], rationale: "r" }],
     detailRows: [
       { parentTargetId: "revenue", rowId: "net_sales.seg.product", rationale: "r" },
       { parentTargetId: "revenue", rowId: "net_sales.seg.phone", rationale: "r" },
+      { parentTargetId: "revenue", rowId: "net_sales.seg.service", rationale: "r" },
     ],
     excluded: [], spineGaps: [],
   };
+  assert.deepEqual(resolveDetailLineItemIds(nested, unified), {
+    "net_sales.seg.product": "revenue.product",
+    "net_sales.seg.phone": "revenue.product.phone",
+    "net_sales.seg.service": "revenue.service",
+  });
   const findings = checkSpineCompleteness({ unified, decision: nested, spineIds: new Set(["revenue.total"]) });
-  assert.ok(findings.some((f) => f.includes("must not nest") && f.includes("x:ProductMember")), findings.join("\n"));
-  // Picking one level — the piece and its sibling root, but not the aggregate — is legal.
-  const antichain: SpineDecision = { ...nested, detailRows: [
-    { parentTargetId: "revenue", rowId: "net_sales.seg.phone", rationale: "r" },
-    { parentTargetId: "revenue", rowId: "net_sales.seg.service", rationale: "r" },
-  ] };
-  const clean = checkSpineCompleteness({ unified, decision: antichain, spineIds: new Set(["revenue.total"]) });
-  assert.ok(!clean.some((f) => f.includes("must not nest")), clean.join("\n"));
+  assert.ok(!findings.some((f) => f.includes("nest")), findings.join("\n"));
+  const result = buildSpineFromUnified({ decision: nested, unified, spineIds: new Set(["revenue.total"]) });
+  assert.deepEqual(result.facts.filter((f) => f.lineItemId?.startsWith("revenue.pro")).map((f) => f.lineItemId).sort(),
+    ["revenue.product", "revenue.product", "revenue.product.phone", "revenue.product.phone"]);
+});
+
+test("a piece whose parent member was not chosen becomes a top-level stream", () => {
+  const unified = makeUnifiedWithNetSales();
+  unified.breakdownRows = [
+    breakdownRow({ rowId: "net_sales.seg.phone", parentRowId: "net_sales", axisQName: "us-gaap:SegmentAxis",
+      memberQName: "x:PhoneMember", label: "Phone", values: { FY2025: 2 }, parentMemberQName: "x:ProductMember" }),
+  ];
+  const decision: SpineDecision = {
+    mappings: [{ targetId: "revenue.total", rowIds: ["net_sales"], rationale: "r" }],
+    detailRows: [{ parentTargetId: "revenue", rowId: "net_sales.seg.phone", rationale: "r" }],
+    excluded: [], spineGaps: [],
+  };
+  assert.deepEqual(resolveDetailLineItemIds(decision, unified), { "net_sales.seg.phone": "revenue.phone" });
 });
 
 test("a breakdown detailRow materializes staged facts from its stored values, with a non-empty asOfDate", () => {
@@ -279,7 +295,7 @@ test("a breakdown detailRow materializes staged facts from its stored values, wi
     mappings: [{ targetId: "revenue.total", rowIds: ["net_sales"], rationale: "r" }],
     detailRows: [{ parentTargetId: "revenue", rowId: "net_sales.seg.a", rationale: "r" }],
     excluded: [], spineGaps: [] }, unified, spineIds: new Set(["revenue.total"]) });
-  const detail = result.facts.find((f) => f.lineItemId === "revenue.net_sales_seg_a");
+  const detail = result.facts.find((f) => f.lineItemId === "revenue.a");
   assert.ok(detail);
   assert.equal(detail!.value, 1);
   assert.deepEqual(detail!.provenance.sourceRefs, []);

@@ -153,6 +153,6 @@ test("spine_mapping labels a breakdown detail row from breakdownRows, not the ro
   const service = new FinancialModelService(financial.modelStore, "s1");
   const view = service.getModel(modelId);
   assert.ok("currentWorkbook" in view);
-  const stream = view.currentWorkbook.sections.revenue.find((row) => row.lineItemId === "revenue.net_sales_seg_products");
+  const stream = view.currentWorkbook.sections.revenue.find((row) => row.lineItemId === "revenue.products");
   assert.equal(stream?.label, "Products", JSON.stringify(view.currentWorkbook.sections.revenue.map((r) => r.lineItemId)));
 });
