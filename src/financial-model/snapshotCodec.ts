@@ -368,7 +368,7 @@ function normalizeLineItem(value: unknown, path: string): LineItem {
     value,
     path,
     ["id", "label", "role", "unit", "section", "order", "historical", "forecast"],
-    ["parentId"],
+    ["parentId", "description"],
   );
   return {
     id: nonemptyString(object.id, `${path}.id`),
@@ -394,6 +394,9 @@ function normalizeLineItem(value: unknown, path: string): LineItem {
       `${path}.forecast`,
       CELL_SOURCES,
     ) as CellSource,
+    ...(hasOwn(object, "description")
+      ? { description: stringValue(object.description, `${path}.description`) }
+      : {}),
   };
 }
 

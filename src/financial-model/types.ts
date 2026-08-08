@@ -79,6 +79,8 @@ export type LineItem = {
   historical: CellSource;
   /** Source in forecast periods. */
   forecast: CellSource;
+  /** Free-text explanation of what the row means; primarily used for Agent-authored custom rows. */
+  description?: string;
 };
 
 export type StatementKind =
@@ -249,7 +251,7 @@ export type StatementMappingPlan = {
   reviewDecisionId: string;
 };
 
-export type DiscountConvention = "year_end" | "mid_year";
+type DiscountConvention = "year_end" | "mid_year";
 
 export type ValuationConfig = {
   anchorPeriodId: string;

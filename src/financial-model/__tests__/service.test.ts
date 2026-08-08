@@ -705,3 +705,37 @@ test("a breakdown detail row's fact stages cleanly end to end through buildSpine
   const stream = view.currentWorkbook.sections.revenue.find((row) => row.lineItemId === "revenue.products");
   assert.equal(stream?.label, "Products");
 });
+
+test("a custom metric row carries its description into the workbook view and survives codec round-trip", () => {
+  const { store, service } = setup();
+  service.createModel(CREATE_INPUT);
+  service.applyOperations("model-1", 0, [
+    { kind: "add_line_item", lineItem: { id: "metric.custom.opex_ratio", label: "Opex ratio",
+      parentId: "custom_metrics", unit: { kind: "ratio" }, description: "Operating expense intensity" } },
+  ]);
+  const view = service.getModel("model-1");
+  assert.ok("currentWorkbook" in view);
+  const row = view.currentWorkbook.sections.metrics.find((r) => r.lineItemId === "metric.custom.opex_ratio");
+  assert.equal(row?.description, "Operating expense intensity");
+  // codec round-trip: encode → decode 后 description 仍在；老行（无 description）不受影响
+  const snapshot = store.getRevision("model-1")!.snapshot;
+  const decoded = financialModelSnapshotCodec.decode(financialModelSnapshotCodec.encode(snapshot));
+  assert.equal(decoded.lineItems.find((i) => i.id === "metric.custom.opex_ratio")?.description, "Operating expense intensity");
+});
+
+test("metric.custom rows accept formulas while registry metrics and fixed drivers stay immutable", () => {
+  const { service } = setup();
+  service.createModel(CREATE_INPUT);
+  const result = service.applyOperations("model-1", 0, [
+    { kind: "add_line_item", lineItem: { id: "metric.custom.gm", label: "GM", parentId: "custom_metrics", unit: { kind: "ratio" } } },
+    { kind: "set_formula", formula: { lineItemId: "metric.custom.gm", appliesTo: "historical",
+      source: "revenue.total / revenue.total", periodIds: ["FY2024", "FY2025"] } },
+  ]);
+  assert.equal(result.revision, 1);
+  assert.throws(() => service.applyOperations("model-1", 1, [
+    { kind: "set_formula", formula: { lineItemId: "metric.roa", appliesTo: "historical", source: "net_income", periodIds: ["FY2024"] } },
+  ]), invalidCode("invalid_model_operation"));
+  assert.throws(() => service.applyOperations("model-1", 1, [
+    { kind: "set_formula", formula: { lineItemId: "margin.operating", appliesTo: "historical", source: "net_income", periodIds: ["FY2024"] } },
+  ]), invalidCode("invalid_model_operation"));
+});

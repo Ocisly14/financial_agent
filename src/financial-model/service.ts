@@ -802,7 +802,7 @@ function isRevenueStreamId(lineItemId: string): boolean {
 }
 
 function planKey(plan: StatementMappingPlan): string {
-  return `${plan.targetLineItemId} ${[...plan.periodIds].sort().join(",")}`;
+  return `${plan.targetLineItemId}\u0000${[...plan.periodIds].sort().join(",")}`;
 }
 
 function referencesLineItem(source: string, lineItemId: string): boolean {
@@ -976,7 +976,10 @@ function operationChanges(
           lineItemId: operation.lineItem.parentId === "revenue"
             ? `revenue.${operation.lineItem.id.replace(/^revenue\./, "")}`
             : operation.lineItem.id,
-          parentId: operation.lineItem.parentId,
+          // "custom_metrics" is a virtual bucket, not a real line item — it has no backing parent row.
+          ...(operation.lineItem.parentId !== "custom_metrics"
+            ? { parentId: operation.lineItem.parentId }
+            : {}),
         };
       case "add_metric":
         return {

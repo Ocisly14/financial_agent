@@ -19,6 +19,7 @@ import { getSharedBarRepository, type BarRepository } from "../../src/data/stock
 export const FINANCIAL_MODELING_TOOLS = [
   "create_financial_model", "review_financial_model_history", "apply_financial_model_operations",
   "get_financial_model", "list_financial_models", "archive_financial_model",
+  "list_unified_statements", "get_unified_rows", "calculate_model_rows",
 ] as const;
 
 export type FinancialModelToolDeps = {
@@ -221,8 +222,8 @@ function enrichWorkbook<T extends JsonValue>(workbook: T, source: ReturnType<Sou
   } };
 }
 function success(summary: string, data: JsonObject): ToolExecutionResult { return { summary, generation_context: { data } }; }
-function failure(code: string, message: string, data: JsonObject = {}): ToolExecutionResult { return { summary: message, error: { code, message }, generation_context: { data: { ...data, error: code } } }; }
-function toolError(error: unknown): ToolExecutionResult {
+export function failure(code: string, message: string, data: JsonObject = {}): ToolExecutionResult { return { summary: message, error: { code, message }, generation_context: { data: { ...data, error: code } } }; }
+export function toolError(error: unknown): ToolExecutionResult {
   if (error instanceof FinancialModelError) return failure(error.code, error.message, error.details ?? {});
   return failure("financial_model_error", error instanceof Error ? error.message : String(error));
 }

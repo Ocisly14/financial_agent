@@ -21,7 +21,7 @@ export type RevisionChange =
   | { kind: "fact_replaced"; lineItemId: string; periodId: string }
   | { kind: "assumption_set"; lineItemId: string; periodIds: string[] }
   | { kind: "line_item_source_set"; lineItemId: string; range: "historical" | "forecast"; source: "actual" | "assumption" | "formula" | "none" }
-  | { kind: "line_item_added"; lineItemId: string; parentId: string }
+  | { kind: "line_item_added"; lineItemId: string; parentId?: string }
   | { kind: "metric_added"; registryId: "cagr"; lineItemId: string }
   | { kind: "formula_set"; lineItemId: string; appliesTo: "historical" | "forecast"; periodIds: string[] }
   | { kind: "statement_mapping_plan_set"; targetLineItemId: string; periodIds: string[] }
@@ -63,6 +63,7 @@ export type WorkbookRowView = {
   formulas: Array<{ appliesTo: "historical" | "forecast"; periodIds: string[]; source: string }>;
   assumptions: Assumption[];
   cells: Record<string, WorkbookCellView>;
+  description?: string;
 };
 
 export type SourceStatementRowView = { sourceLineItemId: string; label: string; unit: Unit; cells: Record<string, WorkbookCellView> };
@@ -290,6 +291,7 @@ function buildDcfRow(snapshot: FinancialModelSnapshot, id: string, periods = sna
     cells: buildCells(snapshot, id, periods),
   };
   if (item.parentId !== undefined) result.parentId = item.parentId;
+  if (item.description !== undefined) result.description = item.description;
   return result;
 }
 
@@ -536,7 +538,10 @@ function validateChange(change: RevisionChange, snapshot: FinancialModelSnapshot
       }
       return;
     case "line_item_added":
-      if (!validLine(change.lineItemId) || !lineIds.has(change.parentId)) queryError("malformed line_item_added change");
+      if (!validLine(change.lineItemId)
+        || (change.parentId !== undefined && !lineIds.has(change.parentId))) {
+        queryError("malformed line_item_added change");
+      }
       return;
     case "metric_added":
       if (change.registryId !== "cagr" || !validLine(change.lineItemId)) queryError("malformed metric_added change");

@@ -61,6 +61,7 @@ export type NewExtensibleLineItem = {
     | "operating_working_capital"
     | "custom_metrics";
   unit?: Unit;
+  description?: string;
 };
 
 export type ModelOperation =
@@ -172,7 +173,9 @@ function coverageOf(snapshot: FinancialModelSnapshot, formula: Formula): string[
 }
 
 function assertMutableDefinition(item: LineItem): void {
-  if (item.section === "metrics" || REGISTRY_DRIVER_IDS.has(item.id)) {
+  // metric.custom.* is agent-owned: no engine identity or default chain reads it, so redefining it
+  // can only affect chains the agent built itself. Registry metrics and the fixed drivers stay locked.
+  if ((item.section === "metrics" && !item.id.startsWith("metric.custom.")) || REGISTRY_DRIVER_IDS.has(item.id)) {
     operationError(`registry-owned definition is immutable: ${item.id}`);
   }
   if (item.historical === "calculated" || item.forecast === "calculated") {
@@ -359,13 +362,13 @@ function addExtensibleLineItem(snapshot: FinancialModelSnapshot, input: NewExten
   snapshot.lineItems.push({
     id: input.id,
     label: input.label,
-    parentId: "custom_metrics",
     role: "none",
     unit: structuredClone(input.unit),
     section: "metrics",
     order,
     historical: "formula",
     forecast: "none",
+    ...(input.description !== undefined ? { description: input.description } : {}),
   });
 }
 

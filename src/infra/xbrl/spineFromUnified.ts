@@ -142,6 +142,14 @@ export function checkSpineCompleteness(input: { unified: UnifiedStatementsArtifa
  * parent — `revenue.total`'s children are revenue streams, not children of a `revenue.total` node —
  * so revenue details collapse to `revenue.<slug>`; everything else keeps its own parent target.
  */
+/** Last dot-separated segment of a rowId, slugged to a lower-snake token. Shared by
+ * `resolveDetailLineItemIds` and the workbench tools' `inWorkbook` heuristic, which both need the
+ * same "what would this row be called as a line item" answer. */
+export function memberSlug(rowId: string): string {
+  const segment = rowId.split(".").pop() ?? rowId;
+  return segment.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").replace(/^([0-9])/, "d$1") || "detail";
+}
+
 export function detailLineItemId(parentTargetId: string, rowId: string): string {
   const parent = parentTargetId === "revenue" || parentTargetId.startsWith("revenue.") ? "revenue" : parentTargetId;
   const slug = rowId.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").replace(/^([0-9])/, "d$1");
@@ -162,10 +170,6 @@ export function resolveDetailLineItemIds(decision: SpineDecision, unified: Unifi
     .filter((detail) => revenueish(detail.parentTargetId) && breakdownById.has(detail.rowId))
     .map((detail) => { const row = breakdownById.get(detail.rowId)!;
       return [`${row.parentRowId}|${row.axisQName}|${row.memberQName}`, detail.rowId]; }));
-  const memberSlug = (rowId: string) => {
-    const segment = rowId.split(".").pop() ?? rowId;
-    return segment.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").replace(/^([0-9])/, "d$1") || "detail";
-  };
   const resolved = new Map<string, string>();
   const resolve = (rowId: string, trail: ReadonlySet<string>): string => {
     const cached = resolved.get(rowId);
