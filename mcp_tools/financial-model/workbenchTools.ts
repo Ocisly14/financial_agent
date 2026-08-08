@@ -1,7 +1,8 @@
 import type { JsonObject, JsonSchema, JsonValue, ToolExecutionResult } from "../../src/framework/types.ts";
-import type { ModelOperation } from "../../src/financial-model/operations.ts";
+import type { ImportedSourceRow, ModelOperation } from "../../src/financial-model/operations.ts";
+import { inferFormulaUnit } from "../../src/financial-model/engine.ts";
 import { FinancialModelService } from "../../src/financial-model/service.ts";
-import type { StatementKind, Unit } from "../../src/financial-model/types.ts";
+import type { LineItem, StatementKind, Unit } from "../../src/financial-model/types.ts";
 import { memberSlug } from "../../src/infra/xbrl/spineFromUnified.ts";
 import type { BreakdownRow, UnifiedStatementsArtifact } from "../../src/infra/xbrl/unifiedStatements.ts";
 import type { RegisteredTool, ToolExecutionContext } from "../toolRegistry.ts";
@@ -201,29 +202,126 @@ function calculateModelRows(deps: FinancialModelToolDeps, input: JsonObject, con
   }
 
   const periodIds = stored.snapshot.periods.filter((p) => p.cls === "actual").map((p) => p.id);
+  // A formula may reference the operable library (step2's unified rows and breakdown rows) directly.
+  // The host materializes each referenced row as an immutable `unified.<rowId>` evidence line item —
+  // values and provenance copied deterministically from the artifact, never through the agent.
+  const artifact = deps.sourceReviewStore.get(modelId)?.unifiedStatements;
+  const imports = new Map<string, ImportedSourceRow>();
+  /** Queues an import for `rowId` if the library holds it; returns whether it (now) resolves. */
+  const importLibraryRow = (rowId: string): boolean => {
+    if (imports.has(rowId) || existingLineItemIds.has(`unified.${rowId}`)) return true;
+    if (artifact === undefined) return false;
+    const breakdown = (artifact.breakdownRows ?? []).find((row) => row.rowId === rowId);
+    if (breakdown) {
+      imports.set(rowId, { rowId, label: breakdown.label, unit: breakdown.unit ?? { kind: "number" },
+        description: `Imported ${breakdown.axisQName} member under ${breakdown.parentRowId}`,
+        values: breakdown.values, asOfDate: breakdown.asOfDate, sourceRef: rowId });
+      return true;
+    }
+    const unifiedRow = artifact.rows.find((row) => row.rowId === rowId);
+    if (unifiedRow) {
+      const facts = artifact.facts.filter((fact) => fact.lineItemId === `unified.${unifiedRow.statement}.${rowId}`);
+      const asOfDate = facts.map((fact) => fact.provenance.asOfDate).reduce((a, b) => (b > a ? b : a), "");
+      // Statement rows without resolved facts default to the model's reporting currency — the only
+      // safe guess for a face-statement line, and unit algebra rejects a wrong one loudly anyway.
+      const fallbackUnit: Unit = { kind: "currency", code: String(meta.metadata?.["reportingCurrency"] ?? "USD") };
+      imports.set(rowId, { rowId, label: unifiedRow.label, unit: facts[0]?.unit ?? fallbackUnit,
+        description: `Imported unified ${unifiedRow.statement} row`,
+        values: unifiedRow.values, asOfDate: asOfDate || new Date().toISOString().slice(0, 10),
+        sourceRef: `unified.${unifiedRow.statement}.${rowId}` });
+      return true;
+    }
+    return false;
+  };
+  // STRICT namespaces: a bare token only ever means a workbook line item; a library row must be
+  // written `unified.<rowId>`. No precedence rule, no silent winner — an id is one thing or an error.
+  const inLibrary = (rowId: string): boolean => artifact !== undefined
+    && (artifact.rows.some((row) => row.rowId === rowId) || (artifact.breakdownRows ?? []).some((row) => row.rowId === rowId));
+  const bareLibraryTokens = new Set<string>();
+  const resolveLibraryToken = (token: string): string => {
+    if (token.startsWith("unified.") && !existingLineItemIds.has(token)) {
+      importLibraryRow(token.slice("unified.".length));
+      return token; // unresolvable stays as-is: the formula validator names it in the batch rejection
+    }
+    if (!existingLineItemIds.has(token) && inLibrary(token)) bareLibraryTokens.add(token);
+    return token;
+  };
+  const expandedFormulas = rows.map((row) =>
+    expandSlugs(row.formula, slugs).replace(TOKEN_PATTERN, resolveLibraryToken));
+
+  if (bareLibraryTokens.size > 0) {
+    return failure("invalid_tool_input", [...bareLibraryTokens]
+      .map((token) => `"${token}" is an operable-library row, not a workbook line item; reference it as "unified.${token}"`)
+      .join("; "));
+  }
+  const importOps: ModelOperation[] = [...imports.values()].map((row) => ({ kind: "import_source_row", row }));
+  // An omitted unit is INFERRED from the formula — defaulting to any fixed kind just collides with
+  // whatever the formula actually produces (a currency delta, a YOY ratio). Batch rows may reference
+  // each other, so inference runs to a fixpoint; a row still unresolved (cycle, bad reference) falls
+  // back to ratio and lets the engine's own compile check name the problem.
+  const inferenceItems = new Map<string, LineItem>(stored.snapshot.lineItems.map((item) => [item.id, item]));
+  const syntheticItem = (id: string, unit: Unit): LineItem =>
+    ({ id, label: id, role: "none", unit, section: "metrics", order: 0, historical: "formula", forecast: "none" });
+  for (const imp of imports.values()) inferenceItems.set(`unified.${imp.rowId}`, syntheticItem(`unified.${imp.rowId}`, imp.unit));
+  const unitByRow = new Map<string, Unit>(rows.flatMap((row) => row.unit ? [[row.id, row.unit] as const] : []));
+  for (const [id, unit] of unitByRow) inferenceItems.set(`metric.custom.${id}`, syntheticItem(`metric.custom.${id}`, unit));
+  for (let pass = 0; pass < rows.length; pass += 1) {
+    let progressed = false;
+    rows.forEach((row, index) => {
+      if (unitByRow.has(row.id)) return;
+      try {
+        const unit = inferFormulaUnit(expandedFormulas[index]!, inferenceItems);
+        unitByRow.set(row.id, unit);
+        inferenceItems.set(`metric.custom.${row.id}`, syntheticItem(`metric.custom.${row.id}`, unit));
+        progressed = true;
+      } catch { /* references a row whose unit is not known yet — try again next pass */ }
+    });
+    if (!progressed) break;
+  }
   const addOps: ModelOperation[] = rows.map((row) => ({
     kind: "add_line_item", lineItem: { id: `metric.custom.${row.id}`, label: row.label ?? row.id.replace(/_/g, " "),
-      parentId: "custom_metrics", unit: row.unit ?? { kind: "ratio" }, ...(row.description ? { description: row.description } : {}) },
+      parentId: "custom_metrics", unit: unitByRow.get(row.id) ?? { kind: "ratio" },
+      ...(row.description ? { description: row.description } : {}) },
   }));
-  const formulaOps: ModelOperation[] = rows.map((row) => ({
+  const formulaOps: ModelOperation[] = rows.map((row, index) => ({
     kind: "set_formula", formula: { lineItemId: `metric.custom.${row.id}`, appliesTo: "historical",
-      source: expandSlugs(row.formula, slugs), periodIds },
+      source: expandedFormulas[index]!, periodIds },
   }));
 
   const service = new FinancialModelService(deps.modelStore, context.sessionId);
   try {
-    const result = service.applyOperations(modelId, expectedRevision, [...addOps, ...formulaOps]);
+    const result = service.applyOperations(modelId, expectedRevision, [...importOps, ...addOps, ...formulaOps]);
     const metricsRows = result.currentWorkbook.sections.metrics;
+    const warnings: string[] = [];
     const data = rows.map((row) => {
       const fullId = `metric.custom.${row.id}`;
       const workbookRow = metricsRows.find((r) => r.lineItemId === fullId);
       const values: Record<string, number | null> = {};
       if (workbookRow) for (const [periodId, cell] of Object.entries(workbookRow.cells)) values[periodId] = cell.value;
+      // A formula whose every period came back null usually references a row that exists but carries
+      // no values (e.g. a structural node) — surface the engine's missing inputs instead of shipping
+      // a silent blank row.
+      if (workbookRow && Object.values(values).every((value) => value === null)) {
+        const missing = [...new Set(Object.values(workbookRow.cells)
+          .flatMap((cell) => cell.diagnostics.filter((d) => d.code === "missing_input").flatMap((d) => d.refs)))];
+        warnings.push(`${fullId} computed null in every period`
+          + `${missing.length === 0 ? "" : ` — inputs with no values: ${missing.join(", ")}`}`);
+      }
       return { lineItemId: fullId, label: row.label ?? row.id.replace(/_/g, " "),
         ...(row.description ? { description: row.description } : {}), formula: row.formula, values };
     });
-    return { summary: `Calculated ${rows.length} custom metric row(s) for model ${modelId}; now at revision ${result.revision}.`,
-      generation_context: { data: { model_id: modelId, revision: result.revision, rows: data as unknown as JsonValue } } };
+    const imported = [...imports.values()].map((row) => {
+      const lineItemId = `unified.${row.rowId}`;
+      const workbookRow = metricsRows.find((r) => r.lineItemId === lineItemId);
+      const values: Record<string, number | null> = {};
+      if (workbookRow) for (const [periodId, cell] of Object.entries(workbookRow.cells)) values[periodId] = cell.value;
+      return { lineItemId, label: row.label, values };
+    });
+    return { summary: `Calculated ${rows.length} custom metric row(s) for model ${modelId}`
+      + `${imported.length === 0 ? "" : `, importing ${imported.length} library row(s)`}; now at revision ${result.revision}.`
+      + `${warnings.length === 0 ? "" : ` WARNING — ${warnings.join("; ")}`}`,
+      generation_context: { data: { model_id: modelId, revision: result.revision, rows: data as unknown as JsonValue,
+        imported: imported as unknown as JsonValue, warnings: warnings as unknown as JsonValue } } };
   } catch (error) {
     return toolError(error);
   }

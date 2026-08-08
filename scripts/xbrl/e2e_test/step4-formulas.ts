@@ -64,13 +64,24 @@ const catalog = Object.values(workbook.sections).flat()
     [latest]: row.cells[latest]?.value ?? null }));
 console.log(`Catalog: ${catalog.length} rows with historical values`);
 
+// The operable library: breakdown rows step3 never promoted into the workbook (e.g. the geographic
+// axis). Referencing one in a formula makes the tool import it deterministically.
+const workbookIds = new Set(catalog.map((row) => row.id));
+const library = (unified.breakdownRows ?? [])
+  .filter((row) => ![...workbookIds].some((id) => id.endsWith(`.${row.rowId.split(".").pop()}`)))
+  .map((row) => ({ rowId: row.rowId, label: row.label, [latest]: row.values[latest] ?? null }));
+console.log(`Operable library (not in workbook): ${library.length} rows`);
+
 // ---- 3. Ask the LLM to author parameter formulas ----
 const system = `You are a financial analyst writing DCF analysis parameters as formulas for a calculation engine.
 The formula language: operators + - * / and parentheses, numeric literals, line item ids, and the functions
 SUM, AVERAGE, LAG, YOY, CAGR, MIN, MAX, ABS, POW. LAG(x, 1) is the prior period's value; YOY(x) is x's
 year-over-year growth. Formulas are evaluated per historical period.
 Rules:
-- Reference ONLY ids from the provided catalog, exactly as written.
+- Reference ids from the provided catalog, exactly as written. You may ALSO reference a row from the
+  [OPERABLE LIBRARY] — disclosed series not yet in the model — by writing unified.<rowId> (the bare
+  rowId is refused); the engine imports it on first use.
+  At least 2 of your parameters must use a library row (e.g. a geographic mix or its growth).
 - Each parameter: a lowercase slug "id" (a-z0-9_, must not equal any catalog id), a "formula", a short
   "label", and a one-sentence "description" of what it measures and why it is useful for a DCF.
 - Formulas may reference other parameters in this same batch by their bare slug.
@@ -80,7 +91,7 @@ Return EXACTLY one JSON object: {"rows":[{"id","formula","label","description"}]
 const router = new ModelRouter(resolveLlmProvider());
 const completion = await router.generate([
   { role: "system", content: system },
-  { role: "user", content: `[LINE ITEM CATALOG]\n${JSON.stringify(catalog)}` },
+  { role: "user", content: `[LINE ITEM CATALOG]\n${JSON.stringify(catalog)}\n\n[OPERABLE LIBRARY]\n${JSON.stringify(library)}` },
 ], { modelClass: "MEDIUM", temperature: 0.1, metadata: { mode: "e2e_formula_test" } });
 const start = completion.text.indexOf("{"); const end = completion.text.lastIndexOf("}");
 if (start < 0 || end < start) throw new Error("LLM did not return JSON");
@@ -89,8 +100,13 @@ console.log(`\nLLM proposed ${proposed.length} parameter(s):`);
 for (const row of proposed) console.log(`  - ${row["id"]}: ${row["formula"]}`);
 
 // ---- 4. Execute through the REAL tool (schema -> slug expansion -> operations -> engine) ----
+// The tool resolves library references through the model's source review artifact.
+const sourceReviewStore = new InMemorySourceReviewStore();
+sourceReviewStore.save(modelId, { ingestionRunId: "e2e", coverage: { requestedPeriodIds: [], statements: [], issues: [] },
+  dimensionalDisclosures: [], curatedTables: [], curations: [], filings: [], facts: [],
+  statementViews: {} as never, unifiedStatements: unified } as never);
 const deps = { modelStore, insightStore: new InMemoryFilingInsightStore(),
-  sourceReviewStore: new InMemorySourceReviewStore(), ingestionStore: new InMemorySourceReviewStore(),
+  sourceReviewStore, ingestionStore: sourceReviewStore,
   waccParameterStore: new InMemoryWaccParameterStore() } as FinancialModelToolDeps;
 const calculate = createWorkbenchTools(deps).find((tool) => tool.name === "calculate_model_rows")!;
 const result = await calculate.execute({ modelId, expectedRevision: committed.revision, rows: proposed },
@@ -105,7 +121,11 @@ if (result.error) {
 
 // ---- 5. Verify: every row computed, values present where inputs exist ----
 const data = result.generation_context!.data as { revision: number;
-  rows: Array<{ lineItemId: string; label: string; description?: string; formula: string; values: Record<string, number | null> }> };
+  rows: Array<{ lineItemId: string; label: string; description?: string; formula: string; values: Record<string, number | null> }>;
+  imported?: Array<{ lineItemId: string; label: string }> };
+if (data.imported?.length) {
+  console.log(`\nImported from the operable library: ${data.imported.map((r) => `${r.lineItemId} (${r.label})`).join(", ")}`);
+}
 const fmt = (value: number | null) => value === null ? "—"
   : Math.abs(value) >= 1e9 ? (value / 1e9).toFixed(1) + "B" : value.toFixed(4);
 console.log(`\n## Engine results (revision ${data.revision})\n`);

@@ -82,7 +82,13 @@ geographic split) — narrowing statement → parent row → axis → member as 
 ground forecast assumptions in disclosed data instead of recalling it. calculate_model_rows is your
 worksheet: each row is {id, formula, label?, description?}, formulas are the same DSL as set_formula,
 rows may reference each other in any order, and every row persists as metric.custom.<id> with its
-formula and description on the record. Never do arithmetic in prose — put it in a row.
+formula and description on the record. Formulas may also reach the operable library — rows you saw in
+get_unified_rows that never entered the workbook, like a geographic member — by writing the rowId with
+the unified. prefix: unified.<rowId>. The host imports it as a read-only evidence row with its values
+and provenance copied deterministically, and your formula computes against it. The namespaces are
+strict: a bare id always means a workbook row, unified.<rowId> always means the library, and a bare
+library rowId is refused with the prefixed spelling to use. Importing never makes a row structural — a
+revenue stream still requires spine_mapping. Never do arithmetic in prose — put it in a row.
 
 BUILDING THE FORECAST IS YOUR WORK, AND IT IS AUTHORING, NOT FORM-FILLING. The engine asks for exactly one thing: a value for \`fcff\` in every forecast period, plus \`wacc\`, \`terminal_growth\`, and \`exit_multiple\`. Given those it discounts, builds the bridge, and produces the valuation. How the model gets from revenue to FCFF is yours to construct from the issuer's economics.
 

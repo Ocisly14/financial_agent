@@ -981,6 +981,9 @@ function operationChanges(
             ? { parentId: operation.lineItem.parentId }
             : {}),
         };
+      case "import_source_row":
+        // A deterministic copy from the operable library reads as an added line item downstream.
+        return { kind: "line_item_added", lineItemId: `unified.${operation.row.rowId}` };
       case "add_metric":
         return {
           kind: "metric_added",

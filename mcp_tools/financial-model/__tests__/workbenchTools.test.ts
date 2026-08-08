@@ -312,6 +312,134 @@ test("calculate stages a mini sheet: out-of-order cross references compute in on
   assert.equal(a.values["FY2024"], 1);
 });
 
+test("a formula referencing a library row imports it deterministically and computes", async () => {
+  const { financial, modelId, sourceReviewStore } = setup();
+  seedRevenueTotal(financial, modelId);
+  sourceReviewStore.save(modelId, review({ unifiedStatements: baseUnified() }));
+  const { calculate } = tools(financial);
+
+  // net_sales.region.us is in the operable library (step2 data layer) but NOT in the workbook.
+  const result = await calculate.execute({ modelId, expectedRevision: 2, rows: [
+    { id: "us_share", formula: "unified.net_sales.region.us / revenue.total", description: "US revenue share" },
+  ] }, ctx);
+  assert.equal(result.error, undefined, JSON.stringify(result.error));
+  const data = result.generation_context!.data as unknown as {
+    rows: Array<{ lineItemId: string; formula: string; values: Record<string, number | null> }>;
+    imported: Array<{ lineItemId: string; label: string; values: Record<string, number | null> }>;
+  };
+  assert.equal(data.rows[0]!.values["FY2024"], 0.6); // 60 / 100
+  // The engine rounds calculated cells; compare approximately.
+  assert.ok(Math.abs((data.rows[0]!.values["FY2025"] ?? 0) - 65 / 110) < 1e-9);
+  assert.deepEqual(data.imported.map((r) => r.lineItemId), ["unified.net_sales.region.us"]);
+  assert.equal(data.imported[0]!.label, "United States");
+  // The imported row is a real, committed workbook row with provenance-carrying facts…
+  const snapshot = financial.modelStore.getRevision(modelId)!.snapshot;
+  const fact = snapshot.facts.find((f) => f.lineItemId === "unified.net_sales.region.us" && f.periodId === "FY2024")!;
+  assert.equal(fact.status, "committed");
+  assert.equal(fact.value, 60);
+  assert.equal(fact.provenance.sourceType, "unified_statements");
+  assert.ok(fact.provenance.asOfDate.length > 0);
+  // …but its definition is read-only: it is evidence, not an authorable row.
+  const service = new FinancialModelService(financial.modelStore, "session-1");
+  assert.throws(() => service.applyOperations(modelId, snapshot ? 3 : 3, [
+    { kind: "set_formula", formula: { lineItemId: "unified.net_sales.region.us", appliesTo: "historical",
+      source: "revenue.total", periodIds: ["FY2024"] } },
+  ]));
+});
+
+test("two formulas sharing one library row import it once, and a later batch reuses it without re-import", async () => {
+  const { financial, modelId, sourceReviewStore } = setup();
+  seedRevenueTotal(financial, modelId);
+  sourceReviewStore.save(modelId, review({ unifiedStatements: baseUnified() }));
+  const { calculate } = tools(financial);
+
+  const first = await calculate.execute({ modelId, expectedRevision: 2, rows: [
+    { id: "us_share", formula: "unified.net_sales.region.us / revenue.total" },
+    { id: "us_growth", formula: "YOY(unified.net_sales.region.us)" },
+  ] }, ctx);
+  assert.equal(first.error, undefined, JSON.stringify(first.error));
+  const firstData = first.generation_context!.data as unknown as { revision: number; imported: Array<{ lineItemId: string }> };
+  assert.equal(firstData.imported.length, 1);
+
+  // NOTE: unified row "total_assets" would collide with the skeleton's own total_assets row, and the
+  // workbook must win that resolution — so the unified-row import path is exercised via cost_of_sales.
+  const second = await calculate.execute({ modelId, expectedRevision: firstData.revision, rows: [
+    { id: "us_to_cogs", formula: "unified.net_sales.region.us / unified.cost_of_sales" },
+  ] }, ctx);
+  assert.equal(second.error, undefined, JSON.stringify(second.error));
+  const secondData = second.generation_context!.data as unknown as {
+    imported: Array<{ lineItemId: string }>; rows: Array<{ values: Record<string, number | null> }> };
+  // net_sales.region.us already materialized; only cost_of_sales (a unified statement row) is new.
+  assert.deepEqual(secondData.imported.map((r) => r.lineItemId), ["unified.cost_of_sales"]);
+  assert.equal(secondData.rows[0]!.values["FY2024"], 60 / -40);
+  assert.equal(secondData.rows[0]!.values["FY2025"], null); // cost_of_sales FY2025 is null in the library
+});
+
+test("strict namespaces: unified.<rowId> reaches a shadowed library row, and the bare form is refused with a hint", async () => {
+  const { financial, modelId, sourceReviewStore } = setup();
+  seedRevenueTotal(financial, modelId);
+  // The library row deliberately shadows the skeleton's structural `revenue` root (which has no values).
+  sourceReviewStore.save(modelId, review({ unifiedStatements: baseUnified({ rows: [
+    { rowId: "revenue", statement: "income_statement", label: "Net sales", rationale: "",
+      values: { FY2024: 200, FY2025: 220 } },
+  ] }) }));
+  const { calculate } = tools(financial);
+  // Bare library reference: rejected upfront, naming the prefix to use.
+  const bare = await calculate.execute({ modelId, expectedRevision: 2, rows: [
+    { id: "us_x", formula: "net_sales.region.us / revenue.total" },
+  ] }, ctx);
+  assert.equal(bare.error?.code, "invalid_tool_input");
+  assert.match(bare.error!.message, /unified\.net_sales\.region\.us/);
+  // Explicit prefix reaches the library's Net sales (200/100) — no double-prefix, no ambiguity.
+  const result = await calculate.execute({ modelId, expectedRevision: 2, rows: [
+    { id: "lib_share", formula: "unified.revenue / revenue.total" },
+    { id: "naive_share", formula: "revenue / revenue.total" },
+  ] }, ctx);
+  assert.equal(result.error, undefined, JSON.stringify(result.error));
+  const data = result.generation_context!.data as unknown as {
+    rows: Array<{ lineItemId: string; values: Record<string, number | null> }>;
+    imported: Array<{ lineItemId: string }>; warnings: string[] };
+  assert.deepEqual(data.imported.map((r) => r.lineItemId), ["unified.revenue"]);
+  assert.equal(data.rows.find((r) => r.lineItemId === "metric.custom.lib_share")!.values["FY2024"], 2);
+  // The bare `revenue` token legally means the workbook's structural root, which has no values —
+  // that row comes back all-null and the response warns instead of staying silent.
+  assert.equal(data.rows.find((r) => r.lineItemId === "metric.custom.naive_share")!.values["FY2024"], null);
+  assert.equal(data.warnings.length, 1);
+  assert.match(data.warnings[0]!, /naive_share/);
+  assert.match(result.summary, /WARNING/);
+});
+
+test("a library row with a null period computes null there, not zero", async () => {
+  const { financial, modelId, sourceReviewStore } = setup();
+  seedRevenueTotal(financial, modelId);
+  sourceReviewStore.save(modelId, review({ unifiedStatements: baseUnified() }));
+  const { calculate } = tools(financial);
+  const result = await calculate.execute({ modelId, expectedRevision: 2, rows: [
+    { id: "cogs_ratio", formula: "unified.cost_of_sales / revenue.total" }, // cost_of_sales FY2025 is null
+  ] }, ctx);
+  assert.equal(result.error, undefined, JSON.stringify(result.error));
+  const data = result.generation_context!.data as unknown as { rows: Array<{ values: Record<string, number | null> }> };
+  assert.equal(data.rows[0]!.values["FY2024"], -0.4);
+  assert.equal(data.rows[0]!.values["FY2025"], null);
+});
+
+test("an omitted unit is inferred from the formula, not defaulted to ratio", async () => {
+  const { financial, modelId } = setup();
+  seedRevenueTotal(financial, modelId);
+  const { calculate } = tools(financial);
+  // A currency-valued formula and a batch cross-reference onto it — both without a declared unit.
+  const result = await calculate.execute({ modelId, expectedRevision: 2, rows: [
+    { id: "rev_delta", formula: "revenue.total - LAG(revenue.total, 1)" },
+    { id: "rev_delta_share", formula: "rev_delta / revenue.total" },
+  ] }, ctx);
+  assert.equal(result.error, undefined, JSON.stringify(result.error));
+  const data = result.generation_context!.data as unknown as { rows: Array<{ lineItemId: string; values: Record<string, number | null> }> };
+  assert.equal(data.rows.find((r) => r.lineItemId === "metric.custom.rev_delta")!.values["FY2025"], 10);
+  const snapshot = financial.modelStore.getRevision(modelId)!.snapshot;
+  assert.deepEqual(snapshot.lineItems.find((i) => i.id === "metric.custom.rev_delta")!.unit, { kind: "currency", code: "USD" });
+  assert.deepEqual(snapshot.lineItems.find((i) => i.id === "metric.custom.rev_delta_share")!.unit, { kind: "ratio" });
+});
+
 test("a circular batch is rejected atomically", async () => {
   const { financial, modelId } = setup();
   seedRevenueTotal(financial, modelId);

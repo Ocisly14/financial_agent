@@ -35,6 +35,17 @@ test("completeness passes when every inventory cell is consumed exactly once", (
   assert.deepEqual(checkUnificationCompleteness({ inventory, decision, requestedPeriods: periods }), []);
 });
 
+test("completeness rejects a rowId that shadows the workbook's valueless structural root", () => {
+  const filings = simpleFilings();
+  const inventory = buildConceptInventory({ filings, requestedPeriods: periods });
+  const decision: UnificationDecision = { rows: [
+    decisionRow("revenue", "us-gaap:Revenues"),
+    decisionRow("cost_of_revenues", "us-gaap:CostOfRevenue"),
+  ] };
+  const findings = checkUnificationCompleteness({ inventory, decision, requestedPeriods: periods });
+  assert.equal(findings.filter((f) => f.includes('"revenue"') && f.includes("reserved")).length, 1);
+});
+
 test("completeness flags dangling inventory cells, unknown components, and double-counts", () => {
   const filings = simpleFilings();
   const inventory = buildConceptInventory({ filings, requestedPeriods: periods });
@@ -152,7 +163,7 @@ test("shared components span a re-tag: each year keeps whichever concept it carr
   const inventory = buildConceptInventory({ filings, requestedPeriods: periods });
   // One row, both tags listed side by side, no per-year enumeration at all.
   const decision: UnificationDecision = { rows: [{
-    rowId: "revenue", statement: "income_statement", label: "Net sales", rationale: "re-tag in FY2025",
+    rowId: "net_sales", statement: "income_statement", label: "Net sales", rationale: "re-tag in FY2025",
     components: [{ conceptQName: "us-gaap:SalesRevenueNet", weight: 1 }, { conceptQName: "us-gaap:Revenues", weight: 1 }] }] };
   assert.deepEqual(checkUnificationCompleteness({ inventory, decision, requestedPeriods: periods }), []);
   const artifact = buildUnifiedStatements({ decision, filings, requestedPeriods: periods, inventory });

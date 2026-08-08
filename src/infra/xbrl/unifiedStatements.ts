@@ -159,6 +159,15 @@ export type BreakdownRow = { rowId: string; parentRowId: string; axisQName: stri
 const SLUG_PATTERN = /^[a-z0-9_]+$/;
 
 /**
+ * Unified rowIds are dot-free, so the only skeleton ids they can shadow are the dot-free ones — and
+ * of those only the VALUELESS structural roots are harmful: `revenue` is a grouping node that never
+ * carries a number, so a calculate-formula token resolving to it (workbook wins name clashes) yields
+ * silent nulls. Data-bearing canonical ids (operating_income, fcff, …) collide benignly — the
+ * workbook row IS the same quantity once mapped.
+ */
+const RESERVED_ROW_IDS = new Set(["revenue"]);
+
+/**
  * A roll-up residual this small relative to the reported parent is noise — a presentation detail or a
  * line the issuer restructured between years — not a mapping error the agent could fix by re-running.
  * Breaks below it are still recorded on the artifact; they just stop gating the loop.
@@ -206,6 +215,10 @@ export function checkUnificationCompleteness(input: { inventory: readonly Invent
   const uses = new Map<string, string[]>();
   for (const row of input.decision.rows) {
     if (!SLUG_PATTERN.test(row.rowId)) findings.push(`rowId "${row.rowId}" is not a slug (expected /^[a-z0-9_]+$/)`);
+    if (RESERVED_ROW_IDS.has(row.rowId)) {
+      findings.push(`rowId "${row.rowId}" is reserved: it shadows the DCF workbook's valueless structural root, `
+        + `so a formula referencing it would silently resolve to an empty row — name the row after the issuer's own caption instead`);
+    }
     if (seenRowIds.has(row.rowId)) findings.push(`duplicate rowId "${row.rowId}"`);
     seenRowIds.add(row.rowId);
     for (const override of row.perYearOverrides ?? []) {

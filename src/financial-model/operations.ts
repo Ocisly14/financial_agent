@@ -77,6 +77,7 @@ export type ModelOperation =
       | { range: "forecast"; source: "assumption" | "formula" | "none" }
     ))
   | { kind: "add_line_item"; lineItem: NewExtensibleLineItem }
+  | { kind: "import_source_row"; row: ImportedSourceRow }
   | { kind: "add_metric"; metric: MetricRequest }
   | { kind: "set_formula"; formula: Formula }
   | { kind: "set_statement_mapping_plan"; plan: StatementMappingPlan }
@@ -86,6 +87,23 @@ export type ModelOperation =
       kind: "advance_stage";
       stage: "history_committed" | "revenue_forecast" | "operations_fcff" | "valued";
     };
+
+/**
+ * A deterministic copy of one operable-library row (unified statement or dimensional breakdown) into
+ * the workbook, so formulas can reference it. Never authored by an agent: the host reads values,
+ * unit, and provenance out of the stored artifact — the numbers pass through no model.
+ */
+export type ImportedSourceRow = {
+  /** The library rowId; the line item lands as `unified.<rowId>`. */
+  rowId: string;
+  label: string;
+  unit: Unit;
+  description?: string;
+  values: Record<string, number | null>;
+  asOfDate: string;
+  /** Provenance back-reference into the unified artifact. */
+  sourceRef: string;
+};
 
 export type CompiledFormula = Formula & { ast: Ast };
 
@@ -372,6 +390,27 @@ function addExtensibleLineItem(snapshot: FinancialModelSnapshot, input: NewExten
   });
 }
 
+function importSourceRow(snapshot: FinancialModelSnapshot, row: ImportedSourceRow): void {
+  if (!/^[a-z0-9_.]+$/.test(row.rowId)) operationError(`invalid library rowId: ${row.rowId}`);
+  if (row.label.trim().length === 0) operationError("imported row label must not be empty");
+  if (row.asOfDate.trim().length === 0) operationError(`imported row needs an asOfDate: ${row.rowId}`);
+  const id = `unified.${row.rowId}`;
+  if (snapshot.lineItems.some((item) => item.id === id)) operationError(`line item already exists: ${id}`);
+  const order = Math.max(699, ...snapshot.lineItems.map((item) => item.order)) + 1;
+  // Evidence, not an authorable row: it lands in the metrics section OUTSIDE the metric.custom.*
+  // namespace, so assertMutableDefinition keeps its definition immutable by construction.
+  snapshot.lineItems.push({ id, label: row.label, role: "none", unit: structuredClone(row.unit),
+    section: "metrics", order, historical: "actual", forecast: "none",
+    ...(row.description !== undefined ? { description: row.description } : {}) });
+  const known = new Set(snapshot.periods.filter((period) => period.cls === "actual").map((period) => period.id));
+  for (const [periodId, value] of Object.entries(row.values)) {
+    if (value === null || !known.has(periodId)) continue;
+    snapshot.facts.push({ factId: `import.${id}.${periodId}`, status: "committed", lineItemId: id,
+      periodId, value, unit: structuredClone(row.unit),
+      provenance: { sourceType: "unified_statements", sourceRefs: [row.sourceRef], asOfDate: row.asOfDate } });
+  }
+}
+
 function replaceCategoryGroup(
   snapshot: FinancialModelSnapshot,
   incoming: DcfCategoryGroup,
@@ -521,6 +560,9 @@ export function applyModelOperations(
         break;
       case "add_line_item":
         addExtensibleLineItem(next, operation.lineItem);
+        break;
+      case "import_source_row":
+        importSourceRow(next, operation.row);
         break;
       case "add_metric":
         acceptSkeleton(next, installRegisteredMetric(skeletonOf(next), next.periods, operation.metric));

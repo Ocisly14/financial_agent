@@ -257,6 +257,14 @@ export function evaluate(input: EngineInput): EngineOutput {
   return { cells, order };
 }
 
+/**
+ * Static unit of a formula against known row units — the same logic the compile-time check runs, so a
+ * caller can adopt the produced unit instead of guessing one and colliding with it.
+ */
+export function inferFormulaUnit(source: string, itemById: ReadonlyMap<string, LineItem>): Unit {
+  return unitOf(parseFormula(source), itemById, source).unit;
+}
+
 /** Compile-time unit of an expression. Throws before evaluation on mismatch. */
 function unitOf(
   ast: Ast,
