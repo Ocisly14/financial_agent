@@ -21,7 +21,6 @@ import { researchPrompt } from "./research/researchPrompt.ts";
 import { getDefaultFinancialModelToolDeps } from "../../mcp_tools/financial-model/financialModelTools.ts";
 import { createDcfSubagentTool } from "../../mcp_tools/financial-model/dcfSubagentTool.ts";
 import { createStatementExtractionTool } from "../../mcp_tools/financial-model/statementExtractionTool.ts";
-import { createComputeWaccTool } from "../../mcp_tools/financial-model/waccTool.ts";
 
 export type FinancialAgentApp = Awaited<ReturnType<typeof createFinancialAgentApp>>;
 
@@ -36,7 +35,6 @@ export async function createFinancialAgentApp() {
   // insight pass, the subagent tool for the subagents themselves.
   toolRegistry.register(createStatementExtractionTool({ modelRouter, financial: financialModelDeps }));
   toolRegistry.register(createDcfSubagentTool({ modelRouter, financial: financialModelDeps }));
-  toolRegistry.register(createComputeWaccTool({ financial: financialModelDeps }));
   const subagents = createSubagentRegistry();
   const subagentRuntime = new SubagentRuntime(modelRouter, toolRegistry);
   const skills = new SkillRegistry();

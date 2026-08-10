@@ -12,14 +12,16 @@ import { SqliteSourceReviewStore, type FilingIngestionStore, type SourceReviewSt
 import { SqliteFilingTableStore, type FilingTableStore } from "../../src/infra/xbrl/filingTableStore.ts";
 import type { RegisteredTool, ToolExecutionContext } from "../toolRegistry.ts";
 import { operationsInputSchema, parseHistoryReviewInput, parseOperations, reviewInputSchema, validate } from "./schemas.ts";
-import { describeWaccStatus, refreshWaccParameters, waccStatusData } from "../../src/financial-model/waccRefresh.ts";
-import { SqliteWaccParameterStore, type WaccParameterStore } from "../../src/financial-model/waccStore.ts";
+import { deriveWaccParameters, type DerivationDeps, type WaccParameterName } from "../../src/financial-model/waccDerivation.ts";
+import type { WaccSheet, WaccSheetComputedInput } from "../../src/financial-model/waccSheet.ts";
 import { getSharedBarRepository, type BarRepository } from "../../src/data/stock/index.ts";
+import { fetchTreasury30y } from "../../src/infra/market/treasuryYield.ts";
 
 export const FINANCIAL_MODELING_TOOLS = [
   "create_financial_model", "review_financial_model_history", "apply_financial_model_operations",
   "get_financial_model", "list_financial_models", "archive_financial_model",
   "list_unified_statements", "get_unified_rows", "calculate_model_rows",
+  "get_treasury_yield",
 ] as const;
 
 export type FinancialModelToolDeps = {
@@ -27,7 +29,6 @@ export type FinancialModelToolDeps = {
   insightStore: FilingInsightStore;
   sourceReviewStore: SourceReviewStore;
   ingestionStore: FilingIngestionStore;
-  waccParameterStore: WaccParameterStore;
   /** Price source for the derived beta and equity value. Absent in tests that do not exercise them. */
   barRepository?: () => Promise<BarRepository | undefined>;
   /** Dimension exploration's data source; absent means statement_unification does not build breakdowns. */
@@ -43,7 +44,6 @@ export function getDefaultFinancialModelToolDeps(): FinancialModelToolDeps {
     insightStore: SqliteFilingInsightStore.open(databasePath),
     sourceReviewStore: SqliteSourceReviewStore.open(databasePath),
     ingestionStore: SqliteSourceReviewStore.open(databasePath),
-    waccParameterStore: SqliteWaccParameterStore.open(databasePath),
     barRepository: getSharedBarRepository,
     tableStore: SqliteFilingTableStore.open(databasePath),
   };
@@ -141,26 +141,98 @@ async function mutate(deps: FinancialModelToolDeps, input: JsonObject, context: 
   options: { refreshWacc?: boolean } = {}): Promise<ToolExecutionResult> {
   try {
     const id = requireString(input, "modelId"); requireOwner(deps, id, context.agentId);
-    const result = action(new FinancialModelService(deps.modelStore, context.sessionId), id, requireInteger(input, "expectedRevision"));
-    const insights = insightContext(deps, result.currentWorkbook.filingInsightSetId ?? null);
+    const service = new FinancialModelService(deps.modelStore, context.sessionId);
+    const reviewResult = action(service, id, requireInteger(input, "expectedRevision"));
+    let result = reviewResult;
     // Committing facts is what makes WACC terms derivable, so the engine works them out here rather
-    // than waiting to be asked. The agent reads where it stands off the commit it already made.
-    const wacc = options.refreshWacc === true ? await waccStatus(deps, id) : undefined;
-    return success(`Updated financial model ${id} to revision ${result.revision}.${describeWaccStatus(wacc)}`,
+    // than waiting to be asked, and lands them as their own revision. The agent reads where the wacc
+    // row stands off the commit it already made, with no separate call. The refresh's own
+    // revision_summary/warnings are reported alongside — not in place of — the review commit's: the
+    // agent's fact-review feedback loop reads revision_summary off the commit it actually asked for.
+    let waccRefreshSkipped: string | undefined;
+    if (options.refreshWacc === true) {
+      const outcome = await refreshWaccSheetFromSpine(deps, service, id, result.revision);
+      if (outcome.kind === "refreshed") result = outcome.result;
+      else waccRefreshSkipped = outcome.reason;
+    }
+    const refreshed = result !== reviewResult && result.revision !== reviewResult.revision;
+    const insights = insightContext(deps, result.currentWorkbook.filingInsightSetId ?? null);
+    return success(`Updated financial model ${id} to revision ${result.revision}.${waccSummary(result.currentWorkbook.waccSheet)}`,
       { model_id: id, revision: result.revision,
-        lifecycle_stage: result.status, revision_summary: result.revisionSummary, filing_insights: insights,
+        lifecycle_stage: result.status, revision_summary: reviewResult.revisionSummary, filing_insights: insights,
         current_workbook: enrichWorkbook(result.currentWorkbook, deps.sourceReviewStore.get(id)),
-        ...waccStatusData(wacc), warnings: result.warnings });
+        ...(refreshed ? { wacc_refresh_summary: result.revisionSummary } : {}),
+        ...(waccRefreshSkipped !== undefined ? { wacc_refresh_skipped: waccRefreshSkipped } : {}),
+        warnings: [...reviewResult.warnings, ...(refreshed ? result.warnings : [])] });
   } catch (error) { return toolError(error); }
 }
 
-async function waccStatus(deps: FinancialModelToolDeps, modelId: string) {
-  const meta = deps.modelStore.getMeta(modelId);
-  const stored = deps.modelStore.getRevision(modelId);
-  if (!meta || !stored) return undefined;
-  return refreshWaccParameters(
-    { parameterStore: deps.waccParameterStore, ...(deps.barRepository ? { barRepository: deps.barRepository } : {}) },
-    { modelId, symbol: meta.symbol, snapshot: stored.snapshot });
+/** Maps the seven `WaccParameterName` terms `deriveWaccParameters` already knows how to compute onto
+ * the WACC sheet rows they fill. equityRiskPremium has no measurable source and no sheet row of its
+ * own here — the agent supplies it directly — so it is simply absent from this table. */
+const WACC_SHEET_ROW_BY_PARAMETER_NAME: Partial<Record<WaccParameterName, WaccSheetComputedInput["rowId"]>> = {
+  beta: "beta", costOfDebt: "cost_of_debt", equityValue: "equity_value", totalDebt: "total_debt", taxRate: "effective_tax_rate",
+  riskFreeRate: "risk_free_rate",
+};
+
+type WaccRefreshOutcome =
+  | { kind: "refreshed"; result: ReturnType<FinancialModelService["archive"]> }
+  | { kind: "skipped"; reason: string };
+
+/**
+ * Runs the WACC derivation against the model's just-committed spine and folds whatever it can reach
+ * into the sheet as a `wacc_sheet_refreshed` revision. Never lets the review commit that triggered it
+ * fail: an absent bar repository, a derivation error, or simply nothing derivable all fall back to a
+ * skip reason reported alongside the commit that already happened.
+ */
+async function refreshWaccSheetFromSpine(deps: FinancialModelToolDeps, service: FinancialModelService,
+  modelId: string, expectedRevision: number): Promise<WaccRefreshOutcome> {
+  if (!deps.barRepository) return { kind: "skipped", reason: "no price data source is configured" };
+  try {
+    const meta = deps.modelStore.getMeta(modelId);
+    const stored = deps.modelStore.getRevision(modelId, expectedRevision);
+    if (!meta || !stored) return { kind: "skipped", reason: "model not found" };
+    const waccSheet = stored.snapshot.waccSheet;
+    if (waccSheet === null) return { kind: "skipped", reason: "model has no WACC sheet" };
+    const repository = await deps.barRepository();
+    const derivationDeps: DerivationDeps = {
+      dailyCloses: async (symbol, from, to) => repository === undefined ? []
+        : (await repository.getBarsBetween(symbol, "1Day", from, to)).map((bar) => ({ t: bar.t, c: bar.c })),
+      treasury30y: (asOf) => fetchTreasury30y(asOf),
+    };
+    // The as-of date is the sheet's own — fixed at the model's creation — never today's date, so a
+    // refresh years later still derives against the same anchor the skeleton was built with.
+    const { derived, cashAndEquivalents, unreachable } = await deriveWaccParameters({
+      symbol: meta.symbol, asOfDate: waccSheet.asOfDate, facts: stored.snapshot.facts,
+      lineItems: stored.snapshot.lineItems, periods: stored.snapshot.periods, deps: derivationDeps });
+    const inputs: WaccSheetComputedInput[] = [];
+    for (const parameter of derived) {
+      const rowId = WACC_SHEET_ROW_BY_PARAMETER_NAME[parameter.name];
+      if (rowId === undefined) continue;
+      inputs.push({ rowId, value: parameter.value, provenance: { sourceType: parameter.sourceType,
+        sourceRefs: parameter.sourceRefs, asOfDate: parameter.asOfDate, rationale: parameter.rationale } });
+    }
+    if (cashAndEquivalents) {
+      inputs.push({ rowId: "cash_and_equivalents_value", value: cashAndEquivalents.value,
+        provenance: { sourceType: "filing", sourceRefs: cashAndEquivalents.sourceRefs,
+          asOfDate: waccSheet.asOfDate, rationale: cashAndEquivalents.rationale } });
+    }
+    if (inputs.length === 0) {
+      const reason = unreachable.map((entry) => `${entry.name}: ${entry.reason}`).join("; ") || "no derivable WACC terms";
+      return { kind: "skipped", reason };
+    }
+    return { kind: "refreshed", result: service.refreshWaccSheet(modelId, expectedRevision, inputs) };
+  } catch (error) {
+    return { kind: "skipped", reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function waccSummary(waccSheet: WaccSheet | null): string {
+  const row = waccSheet?.rows.find((entry) => entry.rowId === "wacc");
+  if (!row) return "";
+  return row.value !== null
+    ? ` wacc ${row.value}.`
+    : ` wacc null; missing: ${row.missingInputs.join(", ")}.`;
 }
 
 async function getModel(deps: FinancialModelToolDeps, input: JsonObject, context: ToolExecutionContext): Promise<ToolExecutionResult> {
@@ -180,13 +252,12 @@ async function getModel(deps: FinancialModelToolDeps, input: JsonObject, context
       ...(input["selector"] && typeof input["selector"] === "object" ? { selector: input["selector"] as ModelQuery["selector"] } : {}),
       includeLineage: input["includeLineage"] === true, reopenSources: input["reopenSources"] === true });
     if ("currentWorkbook" in view) {
-      // The full read carries the WACC picture too, so the agent can see where the model stands
-      // without a separate call — the workbook, and what the discount rate still needs.
-      const wacc = revision === undefined ? await waccStatus(deps, id) : undefined;
-      return success(`Loaded financial model ${id} revision ${view.currentWorkbook.revision}.${describeWaccStatus(wacc)}`,
+      // The full read carries the WACC sheet as part of current_workbook.waccSheet — the agent sees
+      // where the model stands, and what the discount rate still needs, without a separate call.
+      return success(`Loaded financial model ${id} revision ${view.currentWorkbook.revision}.`,
         { model_id: id, revision: view.currentWorkbook.revision,
           revision_history: view.revisionHistory, filing_insights: insightContext(deps, view.currentWorkbook.filingInsightSetId),
-          current_workbook: enrichWorkbook(view.currentWorkbook, deps.sourceReviewStore.get(id)), ...waccStatusData(wacc) });
+          current_workbook: enrichWorkbook(view.currentWorkbook, deps.sourceReviewStore.get(id)) });
     }
     return success(`Loaded financial model ${id} revision ${view.revision}.`, { model_id: id, revision: view.revision,
       filing_insights: insightContext(deps, stored.snapshot.filingInsightSetId ?? null), workbook_slice: view });

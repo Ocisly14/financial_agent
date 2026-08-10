@@ -7,7 +7,6 @@ import { InMemoryModelStore } from "../../../src/financial-model/store.ts";
 import { InMemoryFilingInsightStore } from "../../../src/infra/filing-insights/store.ts";
 import { InMemorySourceReviewStore, type SourceReviewArtifact } from "../../../src/infra/xbrl/sourceReviewStore.ts";
 import { InMemoryFilingTableStore } from "../../../src/infra/xbrl/filingTableStore.ts";
-import { InMemoryWaccParameterStore } from "../../../src/financial-model/waccStore.ts";
 import { ModelRouter, type LlmProvider } from "../../../src/infra/llm/provider.ts";
 import { fact, filing, node, period, statement } from "../../../src/infra/xbrl/__tests__/spineFixture.ts";
 import type { FilingTable } from "../../../src/infra/xbrl/tableTypes.ts";
@@ -78,7 +77,7 @@ function setup(): { financial: FinancialModelToolDeps; modelId: string; sourceRe
     metadata: {}, reportingCurrency: "USD", periods: PERIODS, preparedStatementRows: [] });
   return { modelId, sourceReviewStore,
     financial: { modelStore, sourceReviewStore, ingestionStore: sourceReviewStore,
-      insightStore: new InMemoryFilingInsightStore(), waccParameterStore: new InMemoryWaccParameterStore() } };
+      insightStore: new InMemoryFilingInsightStore() } };
 }
 
 test("statement_unification reports breakdown counts in summary and generation_context when a tableStore is wired", async () => {

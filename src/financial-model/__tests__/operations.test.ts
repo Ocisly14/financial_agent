@@ -58,6 +58,7 @@ function snapshot(options: { metrics?: boolean; sources?: boolean; disclosures?:
     reconciliationResults: [],
     mappingException: null,
     valuation: null,
+    waccSheet: null,
     engineVersion: ENGINE_VERSION,
   };
 }
@@ -87,18 +88,18 @@ test("an empty mutation batch is rejected", () => {
 test("several assumptions apply atomically to one cloned working copy", () => {
   const base = snapshot();
   const next = applyModelOperations(base, [
-    { kind: "set_assumption", assumption: assumption("wacc", "wacc", ["FY2026", "FY2027"], [0.1, 0.09]) },
+    { kind: "set_assumption", assumption: assumption("margin", "margin.operating", ["FY2026", "FY2027"], [0.1, 0.09]) },
     { kind: "set_assumption", assumption: assumption("growth", "terminal_growth", ["FY2027"], [0.03]) },
   ]);
   assert.equal(base.assumptions.length, 0);
-  assert.deepEqual(next.assumptions.map((entry) => entry.assumptionId), ["wacc", "growth"]);
+  assert.deepEqual(next.assumptions.map((entry) => entry.assumptionId), ["margin", "growth"]);
 });
 
 test("a failed later operation leaves the input snapshot unchanged", () => {
   const base = snapshot();
   const before = structuredClone(base);
   invalid(() => applyModelOperations(base, [
-    { kind: "set_assumption", assumption: assumption("wacc", "wacc", ["FY2026"], [0.1]) },
+    { kind: "set_assumption", assumption: assumption("margin", "margin.operating", ["FY2026"], [0.1]) },
     { kind: "add_line_item", lineItem: { parentId: "revenue", id: "Bad-Slug", label: "Bad" } },
   ]));
   assert.deepEqual(base, before);
@@ -107,11 +108,11 @@ test("a failed later operation leaves the input snapshot unchanged", () => {
 test("set_assumption replaces only its explicit cells and preserves remaining path values", () => {
   let current = applyModelOperations(snapshot(), [{
     kind: "set_assumption",
-    assumption: assumption("path", "wacc", ["FY2026", "FY2027"], [0.1, 0.09]),
+    assumption: assumption("path", "margin.operating", ["FY2026", "FY2027"], [0.1, 0.09]),
   }]);
   current = applyModelOperations(current, [{
     kind: "set_assumption",
-    assumption: assumption("replacement", "wacc", ["FY2027"], [0.08]),
+    assumption: assumption("replacement", "margin.operating", ["FY2027"], [0.08]),
   }]);
   assert.deepEqual(current.assumptions.map((entry) => [entry.assumptionId, entry.periods, entry.payload]), [
     ["path", ["FY2026"], { kind: "values", values: [0.1], unit: { kind: "percent" } }],

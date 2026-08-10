@@ -9,6 +9,7 @@ import {
   type Skeleton,
 } from "./skeleton.ts";
 import { validateValuationConfig, type ValuationOutput } from "./valuation.ts";
+import { recalculateWaccSheet, setWaccInput, type SetWaccInput, type WaccSheet } from "./waccSheet.ts";
 import type { CellKey } from "./dsl/graph.ts";
 import type { Ast } from "./dsl/parser.ts";
 import { compatibleUnit } from "./dsl/units.ts";
@@ -86,7 +87,15 @@ export type ModelOperation =
   | {
       kind: "advance_stage";
       stage: "history_committed" | "revenue_forecast" | "operations_fcff" | "valued";
-    };
+    }
+  | { kind: "set_wacc_input"; input: SetWaccInputOperation };
+
+/**
+ * The tool-facing shape omits `asOfDate` — the host stamps it from the sheet's own `asOfDate`
+ * (the model's creation date) when absent, mirroring how `reviewedAt` is host-stamped elsewhere.
+ * A caller MAY still supply it explicitly (e.g. a non-tool caller replaying a specific date).
+ */
+export type SetWaccInputOperation = Omit<SetWaccInput, "asOfDate"> & { asOfDate?: string };
 
 /**
  * A deterministic copy of one operable-library row (unified statement or dimensional breakdown) into
@@ -135,6 +144,7 @@ export type FinancialModelSnapshot = {
   reconciliationResults: ReconciliationResult[];
   mappingException: MappingException | null;
   valuation: ValuationOutput | null;
+  waccSheet: WaccSheet | null;
   engineVersion: string;
 };
 
@@ -599,6 +609,12 @@ export function applyModelOperations(
           operationError(`invalid lifecycle transition: ${next.lifecycleStage} -> ${operation.stage}`);
         }
         next.lifecycleStage = operation.stage;
+        break;
+      }
+      case "set_wacc_input": {
+        if (next.waccSheet === null) operationError("model has no WACC sheet");
+        const asOfDate = operation.input.asOfDate ?? next.waccSheet.asOfDate;
+        next.waccSheet = recalculateWaccSheet(setWaccInput(next.waccSheet, { ...operation.input, asOfDate }));
         break;
       }
       default: {

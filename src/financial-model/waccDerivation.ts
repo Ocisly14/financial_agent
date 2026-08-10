@@ -9,12 +9,42 @@
  */
 import { computeBeta, type PriceBar } from "../infra/market/beta.ts";
 import { effectiveTaxRates } from "./wacc.ts";
-import type { WaccParameterInput, WaccParameterName } from "./waccStore.ts";
 import type { Fact, LineItem, Period } from "./types.ts";
+
+/** The seven CAPM/capital-structure terms this module can derive. */
+export type WaccParameterName =
+  "beta" | "riskFreeRate" | "equityRiskPremium" | "costOfDebt" | "taxRate" | "equityValue" | "totalDebt";
+
+export type WaccParameterSource =
+  /** Derived by the engine from data it holds — beta from bars, the tax rate from the income statement. */
+  | "computed"
+  /** Read off the issuer's filings. */
+  | "filing"
+  /** A market observation: a Treasury yield, a closing price. */
+  | "market"
+  /** Found by the agent through search, e.g. an issuer's bond yield or rating. */
+  | "search"
+  /** The agent's own judgment. The equity risk premium has no measurable source and lands here. */
+  | "agent_estimate";
+
+export type WaccParameterInput = {
+  name: WaccParameterName;
+  value: number;
+  sourceType: WaccParameterSource;
+  sourceRefs: string[];
+  /**
+   * How the value was arrived at, in whatever shape the producer needs: beta records its window,
+   * frequency, market proxy, feed, and observation counts; the tax rate records its per-period rates.
+   * Free-form on purpose — the alternative is a column per producer.
+   */
+  derivation: Record<string, unknown>;
+  asOfDate: string;
+  rationale: string;
+};
 
 /** SPY tracks the S&P 500 and is what the bar cache already holds; named so the choice is visible. */
 export const MARKET_PROXY = "SPY";
-export const DEFAULT_BETA_YEARS = 5;
+export const DEFAULT_BETA_YEARS = 10;
 
 export type BetaOptions = {
   /** History window. The agent may widen it; five years is the conventional default. */
@@ -25,12 +55,22 @@ export type BetaOptions = {
 export type DerivationDeps = {
   /** Daily closes for a ticker over an inclusive date range, from the local cache. */
   dailyCloses: (symbol: string, from: string, to: string) => Promise<PriceBar[]>;
+  /** The official 30-year Treasury yield as of a date, when a feed is wired; absent or a failed
+   * resolution both leave riskFreeRate unreachable rather than fabricating a value. */
+  treasury30y?: (asOfDate: string) => Promise<{ value: number; curveDate: string } | undefined>;
 };
+
+/** The WACC sheet's hidden `cash_and_equivalents_value` row is not one of the seven `WaccParameterName`
+ * terms — it exists only so the sheet's locked `net_debt` formula has a value to subtract — so it is
+ * kept out of `derived`/`WACC_PARAMETER_NAMES` entirely and reported through this narrower field. */
+export type CashDerivation = { value: number; sourceRefs: string[]; rationale: string; derivation: Record<string, unknown> };
 
 export type DerivedParameters = {
   derived: WaccParameterInput[];
+  /** Cash and equivalents at the latest committed period, when the spine has it. */
+  cashAndEquivalents?: CashDerivation;
   /** Terms the engine could not reach, each with the reason — never silently absent. */
-  unreachable: Array<{ name: WaccParameterName; reason: string }>;
+  unreachable: Array<{ name: WaccParameterName | "cash_and_equivalents_value"; reason: string }>;
 };
 
 /** Committed value of one spine line item in one period, or null. Staged facts are not evidence yet. */
@@ -53,6 +93,7 @@ export async function deriveWaccParameters(input: {
   beta?: BetaOptions;
 }): Promise<DerivedParameters> {
   const derived: WaccParameterInput[] = [];
+  let cashAndEquivalents: CashDerivation | undefined;
   const unreachable: DerivedParameters["unreachable"] = [];
   const actuals = actualPeriodIds(input.periods);
   const latest = actuals.at(-1);
@@ -82,6 +123,17 @@ export async function deriveWaccParameters(input: {
       rationale: `Total debt at ${latest}.` });
   } else {
     unreachable.push({ name: "totalDebt", reason: "no committed value for spine target `debt`; map it in spine_mapping" });
+  }
+
+  // --- Cash and equivalents, at the latest committed period — feeds the sheet's locked `net_debt`
+  // formula (total_debt - cash_and_equivalents_value); it is not one of the seven CAPM/WACC terms.
+  const cash = latest === undefined ? undefined : committed(input.facts, "cash_and_equivalents", latest);
+  if (cash) {
+    cashAndEquivalents = { value: cash.value, sourceRefs: [cash.factId],
+      derivation: { periodId: latest }, rationale: `Cash and equivalents at ${latest}.` };
+  } else {
+    unreachable.push({ name: "cash_and_equivalents_value",
+      reason: "no committed value for spine target `cash_and_equivalents`; map it in spine_mapping" });
   }
 
   // --- Market value of equity: diluted shares times the last close.
@@ -137,11 +189,22 @@ export async function deriveWaccParameters(input: {
       reason: "needs committed `interest_expense` and `debt` in the two latest periods; otherwise search the issuer's bond yield and pass it as an override" });
   }
 
-  // --- The two the engine has no source for at all.
-  unreachable.push({ name: "riskFreeRate", reason: "no Treasury feed is wired; supply the 30-year yield as an override" });
+  // --- Risk-free rate: the 30-year Treasury constant-maturity yield, straight off treasury.gov's own
+  // daily yield curve feed, when one is wired and resolves. Otherwise the agent supplies it.
+  const treasury = input.deps.treasury30y ? await input.deps.treasury30y(input.asOfDate) : undefined;
+  if (treasury) {
+    derived.push({ ...base, name: "riskFreeRate", value: treasury.value, sourceType: "market",
+      sourceRefs: [`treasury.gov:30y:${treasury.curveDate}`],
+      derivation: { term: "30Y", curveDate: treasury.curveDate, feed: "treasury.gov" },
+      rationale: `30-year constant-maturity Treasury yield as of ${treasury.curveDate} (treasury.gov daily yield curve).` });
+  } else {
+    unreachable.push({ name: "riskFreeRate", reason: "treasury.gov 30Y yield unavailable; supply it as an override" });
+  }
+
+  // --- The one term the engine has no source for at all.
   unreachable.push({ name: "equityRiskPremium", reason: "no measurable source by nature; state it as an override" });
 
-  return { derived, unreachable };
+  return { derived, unreachable, ...(cashAndEquivalents ? { cashAndEquivalents } : {}) };
 }
 
 async function lastClose(deps: DerivationDeps, symbol: string, asOfDate: string): Promise<PriceBar | undefined> {

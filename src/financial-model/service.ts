@@ -32,6 +32,7 @@ import type {
   RevisionHeader,
 } from "./store.ts";
 import type {
+  Assumption,
   Diagnostic,
   DcfCategoryGroup,
   Fact,
@@ -44,6 +45,7 @@ import type {
   ValuationConfig,
 } from "./types.ts";
 import { calculateValuation, validateValuationConfig } from "./valuation.ts";
+import { applyComputedWaccInputs, createWaccSheet, recalculateWaccSheet, type WaccSheetAnyRowId, type WaccSheetComputedInput } from "./waccSheet.ts";
 import type { JsonObject } from "../framework/types.ts";
 import {
   buildModelContextView,
@@ -173,6 +175,7 @@ export class FinancialModelService {
       reconciliationResults: [],
       mappingException: null,
       valuation: null,
+      waccSheet: recalculateWaccSheet(createWaccSheet(new Date().toISOString().slice(0, 10))),
       engineVersion: ENGINE_VERSION,
     };
     const calculated = recalculate(snapshot);
@@ -434,14 +437,63 @@ export class FinancialModelService {
   ): CommitResult {
     const parent = this.loadForMutation(modelId, expectedRevision);
     const working = applyModelOperations(parent.snapshot, operations);
-    const calculated = recalculate(working);
     const advancement = operations.some((operation) => operation.kind === "advance_stage");
+    // Checked against `working` (pre-recalculate) so a still-unresolved wacc row fails fast with the
+    // sheet's own missing-inputs list, rather than surfacing as calculateValuation's generic
+    // missing_formula_input once recalculate() attempts the valuation it can no longer produce.
+    if (advancement && STAGE_ORDER.indexOf(working.lifecycleStage) >= STAGE_ORDER.indexOf("valued")) {
+      requireWaccResolved(working);
+    }
+    const calculated = recalculate(working);
     if (advancement) enforceStageGates(calculated);
     return this.commit(
       modelId,
       expectedRevision,
       calculated,
       makeSummary(calculated, operationChanges(parent.snapshot, calculated, operations)),
+    );
+  }
+
+  /**
+   * Folds the engine's freshly derived WACC terms into the sheet and commits the result as its own
+   * revision, distinct from the fact-review commit that made those terms derivable. Agent-authored
+   * rows are left untouched — `applyComputedWaccInputs` skips them — and the sheet's `asOfDate` is
+   * never moved: it stays anchored at the model's creation date for the life of the model.
+   */
+  refreshWaccSheet(
+    modelId: string,
+    expectedRevision: number,
+    inputs: WaccSheetComputedInput[],
+  ): CommitResult {
+    const parent = this.loadForMutation(modelId, expectedRevision);
+    if (parent.snapshot.waccSheet === null) {
+      throw new FinancialModelError("invalid_model_operation", "model has no WACC sheet to refresh");
+    }
+    const before = new Map(parent.snapshot.waccSheet.rows.map((row) => [row.rowId, row]));
+    // Mirrors applyComputedWaccInputs' own skip rule so the reported rowIds match what actually
+    // changed, and treats an input whose value already matches the sheet as nothing to apply — so
+    // refreshing an already-current sheet, or one where every derivable row has been agent-overridden,
+    // is a normal no-op (no new revision) rather than an error.
+    const changed = inputs.filter((input) => {
+      const row = before.get(input.rowId);
+      return row?.source !== "agent" && row?.value !== input.value;
+    });
+    if (changed.length === 0) {
+      return commitResult(parent);
+    }
+    const working = structuredClone(parent.snapshot);
+    working.waccSheet = recalculateWaccSheet(applyComputedWaccInputs(working.waccSheet!, inputs));
+    const order = new Map(working.waccSheet.rows.map((row, index) => [row.rowId, index]));
+    const rowIds = [...new Set(changed.map((input) => input.rowId))]
+      .sort((left, right) => order.get(left)! - order.get(right)!);
+    // Recalculate the full workbook so the wacc line item's forecast cells (and any already-computed
+    // valuation) track the sheet immediately, rather than only on the next unrelated commit.
+    const calculated = recalculate(working);
+    return this.commit(
+      modelId,
+      expectedRevision,
+      calculated,
+      makeSummary(calculated, [{ kind: "wacc_sheet_refreshed", rowIds }]),
     );
   }
 
@@ -578,7 +630,11 @@ function recalculate(snapshot: FinancialModelSnapshot): FinancialModelSnapshot {
     periods: next.periods,
     lineItems: next.lineItems,
     facts: activeFacts,
-    assumptions: next.assumptions,
+    // The wacc row is "calculated", not assumption-sourced (see skeleton.ts), so its value never
+    // comes from next.assumptions; it is materialized here, straight off the WACC sheet, into the
+    // same seeding path the engine already uses for assumptions. Not persisted onto next.assumptions
+    // itself — the sheet stays the one stored record of the discount rate.
+    assumptions: [...next.assumptions, ...materializedWaccAssumptions(next)],
     formulas: next.formulas,
     valuationConfig: next.valuationConfig,
   });
@@ -628,6 +684,47 @@ function defaultValuationConfig(periods: readonly Period[]): ValuationConfig {
     asOfDate: anchor.end,
     rationale: "Default phase-1 valuation configuration",
   });
+}
+
+/**
+ * Materializes the WACC sheet's `wacc` row as the forecast value for the `wacc` line item, so the
+ * engine seeds it exactly the way an assumption would be seeded — without it ever being one. The
+ * sheet, not this list, is the record; nothing here is written back onto `snapshot.assumptions`.
+ */
+function materializedWaccAssumptions(snapshot: FinancialModelSnapshot): Assumption[] {
+  const waccRow = snapshot.waccSheet?.rows.find((row) => row.rowId === "wacc");
+  if (!waccRow || waccRow.value === null) return [];
+  const waccItem = snapshot.lineItems.find((item) => item.id === "wacc");
+  if (!waccItem) return [];
+  const forecastPeriods = snapshot.periods.filter((period) => period.cls === "forecast").map((period) => period.id);
+  if (forecastPeriods.length === 0) return [];
+  return [{
+    assumptionId: "wacc-sheet",
+    lineItemId: "wacc",
+    periods: forecastPeriods,
+    payload: { kind: "values", values: [waccRow.value], unit: waccItem.unit },
+    sourceType: "analyst_inference",
+    sourceRefs: ["wacc_sheet:wacc"],
+    asOfDate: snapshot.waccSheet!.asOfDate,
+    rationale: "Materialized from the model's WACC sheet; the sheet is the single source for the discount rate.",
+  }];
+}
+
+/**
+ * Fails fast, before recalculate() ever attempts the valuation, when the WACC sheet's wacc row has
+ * not resolved — naming exactly the rows still blocking it instead of surfacing as a generic missing
+ * cell once calculateValuation runs.
+ */
+function requireWaccResolved(snapshot: FinancialModelSnapshot): void {
+  const row = snapshot.waccSheet?.rows.find((entry) => entry.rowId === "wacc");
+  if (row?.value != null) return;
+  const missing = row && row.missingInputs.length > 0
+    ? row.missingInputs.join(", ")
+    : "the WACC sheet has not derived or been given any of its inputs yet";
+  throw new FinancialModelError(
+    "missing_formula_input",
+    `valued stage requires the WACC sheet's wacc row to resolve; still missing: ${missing}`,
+  );
 }
 
 function enforceStageGates(snapshot: FinancialModelSnapshot): void {
@@ -1017,6 +1114,8 @@ function operationChanges(
         summarizedStage = operation.stage;
         return { kind: "stage_advanced", from, to: operation.stage };
       }
+      case "set_wacc_input":
+        return { kind: "wacc_input_set", rowId: operation.input.rowId };
     }
   });
 }

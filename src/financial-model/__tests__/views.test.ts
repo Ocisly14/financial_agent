@@ -43,7 +43,7 @@ function snapshot(mapped = false): FinancialModelSnapshot {
     selectedHistoricalPeriodIds: mapped ? ["FY2024"] : [], statementMappingPlans: mapped ? plans : [],
     categoryGroups: [], proposedStatementMappings: [],
     valuationConfig, cells: output.cells, diagnostics: [], mappingDiagnostics: [], reconciliationResults: [], mappingException: null,
-    valuation: null, engineVersion: ENGINE_VERSION,
+    valuation: null, waccSheet: null, engineVersion: ENGINE_VERSION,
   };
 }
 

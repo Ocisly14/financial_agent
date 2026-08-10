@@ -68,7 +68,7 @@ test("subagent projections are stage specific and stale proposals are rejected",
     lifecycleStage: "history_committed" as const, updatedAt: "now", createdAt: "then" }, revisionHistory: [], currentWorkbook: {
       modelId: "m1", revision: 3, lifecycleStage: "history_committed" as const, engineVersion: "v", filingInsightSetId: null,
       periods: [], sections: { history: [], metrics: [], revenue: [], operations: [], dcf: [] }, categoryGroups: [], reconciliationResults: [],
-      valuationConfig: {} as never, diagnostics: [], valuation: null, mode: "dcf" as const,
+      valuationConfig: {} as never, diagnostics: [], valuation: null, waccSheet: null, mode: "dcf" as const,
     } };
   const forecast = projectForDcfSubagent("forecast_modeling", context, null);
   assert.deepEqual(Object.keys((forecast.workbook["sections"] as object)), ["history", "metrics", "revenue", "operations"]);

@@ -11,6 +11,13 @@ import {
 } from "../skeleton.ts";
 import { financialModelSnapshotCodec } from "../snapshotCodec.ts";
 import type { Cell, Period, Unit, ValuationConfig } from "../types.ts";
+import {
+  applyComputedWaccInputs,
+  createWaccSheet,
+  recalculateWaccSheet,
+  setWaccInput,
+  type WaccSheet,
+} from "../waccSheet.ts";
 
 const USD: Unit = { kind: "currency", code: "USD" };
 const PCT: Unit = { kind: "percent" };
@@ -53,6 +60,41 @@ const CONFIG: ValuationConfig = {
   asOfDate: "2026-01-01",
   rationale: "Auditable methodology.",
 };
+
+function waccSheetFixture(): WaccSheet {
+  const provenance = {
+    sourceType: "analyst_inference",
+    sourceRefs: ["https://example.com/wacc-inputs"],
+    asOfDate: "2026-01-01",
+    rationale: "Test-derived inputs.",
+  };
+  let sheet = createWaccSheet("2026-01-01");
+  sheet = applyComputedWaccInputs(sheet, [
+    { rowId: "beta", value: 1.2, provenance },
+    { rowId: "cost_of_debt", value: 0.03, provenance },
+    { rowId: "equity_value", value: 3e12, provenance },
+    { rowId: "total_debt", value: 1e11, provenance },
+    { rowId: "effective_tax_rate", value: 0.15, provenance },
+    { rowId: "cash_and_equivalents_value", value: 3e10, provenance },
+  ]);
+  sheet = setWaccInput(sheet, {
+    rowId: "risk_free_rate",
+    value: 0.04,
+    sourceType: "user",
+    sourceRefs: ["https://example.com/rf"],
+    rationale: "10-year treasury yield.",
+    asOfDate: "2026-01-01",
+  });
+  sheet = setWaccInput(sheet, {
+    rowId: "equity_risk_premium",
+    value: 0.05,
+    sourceType: "user",
+    sourceRefs: ["https://example.com/erp"],
+    rationale: "Damodaran ERP estimate.",
+    asOfDate: "2026-01-01",
+  });
+  return recalculateWaccSheet(sheet);
+}
 
 function cell(value: number | null, unit: Unit): Cell {
   return {
@@ -215,6 +257,7 @@ function snapshot(): FinancialModelSnapshot {
       periodIds: ["FY2025"],
     },
     valuation: null,
+    waccSheet: waccSheetFixture(),
     engineVersion: "1.0.0",
   };
 }
@@ -244,6 +287,32 @@ test("snapshot round-trip preserves authoritative period order and every audit f
   assert.deepEqual(decoded.facts, original.facts);
   assert.deepEqual(decoded.factReviewDecisions, original.factReviewDecisions);
   assert.deepEqual(decoded.statementMappingPlans, original.statementMappingPlans);
+});
+
+test("an agent-authored WACC-sheet formula row (source: agent + formulaSource) round-trips through the codec", () => {
+  // set_wacc_input supports a formula on an agent-writable row: source becomes "agent" while
+  // formulaSource is also set. The codec's locked_formula<->formulaSource invariant must not
+  // treat that combination as invalid — only locked_formula rows are required to carry a
+  // formula, and only computed rows are forbidden from carrying one.
+  const original = snapshot();
+  const withAgentFormula = recalculateWaccSheet(setWaccInput(original.waccSheet!, {
+    rowId: "risk_free_rate",
+    formula: "0.02 + 0.02",
+    sourceType: "user",
+    sourceRefs: ["https://example.com/rf"],
+    rationale: "sum of two rates for testing",
+    asOfDate: "2026-01-01",
+  }));
+  const withFormulaRow = { ...original, waccSheet: withAgentFormula };
+  const row = withFormulaRow.waccSheet.rows.find((candidate) => candidate.rowId === "risk_free_rate")!;
+  assert.equal(row.source, "agent");
+  assert.equal(row.formulaSource, "0.02 + 0.02");
+  assert.ok(Math.abs((row.value ?? NaN) - 0.04) < 1e-9);
+
+  const decoded = financialModelSnapshotCodec.decode(
+    financialModelSnapshotCodec.encode(withFormulaRow),
+  );
+  assert.deepEqual(decoded.waccSheet, withFormulaRow.waccSheet);
 });
 
 test("maps encode as deterministically ordered JSON arrays and decode back to maps", () => {

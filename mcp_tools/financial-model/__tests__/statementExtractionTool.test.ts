@@ -11,7 +11,6 @@ import type { PreparedStatementProvider } from "../../../src/infra/xbrl/prepared
 import type { FilingIdentity } from "../../../src/infra/xbrl/types.ts";
 import { filingTable, PERIODS, REPORT_DATES } from "../../../src/infra/xbrl/__tests__/curationFixtures.ts";
 import type { ModelRouter } from "../../../src/infra/llm/provider.ts";
-import { InMemoryWaccParameterStore } from "../../../src/financial-model/waccStore.ts";
 import { createStatementExtractionTool, STATEMENT_EXTRACTION_TOOL } from "../statementExtractionTool.ts";
 import type { FinancialModelToolDeps } from "../financialModelTools.ts";
 
@@ -39,7 +38,6 @@ function fixture(tables = TABLES) {
   const financial: FinancialModelToolDeps = {
     modelStore: new InMemoryModelStore<FinancialModelSnapshot, RevisionChangeSummary>(financialModelSnapshotCodec),
     insightStore: new InMemoryFilingInsightStore(), sourceReviewStore: store, ingestionStore: store,
-    waccParameterStore: new InMemoryWaccParameterStore(),
   };
   const tool = createStatementExtractionTool({ modelRouter: forbiddenRouter, financial, provider: provider(tables),
     tableStore: new InMemoryFilingTableStore(), generateInsights: async () => [] });

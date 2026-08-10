@@ -19,6 +19,7 @@ import {
 import { createAskUserTool } from "./user/askUserTool.ts";
 import { createFinancialModelTools, FINANCIAL_MODELING_TOOLS, type FinancialModelToolDeps } from "./financial-model/financialModelTools.ts";
 import { createWorkbenchTools } from "./financial-model/workbenchTools.ts";
+import { createTreasuryYieldTool } from "./financial-model/treasuryYieldTool.ts";
 
 export function registerAllTools(registry: McpToolRegistry, options: { financialModelDeps?: FinancialModelToolDeps } = {}): void {
   registry.register(createAskUserTool());
@@ -30,6 +31,7 @@ export function registerAllTools(registry: McpToolRegistry, options: { financial
   for (const tool of createTechnicalIndicatorTools()) registry.register(tool);
   for (const tool of createFinancialModelTools(options.financialModelDeps)) registry.register(tool);
   for (const tool of createWorkbenchTools(options.financialModelDeps)) registry.register(tool);
+  registry.register(createTreasuryYieldTool());
   // Price-driven stock strategy tools. Execution is paper/shadow only until a
   // stock broker adapter is explicitly added.
   registry.register(createCreateStrategyTool());

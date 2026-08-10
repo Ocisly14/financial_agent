@@ -19,7 +19,6 @@ import { FinancialModelService, type RevisionChangeSummary } from "../../../src/
 import { financialModelSnapshotCodec } from "../../../src/financial-model/snapshotCodec.ts";
 import { InMemoryModelStore } from "../../../src/financial-model/store.ts";
 import type { FinancialModelSnapshot } from "../../../src/financial-model/operations.ts";
-import { InMemoryWaccParameterStore } from "../../../src/financial-model/waccStore.ts";
 import { createWorkbenchTools } from "../../../mcp_tools/financial-model/workbenchTools.ts";
 import type { FinancialModelToolDeps } from "../../../mcp_tools/financial-model/financialModelTools.ts";
 import type { JsonObject } from "../../../src/framework/types.ts";
@@ -106,8 +105,7 @@ sourceReviewStore.save(modelId, { ingestionRunId: "e2e", coverage: { requestedPe
   dimensionalDisclosures: [], curatedTables: [], curations: [], filings: [], facts: [],
   statementViews: {} as never, unifiedStatements: unified } as never);
 const deps = { modelStore, insightStore: new InMemoryFilingInsightStore(),
-  sourceReviewStore, ingestionStore: sourceReviewStore,
-  waccParameterStore: new InMemoryWaccParameterStore() } as FinancialModelToolDeps;
+  sourceReviewStore, ingestionStore: sourceReviewStore } as FinancialModelToolDeps;
 const calculate = createWorkbenchTools(deps).find((tool) => tool.name === "calculate_model_rows")!;
 const result = await calculate.execute({ modelId, expectedRevision: committed.revision, rows: proposed },
   { agentId: AGENT, sessionId: "e2e-session" });

@@ -43,6 +43,12 @@ import {
   type ValuationDiagnostic,
   type ValuationOutput,
 } from "./valuation.ts";
+import {
+  WACC_SHEET_ROW_IDS,
+  type WaccSheet,
+  type WaccSheetAnyRowId,
+  type WaccSheetRow,
+} from "./waccSheet.ts";
 
 type PlainObject = Record<string, unknown>;
 type WireCell = { key: CellKey; cell: Cell };
@@ -69,7 +75,16 @@ const SNAPSHOT_FIELDS = [
   "valuation",
   "engineVersion",
 ] as const;
-const SNAPSHOT_OPTIONAL_FIELDS = ["filingInsightSetId"] as const;
+// `waccSheet` is optional on decode only for backward compatibility: snapshots written before the
+// WACC sheet existed have no such key and must decode to `null` rather than fail. New snapshots
+// always encode the field (see `toWireSnapshot`), so in practice it is never actually missing.
+const SNAPSHOT_OPTIONAL_FIELDS = ["filingInsightSetId", "waccSheet"] as const;
+
+const WACC_SHEET_ANY_ROW_IDS: readonly WaccSheetAnyRowId[] = [
+  ...WACC_SHEET_ROW_IDS,
+  "cash_and_equivalents_value",
+];
+const WACC_SHEET_SOURCES = ["computed", "agent", "locked_formula", "empty"] as const;
 
 const PERIOD_CLASSES = ["actual", "ttm", "forecast"] as const;
 const LIFECYCLE_STAGES = [
@@ -278,6 +293,10 @@ function normalizeSnapshot(
     ? null
     : normalizeValuationOutput(root.valuation, "$.valuation", itemById, periodById);
 
+  const waccSheet = !hasOwn(root, "waccSheet") || root.waccSheet === null
+    ? null
+    : normalizeWaccSheet(root.waccSheet, "$.waccSheet");
+
   return {
     filingInsightSetId: hasOwn(root, "filingInsightSetId")
       ? root.filingInsightSetId === null ? null : nonemptyString(root.filingInsightSetId, "$.filingInsightSetId")
@@ -305,6 +324,7 @@ function normalizeSnapshot(
     reconciliationResults,
     mappingException,
     valuation,
+    waccSheet,
     engineVersion: nonemptyString(root.engineVersion, "$.engineVersion"),
   };
 }
@@ -331,6 +351,7 @@ function toWireSnapshot(snapshot: FinancialModelSnapshot): PlainObject {
     reconciliationResults: snapshot.reconciliationResults,
     mappingException: snapshot.mappingException,
     valuation: snapshot.valuation,
+    waccSheet: snapshot.waccSheet,
     engineVersion: snapshot.engineVersion,
   };
 }
@@ -1139,6 +1160,77 @@ function normalizeValuationOutput(
     }
   }
   return output;
+}
+
+/**
+ * The WACC sheet's provenance shape is deliberately narrower than the workbook-wide `Provenance`
+ * type (no `decimals`/`accession`/`concept`/`filingUrl`) — it is a scalar, single-column sheet, not
+ * a fact ledger — so it gets its own normalizer rather than reusing `normalizeProvenance`.
+ */
+function normalizeWaccRowProvenance(
+  value: unknown,
+  path: string,
+): NonNullable<WaccSheetRow["provenance"]> {
+  const object = exactObject(value, path, ["sourceType", "sourceRefs", "asOfDate", "rationale"]);
+  return {
+    sourceType: nonemptyString(object.sourceType, `${path}.sourceType`),
+    sourceRefs: stringArray(object.sourceRefs, `${path}.sourceRefs`),
+    asOfDate: nonemptyString(object.asOfDate, `${path}.asOfDate`),
+    rationale: stringValue(object.rationale, `${path}.rationale`),
+  };
+}
+
+function normalizeWaccRowId(value: unknown, path: string): WaccSheetAnyRowId {
+  return enumValue(value, path, WACC_SHEET_ANY_ROW_IDS) as WaccSheetAnyRowId;
+}
+
+function normalizeWaccSheetRow(value: unknown, path: string): WaccSheetRow {
+  const object = exactObject(
+    value,
+    path,
+    ["rowId", "label", "unit", "source", "value", "missingInputs"],
+    ["formulaSource", "provenance"],
+  );
+  const value_ = object.value === null ? null : finiteNumber(object.value, `${path}.value`);
+  const missingInputs = array(object.missingInputs, `${path}.missingInputs`, (entry, entryPath) =>
+    normalizeWaccRowId(entry, entryPath));
+  uniqueStrings(missingInputs, `${path}.missingInputs`);
+  return {
+    rowId: normalizeWaccRowId(object.rowId, `${path}.rowId`),
+    label: stringValue(object.label, `${path}.label`),
+    unit: normalizeUnit(object.unit, `${path}.unit`),
+    source: enumValue(object.source, `${path}.source`, WACC_SHEET_SOURCES) as WaccSheetRow["source"],
+    value: value_,
+    ...(hasOwn(object, "formulaSource")
+      ? { formulaSource: nonemptyString(object.formulaSource, `${path}.formulaSource`) }
+      : {}),
+    ...(hasOwn(object, "provenance")
+      ? { provenance: normalizeWaccRowProvenance(object.provenance, `${path}.provenance`) }
+      : {}),
+    missingInputs,
+  };
+}
+
+function normalizeWaccSheet(value: unknown, path: string): WaccSheet {
+  const object = exactObject(value, path, ["asOfDate", "rows"]);
+  const rows = array(object.rows, `${path}.rows`, normalizeWaccSheetRow);
+  const rowById = uniqueBy(rows, (row) => row.rowId, `${path}.rows`, "WACC sheet row id");
+  if (rowById.size !== WACC_SHEET_ANY_ROW_IDS.length
+    || WACC_SHEET_ANY_ROW_IDS.some((rowId) => !rowById.has(rowId))) {
+    throw invalid(`${path}.rows`, "WACC sheet must contain exactly its fixed 12+1 rows");
+  }
+  for (const row of rows) {
+    if (row.source === "locked_formula" && row.formulaSource === undefined) {
+      throw invalid(`${path}.rows`, `locked-formula row has no formulaSource: ${row.rowId}`);
+    }
+    if (row.source === "computed" && row.formulaSource !== undefined) {
+      throw invalid(`${path}.rows`, `computed row must not carry a formulaSource: ${row.rowId}`);
+    }
+  }
+  return {
+    asOfDate: nonemptyString(object.asOfDate, `${path}.asOfDate`),
+    rows,
+  };
 }
 
 function validateLineItemReferences(

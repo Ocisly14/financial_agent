@@ -17,6 +17,7 @@ import { InMemoryModelStore, SqliteModelStore } from "../store.ts";
 import type { Fact, FactReviewDecision, Period } from "../types.ts";
 import { buildSpineFromUnified } from "../../infra/xbrl/spineFromUnified.ts";
 import type { UnifiedStatementsArtifact } from "../../infra/xbrl/unifiedStatements.ts";
+import { recalculateWaccSheet, setWaccInput, type WaccSheetComputedInput } from "../waccSheet.ts";
 
 const PERIODS: Period[] = [
   { id: "FY2024", label: "FY2024", start: "2024-01-01", end: "2024-12-31", cls: "actual" },
@@ -446,14 +447,14 @@ test("one ordered operation batch commits exactly one revision and fully recalcu
     {
       kind: "set_assumption",
       assumption: {
-        assumptionId: "wacc-path",
-        lineItemId: "wacc",
+        assumptionId: "margin-path",
+        lineItemId: "margin.operating",
         periods: ["FY2026", "FY2027"],
         payload: { kind: "values", values: [0.1, 0.09], unit: { kind: "percent" } },
         sourceType: "user",
         sourceRefs: ["test"],
         asOfDate: "2026-08-04",
-        rationale: "Discount path",
+        rationale: "Operating margin path",
       },
     },
   ];
@@ -738,4 +739,311 @@ test("metric.custom rows accept formulas while registry metrics and fixed driver
   assert.throws(() => service.applyOperations("model-1", 1, [
     { kind: "set_formula", formula: { lineItemId: "margin.operating", appliesTo: "historical", source: "net_income", periodIds: ["FY2024"] } },
   ]), invalidCode("invalid_model_operation"));
+});
+
+test("createModel initializes a 12-row WACC sheet dated today with wacc unresolved", () => {
+  const { service } = setup();
+  const result = service.createModel(CREATE_INPUT);
+  const waccSheet = result.currentWorkbook.waccSheet;
+  assert.ok(waccSheet);
+  assert.equal(waccSheet.asOfDate, new Date().toISOString().slice(0, 10));
+  // Public contract is the 12 rows; the hidden cash_and_equivalents_value row is an
+  // implementation detail that must not leak into the workbook view.
+  assert.deepEqual(waccSheet.rows.map((row) => row.rowId).sort(), [
+    "beta", "cost_of_debt", "cost_of_equity", "d_over_v", "e_over_v", "effective_tax_rate",
+    "equity_risk_premium", "equity_value", "net_debt", "risk_free_rate", "total_debt", "wacc",
+  ]);
+  const wacc = waccSheet.rows.find((row) => row.rowId === "wacc");
+  assert.equal(wacc?.value, null);
+  assert.ok((wacc?.missingInputs.length ?? 0) > 0);
+});
+
+test("the WACC sheet round-trips through the snapshot codec", () => {
+  const { store, service } = setup();
+  service.createModel(CREATE_INPUT);
+  const snapshot = store.getRevision("model-1")!.snapshot;
+  const decoded = financialModelSnapshotCodec.decode(financialModelSnapshotCodec.encode(snapshot));
+  assert.deepEqual(decoded.waccSheet, snapshot.waccSheet);
+});
+
+test("decoding a snapshot stored before the WACC sheet existed yields waccSheet: null", () => {
+  const { store, service } = setup();
+  service.createModel(CREATE_INPUT);
+  const snapshot = store.getRevision("model-1")!.snapshot;
+  const wire = JSON.parse(financialModelSnapshotCodec.encode(snapshot)) as Record<string, unknown>;
+  delete wire.waccSheet;
+  const decoded = financialModelSnapshotCodec.decode(JSON.stringify(wire));
+  assert.equal(decoded.waccSheet, null);
+});
+
+test("refreshWaccSheet fills the derivable rows, leaves an agent override alone, and lands one wacc_sheet_refreshed revision", () => {
+  const { store, service } = setup();
+  const created = service.createModel(CREATE_INPUT);
+
+  // The agent has already overridden cost_of_debt with a current bond yield before any refresh runs —
+  // a refresh must never clobber a row the agent authored, even one it could otherwise compute itself.
+  const before = store.getRevision("model-1")!;
+  const asOfDate = before.snapshot.waccSheet!.asOfDate;
+  const withAgentOverride = structuredClone(before.snapshot);
+  withAgentOverride.waccSheet = recalculateWaccSheet(setWaccInput(withAgentOverride.waccSheet!, {
+    rowId: "cost_of_debt", value: 0.09, sourceType: "search", sourceRefs: ["bond:issue"],
+    rationale: "current issue yield", asOfDate,
+  }));
+  store.commit("model-1", before.revision, {
+    lifecycleStage: withAgentOverride.lifecycleStage, snapshot: withAgentOverride,
+    changeSummary: { changes: [], changedSections: [], warningCount: 0, blockerCount: 0 },
+    engineVersion: "test", creatingSessionId: "test",
+  });
+  const revisionBeforeRefresh = store.getRevision("model-1")!.revision;
+
+  const provenance = (rationale: string) => ({ sourceType: "computed", sourceRefs: [], asOfDate, rationale });
+  const inputs: WaccSheetComputedInput[] = [
+    { rowId: "beta", value: 1.2, provenance: provenance("beta") },
+    { rowId: "cost_of_debt", value: 0.05, provenance: provenance("should not apply — agent already wrote this row") },
+    { rowId: "equity_value", value: 3_000_000_000_000, provenance: provenance("equity value") },
+    { rowId: "total_debt", value: 100_000_000_000, provenance: provenance("total debt") },
+    { rowId: "effective_tax_rate", value: 0.15, provenance: provenance("tax rate") },
+    { rowId: "cash_and_equivalents_value", value: 30_000_000_000, provenance: provenance("cash") },
+  ];
+  const result = service.refreshWaccSheet("model-1", revisionBeforeRefresh, inputs);
+
+  assert.equal(result.revision, revisionBeforeRefresh + 1);
+  const sheet = result.currentWorkbook.waccSheet!;
+  assert.equal(sheet.asOfDate, asOfDate); // as-of never moves on refresh
+  assert.equal(sheet.rows.find((row) => row.rowId === "beta")?.value, 1.2);
+  assert.equal(sheet.rows.find((row) => row.rowId === "equity_value")?.value, 3_000_000_000_000);
+  assert.equal(sheet.rows.find((row) => row.rowId === "total_debt")?.value, 100_000_000_000);
+  assert.equal(sheet.rows.find((row) => row.rowId === "effective_tax_rate")?.value, 0.15);
+  // The agent's cost_of_debt survives untouched — the refresh's own 0.05 for that row was skipped.
+  assert.equal(sheet.rows.find((row) => row.rowId === "cost_of_debt")?.value, 0.09);
+
+  const change = result.revisionSummary.changes.find((entry) => entry.kind === "wacc_sheet_refreshed");
+  assert.ok(change, "expected exactly one wacc_sheet_refreshed change");
+  if (change?.kind === "wacc_sheet_refreshed") {
+    assert.deepEqual([...change.rowIds].sort(),
+      ["beta", "cash_and_equivalents_value", "effective_tax_rate", "equity_value", "total_debt"].sort());
+  }
+});
+
+test("refreshWaccSheet is a no-op (no new revision) when every derivable row has already been agent-overridden", () => {
+  // Regression for I3: refreshWaccSheet used to throw invalid_model_operation when the filter left
+  // nothing to apply — a perfectly legitimate state, not an error — which the tool then surfaced as a
+  // misleading "wacc sheet refresh applied no rows" skip reason.
+  const { store, service } = setup();
+  service.createModel(CREATE_INPUT);
+  const before = store.getRevision("model-1")!;
+  const asOfDate = before.snapshot.waccSheet!.asOfDate;
+  const withAgentOverride = structuredClone(before.snapshot);
+  withAgentOverride.waccSheet = recalculateWaccSheet(setWaccInput(withAgentOverride.waccSheet!, {
+    rowId: "cost_of_debt", value: 0.09, sourceType: "search", sourceRefs: ["bond:issue"],
+    rationale: "current issue yield", asOfDate,
+  }));
+  store.commit("model-1", before.revision, {
+    lifecycleStage: withAgentOverride.lifecycleStage, snapshot: withAgentOverride,
+    changeSummary: { changes: [], changedSections: [], warningCount: 0, blockerCount: 0 },
+    engineVersion: "test", creatingSessionId: "test",
+  });
+  const revisionBeforeRefresh = store.getRevision("model-1")!.revision;
+
+  // The only input the derivation could offer is the row the agent already wrote.
+  const inputs: WaccSheetComputedInput[] = [
+    { rowId: "cost_of_debt", value: 0.05, provenance: { sourceType: "computed", sourceRefs: [], asOfDate, rationale: "should not apply" } },
+  ];
+  const result = service.refreshWaccSheet("model-1", revisionBeforeRefresh, inputs);
+  assert.equal(result.revision, revisionBeforeRefresh, "no new revision should be committed");
+  assert.equal(result.currentWorkbook.waccSheet!.rows.find((row) => row.rowId === "cost_of_debt")?.value, 0.09);
+  assert.equal(store.listRevisionHeaders("model-1").length, revisionBeforeRefresh + 1,
+    "the revision ledger must not have grown");
+});
+
+test("refreshWaccSheet is a no-op (no new revision) when the derived values are byte-identical to the sheet's current values", () => {
+  // Regression for I3: a refresh whose derived values match the sheet exactly used to still commit a
+  // new (no-op) wacc_sheet_refreshed revision on top of the existing one.
+  const { store, service } = setup();
+  service.createModel(CREATE_INPUT);
+  const asOfDate = store.getRevision("model-1")!.snapshot.waccSheet!.asOfDate;
+  const inputs: WaccSheetComputedInput[] = [
+    { rowId: "beta", value: 1.1, provenance: { sourceType: "computed", sourceRefs: ["bars"], asOfDate, rationale: "beta" } },
+    { rowId: "equity_value", value: 200, provenance: { sourceType: "market", sourceRefs: ["bars"], asOfDate, rationale: "equity value" } },
+  ];
+  const first = service.refreshWaccSheet("model-1", 0, inputs);
+  assert.equal(first.revision, 1, "the first refresh with real changes commits a revision");
+
+  const second = service.refreshWaccSheet("model-1", first.revision, inputs);
+  assert.equal(second.revision, first.revision, "an identical re-derivation must not commit a new revision");
+  assert.equal(store.listRevisionHeaders("model-1").length, 2,
+    "the revision ledger must not have grown for the byte-identical refresh");
+});
+
+test("refreshWaccSheet recalculates the workbook so the wacc line item's forecast cells track the sheet", () => {
+  // Regression for I1: refreshWaccSheet used to commit the sheet without calling recalculate(), so
+  // the wacc line item's forecast cells (seeded only inside recalculate() via
+  // materializedWaccAssumptions) kept whatever value they had before the refresh — stale or missing —
+  // even though the sheet itself had a resolved wacc value.
+  const { service } = setup();
+  service.createModel(CREATE_INPUT);
+
+  // The agent fills the two terms it supplies directly before any auto-refresh lands the rest — an
+  // ordinary ordering — so the wacc row is still unresolved at this point.
+  const filled = service.applyOperations("model-1", 0, [
+    { kind: "set_wacc_input", input: { rowId: "risk_free_rate", value: 0.04,
+      sourceType: "market", sourceRefs: ["treasury"], rationale: "current 10y yield", asOfDate: "2026-01-01" } },
+    { kind: "set_wacc_input", input: { rowId: "equity_risk_premium", value: 0.05,
+      sourceType: "agent_estimate", sourceRefs: [], rationale: "analyst judgment", asOfDate: "2026-01-01" } },
+  ]);
+
+  const inputs: WaccSheetComputedInput[] = [
+    { rowId: "beta", value: 1.1, provenance: { sourceType: "computed", sourceRefs: ["bars"], asOfDate: "2026-01-01", rationale: "beta" } },
+    { rowId: "cost_of_debt", value: 0.03, provenance: { sourceType: "filing", sourceRefs: ["10-K"], asOfDate: "2026-01-01", rationale: "cost of debt" } },
+    { rowId: "equity_value", value: 200, provenance: { sourceType: "market", sourceRefs: ["bars"], asOfDate: "2026-01-01", rationale: "equity value" } },
+    { rowId: "total_debt", value: 50, provenance: { sourceType: "filing", sourceRefs: ["10-K"], asOfDate: "2026-01-01", rationale: "total debt" } },
+    { rowId: "effective_tax_rate", value: 0.2, provenance: { sourceType: "computed", sourceRefs: ["10-K"], asOfDate: "2026-01-01", rationale: "tax rate" } },
+    { rowId: "cash_and_equivalents_value", value: 0, provenance: { sourceType: "filing", sourceRefs: ["10-K"], asOfDate: "2026-01-01", rationale: "cash" } },
+  ];
+  const refreshed = service.refreshWaccSheet("model-1", filled.revision, inputs);
+
+  const waccRow = refreshed.currentWorkbook.waccSheet!.rows.find((row) => row.rowId === "wacc")!;
+  assert.ok(waccRow.value !== null, "the sheet's own wacc value should now be resolved");
+  const forecastPeriodId = PERIODS.find((period) => period.cls === "forecast")!.id;
+  const waccLineItemRow = refreshed.currentWorkbook.sections.dcf.find((row) => "lineItemId" in row && row.lineItemId === "wacc") as
+    { cells: Record<string, { value: number | null }> } | undefined;
+  assert.ok(waccLineItemRow, "expected a wacc row in the dcf section");
+  assert.equal(waccLineItemRow!.cells[forecastPeriodId]?.value, waccRow.value);
+});
+
+test("set_wacc_input chains risk_free_rate and equity_risk_premium into cost_of_equity", () => {
+  const { service } = setup();
+  service.createModel(CREATE_INPUT);
+  const asOfDate = service.getModel("model-1");
+  assert.ok("currentWorkbook" in asOfDate);
+  const sheetAsOfDate = asOfDate.currentWorkbook.waccSheet!.asOfDate;
+
+  const rf = service.applyOperations("model-1", 0, [
+    { kind: "set_wacc_input", input: { rowId: "risk_free_rate", value: 0.04,
+      sourceType: "market_data", sourceRefs: ["treasury:10y"], rationale: "10y treasury yield",
+      asOfDate: sheetAsOfDate } },
+  ]);
+  const change = rf.revisionSummary.changes.find((entry) => entry.kind === "wacc_input_set");
+  assert.ok(change, "expected a wacc_input_set change");
+  if (change?.kind === "wacc_input_set") assert.equal(change.rowId, "risk_free_rate");
+
+  const erp = service.applyOperations("model-1", rf.revision, [
+    { kind: "set_wacc_input", input: { rowId: "equity_risk_premium", value: 0.05,
+      sourceType: "analyst_inference", sourceRefs: ["research:erp"], rationale: "consensus ERP",
+      asOfDate: sheetAsOfDate } },
+  ]);
+
+  const sheet = erp.currentWorkbook.waccSheet!;
+  const beta = sheet.rows.find((row) => row.rowId === "beta");
+  const costOfEquity = sheet.rows.find((row) => row.rowId === "cost_of_equity");
+  if (beta?.value !== null && beta?.value !== undefined) {
+    // cost_of_equity = risk_free_rate + beta * equity_risk_premium, chained once beta is known.
+    assert.ok(Math.abs((costOfEquity?.value ?? NaN) - (0.04 + beta.value * 0.05)) < 1e-9);
+  } else {
+    // beta is not computed yet in a bare createModel snapshot — cost_of_equity stays unresolved,
+    // but risk_free_rate and equity_risk_premium themselves must have landed.
+    assert.equal(sheet.rows.find((row) => row.rowId === "risk_free_rate")?.value, 0.04);
+    assert.equal(sheet.rows.find((row) => row.rowId === "equity_risk_premium")?.value, 0.05);
+    assert.ok(costOfEquity?.missingInputs.includes("beta"));
+  }
+});
+
+test("set_wacc_input with a formula commits cleanly and round-trips through the codec", () => {
+  // Regression for C1: the codec's locked_formula<->formulaSource invariant used to reject any row
+  // with both source: "agent" and a formulaSource, which is exactly the shape setWaccInput produces
+  // when the agent supplies a formula rather than a bare value.
+  const { store, service } = setup();
+  service.createModel(CREATE_INPUT);
+  const sheetAsOfDate = store.getRevision("model-1")!.snapshot.waccSheet!.asOfDate;
+  const result = service.applyOperations("model-1", 0, [
+    { kind: "set_wacc_input", input: { rowId: "risk_free_rate", formula: "0.02 + 0.02",
+      sourceType: "market_data", sourceRefs: ["treasury:10y"], rationale: "sum of two rates",
+      asOfDate: sheetAsOfDate } },
+  ]);
+  const row = result.currentWorkbook.waccSheet!.rows.find((entry) => entry.rowId === "risk_free_rate");
+  assert.equal(row?.source, "agent");
+  assert.equal(row?.formulaSource, "0.02 + 0.02");
+  assert.ok(Math.abs((row?.value ?? NaN) - 0.04) < 1e-9);
+
+  const stored = store.getRevision("model-1", result.revision)!.snapshot;
+  const decoded = financialModelSnapshotCodec.decode(financialModelSnapshotCodec.encode(stored));
+  assert.deepEqual(decoded.waccSheet, stored.waccSheet);
+});
+
+test("set_wacc_input omitting asOfDate defaults it to the sheet's own asOfDate", () => {
+  const { store, service } = setup();
+  service.createModel(CREATE_INPUT);
+  const sheetAsOfDate = store.getRevision("model-1")!.snapshot.waccSheet!.asOfDate;
+  const result = service.applyOperations("model-1", 0, [
+    { kind: "set_wacc_input", input: { rowId: "risk_free_rate", value: 0.04,
+      sourceType: "market_data", sourceRefs: ["treasury:10y"], rationale: "10y treasury yield" } },
+  ]);
+  const row = result.currentWorkbook.waccSheet!.rows.find((r) => r.rowId === "risk_free_rate");
+  assert.equal(row?.provenance?.asOfDate, sheetAsOfDate);
+});
+
+test("set_wacc_input rejects writes to computed and locked-formula rows", () => {
+  const { service } = setup();
+  service.createModel(CREATE_INPUT);
+  assert.throws(() => service.applyOperations("model-1", 0, [
+    { kind: "set_wacc_input", input: { rowId: "wacc", value: 0.1,
+      sourceType: "user", sourceRefs: ["manual"], rationale: "override", asOfDate: "2026-01-01" } },
+  ]), invalidCode("invalid_model_operation"));
+  assert.throws(() => service.applyOperations("model-1", 0, [
+    { kind: "set_wacc_input", input: { rowId: "e_over_v", value: 0.5,
+      sourceType: "user", sourceRefs: ["manual"], rationale: "override", asOfDate: "2026-01-01" } },
+  ]), invalidCode("invalid_model_operation"));
+});
+
+test("advancing to valued is blocked while the WACC sheet's wacc row is unresolved, naming the sheet's own missing inputs, and never commits", () => {
+  const { store, service } = setup();
+  service.createModel(CREATE_INPUT);
+  assert.throws(
+    () => service.applyOperations("model-1", 0, [{ kind: "advance_stage", stage: "valued" }]),
+    (error: unknown) => {
+      assert.ok(error instanceof FinancialModelError);
+      assert.equal(error.code, "missing_formula_input");
+      assert.match(error.message, /WACC sheet/);
+      return true;
+    },
+  );
+  assert.equal(store.getRevision("model-1")?.revision, 0, "the blocked advancement must not commit");
+});
+
+test("filling risk_free_rate and equity_risk_premium resolves the wacc row once the other terms are already computed, clearing the valued-stage block", () => {
+  const { service } = setup();
+  service.createModel(CREATE_INPUT);
+  const inputs: WaccSheetComputedInput[] = [
+    { rowId: "beta", value: 1, provenance: { sourceType: "computed", sourceRefs: ["bars"], asOfDate: "2026-01-01", rationale: "beta" } },
+    { rowId: "cost_of_debt", value: 0.05, provenance: { sourceType: "filing", sourceRefs: ["10-K"], asOfDate: "2026-01-01", rationale: "cost of debt" } },
+    { rowId: "equity_value", value: 100, provenance: { sourceType: "market", sourceRefs: ["bars"], asOfDate: "2026-01-01", rationale: "equity value" } },
+    { rowId: "total_debt", value: 0, provenance: { sourceType: "filing", sourceRefs: ["10-K"], asOfDate: "2026-01-01", rationale: "total debt" } },
+    { rowId: "effective_tax_rate", value: 0.25, provenance: { sourceType: "computed", sourceRefs: ["10-K"], asOfDate: "2026-01-01", rationale: "tax rate" } },
+    { rowId: "cash_and_equivalents_value", value: 0, provenance: { sourceType: "filing", sourceRefs: ["10-K"], asOfDate: "2026-01-01", rationale: "cash" } },
+  ];
+  const refreshed = service.refreshWaccSheet("model-1", 0, inputs);
+  assert.throws(
+    () => service.applyOperations("model-1", refreshed.revision, [{ kind: "advance_stage", stage: "valued" }]),
+    invalidCode("missing_formula_input"),
+    "risk_free_rate and equity_risk_premium are still unfilled",
+  );
+  const filled = service.applyOperations("model-1", refreshed.revision, [
+    { kind: "set_wacc_input", input: { rowId: "risk_free_rate", value: 0.04,
+      sourceType: "market", sourceRefs: ["treasury"], rationale: "current 30y yield", asOfDate: "2026-01-01" } },
+    { kind: "set_wacc_input", input: { rowId: "equity_risk_premium", value: 0.06,
+      sourceType: "agent_estimate", sourceRefs: [], rationale: "analyst judgment", asOfDate: "2026-01-01" } },
+  ]);
+  const waccRow = filled.currentWorkbook.waccSheet!.rows.find((row) => row.rowId === "wacc")!;
+  assert.equal(waccRow.value, 0.1);
+  // The wacc-sheet gate itself no longer blocks; the model still has no fcff (never staged or
+  // reviewed any facts, no forecast chain), so advancement fails on that instead, never mentioning
+  // the WACC sheet — proof the earlier block really was about wacc, not a different prerequisite.
+  assert.throws(
+    () => service.applyOperations("model-1", filled.revision, [{ kind: "advance_stage", stage: "valued" }]),
+    (error: unknown) => {
+      assert.ok(error instanceof FinancialModelError);
+      assert.doesNotMatch(error.message, /WACC sheet/);
+      return true;
+    },
+  );
 });

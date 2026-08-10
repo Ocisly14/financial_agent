@@ -3,6 +3,7 @@ import { FinancialModelError } from "./errors.ts";
 import type { FinancialModelSnapshot, ModelSelector } from "./operations.ts";
 import type { ModelView, Revision, RevisionHeader } from "./store.ts";
 import type { ValuationOutput } from "./valuation.ts";
+import { WACC_SHEET_ROW_IDS, type WaccSheet, type WaccSheetAnyRowId, type WaccSheetRowId } from "./waccSheet.ts";
 import type {
   Assumption, CellSource, DcfCategoryGroup, Diagnostic, LifecycleStage, LineItemRole, Period,
   ReconciliationResult, StatementMappingPlan, Unit, ValuationConfig,
@@ -28,7 +29,9 @@ export type RevisionChange =
   | { kind: "category_group_set"; parentLineItemId: string; category: string; periodIds: string[] }
   | { kind: "valuation_config_set" }
   | { kind: "stage_advanced"; from: LifecycleStage; to: LifecycleStage }
-  | { kind: "archived" };
+  | { kind: "archived" }
+  | { kind: "wacc_sheet_refreshed"; rowIds: WaccSheetAnyRowId[] }
+  | { kind: "wacc_input_set"; rowId: WaccSheetRowId };
 
 export type RevisionChangeSummary = JsonObject & {
   changes: RevisionChange[];
@@ -86,6 +89,7 @@ type CurrentWorkbookBase = {
   valuationConfig: ValuationConfig;
   diagnostics: Diagnostic[];
   valuation: ValuationOutput | null;
+  waccSheet: WaccSheet | null;
 };
 export type CurrentWorkbookView = CurrentWorkbookBase & (
   | { mode: "statement_mapping"; sourceStatementReview: SourceStatementReviewView }
@@ -116,6 +120,19 @@ export type HistoricalDcfCompletenessView = {
 export type WorkbookViewOptions = { includeSourceStatements?: boolean };
 
 const DCF_SECTIONS: readonly DcfWorkbookSection[] = ["history", "metrics", "revenue", "operations", "dcf"];
+const PUBLIC_WACC_ROW_IDS: ReadonlySet<string> = new Set(WACC_SHEET_ROW_IDS);
+/** Public rows plus the hidden `cash_and_equivalents_value` row — the full namespace a
+ * `wacc_sheet_refreshed` change's `rowIds` may draw from. */
+const ALL_WACC_ROW_IDS: ReadonlySet<string> = new Set([...WACC_SHEET_ROW_IDS, "cash_and_equivalents_value"]);
+
+/** The sheet's hidden 13th row (`cash_and_equivalents_value`) exists only so the locked `net_debt`
+ * formula has an operand; it is not part of the agent-facing 12-row contract and must not leak into
+ * the workbook view. */
+function publicWaccSheet(waccSheet: WaccSheet | null): WaccSheet | null {
+  if (waccSheet === null) return null;
+  const clone = structuredClone(waccSheet);
+  return { asOfDate: clone.asOfDate, rows: clone.rows.filter((row) => PUBLIC_WACC_ROW_IDS.has(row.rowId)) };
+}
 
 export function buildWorkbookView(
   modelId: string, revision: number, snapshot: FinancialModelSnapshot, options: WorkbookViewOptions = {},
@@ -138,6 +155,7 @@ export function buildWorkbookView(
     reconciliationResults: structuredClone(snapshot.reconciliationResults),
     valuationConfig: structuredClone(snapshot.valuationConfig), diagnostics: structuredClone(snapshot.diagnostics),
     valuation: structuredClone(snapshot.valuation),
+    waccSheet: publicWaccSheet(snapshot.waccSheet),
   };
   const mappingMode = options.includeSourceStatements === true
     || snapshot.statementMappingPlans.length === 0
@@ -424,7 +442,7 @@ function validateSummary(summary: RevisionChangeSummary, snapshot: FinancialMode
     "fact_replaced", "assumption_set",
     "line_item_source_set", "line_item_added", "metric_added", "formula_set",
     "statement_mapping_plan_set", "category_group_set", "valuation_config_set",
-    "stage_advanced", "archived",
+    "stage_advanced", "archived", "wacc_sheet_refreshed", "wacc_input_set",
   ]);
   const sections = [
     "history", "metrics", "revenue", "operations", "dcf",
@@ -567,6 +585,18 @@ function validateChange(change: RevisionChange, snapshot: FinancialModelSnapshot
       if (!new Set(["draft", "history_committed", "revenue_forecast", "operations_fcff", "valued", "archived"]).has(change.from)
         || !new Set(["draft", "history_committed", "revenue_forecast", "operations_fcff", "valued", "archived"]).has(change.to)) {
         queryError("malformed stage_advanced change");
+      }
+      return;
+    case "wacc_sheet_refreshed":
+      if (!Array.isArray(change.rowIds) || change.rowIds.length === 0
+        || !change.rowIds.every((id) => typeof id === "string" && ALL_WACC_ROW_IDS.has(id))
+        || new Set(change.rowIds).size !== change.rowIds.length) {
+        queryError("malformed wacc_sheet_refreshed change");
+      }
+      return;
+    case "wacc_input_set":
+      if (typeof change.rowId !== "string" || !WACC_SHEET_ROW_IDS.includes(change.rowId as WaccSheetRowId)) {
+        queryError("malformed wacc_input_set change");
       }
       return;
   }

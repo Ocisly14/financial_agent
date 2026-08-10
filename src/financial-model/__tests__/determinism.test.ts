@@ -102,6 +102,7 @@ function snapshot(output = evaluate(engineInput())): FinancialModelSnapshot {
     reconciliationResults: [],
     mappingException: null,
     valuation: null,
+    waccSheet: null,
     engineVersion: ENGINE_VERSION,
   };
 }

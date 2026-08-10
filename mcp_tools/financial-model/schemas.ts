@@ -1,6 +1,7 @@
 import type { JsonObject, JsonSchema, JsonValue } from "../../src/framework/types.ts";
 import type { ModelOperation } from "../../src/financial-model/operations.ts";
 import type { ReviewFactsInput } from "../../src/financial-model/service.ts";
+import { WACC_SHEET_ROW_IDS } from "../../src/financial-model/waccSheet.ts";
 
 const string = (description?: string): JsonSchema => ({ type: "string", ...(description ? { description } : {}) });
 const number: JsonSchema = { type: "number" };
@@ -66,6 +67,9 @@ const operationVariants: JsonSchema[] = [
   object({ kind: { type: "string", enum: ["set_category_group"] }, group: categoryGroup }, ["kind", "group"]),
   object({ kind: { type: "string", enum: ["set_valuation_config"] }, config: valuation }, ["kind", "config"]),
   object({ kind: { type: "string", enum: ["advance_stage"] }, stage: { type: "string", enum: ["history_committed", "revenue_forecast", "operations_fcff", "valued"] } }, ["kind", "stage"]),
+  object({ kind: { type: "string", enum: ["set_wacc_input"] }, rowId: { type: "string", enum: [...WACC_SHEET_ROW_IDS] },
+    value: number, formula: string(), sourceType: string(), sourceRefs: strings, rationale: string() },
+  ["kind", "rowId", "sourceType", "sourceRefs", "rationale"]),
 ];
 
 export const operationsInputSchema = object({ modelId: string(), expectedRevision: number,
@@ -78,7 +82,20 @@ export function parseHistoryReviewInput(input: JsonObject): ReviewFactsInput {
 
 export function parseOperations(input: JsonObject): ModelOperation[] {
   validate(input, operationsInputSchema, "$", true);
-  return input["operations"] as unknown as ModelOperation[];
+  const operations = input["operations"] as unknown as JsonObject[];
+  // Every other variant's JSON shape matches its ModelOperation shape field-for-field, so the cast
+  // below is a straight passthrough. `set_wacc_input` is the one exception: the tool-facing schema
+  // is flat (rowId/value/formula/sourceType/sourceRefs/rationale alongside kind) while the typed
+  // operation nests those fields under `input` (and the tool never supplies `asOfDate` — the host
+  // stamps it from the sheet's own asOfDate in the operation handler). Repack it here.
+  return operations.map((operation): ModelOperation => {
+    if (operation["kind"] !== "set_wacc_input") return operation as unknown as ModelOperation;
+    const { kind: _kind, ...rest } = operation;
+    return {
+      kind: "set_wacc_input",
+      input: rest as unknown as Extract<ModelOperation, { kind: "set_wacc_input" }>["input"],
+    };
+  });
 }
 
 export function validate(value: JsonValue, schema: JsonSchema, path: string, root = false): void {

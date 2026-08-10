@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { FinancialModelError } from "../errors.ts";
 import type { FinancialModelSnapshot, ModelOperation } from "../operations.ts";
 import { FinancialModelService } from "../service.ts";
 import { financialModelSnapshotCodec } from "../snapshotCodec.ts";
@@ -11,6 +12,7 @@ import type {
   Assumption, Fact, FactReviewDecision, Period, PreparedStatementRow, StatementMappingPlan,
   DcfCategoryGroup, Unit, ValuationConfig,
 } from "../types.ts";
+import type { WaccSheetComputedInput } from "../waccSheet.ts";
 import type { RevisionChangeSummary, WorkbookRowView } from "../views.ts";
 
 const USD: Unit = { kind: "currency", code: "USD" };
@@ -66,18 +68,37 @@ const FORECAST_EXPECTED = {
   changeNwc: [0.9, 0.99, 1.089],
   fcff: [20.22, 22.242, 24.4662],
 };
+// WACC is a flat 0.10 in every forecast period (see WACC_COMPUTED_INPUTS / setWaccInputOp below): the
+// sheet's locked formula collapses to cost_of_equity alone once total_debt is zero, so d_over_v drops
+// out and wacc = cost_of_equity = risk_free_rate + beta * equity_risk_premium = 0.04 + 1 * 0.06.
 const VALUATION_EXPECTED = {
-  discountFactors: [1.1, 1.221, 1.36752],
-  explicitPresentValue: 54.488961039,
-  gordonTerminalValue: 280.002066667,
-  gordonEnterpriseValue: 259.240677041,
-  gordonEquityValue: 241.240677041,
-  gordonPerShare: 24.1240677041,
+  discountFactors: [1.1, 1.21, 1.331],
+  explicitPresentValue: 55.145454545455,
+  gordonTerminalValue: 360.002657142857,
+  gordonEnterpriseValue: 325.620779221,
+  gordonEquityValue: 307.620779221,
+  gordonPerShare: 30.7620779221,
   exitTerminalValue: 319.44,
-  exitEnterpriseValue: 288.07969463,
-  exitEquityValue: 270.07969463,
-  exitPerShare: 27.007969463,
+  exitEnterpriseValue: 295.145454545,
+  exitEquityValue: 277.145454545,
+  exitPerShare: 27.7145454545,
 };
+
+/** Fills every WACC-sheet row the engine can derive, hand-supplied here since the golden fixture has
+ * no bar repository. Chosen so total_debt is zero: the capital-structure weight on cost_of_debt drops
+ * out entirely, leaving wacc = cost_of_equity, deterministic and independent of cost_of_debt/tax. */
+const WACC_COMPUTED_INPUTS: WaccSheetComputedInput[] = [
+  { rowId: "beta", value: 1, provenance: { sourceType: "computed", sourceRefs: ["golden-beta"], asOfDate: "2023-12-31", rationale: "Golden fixture beta." } },
+  { rowId: "cost_of_debt", value: 0.05, provenance: { sourceType: "filing", sourceRefs: ["golden-bond"], asOfDate: "2023-12-31", rationale: "Golden fixture cost of debt (unused: total_debt is zero)." } },
+  { rowId: "equity_value", value: 100, provenance: { sourceType: "market", sourceRefs: ["golden-market"], asOfDate: "2023-12-31", rationale: "Golden fixture equity value." } },
+  { rowId: "total_debt", value: 0, provenance: { sourceType: "filing", sourceRefs: ["golden-debt"], asOfDate: "2023-12-31", rationale: "Golden fixture total debt." } },
+  { rowId: "effective_tax_rate", value: 0.25, provenance: { sourceType: "computed", sourceRefs: ["golden-tax"], asOfDate: "2023-12-31", rationale: "Golden fixture tax rate (unused: total_debt is zero)." } },
+  { rowId: "cash_and_equivalents_value", value: 0, provenance: { sourceType: "filing", sourceRefs: ["golden-cash"], asOfDate: "2023-12-31", rationale: "Golden fixture cash." } },
+];
+
+function setWaccInputOp(rowId: "risk_free_rate" | "equity_risk_premium", value: number, rationale: string): ModelOperation {
+  return { kind: "set_wacc_input", input: { rowId, value, sourceType: "market", sourceRefs: ["golden-treasury"], rationale } };
+}
 
 test("golden service workflow maps statements once and produces a deterministic DCF valuation", (t) => {
   const directory = mkdtempSync(join(tmpdir(), "golden-dcf-"));
@@ -144,8 +165,38 @@ test("golden service workflow maps statements once and produces a deterministic 
   assert.equal(cellValue(operatingResult.currentWorkbook.sections.metrics, "metric.roa", "FY2022"), HISTORICAL_EXPECTED.roaFY2022);
   assert.equal(cellValue(operatingResult.currentWorkbook.sections.metrics, "metric.roe", "FY2022"), HISTORICAL_EXPECTED.roeFY2022);
 
-  const valued = service.applyOperations("golden-dcf", 5, [
-    setAssumption("wacc", FORECASTS, [0.10, 0.11, 0.12]),
+  // Advancing to valued while the WACC sheet's wacc row is still unresolved is rejected before the
+  // engine even attempts the valuation, naming the sheet rows still missing rather than surfacing a
+  // generic missing-cell error.
+  assert.throws(() => service.applyOperations("golden-dcf", 5, [
+    setAssumption("terminal_growth", ["FY2026"], [0.03]),
+    setAssumption("exit_multiple", ["FY2026"], [8]),
+    notApplicable("lease_liabilities", ["FY2023"]),
+    notApplicable("preferred_equity", ["FY2023"]),
+    notApplicable("non_controlling_interests", ["FY2023"]),
+    { kind: "set_valuation_config", config: valuationConfig() },
+    { kind: "advance_stage", stage: "valued" },
+  ]), (error: unknown) => {
+    assert.ok(error instanceof FinancialModelError);
+    assert.equal(error.code, "missing_formula_input");
+    assert.match(error.message, /WACC sheet/);
+    return true;
+  });
+  assert.equal(store.getRevision("golden-dcf")?.revision, 5, "the blocked attempt must not commit");
+
+  // The sheet is the single source for wacc: the engine derives what it can (here hand-supplied, since
+  // the fixture has no bar repository), the agent fills the two rows it never can.
+  const waccRefreshed = service.refreshWaccSheet("golden-dcf", 5, WACC_COMPUTED_INPUTS);
+  assert.equal(waccRefreshed.revision, 6);
+  const waccFilled = service.applyOperations("golden-dcf", 6, [
+    setWaccInputOp("risk_free_rate", 0.04, "Golden fixture risk-free rate."),
+    setWaccInputOp("equity_risk_premium", 0.06, "Golden fixture equity risk premium — analyst judgment."),
+  ]);
+  assert.equal(waccFilled.revision, 7);
+  const waccRow = waccFilled.currentWorkbook.waccSheet!.rows.find((row) => row.rowId === "wacc")!;
+  assert.equal(waccRow.value, 0.10);
+
+  const valued = service.applyOperations("golden-dcf", 7, [
     setAssumption("terminal_growth", ["FY2026"], [0.03]),
     setAssumption("exit_multiple", ["FY2026"], [8]),
     notApplicable("lease_liabilities", ["FY2023"]),
@@ -154,11 +205,11 @@ test("golden service workflow maps statements once and produces a deterministic 
     { kind: "set_valuation_config", config: valuationConfig() },
     { kind: "advance_stage", stage: "valued" },
   ]);
-  assert.equal(valued.revision, 6);
+  assert.equal(valued.revision, 8);
   assert.equal(valued.status, "valued");
   const valuation = valued.currentWorkbook.valuation!;
   assert.deepEqual(valuation.explicitPeriods.map((period) => period.fcff), FORECAST_EXPECTED.fcff);
-  assert.deepEqual(valuation.explicitPeriods.map((period) => period.wacc), [0.10, 0.11, 0.12]);
+  assert.deepEqual(valuation.explicitPeriods.map((period) => period.wacc), [0.10, 0.10, 0.10]);
   assert.deepEqual(valuation.explicitPeriods.map((period) => period.discountFactor), VALUATION_EXPECTED.discountFactors);
   assertClose(valuation.explicitPeriods.reduce((sum, period) => sum + period.presentValue, 0), VALUATION_EXPECTED.explicitPresentValue);
   assertClose(valuation.gordonGrowth.terminalValue, VALUATION_EXPECTED.gordonTerminalValue);
@@ -186,10 +237,10 @@ test("golden service workflow maps statements once and produces a deterministic 
 
   const context = service.getModel("golden-dcf");
   assert.ok("currentWorkbook" in context);
-  assert.deepEqual(context.revisionHistory.map((revision) => revision.revision), [0, 1, 2, 3, 4, 5]);
-  assert.equal(context.currentWorkbook.revision, 6);
+  assert.deepEqual(context.revisionHistory.map((revision) => revision.revision), [0, 1, 2, 3, 4, 5, 6, 7]);
+  assert.equal(context.currentWorkbook.revision, 8);
   assert.equal(context.currentWorkbook.mode, "dcf");
-  assert.equal(store.getRevision("golden-dcf")?.revision, 6);
+  assert.equal(store.getRevision("golden-dcf")?.revision, 8);
   const goldenAgentContext = JSON.stringify(context);
   const valuedSnapshot = financialModelSnapshotCodec.encode(
     store.getRevision("golden-dcf")!.snapshot,
@@ -213,18 +264,21 @@ test("golden service workflow maps statements once and produces a deterministic 
   assert.equal(JSON.stringify(reopenedService.getModel("golden-dcf")), goldenAgentContext);
   assert.equal(decodeCount, 1, "revision headers must not decode historical snapshots");
 
-  const repeatedOnce = reopenedService.applyOperations("golden-dcf", 6, [
-    setAssumption("wacc", FORECASTS, [0.10, 0.11, 0.12]),
+  // set_wacc_input is idempotent when replayed with the same value/rationale (asOfDate re-defaults to
+  // the sheet's own fixed date each time), so replaying it changes nothing byte-for-byte — the same
+  // repeatability guarantee the old wacc assumption replay exercised.
+  const repeatedOnce = reopenedService.applyOperations("golden-dcf", 8, [
+    setWaccInputOp("risk_free_rate", 0.04, "Golden fixture risk-free rate."),
   ]);
-  assert.equal(repeatedOnce.revision, 7);
+  assert.equal(repeatedOnce.revision, 9);
   assertSnapshotBytes(
     financialModelSnapshotCodec.encode(store.getRevision("golden-dcf")!.snapshot),
     valuedSnapshot,
   );
-  const repeatedTwice = reopenedService.applyOperations("golden-dcf", 7, [
-    setAssumption("wacc", FORECASTS, [0.10, 0.11, 0.12]),
+  const repeatedTwice = reopenedService.applyOperations("golden-dcf", 9, [
+    setWaccInputOp("risk_free_rate", 0.04, "Golden fixture risk-free rate."),
   ]);
-  assert.equal(repeatedTwice.revision, 8);
+  assert.equal(repeatedTwice.revision, 10);
   assertSnapshotBytes(
     financialModelSnapshotCodec.encode(store.getRevision("golden-dcf")!.snapshot),
     valuedSnapshot,
@@ -375,7 +429,7 @@ function handComputedSensitivity(
   waccDelta: number,
   terminalDelta: number,
 ): number {
-  const wacc = [0.10, 0.11, 0.12].map((value) => value + waccDelta);
+  const wacc = [0.10, 0.10, 0.10].map((value) => value + waccDelta);
   const factors: number[] = [];
   let factor = 1;
   for (const rate of wacc) {

@@ -7,7 +7,6 @@ import { InMemoryModelStore } from "../../../src/financial-model/store.ts";
 import { InMemoryFilingInsightStore } from "../../../src/infra/filing-insights/store.ts";
 import { InMemorySourceReviewStore, type SourceReviewArtifact } from "../../../src/infra/xbrl/sourceReviewStore.ts";
 import type { BreakdownRow, UnifiedStatementsArtifact } from "../../../src/infra/xbrl/unifiedStatements.ts";
-import { InMemoryWaccParameterStore } from "../../../src/financial-model/waccStore.ts";
 import { period } from "../../../src/infra/xbrl/__tests__/spineFixture.ts";
 import { createWorkbenchTools, expandSlugs, UNIFIED_ROWS_PAGE } from "../workbenchTools.ts";
 import type { FinancialModelToolDeps } from "../financialModelTools.ts";
@@ -80,7 +79,7 @@ function setup(): { financial: FinancialModelToolDeps; modelId: string; sourceRe
     metadata: {}, reportingCurrency: "USD", periods: PERIODS, preparedStatementRows: [] });
   return { modelId, sourceReviewStore,
     financial: { modelStore, sourceReviewStore, ingestionStore: sourceReviewStore,
-      insightStore: new InMemoryFilingInsightStore(), waccParameterStore: new InMemoryWaccParameterStore() } };
+      insightStore: new InMemoryFilingInsightStore() } };
 }
 
 function tools(financial: FinancialModelToolDeps) {

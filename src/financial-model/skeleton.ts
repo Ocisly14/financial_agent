@@ -192,7 +192,10 @@ export function createSkeleton(input: CreateSkeletonInput): Skeleton {
   add({ id: "ratio.operating_nwc_to_revenue", label: "Operating working capital to revenue", role: "none", unit: ratio, section: "operations", historical: "formula", forecast: "assumption" });
   add({ id: "change_nwc", label: "Change in operating working capital", role: "change_nwc", unit: currency, section: "operations", historical: "formula", forecast: "formula" });
   add({ id: "fcff", label: "Free cash flow to firm", role: "fcff", unit: currency, section: "dcf", historical: "formula", forecast: "formula" });
-  add({ id: "wacc", label: "WACC", role: "wacc", unit: percent, section: "dcf", historical: "none", forecast: "assumption" });
+  // forecast: "calculated" — the WACC sheet is the single source for this row (see waccSheet.ts and
+  // service.ts's recalculate). set_assumption is refused for it via the ordinary "not assumption-
+  // sourced" check; recalculate() seeds its forecast cells straight from the sheet's wacc row.
+  add({ id: "wacc", label: "WACC", role: "wacc", unit: percent, section: "dcf", historical: "none", forecast: "calculated" });
   add({ id: "terminal_growth", label: "Terminal growth", role: "terminal_growth", unit: percent, section: "dcf", historical: "none", forecast: "assumption" });
   add({ id: "exit_multiple", label: "Exit multiple", role: "exit_multiple", unit: ratio, section: "dcf", historical: "none", forecast: "assumption" });
 
