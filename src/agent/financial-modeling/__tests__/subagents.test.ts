@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DcfSubagentRegistry, assertFreshDcfProposal, projectForDcfSubagent } from "../subagents.ts";
+import { DcfSubagentRegistry } from "../subagents.ts";
 import { createSubagentRegistry } from "../../subagents/registerSubagents.ts";
 import { SubagentRuntime } from "../../../framework/subagent.ts";
 import { SessionState } from "../../../framework/sessionState.ts";
 import { McpToolRegistry } from "../../../../mcp_tools/toolRegistry.ts";
 import { ModelRouter, type LlmProvider } from "../../../infra/llm/provider.ts";
 
-test("only financial_modeling is top-level; the four DCF subagents remain private", () => {
+test("only financial_modeling is top-level; the two DCF subagents remain private", () => {
   const top = createSubagentRegistry().list().map((agent) => agent.name);
   assert.ok(top.includes("financial_modeling"));
   for (const child of new DcfSubagentRegistry().list()) assert.equal(top.includes(child as never), false);
@@ -61,18 +61,4 @@ test("financial_modeling runtime refuses parallel revision mutations before eith
   assert.equal(executions, 0);
   assert.equal(correctionSeen, true);
   assert.equal(state.task(dispatch.event_id)?.result?.status, "ok");
-});
-
-test("subagent projections are stage specific and stale proposals are rejected", () => {
-  const context = { model: { modelId: "m1", ownerAgentId: "a1", originSessionId: "s", symbol: "X", metadata: {}, currentRevision: 3,
-    lifecycleStage: "history_committed" as const, updatedAt: "now", createdAt: "then" }, revisionHistory: [], currentWorkbook: {
-      modelId: "m1", revision: 3, lifecycleStage: "history_committed" as const, engineVersion: "v", filingInsightSetId: null,
-      periods: [], sections: { history: [], metrics: [], revenue: [], operations: [], dcf: [] }, categoryGroups: [], reconciliationResults: [],
-      valuationConfig: {} as never, diagnostics: [], valuation: null, waccSheet: null, mode: "dcf" as const,
-    } };
-  const forecast = projectForDcfSubagent("forecast_modeling", context, null);
-  assert.deepEqual(Object.keys((forecast.workbook["sections"] as object)), ["history", "metrics", "revenue", "operations"]);
-  assert.equal("ownerAgentId" in forecast, false);
-  assert.throws(() => assertFreshDcfProposal({ subagent: "forecast_modeling", modelId: "m1", baseRevision: 2,
-    lifecycleStage: "history_committed", rationale: "", payload: {}, sourceRefs: [] }, context), /stale_dcf_proposal/);
 });

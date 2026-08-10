@@ -1,35 +1,23 @@
 import type { RegisteredTool } from "../toolRegistry.ts";
-import type { JsonObject, JsonValue } from "../../src/framework/types.ts";
+import type { JsonObject } from "../../src/framework/types.ts";
 import type { ModelRouter } from "../../src/infra/llm/provider.ts";
 import { FinancialModelService } from "../../src/financial-model/service.ts";
 import type { FinancialModelToolDeps } from "./financialModelTools.ts";
-import { parseOperations } from "./schemas.ts";
 import { validate } from "./schemas.ts";
 import type { JsonSchema } from "../../src/framework/types.ts";
 import { createSpineMappingTools, createStatementUnificationTools, type LoadedWorkingSet } from "./mappingSubagentTools.ts";
 import { resolveDetailLineItemIds } from "../../src/infra/xbrl/spineFromUnified.ts";
 import { runSpineMappingAgent } from "../../src/agent/financial-modeling/spineMappingAgent.ts";
 import { runStatementUnificationAgent } from "../../src/agent/financial-modeling/statementUnificationAgent.ts";
-import {
-  assertFreshDcfProposal,
-  DcfSubagentRegistry,
-  projectForDcfSubagent,
-  type DcfSubagentProposal,
-  type ModelingProposalSubagent,
-} from "../../src/agent/financial-modeling/subagents.ts";
+import { DcfSubagentRegistry } from "../../src/agent/financial-modeling/subagents.ts";
 
 export const DCF_PRIVATE_SUBAGENT_TOOL = "run_dcf_subagent";
 
-const SUBAGENT_INPUT_SCHEMA: JsonSchema = { type: "object", oneOf: [
-  { type: "object", additionalProperties: false, required: ["subagent", "modelId", "task"], properties: {
-    subagent: { type: "string", enum: ["forecast_modeling", "valuation_review"] },
-    modelId: { type: "string" }, task: { type: "string" },
-  } },
-  { type: "object", additionalProperties: false, required: ["subagent", "modelId", "task"], properties: {
+const SUBAGENT_INPUT_SCHEMA: JsonSchema = { type: "object", additionalProperties: false,
+  required: ["subagent", "modelId", "task"], properties: {
     subagent: { type: "string", enum: ["statement_unification", "spine_mapping"] },
     modelId: { type: "string" }, task: { type: "string" },
-  } },
-] };
+  } };
 
 export function createDcfSubagentTool(deps: {
   modelRouter: ModelRouter;
@@ -47,8 +35,8 @@ export function createDcfSubagentTool(deps: {
       catch (error) { return { summary: error instanceof Error ? error.message : String(error),
         error: { code: "invalid_tool_input", message: error instanceof Error ? error.message : String(error) } }; }
       const subagent = requiredString(input, "subagent");
-      if (subagent === "statement_unification" || subagent === "spine_mapping") {
-        const modelId = requiredString(input, "modelId");
+      const modelId = requiredString(input, "modelId");
+      {
         const meta = deps.financial.modelStore.getMeta(modelId);
         if (!meta || meta.ownerAgentId !== context.agentId) return { summary: "Financial model not found.", error: { code: "financial_model_not_found", message: "Financial model not found." } };
         const sourceReview = deps.financial.sourceReviewStore.get(modelId);
@@ -128,42 +116,9 @@ export function createDcfSubagentTool(deps: {
           spineGaps: run.decision.spineGaps, coverageGaps: run.coverageGaps,
           unresolvedFindings: run.unresolvedFindings } as unknown as JsonObject } } };
       }
-      if (!subagents.has(subagent as never)) return { summary: `Unknown DCF subagent: ${subagent}`, error: { code: "invalid_dcf_subagent", message: `Unknown DCF subagent: ${subagent}` } };
-      const definition = subagents.get(subagent as never);
-      if (!(subagent === "forecast_modeling" || subagent === "valuation_review")) throw new Error("invalid proposal subagent authority");
-      const modelId = requiredString(input, "modelId");
-      const meta = deps.financial.modelStore.getMeta(modelId);
-      if (!meta || meta.ownerAgentId !== context.agentId) return { summary: "Financial model not found.", error: { code: "financial_model_not_found", message: "Financial model not found." } };
-      const service = new FinancialModelService(deps.financial.modelStore, context.sessionId);
-      const model = service.getModel(modelId);
-      if (!("currentWorkbook" in model)) throw new Error("default model context expected");
-      const insightSetId = model.currentWorkbook.filingInsightSetId;
-      const projection = projectForDcfSubagent(subagent, model,
-        insightSetId ? deps.financial.insightStore.getContext(insightSetId) ?? null : null);
-      const payload = parsePayload((await deps.modelRouter.generate([
-        { role: "system", content: definition.prompt },
-        { role: "user", content: `${requiredString(input, "task")}\n\nREAD-ONLY CONTEXT:\n${JSON.stringify(projection)}` },
-      ], { modelClass: definition.modelClass, temperature: 0.1, metadata: { mode: "dcf_subagent", subagent } })).text);
-      const proposedPayload = validateProposalPayload(subagent, payload["payload"], modelId, projection.baseRevision);
-      const proposal: DcfSubagentProposal = { subagent, modelId, baseRevision: projection.baseRevision,
-        lifecycleStage: projection.lifecycleStage, rationale: typeof payload["rationale"] === "string" ? payload["rationale"] : "",
-        payload: proposedPayload, sourceRefs: Array.isArray(payload["sourceRefs"])
-          ? payload["sourceRefs"].filter((entry): entry is string => typeof entry === "string") : [] };
-      const latest = service.getModel(modelId);
-      if (!("currentWorkbook" in latest)) throw new Error("default model context expected");
-      assertFreshDcfProposal(proposal, latest);
-      return { summary: `${subagent} returned a read-only proposal for ${modelId}@${proposal.baseRevision}.`,
-        generation_context: { data: { proposal: proposal as unknown as JsonObject } } };
+      return { summary: `Unknown DCF subagent: ${subagent}`, error: { code: "invalid_dcf_subagent", message: `Unknown DCF subagent: ${subagent}` } };
     },
   };
-}
-
-function validateProposalPayload(subagent: ModelingProposalSubagent, payload: JsonValue | undefined, modelId: string, revision: number): JsonValue {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error(`${subagent} proposal payload must be an object`);
-  if ("modelId" in payload || "expectedRevision" in payload) throw new Error("subagent proposal must not supply model ownership/revision fields");
-  const operations = (payload as JsonObject)["operations"];
-  parseOperations({ modelId, expectedRevision: revision, operations: operations ?? payload });
-  return { operations: operations ?? payload };
 }
 
 /**
@@ -198,14 +153,4 @@ export function composeSubagentReport(counts: string, notes: string): string {
   return `${counts}\n\n${lastStop > SUBAGENT_NOTES_BUDGET_CHARS / 2 ? clipped.slice(0, lastStop + 1) : `${clipped.trimEnd()}…`}`;
 }
 
-function parsePayload(text: string): JsonObject {
-  const start = text.indexOf("{"); const end = text.lastIndexOf("}");
-  if (start < 0 || end < start) throw new Error("DCF subagent did not return JSON");
-  const parsed: unknown = JSON.parse(text.slice(start, end + 1));
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("DCF subagent proposal must be an object");
-  return parsed as JsonObject;
-}
 function requiredString(input: JsonObject, key: string): string { const value = input[key]; if (typeof value !== "string" || !value.trim()) throw new Error(`${key} is required`); return value.trim(); }
-function integer(value: JsonValue | undefined, fallback: number, min: number, max: number): number {
-  if (value === undefined) return fallback; if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) throw new Error(`expected integer ${min}..${max}`); return value;
-}

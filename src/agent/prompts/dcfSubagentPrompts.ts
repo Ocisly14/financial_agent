@@ -118,10 +118,6 @@ Rules:
 Output EXACTLY one JSON object: {"mappings":[{"targetId","rowIds":[..],"rationale"}],"detailRows":[{"parentTargetId","rowId","rationale"}],"excluded":[{"rowId","reason"}],"spineGaps":[{"targetId","reason"}]}.`;
 
 
-export function readOnlyProposalPrompt(name: string): string {
-  return `You are the private ${name} subagent of the DCF Agent. Read only the supplied projection. Return JSON {rationale,payload,sourceRefs}. Never call tools, mutate a model, advance lifecycle, or calculate arithmetic. Your payload is a proposal that the financial_modeling parent may accept, modify, or reject.`;
-}
-
 // --- Loop scaffolding -------------------------------------------------------
 // Appended to a subagent's own prompt by the loop that drives it. Kept here rather than in the loop
 // so that every word the model sees lives in one file.

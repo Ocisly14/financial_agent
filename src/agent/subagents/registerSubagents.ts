@@ -8,7 +8,7 @@ export function createSubagentRegistry(): SubagentRegistry {
   const registry = new SubagentRegistry();
   registry.register({
     name: "financial_modeling",
-    description: "Hierarchical DCF Agent that owns one revisioned model workflow and delegates statement extraction, mapping, forecast, and valuation analysis to private subagents.",
+    description: "Hierarchical DCF Agent that owns one revisioned model workflow and delegates statement extraction and mapping to private subagents, then authors the forecast and valuation itself.",
     modelClass: "MEDIUM",
     defaultTools: [...FINANCIAL_MODELING_TOOLS, STATEMENT_EXTRACTION_TOOL,
       DCF_PRIVATE_SUBAGENT_TOOL, "financial_search"],
