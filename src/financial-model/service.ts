@@ -143,7 +143,7 @@ export class FinancialModelService {
       selectedHistoricalPeriodIds: [],
       categoryGroups: [],
       valuationConfig: input.valuationConfig === undefined
-        ? defaultValuationConfig(input.periods)
+        ? initialValuationConfig(input.periods)
         : validateValuationConfig(input.valuationConfig),
       cells: new Map(),
       diagnostics: [],
@@ -572,7 +572,14 @@ function installWorkingCapitalIdentity(snapshot: FinancialModelSnapshot): void {
   snapshot.formulas.push({ lineItemId: "operating_working_capital", appliesTo: "historical", source, periodIds: historicalIds });
 }
 
-function defaultValuationConfig(periods: readonly Period[]): ValuationConfig {
+/**
+ * The valuation configuration a new model starts with: the anchor period, and nothing else. Which
+ * metric the exit multiple applies to, when cash is assumed to arrive, and what to stress are
+ * judgments with no engine-derivable answer, so they start null and the valuation refuses to
+ * compute until set_valuation_config fills them. Seeding them would hand the agent a decision it
+ * never made and record it as one.
+ */
+function initialValuationConfig(periods: readonly Period[]): ValuationConfig {
   const anchor = [...periods].reverse().find((period) => period.cls !== "forecast");
   if (!anchor) {
     throw new FinancialModelError(
@@ -580,20 +587,12 @@ function defaultValuationConfig(periods: readonly Period[]): ValuationConfig {
       "a valuation model requires an actual or TTM anchor period",
     );
   }
-  return validateValuationConfig({
+  return {
     anchorPeriodId: anchor.id,
-    discountConvention: "year_end",
-    exitTerminalMetric: "ebitda",
-    sensitivity: {
-      waccDeltas: [-0.01, 0, 0.01],
-      terminalGrowthDeltas: [-0.005, 0, 0.005],
-      exitMultipleDeltas: [-1, 0, 1],
-    },
-    sourceType: "user",
-    sourceRefs: ["model_creation_default"],
-    asOfDate: anchor.end,
-    rationale: "Default phase-1 valuation configuration",
-  });
+    discountConvention: null,
+    exitTerminalMetric: null,
+    sensitivity: null,
+  };
 }
 
 /**

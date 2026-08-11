@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { cellKey, type CellKey } from "../dsl/graph.ts";
 import { FinancialModelError } from "../errors.ts";
 import { createSkeleton } from "../skeleton.ts";
-import type { Cell, Period, Unit, ValuationConfig } from "../types.ts";
+import type { Cell, Period, ResolvedValuationConfig, Unit } from "../types.ts";
 import {
   MAX_SENSITIVITY_AXIS_LENGTH,
   calculateValuation,
@@ -47,7 +47,7 @@ const PERIODS: Period[] = [
   },
 ];
 
-const CONFIG: ValuationConfig = {
+const CONFIG: ResolvedValuationConfig = {
   anchorPeriodId: "FY2025",
   discountConvention: "year_end",
   exitTerminalMetric: "ebitda",
@@ -292,9 +292,9 @@ test("sensitivity axes are normalized, bounded, and deterministic", () => {
       exitMultipleDeltas: [1, -1, 0, 1],
     },
   });
-  assert.deepEqual(normalized.sensitivity.waccDeltas, [-0.01, 0, 0.01]);
-  assert.deepEqual(normalized.sensitivity.terminalGrowthDeltas, [-0.01, 0, 0.01]);
-  assert.deepEqual(normalized.sensitivity.exitMultipleDeltas, [-1, 0, 1]);
+  assert.deepEqual(normalized.sensitivity?.waccDeltas, [-0.01, 0, 0.01]);
+  assert.deepEqual(normalized.sensitivity?.terminalGrowthDeltas, [-0.01, 0, 0.01]);
+  assert.deepEqual(normalized.sensitivity?.exitMultipleDeltas, [-1, 0, 1]);
 
   assert.throws(
     () => validateValuationConfig({

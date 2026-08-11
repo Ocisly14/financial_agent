@@ -622,55 +622,42 @@ function normalizeDcfCategoryGroup(value: unknown, path: string): DcfCategoryGro
 }
 
 function normalizeValuationConfig(value: unknown, path: string): ValuationConfig {
-  const object = exactObject(value, path, [
-    "anchorPeriodId",
-    "discountConvention",
-    "exitTerminalMetric",
-    "sensitivity",
-    "sourceType",
-    "sourceRefs",
-    "asOfDate",
-    "rationale",
-  ]);
-  const sensitivity = exactObject(
-    object.sensitivity,
-    `${path}.sensitivity`,
-    ["waccDeltas", "terminalGrowthDeltas", "exitMultipleDeltas"],
+  // The three judgment fields persist as null until an agent decides them, and provenance only
+  // exists once one has — an unset configuration has nobody to attribute.
+  const object = exactObject(
+    value,
+    path,
+    ["anchorPeriodId", "discountConvention", "exitTerminalMetric", "sensitivity"],
+    ["sourceType", "sourceRefs", "asOfDate", "rationale"],
   );
+  const sensitivity = object.sensitivity === null ? null : (() => {
+    const axes = exactObject(
+      object.sensitivity,
+      `${path}.sensitivity`,
+      ["waccDeltas", "terminalGrowthDeltas", "exitMultipleDeltas"],
+    );
+    return {
+      waccDeltas: normalizedAxis(axes.waccDeltas, `${path}.sensitivity.waccDeltas`),
+      terminalGrowthDeltas: normalizedAxis(axes.terminalGrowthDeltas, `${path}.sensitivity.terminalGrowthDeltas`),
+      exitMultipleDeltas: normalizedAxis(axes.exitMultipleDeltas, `${path}.sensitivity.exitMultipleDeltas`),
+    };
+  })();
+  const decided = object.discountConvention !== null;
+  if (decided !== (object.exitTerminalMetric !== null) || decided !== (sensitivity !== null)) {
+    throw invalid(path, "valuation judgments are set together: all three null, or all three decided");
+  }
   return {
     anchorPeriodId: nonemptyString(object.anchorPeriodId, `${path}.anchorPeriodId`),
-    discountConvention: enumValue(
-      object.discountConvention,
-      `${path}.discountConvention`,
-      ["year_end", "mid_year"],
-    ),
-    exitTerminalMetric: enumValue(
-      object.exitTerminalMetric,
-      `${path}.exitTerminalMetric`,
-      ["ebitda", "fcff"],
-    ),
-    sensitivity: {
-      waccDeltas: normalizedAxis(
-        sensitivity.waccDeltas,
-        `${path}.sensitivity.waccDeltas`,
-      ),
-      terminalGrowthDeltas: normalizedAxis(
-        sensitivity.terminalGrowthDeltas,
-        `${path}.sensitivity.terminalGrowthDeltas`,
-      ),
-      exitMultipleDeltas: normalizedAxis(
-        sensitivity.exitMultipleDeltas,
-        `${path}.sensitivity.exitMultipleDeltas`,
-      ),
-    },
-    sourceType: enumValue(
-      object.sourceType,
-      `${path}.sourceType`,
-      ["user", "analyst_inference"],
-    ),
-    sourceRefs: stringArray(object.sourceRefs, `${path}.sourceRefs`),
-    asOfDate: nonemptyString(object.asOfDate, `${path}.asOfDate`),
-    rationale: stringValue(object.rationale, `${path}.rationale`),
+    discountConvention: object.discountConvention === null ? null
+      : enumValue(object.discountConvention, `${path}.discountConvention`, ["year_end", "mid_year"]),
+    exitTerminalMetric: object.exitTerminalMetric === null ? null
+      : enumValue(object.exitTerminalMetric, `${path}.exitTerminalMetric`, ["ebitda", "fcff"]),
+    sensitivity,
+    ...(hasOwn(object, "sourceType")
+      ? { sourceType: enumValue(object.sourceType, `${path}.sourceType`, ["user", "analyst_inference"]) } : {}),
+    ...(hasOwn(object, "sourceRefs") ? { sourceRefs: stringArray(object.sourceRefs, `${path}.sourceRefs`) } : {}),
+    ...(hasOwn(object, "asOfDate") ? { asOfDate: nonemptyString(object.asOfDate, `${path}.asOfDate`) } : {}),
+    ...(hasOwn(object, "rationale") ? { rationale: stringValue(object.rationale, `${path}.rationale`) } : {}),
   };
 }
 

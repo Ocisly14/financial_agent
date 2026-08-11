@@ -10,6 +10,7 @@ import type {
   LineItemRole,
   Period,
   ValuationConfig,
+  ResolvedValuationConfig,
 } from "./types.ts";
 
 export const MAX_SENSITIVITY_AXIS_LENGTH = 21;
@@ -144,10 +145,11 @@ export function validateValuationConfig(config: ValuationConfig): ValuationConfi
     return normalized;
   };
 
+  // Only what is present is validated: an unset judgment field is a legitimate state, not an error.
   return {
     ...config,
-    sourceRefs: [...config.sourceRefs],
-    sensitivity: {
+    ...(config.sourceRefs === undefined ? {} : { sourceRefs: [...config.sourceRefs] }),
+    sensitivity: config.sensitivity === null ? null : {
       waccDeltas: normalizeAxis(config.sensitivity.waccDeltas, "WACC sensitivity"),
       terminalGrowthDeltas: normalizeAxis(
         config.sensitivity.terminalGrowthDeltas,
@@ -161,9 +163,28 @@ export function validateValuationConfig(config: ValuationConfig): ValuationConfi
   };
 }
 
+/** The judgment fields the agent must decide before any valuation number exists. */
+const REQUIRED_VALUATION_DECISIONS = ["discountConvention", "exitTerminalMetric", "sensitivity"] as const;
+
+/**
+ * Validates the configuration and requires every judgment to have been made. Missing ones are
+ * named so the caller can see exactly which decision is still owed — the same contract the WACC
+ * sheet's `missingInputs` offers for the discount rate.
+ */
+export function resolveValuationConfig(config: ValuationConfig): ResolvedValuationConfig {
+  const validated = validateValuationConfig(config);
+  const missing = REQUIRED_VALUATION_DECISIONS.filter((field) => validated[field] === null);
+  if (missing.length > 0) {
+    invalidTerminal(
+      `the valuation cannot compute until these are set with set_valuation_config: ${missing.join(", ")}`,
+    );
+  }
+  return validated as ResolvedValuationConfig;
+}
+
 export function calculateValuation(input: ValuationInput): ValuationOutput {
   validateRoleCardinality(input.lineItems);
-  const config = validateValuationConfig(input.valuationConfig);
+  const config = resolveValuationConfig(input.valuationConfig);
   const bound = bindInputs(input, config);
   validateReferenceTerminalInputs(bound);
 
@@ -205,7 +226,7 @@ export function calculateValuation(input: ValuationInput): ValuationOutput {
   };
 }
 
-function bindInputs(input: ValuationInput, config: ValuationConfig): BoundInputs {
+function bindInputs(input: ValuationInput, config: ResolvedValuationConfig): BoundInputs {
   const grid = buildGrid(input.periods);
   const anchorPosition = grid.positionOf(config.anchorPeriodId);
   if (anchorPosition < 0) invalidTerminal(`unknown valuation anchor: ${config.anchorPeriodId}`);
@@ -434,7 +455,7 @@ function validateReferenceTerminalInputs(bound: BoundInputs): void {
 function buildDiscountSchedule(
   fcff: readonly number[],
   wacc: readonly number[],
-  convention: ValuationConfig["discountConvention"],
+  convention: ResolvedValuationConfig["discountConvention"],
 ): DiscountSchedule {
   const factors: number[] = [];
   const presentValues: number[] = [];
@@ -516,7 +537,7 @@ function buildMethodResult(
 
 function buildGordonSensitivity(
   bound: BoundInputs,
-  config: ValuationConfig,
+  config: ResolvedValuationConfig,
 ): SensitivityMatrix {
   const rows = config.sensitivity.waccDeltas;
   const columns = config.sensitivity.terminalGrowthDeltas;
@@ -564,7 +585,7 @@ function buildGordonSensitivity(
 
 function buildExitSensitivity(
   bound: BoundInputs,
-  config: ValuationConfig,
+  config: ResolvedValuationConfig,
 ): SensitivityMatrix {
   const rows = config.sensitivity.waccDeltas;
   const columns = config.sensitivity.exitMultipleDeltas;

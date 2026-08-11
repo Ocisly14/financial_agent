@@ -249,19 +249,37 @@ export type ReconciliationResult =
 
 type DiscountConvention = "year_end" | "mid_year";
 
+export type ValuationSensitivity = {
+  waccDeltas: number[];
+  terminalGrowthDeltas: number[];
+  exitMultipleDeltas: number[];
+};
+
+/**
+ * The three judgment fields start null and stay null until the agent sets them: which metric the
+ * exit multiple applies to, when cash is assumed to arrive, and what to stress are decisions the
+ * engine has no basis to make. A default would read back as a decision nobody took — so the
+ * valuation simply does not compute until all three are filled, the same way the WACC sheet's
+ * `wacc` row does not resolve until its own inputs are. `anchorPeriodId` is not a judgment: the
+ * bridge anchors at the last actual period, which the engine derives unambiguously.
+ */
 export type ValuationConfig = {
   anchorPeriodId: string;
+  discountConvention: DiscountConvention | null;
+  exitTerminalMetric: "ebitda" | "fcff" | null;
+  sensitivity: ValuationSensitivity | null;
+  /** Provenance exists only once an agent has actually set the configuration. */
+  sourceType?: "user" | "analyst_inference";
+  sourceRefs?: string[];
+  asOfDate?: string;
+  rationale?: string;
+};
+
+/** A configuration with every judgment made — what `calculateValuation` requires. */
+export type ResolvedValuationConfig = ValuationConfig & {
   discountConvention: DiscountConvention;
   exitTerminalMetric: "ebitda" | "fcff";
-  sensitivity: {
-    waccDeltas: number[];
-    terminalGrowthDeltas: number[];
-    exitMultipleDeltas: number[];
-  };
-  sourceType: "user" | "analyst_inference";
-  sourceRefs: string[];
-  asOfDate: string;
-  rationale: string;
+  sensitivity: ValuationSensitivity;
 };
 
 export type Diagnostic = {

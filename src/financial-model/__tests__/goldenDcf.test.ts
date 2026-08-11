@@ -167,6 +167,14 @@ test("golden service workflow maps statements once and produces a deterministic 
   assert.equal(cellValue(operatingResult.currentWorkbook.sections.metrics, "metric.roa", "FY2022"), HISTORICAL_EXPECTED.roaFY2022);
   assert.equal(cellValue(operatingResult.currentWorkbook.sections.metrics, "metric.roe", "FY2022"), HISTORICAL_EXPECTED.roeFY2022);
 
+  // A new model makes no valuation judgments for you: the three decisions start null and carry no
+  // provenance, because there is nobody to attribute a value nobody chose.
+  const fresh = operatingResult.currentWorkbook.valuationConfig;
+  assert.equal(fresh.discountConvention, null);
+  assert.equal(fresh.exitTerminalMetric, null);
+  assert.equal(fresh.sensitivity, null);
+  assert.equal(fresh.sourceType ?? null, null);
+
   // With the WACC sheet's wacc row still unresolved, the terminal/bridge batch commits fine but the
   // model simply reads as not-yet-valued: valuation stays null until the discount rate exists.
   const terminalSet = service.applyOperations("golden-dcf", 4, [
@@ -175,24 +183,33 @@ test("golden service workflow maps statements once and produces a deterministic 
     notApplicable("lease_liabilities", ["FY2023"]),
     notApplicable("preferred_equity", ["FY2023"]),
     notApplicable("non_controlling_interests", ["FY2023"]),
-    { kind: "set_valuation_config", config: valuationConfig() },
   ]);
   assert.equal(terminalSet.revision, 5);
   assert.equal(terminalSet.status, "operations_fcff");
   assert.equal(terminalSet.currentWorkbook.valuation ?? null, null);
 
   // The sheet is the single source for wacc: the engine derives what it can (here hand-supplied, since
-  // the fixture has no bar repository), the agent fills the two rows it never can. The moment the
-  // wacc row resolves, the valuation computes and the model reads as valued — no ceremony.
+  // the fixture has no bar repository), the agent fills the two rows it never can.
   const waccRefreshed = service.refreshWaccSheet("golden-dcf", 5, WACC_COMPUTED_INPUTS);
   assert.equal(waccRefreshed.revision, 6);
-  const valued = service.applyOperations("golden-dcf", 6, [
+  const waccResolved = service.applyOperations("golden-dcf", 6, [
     setWaccInputOp("risk_free_rate", 0.04, "Golden fixture risk-free rate."),
     setWaccInputOp("equity_risk_premium", 0.06, "Golden fixture equity risk premium — analyst judgment."),
   ]);
-  assert.equal(valued.revision, 7);
-  const waccRow = valued.currentWorkbook.waccSheet!.rows.find((row) => row.rowId === "wacc")!;
+  assert.equal(waccResolved.revision, 7);
+  const waccRow = waccResolved.currentWorkbook.waccSheet!.rows.find((row) => row.rowId === "wacc")!;
   assert.equal(waccRow.value, 0.10);
+  // Two independent gates: a resolved discount rate is not enough on its own. Every input the engine
+  // can compute is now in place, and the model still refuses to value — the judgments are unmade.
+  assert.equal(waccResolved.status, "operations_fcff");
+  assert.equal(waccResolved.currentWorkbook.valuation ?? null, null);
+
+  // Making them is what produces a valuation, and the configuration now carries who made it.
+  const valued = service.applyOperations("golden-dcf", 7, [
+    { kind: "set_valuation_config", config: valuationConfig() },
+  ]);
+  assert.equal(valued.revision, 8);
+  assert.equal(valued.currentWorkbook.valuationConfig.sourceType, "analyst_inference");
   assert.equal(valued.status, "valued");
   const valuation = valued.currentWorkbook.valuation!;
   assert.deepEqual(valuation.explicitPeriods.map((period) => period.fcff), FORECAST_EXPECTED.fcff);
@@ -224,10 +241,10 @@ test("golden service workflow maps statements once and produces a deterministic 
 
   const context = service.getModel("golden-dcf");
   assert.ok("currentWorkbook" in context);
-  assert.deepEqual(context.revisionHistory.map((revision) => revision.revision), [0, 1, 2, 3, 4, 5, 6]);
-  assert.equal(context.currentWorkbook.revision, 7);
+  assert.deepEqual(context.revisionHistory.map((revision) => revision.revision), [0, 1, 2, 3, 4, 5, 6, 7]);
+  assert.equal(context.currentWorkbook.revision, 8);
   assert.equal(context.currentWorkbook.mode, "dcf");
-  assert.equal(store.getRevision("golden-dcf")?.revision, 7);
+  assert.equal(store.getRevision("golden-dcf")?.revision, 8);
   const goldenAgentContext = JSON.stringify(context);
   const valuedSnapshot = financialModelSnapshotCodec.encode(
     store.getRevision("golden-dcf")!.snapshot,
@@ -254,18 +271,18 @@ test("golden service workflow maps statements once and produces a deterministic 
   // set_wacc_input is idempotent when replayed with the same value/rationale (asOfDate re-defaults to
   // the sheet's own fixed date each time), so replaying it changes nothing byte-for-byte — the same
   // repeatability guarantee the old wacc assumption replay exercised.
-  const repeatedOnce = reopenedService.applyOperations("golden-dcf", 7, [
+  const repeatedOnce = reopenedService.applyOperations("golden-dcf", 8, [
     setWaccInputOp("risk_free_rate", 0.04, "Golden fixture risk-free rate."),
   ]);
-  assert.equal(repeatedOnce.revision, 8);
+  assert.equal(repeatedOnce.revision, 9);
   assertSnapshotBytes(
     financialModelSnapshotCodec.encode(store.getRevision("golden-dcf")!.snapshot),
     valuedSnapshot,
   );
-  const repeatedTwice = reopenedService.applyOperations("golden-dcf", 8, [
+  const repeatedTwice = reopenedService.applyOperations("golden-dcf", 9, [
     setWaccInputOp("risk_free_rate", 0.04, "Golden fixture risk-free rate."),
   ]);
-  assert.equal(repeatedTwice.revision, 9);
+  assert.equal(repeatedTwice.revision, 10);
   assertSnapshotBytes(
     financialModelSnapshotCodec.encode(store.getRevision("golden-dcf")!.snapshot),
     valuedSnapshot,
