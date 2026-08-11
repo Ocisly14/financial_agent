@@ -42,13 +42,7 @@ const labelByRowId = new Map([...unified.rows, ...(unified.breakdownRows ?? [])]
 const detailIds = resolveDetailLineItemIds(spine.decision, unified);
 const labels = Object.fromEntries(spine.decision.detailRows.map((detail) => [
   detailIds[detail.rowId]!, labelByRowId.get(detail.rowId) ?? detail.rowId]));
-service.stageSpineFacts(modelId, 0, { facts: spine.facts, labels, historicalPeriodIds: actualIds });
-const staged = modelStore.getRevision(modelId)!.snapshot.facts.filter((fact) => fact.status === "staged");
-const committed = service.reviewFacts(modelId, 1, {
-  decisions: staged.map((fact) => ({ decisionId: `d-${fact.factId}`, factId: fact.factId,
-    action: "commit" as const, mappedLineItemId: fact.lineItemId!, rationale: "e2e", reviewedBy: AGENT,
-    reviewedAt: new Date().toISOString() })),
-  selectedHistoricalPeriodIds: actualIds, categoryLineItems: [], statementMappingPlans: [], categoryGroups: [] });
+const committed = service.commitSpineFacts(modelId, 0, { facts: spine.facts, labels, historicalPeriodIds: actualIds });
 
 const sourceReviewStore = new InMemorySourceReviewStore();
 sourceReviewStore.save(modelId, { ingestionRunId: "e2e", coverage: { requestedPeriodIds: [], statements: [], issues: [] },

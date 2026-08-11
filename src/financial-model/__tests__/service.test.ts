@@ -361,12 +361,8 @@ test("a failed required DCF category reconciliation reopens source context and b
   assert.ok(snapshot.reconciliationResults.some((result) =>
     result.kind === "category" && result.status === "failed"));
   assert.equal(snapshot.mappingException?.reason, "reconciliation");
-  assert.throws(
-    () => service.applyOperations("model-1", 2, [
-      { kind: "advance_stage", stage: "history_committed" },
-    ]),
-    invalidCode("unresolved_reconciliation"),
-  );
+  // Lifecycle is derived: unresolved reconciliation keeps the model reading as draft.
+  assert.equal(snapshot.lifecycleStage, "draft");
   assert.equal(store.getRevision("model-1")?.revision, 2);
 });
 
@@ -488,13 +484,6 @@ test("empty batches, compile failures, gate blockers, and conflicts write nothin
     }]),
     invalidCode("invalid_formula"),
   );
-  assert.throws(
-    () => service.applyOperations("model-1", 0, [{
-      kind: "advance_stage",
-      stage: "history_committed",
-    }]),
-    invalidCode("history_review_required"),
-  );
   service.stageFacts("model-1", 0, [stagedRevenue("FY2024", 100)]);
   assert.throws(
     () => service.stageFacts("model-1", 0, [stagedRevenue("FY2025", 110)]),
@@ -509,26 +498,14 @@ test("empty batches, compile failures, gate blockers, and conflicts write nothin
   assert.equal(financialModelSnapshotCodec.encode(store.getRevision("model-1", 0)!.snapshot), before);
 });
 
-test("stage gates run only on explicit advancement", () => {
+test("an incomplete history reads as draft; the derived stage never blocks a commit", () => {
   const { store, service } = setup();
   service.createModel(CREATE_INPUT);
   const facts = [stagedRevenue("FY2024", 100), stagedRevenue("FY2025", 110)];
   service.stageFacts("model-1", 0, facts);
   service.reviewFacts("model-1", 1, reviewInput(facts));
-  assert.equal(current(store).lifecycleStage, "draft");
-  assert.throws(
-    () => service.applyOperations("model-1", 2, [{
-      kind: "advance_stage",
-      stage: "history_committed",
-    }]),
-    (error: unknown) => {
-      assert.ok(error instanceof FinancialModelError);
-      assert.equal(error.code, "history_review_required");
-      assert.ok(Array.isArray(error.details?.["missing"]));
-      assert.ok(error.details?.["historicalDcfCompleteness"]);
-      return true;
-    },
-  );
+  // The thin fixture cannot satisfy the history reading, so the model simply stays draft — but the
+  // review itself committed fine: stages are readings of fact, not gates.
   assert.equal(store.getRevision("model-1")?.revision, 2);
   assert.equal(current(store).lifecycleStage, "draft");
 });
@@ -607,25 +584,26 @@ const spineFact = (lineItemId: string, periodId: string, value: number): Fact =>
   provenance: { sourceType: "unified_statements", sourceRefs: [`unified.${lineItemId}.${periodId}`], asOfDate: "2026-08-07" },
 });
 
-test("stageSpineFacts stages onto canonical targets and selects the actual periods", () => {
+test("commitSpineFacts commits onto canonical targets and selects the actual periods", () => {
   const { store, service } = setup();
   service.createModel(CREATE_INPUT);
   const facts = [spineFact("revenue.total", "FY2024", 100), spineFact("revenue.total", "FY2025", 120)];
-  const result = service.stageSpineFacts("model-1", 0, { facts, historicalPeriodIds: ["FY2024", "FY2025"] });
+  const result = service.commitSpineFacts("model-1", 0, { facts, historicalPeriodIds: ["FY2024", "FY2025"] });
   assert.equal(result.revision, 1);
 
   const snapshot = store.getRevision("model-1")!.snapshot;
   assert.deepEqual(snapshot.selectedHistoricalPeriodIds, ["FY2024", "FY2025"]);
-  // Staged, never committed: the subagent has no authority to accept its own numbers.
+  // Committed directly — no staged intermediate: the pipeline validated upstream, reconciliation
+  // re-validates on this commit, and the revision chain is the audit record.
   const landed = snapshot.facts.filter((fact) => fact.lineItemId === "revenue.total");
   assert.equal(landed.length, 2);
-  assert.ok(landed.every((fact) => fact.status === "staged"), JSON.stringify(landed.map((f) => f.status)));
+  assert.ok(landed.every((fact) => fact.status === "committed"), JSON.stringify(landed.map((f) => f.status)));
 });
 
 test("a revenue detail row is installed as a revenue stream and carries its label", () => {
   const { service } = setup();
   service.createModel(CREATE_INPUT);
-  service.stageSpineFacts("model-1", 0, {
+  service.commitSpineFacts("model-1", 0, {
     facts: [spineFact("revenue.automotive", "FY2024", 80)],
     labels: { "revenue.automotive": "Automotive revenues" },
     historicalPeriodIds: ["FY2024"],
@@ -636,11 +614,43 @@ test("a revenue detail row is installed as a revenue stream and carries its labe
   assert.equal(stream?.label, "Automotive revenues");
 });
 
+test("committed spine facts are history evidence without legacy statement-mapping plans", () => {
+  const { store, service } = setup();
+  service.createModel(CREATE_INPUT);
+  const facts = [spineFact("revenue.total", "FY2024", 100), spineFact("revenue.total", "FY2025", 110)];
+  service.commitSpineFacts("model-1", 0, { facts, historicalPeriodIds: ["FY2024", "FY2025"] });
+  // One commit is the whole story now: facts land committed with their unified_statements provenance,
+  // which is exactly the evidence the derived history reading looks for — no plans, no review step.
+  const snapshot = current(store);
+  assert.ok(snapshot.facts.some((fact) => fact.status === "committed"
+    && fact.provenance.sourceType === "unified_statements"));
+});
+
+test("the history commit installs the working-capital identity over exactly the mapped components", () => {
+  const { store, service } = setup();
+  service.createModel(CREATE_INPUT);
+  // AR, inventory, AP mapped; the other four WC components are declared gaps for this issuer —
+  // they must drop out of the identity, not null-poison it.
+  const facts = [
+    spineFact("revenue.total", "FY2024", 100), spineFact("revenue.total", "FY2025", 110),
+    spineFact("accounts_receivable", "FY2024", 30), spineFact("accounts_receivable", "FY2025", 33),
+    spineFact("inventory", "FY2024", 10), spineFact("inventory", "FY2025", 11),
+    spineFact("accounts_payable", "FY2024", 20), spineFact("accounts_payable", "FY2025", 22),
+  ];
+  const reviewed = service.commitSpineFacts("model-1", 0, { facts, historicalPeriodIds: ["FY2024", "FY2025"] });
+  const formula = store.getRevision("model-1")!.snapshot.formulas
+    .find((f) => f.lineItemId === "operating_working_capital" && f.appliesTo === "historical");
+  assert.equal(formula?.source, "accounts_receivable + inventory - accounts_payable");
+  const operations = reviewed.currentWorkbook.sections.operations;
+  assert.equal(operations.find((r) => r.lineItemId === "operating_working_capital")!.cells["FY2025"]!.value, 33 + 11 - 22);
+  assert.equal(operations.find((r) => r.lineItemId === "ratio.operating_nwc_to_revenue")!.cells["FY2025"]!.value, (33 + 11 - 22) / 110);
+});
+
 test("a nested stream batch installs the child under its parent stream, whatever the input order", () => {
   const { service } = setup();
   service.createModel(CREATE_INPUT);
   // Child listed before its parent: staging must still create revenue.product first.
-  service.stageSpineFacts("model-1", 0, {
+  service.commitSpineFacts("model-1", 0, {
     facts: [spineFact("revenue.product.iphone", "FY2024", 60), spineFact("revenue.product", "FY2024", 100)],
     labels: { "revenue.product": "Product", "revenue.product.iphone": "iPhone" },
     historicalPeriodIds: ["FY2024"],
@@ -659,7 +669,7 @@ test("a detail row whose parent refuses children costs that row, not the batch",
   const { service } = setup();
   service.createModel(CREATE_INPUT);
   // `free_cash_flow` is a computed DCF node, not a safe detail parent.
-  const result = service.stageSpineFacts("model-1", 0, {
+  const result = service.commitSpineFacts("model-1", 0, {
     facts: [spineFact("free_cash_flow.invented", "FY2024", 5), spineFact("revenue.total", "FY2024", 100)],
     historicalPeriodIds: ["FY2024"],
   });
@@ -670,7 +680,7 @@ test("a detail row whose parent refuses children costs that row, not the batch",
 });
 
 // Regression for a Critical finding: a breakdown-derived fact from buildSpineFromUnified must carry a
-// non-empty provenance.asOfDate, or snapshotCodec.normalizeProvenance rejects it and stageSpineFacts
+// non-empty provenance.asOfDate, or snapshotCodec.normalizeProvenance rejects it and commitSpineFacts
 // throws for the whole batch — not just the offending detail row.
 test("a breakdown detail row's fact stages cleanly end to end through buildSpineFromUnified", () => {
   const netSalesFact: Fact = { factId: "unified.income_statement.net_sales.FY2024", status: "staged",
@@ -698,7 +708,7 @@ test("a breakdown detail row's fact stages cleanly end to end through buildSpine
   service.createModel(CREATE_INPUT);
   // Must not throw: this is exactly the path snapshotCodec.normalizeProvenance used to reject when
   // the breakdown row's asOfDate fell back to "".
-  const result = service.stageSpineFacts("model-1", 0, { facts, historicalPeriodIds: ["FY2024"],
+  const result = service.commitSpineFacts("model-1", 0, { facts, historicalPeriodIds: ["FY2024"],
     labels: { "revenue.products": "Products" } });
   const view = service.getModel("model-1");
   assert.ok("currentWorkbook" in view);
@@ -995,22 +1005,15 @@ test("set_wacc_input rejects writes to computed and locked-formula rows", () => 
   ]), invalidCode("invalid_model_operation"));
 });
 
-test("advancing to valued is blocked while the WACC sheet's wacc row is unresolved, naming the sheet's own missing inputs, and never commits", () => {
+test("a model with an unresolved wacc row never carries a valuation and reads as its actual stage", () => {
   const { store, service } = setup();
   service.createModel(CREATE_INPUT);
-  assert.throws(
-    () => service.applyOperations("model-1", 0, [{ kind: "advance_stage", stage: "valued" }]),
-    (error: unknown) => {
-      assert.ok(error instanceof FinancialModelError);
-      assert.equal(error.code, "missing_formula_input");
-      assert.match(error.message, /WACC sheet/);
-      return true;
-    },
-  );
-  assert.equal(store.getRevision("model-1")?.revision, 0, "the blocked advancement must not commit");
+  const revision = store.getRevision("model-1")!;
+  assert.equal(revision.lifecycleStage, "draft");
+  assert.equal(revision.snapshot.valuation, null);
 });
 
-test("filling risk_free_rate and equity_risk_premium resolves the wacc row once the other terms are already computed, clearing the valued-stage block", () => {
+test("filling risk_free_rate and equity_risk_premium resolves the wacc row once the other terms are already computed", () => {
   const { service } = setup();
   service.createModel(CREATE_INPUT);
   const inputs: WaccSheetComputedInput[] = [
@@ -1022,11 +1025,6 @@ test("filling risk_free_rate and equity_risk_premium resolves the wacc row once 
     { rowId: "cash_and_equivalents_value", value: 0, provenance: { sourceType: "filing", sourceRefs: ["10-K"], asOfDate: "2026-01-01", rationale: "cash" } },
   ];
   const refreshed = service.refreshWaccSheet("model-1", 0, inputs);
-  assert.throws(
-    () => service.applyOperations("model-1", refreshed.revision, [{ kind: "advance_stage", stage: "valued" }]),
-    invalidCode("missing_formula_input"),
-    "risk_free_rate and equity_risk_premium are still unfilled",
-  );
   const filled = service.applyOperations("model-1", refreshed.revision, [
     { kind: "set_wacc_input", input: { rowId: "risk_free_rate", value: 0.04,
       sourceType: "market", sourceRefs: ["treasury"], rationale: "current 30y yield", asOfDate: "2026-01-01" } },
@@ -1035,15 +1033,8 @@ test("filling risk_free_rate and equity_risk_premium resolves the wacc row once 
   ]);
   const waccRow = filled.currentWorkbook.waccSheet!.rows.find((row) => row.rowId === "wacc")!;
   assert.equal(waccRow.value, 0.1);
-  // The wacc-sheet gate itself no longer blocks; the model still has no fcff (never staged or
-  // reviewed any facts, no forecast chain), so advancement fails on that instead, never mentioning
-  // the WACC sheet — proof the earlier block really was about wacc, not a different prerequisite.
-  assert.throws(
-    () => service.applyOperations("model-1", filled.revision, [{ kind: "advance_stage", stage: "valued" }]),
-    (error: unknown) => {
-      assert.ok(error instanceof FinancialModelError);
-      assert.doesNotMatch(error.message, /WACC sheet/);
-      return true;
-    },
-  );
+  // wacc resolved, but the model has no committed history or fcff chain, so the derived stage stays
+  // draft and no valuation is produced — the wacc sheet alone never makes a model read as valued.
+  assert.equal(filled.status, "draft");
+  assert.equal(filled.currentWorkbook.valuation ?? null, null);
 });

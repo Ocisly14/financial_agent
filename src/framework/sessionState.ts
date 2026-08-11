@@ -51,10 +51,10 @@ const APPROVAL_TTL_MS = 15 * 60_000;
 const KINDS: Record<Source, ReadonlySet<string>> = {
   user: new Set(["user_message"]),
   orchestrator: new Set(["reply", "dispatch", "skill_invoke", "skill_result", "error", "tool_use", "tool_result", "user_input_required"]),
-  market_data: new Set(["task_result", "tool_use", "tool_result"]),
-  market_research: new Set(["task_result", "tool_use", "tool_result"]),
-  trading_operations: new Set(["task_result", "tool_use", "tool_result", "approval_required", "approval_resolved"]),
-  financial_modeling: new Set(["task_result", "tool_use", "tool_result"]),
+  market_data: new Set(["task_result", "tool_use", "tool_result", "subagent_note"]),
+  market_research: new Set(["task_result", "tool_use", "tool_result", "subagent_note"]),
+  trading_operations: new Set(["task_result", "tool_use", "tool_result", "approval_required", "approval_resolved", "subagent_note"]),
+  financial_modeling: new Set(["task_result", "tool_use", "tool_result", "subagent_note"]),
   skill: new Set(["skill_invoke", "workflow_started", "workflow_step", "workflow_done"]),
 };
 
@@ -256,7 +256,15 @@ export class SessionState {
   subagentProgress(dispatchEventId: string): string {
     const lines: string[] = [];
     for (const e of this.events) {
-      if (!e.is_sidechain || e.kind !== "tool_result" || e.payload.task_id !== dispatchEventId) continue;
+      if (!e.is_sidechain || e.payload.task_id !== dispatchEventId) continue;
+      // 每步的 note 与工具结果按时间交错:模型上一步"打算做什么"的一行字
+      // 跨步存活,是它自己的连续性记忆。
+      if (e.kind === "subagent_note") {
+        const step = typeof e.payload.step === "number" ? ` step ${e.payload.step}` : "";
+        lines.push(`[note${step}] ${e.payload.note as string}`);
+        continue;
+      }
+      if (e.kind !== "tool_result") continue;
       const name = (e.payload.name as string) ?? "tool";
       const err = e.payload.error as { message?: string } | undefined;
       if (err) {
@@ -288,18 +296,33 @@ export class SessionState {
     return out;
   }
 
-  subagentToolErrors(dispatchEventId: string): { name: string; code: string; message: string; summary?: string }[] {
-    const out: { name: string; code: string; message: string; summary?: string }[] = [];
+  /** Every per-step note the subagent wrote for this task, in order, with the
+   * step it was written at — the step numbers are what let the model see its
+   * own repetition ("I have said 'check once' for ten steps straight"). */
+  subagentNotes(dispatchEventId: string): { step: number; note: string }[] {
+    const notes: { step: number; note: string }[] = [];
+    for (const e of this.events) {
+      if (!e.is_sidechain || e.kind !== "subagent_note" || e.payload.task_id !== dispatchEventId) continue;
+      if (typeof e.payload.note === "string") {
+        notes.push({ step: typeof e.payload.step === "number" ? e.payload.step : 0, note: e.payload.note });
+      }
+    }
+    return notes;
+  }
+
+  subagentToolErrors(dispatchEventId: string): { name: string; code: string; message: string; summary?: string; step?: number }[] {
+    const out: { name: string; code: string; message: string; summary?: string; step?: number }[] = [];
     for (const e of this.events) {
       if (!e.is_sidechain || e.kind !== "tool_result" || e.payload.task_id !== dispatchEventId) continue;
       const err = e.payload.error as { code?: string; message?: string } | undefined;
       if (!err) continue;
-      const item: { name: string; code: string; message: string; summary?: string } = {
+      const item: { name: string; code: string; message: string; summary?: string; step?: number } = {
         name: (e.payload.name as string) ?? "tool",
         code: err.code ?? "tool_error",
         message: err.message ?? (e.payload.summary as string | undefined) ?? "Tool failed.",
       };
       if (typeof e.payload.summary === "string") item.summary = e.payload.summary;
+      if (typeof e.payload.step === "number") item.step = e.payload.step;
       out.push(item);
     }
     return out;

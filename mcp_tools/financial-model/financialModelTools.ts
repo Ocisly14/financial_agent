@@ -11,14 +11,14 @@ import type { FilingInsightContextView } from "../../src/infra/filing-insights/t
 import { SqliteSourceReviewStore, type FilingIngestionStore, type SourceReviewStore } from "../../src/infra/xbrl/sourceReviewStore.ts";
 import { SqliteFilingTableStore, type FilingTableStore } from "../../src/infra/xbrl/filingTableStore.ts";
 import type { RegisteredTool, ToolExecutionContext } from "../toolRegistry.ts";
-import { operationsInputSchema, parseHistoryReviewInput, parseOperations, reviewInputSchema, validate } from "./schemas.ts";
+import { operationsInputSchema, parseOperations, validate } from "./schemas.ts";
 import { deriveWaccParameters, type DerivationDeps, type WaccParameterName } from "../../src/financial-model/waccDerivation.ts";
 import type { WaccSheet, WaccSheetComputedInput } from "../../src/financial-model/waccSheet.ts";
 import { getSharedBarRepository, type BarRepository } from "../../src/data/stock/index.ts";
 import { fetchTreasury30y } from "../../src/infra/market/treasuryYield.ts";
 
 export const FINANCIAL_MODELING_TOOLS = [
-  "create_financial_model", "review_financial_model_history", "apply_financial_model_operations",
+  "create_financial_model", "apply_financial_model_operations",
   "get_financial_model", "list_financial_models", "archive_financial_model",
   "list_unified_statements", "get_unified_rows", "calculate_model_rows",
   "get_treasury_yield",
@@ -68,12 +68,6 @@ export function createFinancialModelTools(injected?: FinancialModelToolDeps): Re
       symbol: { type: "string" },
       ingestionRunId: { type: "string", description: "Immutable run returned by the private statement_extraction subagent." },
     }, ["symbol", "ingestionRunId"], async (input, context) => createModel(deps, input, context)),
-    tool("review_financial_model_history", "Atomically commit reviewed facts, periods, categories, and statement mappings.", {
-      ...(reviewInputSchema.properties as unknown as Record<string, JsonObject>),
-    }, reviewInputSchema.required ?? [],
-    async (input, context) => mutate(deps, input, context,
-      (service, id, revision) => service.reviewFacts(id, revision, parseHistoryReviewInput(input)),
-      { refreshWacc: true })),
     tool("apply_financial_model_operations", "Apply an ordered batch of DCF assumptions, formulas, categories, configuration, and stage changes.", {
       ...(operationsInputSchema.properties as unknown as Record<string, JsonObject>),
     }, operationsInputSchema.required ?? [], async (input, context) => mutate(deps, input, context,
@@ -185,7 +179,7 @@ type WaccRefreshOutcome =
  * fail: an absent bar repository, a derivation error, or simply nothing derivable all fall back to a
  * skip reason reported alongside the commit that already happened.
  */
-async function refreshWaccSheetFromSpine(deps: FinancialModelToolDeps, service: FinancialModelService,
+export async function refreshWaccSheetFromSpine(deps: FinancialModelToolDeps, service: FinancialModelService,
   modelId: string, expectedRevision: number): Promise<WaccRefreshOutcome> {
   if (!deps.barRepository) return { kind: "skipped", reason: "no price data source is configured" };
   try {

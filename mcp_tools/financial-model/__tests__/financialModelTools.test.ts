@@ -12,7 +12,7 @@ import { FinancialModelService } from "../../../src/financial-model/service.ts";
 import type { Fact, Period } from "../../../src/financial-model/types.ts";
 import type { BarRepository, DailyBar } from "../../../src/data/stock/index.ts";
 import { recalculateWaccSheet, setWaccInput } from "../../../src/financial-model/waccSheet.ts";
-import { createFinancialModelTools, type FinancialModelToolDeps } from "../financialModelTools.ts";
+import { createFinancialModelTools, refreshWaccSheetFromSpine, type FinancialModelToolDeps } from "../financialModelTools.ts";
 import { formatAllowedTools } from "../../../src/framework/subagent.ts";
 
 function fixture(): { deps: FinancialModelToolDeps; ingestion: InMemorySourceReviewStore; prepared: PreparedFilingStatements } {
@@ -123,20 +123,8 @@ test("create carries the curation loop's tables and decisions into the source re
   assert.ok(source.presentationExtracts!.every((extract) => !("tables" in extract)));
 });
 
-test("history review commits without any table classification gate", async () => {
-  const { tools } = run();
-  await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1" }, { agentId: "owner-1", sessionId: "s" });
-  const reviewed = await tools.get("review_financial_model_history")!.execute({ modelId: "model-1", expectedRevision: 1,
-    selectedHistoricalPeriodIds: ["FY2024"], decisions: [], categoryLineItems: [], statementMappingPlans: [], categoryGroups: [],
-  }, { agentId: "owner-1", sessionId: "s" });
-  assert.equal(reviewed.error, undefined);
-  assert.equal(reviewed.generation_context?.data["revision"], 2);
-});
-
 test("tool schemas expose nested operation contracts and reject unknown or malformed payloads", async () => {
   const { tools } = run();
-  const reviewSchema = tools.get("review_financial_model_history")!.inputSchema;
-  assert.ok(reviewSchema.properties?.["decisions"]?.items?.properties?.["action"]?.enum?.includes("commit"));
   const operationItems = tools.get("apply_financial_model_operations")!.inputSchema.properties?.["operations"]?.items;
   assert.ok(operationItems?.oneOf?.some((variant) => variant.properties?.["kind"]?.enum?.includes("set_assumption")));
   const rendered = formatAllowedTools([tools.get("apply_financial_model_operations")!]);
@@ -144,10 +132,6 @@ test("tool schemas expose nested operation contracts and reject unknown or malfo
 
   const unknown = await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1", surprise: true }, { agentId: "owner-1", sessionId: "s" });
   assert.equal(unknown.error?.code, "invalid_tool_input");
-  const invalidReview = await tools.get("review_financial_model_history")!.execute({ modelId: "m", expectedRevision: 1,
-    selectedHistoricalPeriodIds: [], decisions: [{ action: "commit" }], categoryLineItems: [], statementMappingPlans: [], categoryGroups: [] },
-  { agentId: "owner-1", sessionId: "s" });
-  assert.equal(invalidReview.error?.code, "invalid_tool_input");
   const invalidOperation = await tools.get("apply_financial_model_operations")!.execute({ modelId: "m", expectedRevision: 1,
     operations: [{ kind: "invented_operation" }] }, { agentId: "owner-1", sessionId: "s" });
   assert.equal(invalidOperation.error?.code, "invalid_tool_input");
@@ -185,31 +169,27 @@ test("a review decision may omit reviewedAt, and the committed ledger carries th
   const staged = deps.modelStore.getRevision("model-1")!.snapshot.facts.find((fact) => fact.status === "staged")!;
   const before = new Date().toISOString();
 
-  const reviewed = await tools.get("review_financial_model_history")!.execute({
-    modelId: "model-1", expectedRevision: 1, selectedHistoricalPeriodIds: ["FY2024"],
+  const service = new FinancialModelService(deps.modelStore, "s");
+  service.reviewFacts("model-1", 1, {
     decisions: [{ decisionId: "d1", factId: staged.factId, action: "commit", mappedLineItemId: staged.lineItemId!,
-      rationale: "Confirmed against the filing", reviewedBy: "mapping_review_subagent" }],
-    categoryLineItems: [], statementMappingPlans: [], categoryGroups: [],
-  }, owner);
+      rationale: "Confirmed against the filing", reviewedBy: "mapping_review_subagent" } as never],
+    selectedHistoricalPeriodIds: ["FY2024"], categoryLineItems: [], statementMappingPlans: [], categoryGroups: [],
+  });
 
-  assert.equal(reviewed.error, undefined);
   const stamped = deps.modelStore.getRevision("model-1")!.snapshot.factReviewDecisions.find((entry) => entry.decisionId === "d1");
   assert.ok(stamped, "the decision was committed");
   assert.ok(stamped!.reviewedAt >= before && stamped!.reviewedAt <= new Date().toISOString());
 });
 
-test("without a price data source the review commit still lands, and the response says the refresh was skipped", async () => {
-  const { deps, tools } = run();
-  await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1" }, { agentId: "owner-1", sessionId: "s" });
+test("without a price data source the WACC refresh reports itself skipped instead of failing", async () => {
+  const { deps } = run();
   assert.equal(deps.barRepository, undefined);
-  const reviewed = await tools.get("review_financial_model_history")!.execute({ modelId: "model-1", expectedRevision: 1,
-    selectedHistoricalPeriodIds: ["FY2024"], decisions: [], categoryLineItems: [], statementMappingPlans: [], categoryGroups: [],
-  }, { agentId: "owner-1", sessionId: "s" });
-  assert.equal(reviewed.error, undefined);
-  // No barRepository means no second, wacc_sheet_refreshed revision — only the ordinary review commit.
-  assert.equal(reviewed.generation_context?.data["revision"], 2);
-  assert.equal(typeof reviewed.generation_context?.data["wacc_refresh_skipped"], "string");
-  assert.ok((reviewed.generation_context?.data["wacc_refresh_skipped"] as string).length > 0);
+  const service = new FinancialModelService(deps.modelStore, "s");
+  const tools = new Map(createFinancialModelTools(deps).map((tool) => [tool.name, tool]));
+  await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1" }, { agentId: "owner-1", sessionId: "s" });
+  const outcome = await refreshWaccSheetFromSpine(deps, service, "model-1", 1);
+  assert.equal(outcome.kind, "skipped");
+  if (outcome.kind === "skipped") assert.ok(outcome.reason.length > 0);
 });
 
 // --- WACC-sheet auto-refresh, wired end to end through review_financial_model_history --------------
@@ -299,70 +279,48 @@ const WACC_FULL_FACTS: Fact[] = [
 
 const waccContext = { agentId: "agent-1", sessionId: "session-1" };
 
-test("review_financial_model_history refreshes the derivable WACC-sheet rows, skips an agent-authored row, and lands one wacc_sheet_refreshed revision", async () => {
+test("the WACC refresh derives the reachable rows, skips an agent-authored row, and lands one wacc_sheet_refreshed revision", async () => {
   stubTreasuryFetch();
   const { deps, modelStore, service } = waccHarness();
-  const staged = service.stageSpineFacts("fm-1", 0, {
+  const committed = service.commitSpineFacts("fm-1", 0, {
     facts: WACC_FULL_FACTS.map((fact) => ({ ...fact, status: "staged" as const })),
     historicalPeriodIds: ["FY2024", "FY2025"],
   });
-  // The agent has already priced cost_of_debt off a current bond yield before the review commit; the
-  // auto-refresh that follows the commit must not clobber it even though it is one of the rows the
-  // engine could otherwise derive from interest_expense/debt.
-  const beforeReview = modelStore.getRevision("fm-1")!;
-  const asOfDate = beforeReview.snapshot.waccSheet!.asOfDate;
-  const withAgentOverride = structuredClone(beforeReview.snapshot);
+  // The agent has already priced cost_of_debt off a current bond yield before the refresh; the
+  // refresh must not clobber it even though it is one of the rows the engine could otherwise derive
+  // from interest_expense/debt.
+  const beforeRefresh = modelStore.getRevision("fm-1")!;
+  const asOfDate = beforeRefresh.snapshot.waccSheet!.asOfDate;
+  const withAgentOverride = structuredClone(beforeRefresh.snapshot);
   withAgentOverride.waccSheet = recalculateWaccSheet(setWaccInput(withAgentOverride.waccSheet!, {
     rowId: "cost_of_debt", value: 0.09, sourceType: "search", sourceRefs: ["bond:issue"],
     rationale: "current issue yield", asOfDate,
   }));
-  modelStore.commit("fm-1", beforeReview.revision, {
+  modelStore.commit("fm-1", beforeRefresh.revision, {
     lifecycleStage: withAgentOverride.lifecycleStage, snapshot: withAgentOverride,
     changeSummary: { changes: [], changedSections: [], warningCount: 0, blockerCount: 0 },
     engineVersion: "test", creatingSessionId: "test",
   });
-  const revisionBeforeReview = modelStore.getRevision("fm-1")!.revision;
-  // One extra revision beyond staging: the manual commit above that plants the agent's cost_of_debt.
-  assert.equal(revisionBeforeReview, staged.revision + 1);
+  const revisionBeforeRefresh = modelStore.getRevision("fm-1")!.revision;
+  assert.equal(revisionBeforeRefresh, committed.revision + 1);
 
-  const tools = new Map(createFinancialModelTools(deps).map((tool) => [tool.name, tool]));
-  const reviewed = await tools.get("review_financial_model_history")!.execute({
-    modelId: "fm-1", expectedRevision: revisionBeforeReview,
-    decisions: WACC_FULL_FACTS.map((fact) => ({ decisionId: `commit-${fact.factId}`, factId: fact.factId,
-      action: "commit", mappedLineItemId: fact.lineItemId!, rationale: "fixture", reviewedBy: "agent-1" })),
-    selectedHistoricalPeriodIds: ["FY2024", "FY2025"],
-    categoryLineItems: [], statementMappingPlans: [], categoryGroups: [],
-  }, waccContext);
+  const outcome = await refreshWaccSheetFromSpine(deps, service, "fm-1", revisionBeforeRefresh);
+  assert.equal(outcome.kind, "refreshed");
+  if (outcome.kind !== "refreshed") return;
+  assert.equal(outcome.result.revision, revisionBeforeRefresh + 1);
 
-  assert.equal(reviewed.error, undefined);
-  assert.equal(reviewed.generation_context?.data["wacc_refresh_skipped"], undefined);
-  // Two revisions happened: the review commit, then the wacc_sheet_refreshed refresh on top of it.
-  assert.equal(reviewed.generation_context?.data["revision"], revisionBeforeReview + 2);
-
-  // Regression for I2: the response's own revision_summary must still be the review commit's — the
-  // auto-refresh's summary must not have replaced it — and the refresh's summary is reported
-  // separately, alongside it.
-  const revisionSummary = reviewed.generation_context?.data["revision_summary"] as
-    { changes: Array<{ kind: string }> };
-  assert.ok(revisionSummary.changes.some((change) => change.kind === "facts_reviewed"),
-    "the review commit's own revision_summary must survive the auto-refresh");
-  const waccRefreshSummary = reviewed.generation_context?.data["wacc_refresh_summary"] as
-    { changes: Array<{ kind: string }> } | undefined;
-  assert.ok(waccRefreshSummary, "expected the refresh's own summary to be reported separately");
-  assert.ok(waccRefreshSummary!.changes.some((change) => change.kind === "wacc_sheet_refreshed"));
-
-  const workbook = reviewed.generation_context?.data["current_workbook"] as never as
-    { waccSheet: { rows: Array<{ rowId: string; value: number | null; source: string;
-      provenance?: { sourceType: string; rationale: string } }> } };
-  assert.equal(workbook.waccSheet.rows.find((row) => row.rowId === "beta")?.value !== null, true);
-  assert.equal(workbook.waccSheet.rows.find((row) => row.rowId === "equity_value")?.value !== null, true);
-  assert.equal(workbook.waccSheet.rows.find((row) => row.rowId === "total_debt")?.value, 100_000);
-  assert.equal(workbook.waccSheet.rows.find((row) => row.rowId === "effective_tax_rate")?.value, 0.16);
-  // The agent's override survived the auto-refresh untouched.
-  assert.equal(workbook.waccSheet.rows.find((row) => row.rowId === "cost_of_debt")?.value, 0.09);
+  const sheet = outcome.result.currentWorkbook.waccSheet!;
+  const rows = sheet.rows as Array<{ rowId: string; value: number | null; source: string;
+    provenance?: { sourceType: string; rationale: string } }>;
+  assert.equal(rows.find((row) => row.rowId === "beta")?.value !== null, true);
+  assert.equal(rows.find((row) => row.rowId === "equity_value")?.value !== null, true);
+  assert.equal(rows.find((row) => row.rowId === "total_debt")?.value, 100_000);
+  assert.equal(rows.find((row) => row.rowId === "effective_tax_rate")?.value, 0.16);
+  // The agent's override survived the refresh untouched.
+  assert.equal(rows.find((row) => row.rowId === "cost_of_debt")?.value, 0.09);
 
   // The Treasury feed (stubbed above) landed risk_free_rate as a computed, market-sourced row.
-  const rfRow = workbook.waccSheet.rows.find((row) => row.rowId === "risk_free_rate")!;
+  const rfRow = rows.find((row) => row.rowId === "risk_free_rate")!;
   assert.equal(rfRow.value, WACC_TEST_RISK_FREE_RATE);
   assert.equal(rfRow.source, "computed");
   assert.equal(rfRow.provenance?.sourceType, "market");
@@ -377,47 +335,36 @@ test("review_financial_model_history refreshes the derivable WACC-sheet rows, sk
     assert.ok(change.rowIds.includes("risk_free_rate"), "risk_free_rate should be reported as refreshed");
     assert.ok(!change.rowIds.includes("cost_of_debt"), "cost_of_debt was agent-authored and must not be reported as refreshed");
   }
-  assert.ok(reviewed.summary.includes("wacc"), reviewed.summary);
   restoreFetch();
 });
 
 test("an agent-preset risk_free_rate survives the Treasury-feed auto-refresh untouched", async () => {
   stubTreasuryFetch();
   const { deps, modelStore, service } = waccHarness();
-  const staged = service.stageSpineFacts("fm-1", 0, {
+  service.commitSpineFacts("fm-1", 0, {
     facts: WACC_FULL_FACTS.map((fact) => ({ ...fact, status: "staged" as const })),
     historicalPeriodIds: ["FY2024", "FY2025"],
   });
-  // The agent has already stated a risk-free rate (say, from its own search) before the review commit;
-  // the auto-refresh that follows must not clobber it even though the Treasury feed also resolves.
-  const beforeReview = modelStore.getRevision("fm-1")!;
-  const asOfDate = beforeReview.snapshot.waccSheet!.asOfDate;
-  const withAgentOverride = structuredClone(beforeReview.snapshot);
+  // The agent has already stated a risk-free rate (say, from its own search) before the refresh;
+  // the refresh must not clobber it even though the Treasury feed also resolves.
+  const beforeRefresh = modelStore.getRevision("fm-1")!;
+  const asOfDate = beforeRefresh.snapshot.waccSheet!.asOfDate;
+  const withAgentOverride = structuredClone(beforeRefresh.snapshot);
   withAgentOverride.waccSheet = recalculateWaccSheet(setWaccInput(withAgentOverride.waccSheet!, {
     rowId: "risk_free_rate", value: 0.05, sourceType: "search", sourceRefs: ["agent-search:30y"],
     rationale: "agent-sourced 30y yield, predating the feed refresh", asOfDate,
   }));
-  modelStore.commit("fm-1", beforeReview.revision, {
+  modelStore.commit("fm-1", beforeRefresh.revision, {
     lifecycleStage: withAgentOverride.lifecycleStage, snapshot: withAgentOverride,
     changeSummary: { changes: [], changedSections: [], warningCount: 0, blockerCount: 0 },
     engineVersion: "test", creatingSessionId: "test",
   });
-  const revisionBeforeReview = modelStore.getRevision("fm-1")!.revision;
+  const revisionBeforeRefresh = modelStore.getRevision("fm-1")!.revision;
 
-  const tools = new Map(createFinancialModelTools(deps).map((tool) => [tool.name, tool]));
-  const reviewed = await tools.get("review_financial_model_history")!.execute({
-    modelId: "fm-1", expectedRevision: revisionBeforeReview,
-    decisions: WACC_FULL_FACTS.map((fact) => ({ decisionId: `commit-${fact.factId}`, factId: fact.factId,
-      action: "commit", mappedLineItemId: fact.lineItemId!, rationale: "fixture", reviewedBy: "agent-1" })),
-    selectedHistoricalPeriodIds: ["FY2024", "FY2025"],
-    categoryLineItems: [], statementMappingPlans: [], categoryGroups: [],
-  }, waccContext);
-
-  assert.equal(reviewed.error, undefined);
-  const workbook = reviewed.generation_context?.data["current_workbook"] as never as
-    { waccSheet: { rows: Array<{ rowId: string; value: number | null; source: string }> } };
-  const rfRow = workbook.waccSheet.rows.find((row) => row.rowId === "risk_free_rate")!;
-  assert.equal(rfRow.value, 0.05);
-  assert.equal(rfRow.source, "agent");
+  const outcome = await refreshWaccSheetFromSpine(deps, service, "fm-1", revisionBeforeRefresh);
+  assert.equal(outcome.kind, "refreshed");
+  if (outcome.kind !== "refreshed") return;
+  const rows = outcome.result.currentWorkbook.waccSheet!.rows as Array<{ rowId: string; value: number | null }>;
+  assert.equal(rows.find((row) => row.rowId === "risk_free_rate")?.value, 0.05);
   restoreFetch();
 });

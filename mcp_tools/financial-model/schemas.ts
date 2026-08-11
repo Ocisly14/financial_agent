@@ -66,7 +66,6 @@ const operationVariants: JsonSchema[] = [
   object({ kind: { type: "string", enum: ["set_statement_mapping_plan"] }, plan: mappingPlan }, ["kind", "plan"]),
   object({ kind: { type: "string", enum: ["set_category_group"] }, group: categoryGroup }, ["kind", "group"]),
   object({ kind: { type: "string", enum: ["set_valuation_config"] }, config: valuation }, ["kind", "config"]),
-  object({ kind: { type: "string", enum: ["advance_stage"] }, stage: { type: "string", enum: ["history_committed", "revenue_forecast", "operations_fcff", "valued"] } }, ["kind", "stage"]),
   object({ kind: { type: "string", enum: ["set_wacc_input"] }, rowId: { type: "string", enum: [...WACC_SHEET_ROW_IDS] },
     value: number, formula: string(), sourceType: string(), sourceRefs: strings, rationale: string() },
   ["kind", "rowId", "sourceType", "sourceRefs", "rationale"]),
@@ -80,9 +79,35 @@ export function parseHistoryReviewInput(input: JsonObject): ReviewFactsInput {
   return input as unknown as ReviewFactsInput;
 }
 
+/** 单批操作上限:长 JSON 输出的结构错误率随长度累积,超限直接拒绝并提示拆批。 */
+export const MAX_OPERATIONS_PER_BATCH = 10;
+
 export function parseOperations(input: JsonObject): ModelOperation[] {
-  validate(input, operationsInputSchema, "$", true);
+  try {
+    validate(input, operationsInputSchema, "$", true);
+  } catch (error) {
+    // A bare "does not match exactly one allowed variant" hides WHICH operation failed and whether
+    // its kind even exists — append the offending op's kind so the fix direction is obvious.
+    const message = error instanceof Error ? error.message : String(error);
+    const match = /\$\.operations\[(\d+)\]/.exec(message);
+    const rawOps = Array.isArray(input["operations"]) ? input["operations"] as JsonObject[] : [];
+    if (match && rawOps[Number(match[1])]) {
+      const kind = rawOps[Number(match[1])]?.["kind"];
+      const known = new Set(["replace_fact", "set_assumption", "set_line_item_source", "add_line_item", "import_source_row",
+        "add_metric", "set_formula", "set_statement_mapping_plan", "set_category_group", "set_valuation_config", "set_wacc_input"]);
+      const hint = typeof kind === "string"
+        ? (known.has(kind) ? ` (operation kind "${kind}" — a field is missing or malformed)`
+          : ` (unknown operation kind "${kind}"; allowed kinds: ${[...known].join(", ")})`)
+        : " (operation has no \"kind\" field)";
+      throw new Error(message + hint);
+    }
+    throw error;
+  }
   const operations = input["operations"] as unknown as JsonObject[];
+  if (operations.length > MAX_OPERATIONS_PER_BATCH) {
+    throw new Error(`operations batch too large: ${operations.length} operations, maximum is ${MAX_OPERATIONS_PER_BATCH}. `
+      + `Split into consecutive batches of at most ${MAX_OPERATIONS_PER_BATCH}; each batch commits its own revision, so splitting never changes the outcome.`);
+  }
   // Every other variant's JSON shape matches its ModelOperation shape field-for-field, so the cast
   // below is a straight passthrough. `set_wacc_input` is the one exception: the tool-facing schema
   // is flat (rowId/value/formula/sourceType/sourceRefs/rationale alongside kind) while the typed

@@ -27,10 +27,9 @@ export function createReadSkillReferenceTool(skills: SkillRegistry): RegisteredT
       const relative = typeof input["path"] === "string" ? input["path"] : "";
       const skill = skills.get(name);
       if (!skill) {
-        return {
-          summary: `Skill not found: ${name}`,
-          error: { code: "skill_not_found", message: `Skill not found: ${name}` },
-        };
+        const available = skills.list().map((entry) => entry.name).join(", ");
+        const message = `Skill not found: ${name}. Available skills: ${available}`;
+        return { summary: message, error: { code: "skill_not_found", message } };
       }
       let full: string;
       try {
@@ -77,10 +76,9 @@ export function createRunSkillScriptTool(skills: SkillRegistry): RegisteredTool 
       const relative = typeof input["script"] === "string" ? input["script"] : "";
       const skill = skills.get(name);
       if (!skill) {
-        return {
-          summary: `Skill not found: ${name}`,
-          error: { code: "skill_not_found", message: `Skill not found: ${name}` },
-        };
+        const available = skills.list().map((entry) => entry.name).join(", ");
+        const message = `Skill not found: ${name}. Available skills: ${available}`;
+        return { summary: message, error: { code: "skill_not_found", message } };
       }
       let full: string;
       try {

@@ -245,11 +245,14 @@ export function createSkeleton(input: CreateSkeletonInput): Skeleton {
     ["share_repurchases", "Share repurchases"],
   ];
 
+  // History rows are containers for mapped filing facts: historical "actual" so committed facts
+  // surface into cells (a "none" row swallows its facts silently — the registry metrics reading
+  // these lines would compute null forever). Unmapped rows simply stay null, same as any actual row.
   for (const [id, label, unit] of incomeRows) {
-    add({ id, label, role: "none", unit, section: "history", historical: "none", forecast: "none" });
+    add({ id, label, role: "none", unit, section: "history", historical: "actual", forecast: "none" });
   }
   for (const [id, label] of [...balanceRows, ...cashFlowRows]) {
-    add({ id, label, role: "none", unit: currency, section: "history", historical: "none", forecast: "none" });
+    add({ id, label, role: "none", unit: currency, section: "history", historical: "actual", forecast: "none" });
   }
 
   const bridgeRows: Array<[string, string, LineItemRole, typeof currency | typeof shares]> = [

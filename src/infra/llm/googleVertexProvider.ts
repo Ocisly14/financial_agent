@@ -1,12 +1,14 @@
 import { createVertex } from "@ai-sdk/google-vertex";
-import { generateText, streamText, type CoreMessage } from "ai";
+import { generateText, jsonSchema, streamText, type CoreMessage, type CoreTool } from "ai";
 import type {
   GenerateOptions,
   GenerateResult,
   LlmMessage,
   LlmProvider,
+  LlmToolCall,
   ModelClass,
 } from "./provider.ts";
+import type { JsonObject } from "../../framework/types.ts";
 import { googleApplicationCredentialsFromSetting } from "./googleVertexCredentials.ts";
 import { createLogger } from "../logger/logger.ts";
 
@@ -71,15 +73,32 @@ export class GoogleVertexProvider implements LlmProvider {
       .map((m) => m.content)
       .join("\n\n");
 
-    const coreMessages: CoreMessage[] = messages
-      .filter((m) => m.role !== "system")
-      .map((m) => ({
-        // Gemini knows user/assistant. Map tool → user input.
-        role: m.role === "assistant" ? "assistant" : "user",
-        content: m.content,
-      }));
+    const coreMessages: CoreMessage[] = [];
+    for (const m of messages.filter((entry) => entry.role !== "system")) {
+      // Gemini knows user/assistant. Map tool → user input. Consecutive
+      // same-role messages (e.g. a cacheable prefix split) merge into one turn.
+      const role = m.role === "assistant" ? "assistant" as const : "user" as const;
+      const last = coreMessages[coreMessages.length - 1];
+      if (last && last.role === role && typeof last.content === "string") {
+        last.content = `${last.content}\n\n${m.content}`;
+      } else {
+        coreMessages.push({ role, content: m.content });
+      }
+    }
 
     const streaming = typeof options.onToken === "function";
+
+    // Native function calling via ai-sdk: schema-constrained tool args. toolChoice
+    // "auto", not "required": forcing a call suppresses the model's reasoning and
+    // collapses planning into reflexive repeat calls.
+    const toolParams = options.tools?.length
+      ? {
+        tools: Object.fromEntries(options.tools.map((t): [string, CoreTool] => [
+          t.name, { description: t.description, parameters: jsonSchema(t.inputSchema) },
+        ])),
+        toolChoice: "auto" as const,
+      }
+      : {};
 
     if (streaming) {
       log.debug(`Google Vertex STREAMING model=${model}`);
@@ -89,6 +108,7 @@ export class GoogleVertexProvider implements LlmProvider {
         messages: coreMessages,
         temperature: options.temperature ?? 0.2,
         ...(options.signal ? { abortSignal: options.signal } : {}),
+        ...toolParams,
       });
 
       let text = "";
@@ -97,8 +117,9 @@ export class GoogleVertexProvider implements LlmProvider {
         options.onToken!(delta);
       }
       const usage = await result.usage;
+      const calls = (await result.toolCalls).map((c): LlmToolCall => ({ name: c.toolName, input: c.args as JsonObject }));
 
-      return this.toResult(text, usage, options, start);
+      return this.toResult(text, calls, usage, options, start);
     }
 
     log.debug(`Google Vertex model=${model}`);
@@ -108,19 +129,23 @@ export class GoogleVertexProvider implements LlmProvider {
       messages: coreMessages,
       temperature: options.temperature ?? 0.2,
       ...(options.signal ? { abortSignal: options.signal } : {}),
+      ...toolParams,
     });
 
-    return this.toResult(result.text, result.usage, options, start);
+    const calls = result.toolCalls.map((c): LlmToolCall => ({ name: c.toolName, input: c.args as JsonObject }));
+    return this.toResult(result.text, calls, result.usage, options, start);
   }
 
   private toResult(
     text: string,
+    toolCalls: LlmToolCall[],
     usage: { promptTokens?: number; completionTokens?: number } | undefined,
     options: GenerateOptions,
     start: number,
   ): GenerateResult {
     return {
       text,
+      ...(toolCalls.length > 0 ? { toolCalls } : {}),
       metrics: {
         tokens_in: usage?.promptTokens ?? 0,
         tokens_out: usage?.completionTokens ?? 0,

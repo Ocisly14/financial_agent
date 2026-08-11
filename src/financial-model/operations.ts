@@ -84,10 +84,6 @@ export type ModelOperation =
   | { kind: "set_statement_mapping_plan"; plan: StatementMappingPlan }
   | { kind: "set_category_group"; group: DcfCategoryGroup }
   | { kind: "set_valuation_config"; config: ValuationConfig }
-  | {
-      kind: "advance_stage";
-      stage: "history_committed" | "revenue_forecast" | "operations_fcff" | "valued";
-    }
   | { kind: "set_wacc_input"; input: SetWaccInputOperation };
 
 /**
@@ -156,10 +152,6 @@ const REGISTRY_DRIVER_IDS = new Set([
   "ratio.capex_to_revenue",
   "ratio.operating_nwc_to_revenue",
 ]);
-
-const STAGE_ORDER: readonly LifecycleStage[] = [
-  "draft", "history_committed", "revenue_forecast", "operations_fcff", "valued", "archived",
-];
 
 function operationError(message: string): never {
   throw new FinancialModelError("invalid_model_operation", message);
@@ -602,15 +594,6 @@ export function applyModelOperations(
       case "set_valuation_config":
         next.valuationConfig = validateValuationConfig(operation.config);
         break;
-      case "advance_stage": {
-        const current = STAGE_ORDER.indexOf(next.lifecycleStage);
-        const target = STAGE_ORDER.indexOf(operation.stage);
-        if (target <= current || target < 0) {
-          operationError(`invalid lifecycle transition: ${next.lifecycleStage} -> ${operation.stage}`);
-        }
-        next.lifecycleStage = operation.stage;
-        break;
-      }
       case "set_wacc_input": {
         if (next.waccSheet === null) operationError("model has no WACC sheet");
         const asOfDate = operation.input.asOfDate ?? next.waccSheet.asOfDate;

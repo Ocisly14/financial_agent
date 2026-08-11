@@ -1,7 +1,7 @@
 // Step 6 — WACC-sheet regression smoke test (no LLM calls).
 // Rebuilds a committed AAPL model in memory from step1-3 artifacts (same recipe as step4's setup),
 // then exercises the whole WACC-sheet skeleton end to end:
-//   1. runs the auto-refresh the same way review_financial_model_history does in production
+//   1. runs the auto-refresh the same way the spine-commit path does in production
 //      (deriveWaccParameters -> service.refreshWaccSheet), sourced from real cached price bars when
 //      available, else a deterministic synthetic walk;
 //   2. prints the 12-row sheet and asserts the engine filled what it can measure and named what it can't;
@@ -52,18 +52,12 @@ const labelByRowId = new Map([...unified.rows, ...(unified.breakdownRows ?? [])]
 const detailIds = resolveDetailLineItemIds(spine.decision, unified);
 const labels = Object.fromEntries(spine.decision.detailRows.map((detail) => [
   detailIds[detail.rowId]!, labelByRowId.get(detail.rowId) ?? detail.rowId]));
-service.stageSpineFacts(modelId, 0, { facts: spine.facts, labels, historicalPeriodIds: actualIds });
-const staged = modelStore.getRevision(modelId)!.snapshot.facts.filter((fact) => fact.status === "staged");
-const committed = service.reviewFacts(modelId, 1, {
-  decisions: staged.map((fact) => ({ decisionId: `d-${fact.factId}`, factId: fact.factId,
-    action: "commit" as const, mappedLineItemId: fact.lineItemId!, rationale: "e2e wacc test",
-    reviewedBy: AGENT, reviewedAt: new Date().toISOString() })),
-  selectedHistoricalPeriodIds: actualIds, categoryLineItems: [], statementMappingPlans: [], categoryGroups: [] });
+const committed = service.commitSpineFacts(modelId, 0, { facts: spine.facts, labels, historicalPeriodIds: actualIds });
 console.log(`Model ${modelId} committed at revision ${committed.revision} (${staged.length}/${spine.facts.length} facts landed)`);
 const asOfDate = committed.currentWorkbook.waccSheet!.asOfDate;
 console.log(`WACC sheet as-of date: ${asOfDate}`);
 
-// ---- 2. Auto-refresh, the same way review_financial_model_history's mutate() does in production:
+// ---- 2. Auto-refresh, the same way the spine-commit path does in production:
 // deriveWaccParameters against the just-committed spine, folded in via service.refreshWaccSheet. ----
 function yearsBefore(isoDate: string, years: number): string {
   const date = new Date(`${isoDate}T00:00:00Z`);
@@ -183,18 +177,11 @@ for (const rowId of ["cost_of_equity", "wacc"] as const) {
   assert(row.missingInputs.length > 0, `${rowId} names its missing inputs: [${row.missingInputs.join(", ")}]`);
 }
 
-// ---- 4. Assert the stage gate blocks on wacc specifically, before it is filled ----
-console.log("\n## Stage-gate check, before filling risk_free_rate / equity_risk_premium\n");
-let gateErrorBefore: FinancialModelError | undefined;
-try {
-  service.applyOperations(modelId, refreshed.revision, [{ kind: "advance_stage", stage: "valued" }]);
-} catch (error) {
-  if (error instanceof FinancialModelError) gateErrorBefore = error;
-  else throw error;
-}
-assert(gateErrorBefore !== undefined && gateErrorBefore.code === "missing_formula_input"
-  && gateErrorBefore.message.includes("wacc"),
-  `advancing to valued is blocked citing the wacc row (got: ${gateErrorBefore ? `[${gateErrorBefore.code}] ${gateErrorBefore.message}` : "no error"})`);
+// ---- 4. wacc 未解出时,推导出的 lifecycle 不会读作 valued,估值保持 null ----
+console.log("\n## Derived-stage check, before filling risk_free_rate / equity_risk_premium\n");
+assert(modelStore.getRevision(modelId)!.lifecycleStage !== "valued",
+  "an unresolved wacc row keeps the derived stage below valued");
+assert(modelStore.getRevision(modelId)!.snapshot.valuation === null, "no valuation while wacc is unresolved");
 
 // ---- 5. Fill the remaining named gaps through the real operations path: set_wacc_input for erp,
 // which the engine can never derive by nature, and for risk_free_rate only as a FALLBACK — when the
@@ -232,33 +219,17 @@ assert(finalByRow.get("cost_of_equity")!.value !== null, "cost_of_equity chained
 
 console.log(`\nWACC = ${waccRow.value}`);
 
-// ---- 6. Re-run the stage-gate check: the wacc gate must no longer be the blocker. Reaching "valued"
-// for real needs forecast machinery (revenue_total/fcff forecast cells, a calculated valuation) this
-// script never builds, so what is asserted here is narrower and precise: the wacc-specific check
-// (`requireWaccResolved`, run before every other stage gate) now passes, and any remaining block is a
-// *different* gate (history/forecast), never a wacc complaint. ----
-console.log("\n## Stage-gate check, after filling risk_free_rate / equity_risk_premium\n");
-let gateErrorAfter: FinancialModelError | undefined;
-try {
-  service.applyOperations(modelId, filled.revision, [{ kind: "advance_stage", stage: "valued" }]);
-} catch (error) {
-  if (error instanceof FinancialModelError) gateErrorAfter = error;
-  else throw error;
-}
-const waccGateStillBlocking = gateErrorAfter !== undefined
-  && gateErrorAfter.code === "missing_formula_input" && gateErrorAfter.message.includes("WACC sheet's wacc row");
-assert(!waccGateStillBlocking,
-  gateErrorAfter === undefined
-    ? "advancing to valued now succeeds outright"
-    : `wacc no longer the blocker — advance now fails on a different gate instead (got: [${gateErrorAfter.code}] ${gateErrorAfter.message})`);
+// ---- 6. wacc 解出后,valued 与否只取决于预测机器(本脚本不搭):推导 stage 如实反映,
+// 不再存在任何"门"来报错。 ----
+console.log("\n## Derived-stage check, after filling risk_free_rate / equity_risk_premium\n");
+console.log(`  derived stage now: ${modelStore.getRevision(modelId)!.lifecycleStage}`);
 
 writeStep("step6-wacc.json", {
   modelId, asOfDate, priceSource,
   derived: derivation.derived.map((d) => ({ name: d.name, value: d.value, sourceType: d.sourceType })),
   unreachable: derivation.unreachable,
   afterRefresh, finalSheet, wacc: waccRow.value,
-  gateBeforeFill: gateErrorBefore ? { code: gateErrorBefore.code, message: gateErrorBefore.message } : null,
-  gateAfterFill: gateErrorAfter ? { code: gateErrorAfter.code, message: gateErrorAfter.message } : null,
+  derivedStage: modelStore.getRevision(modelId)!.lifecycleStage,
   failures,
 });
 

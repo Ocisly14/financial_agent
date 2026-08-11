@@ -123,15 +123,6 @@ const SECTION_ORDER: readonly ModelReadSection[] = [
   "source_cash_flow",
 ];
 
-const STAGE_ORDER: readonly LifecycleStage[] = [
-  "draft",
-  "history_committed",
-  "revenue_forecast",
-  "operations_fcff",
-  "valued",
-  "archived",
-];
-
 export class FinancialModelService {
   private readonly store: ModelStore<FinancialModelSnapshot, RevisionChangeSummary>;
   private readonly creatingSessionId: string;
@@ -279,16 +270,13 @@ export class FinancialModelService {
   }
 
   /**
-   * Stages the canonical spine facts the `spine_mapping` subagent produced from the unified
-   * statements. Staging, not committing: the subagent has no authority over a revision, so the facts
-   * land as candidates and the owning agent accepts them through `review_financial_model_history`.
-   *
-   * Supplementary detail rows arrive as ids the skeleton does not carry yet. A revenue detail becomes
-   * a revenue stream; any other detail becomes a DCF detail line item under its parent. A detail whose
-   * parent refuses children is dropped rather than failing the whole batch — it is supplementary by
-   * definition, and losing one must not cost the issuer its spine.
+   * Commits the canonical spine facts the `spine_mapping` subagent produced from the unified
+   * statements — directly, no staged intermediate: the upstream pipeline already verified roll-ups
+   * per filing and partition tolerances, the engine re-validates via reconciliation on this very
+   * commit, and the revision chain itself is the audit record. A wrong mapping is corrected with
+   * replace_fact / set_formula on a later revision, not prevented by a review ceremony.
    */
-  stageSpineFacts(modelId: string, expectedRevision: number, input: StageSpineFactsInput): CommitResult {
+  commitSpineFacts(modelId: string, expectedRevision: number, input: StageSpineFactsInput): CommitResult {
     const parent = this.loadForMutation(modelId, expectedRevision);
     const working = structuredClone(parent.snapshot);
     if (working.selectedHistoricalPeriodIds.length === 0) {
@@ -324,7 +312,8 @@ export class FinancialModelService {
       && installed.has(fact.lineItemId)
       && knownPeriods.has(fact.periodId)
       && !existingFactIds.has(fact.factId));
-    working.facts = stageFactCandidates(working.facts, candidates);
+    working.facts = [...working.facts, ...candidates.map((fact) => ({ ...structuredClone(fact), status: "committed" as const }))];
+    installWorkingCapitalIdentity(working);
     const calculated = recalculate(working);
     const factChange = factsStagedChange(calculated, candidates);
     return this.commit(modelId, expectedRevision, calculated, makeSummary(calculated, [{
@@ -363,7 +352,7 @@ export class FinancialModelService {
         const slug = item.id.startsWith("revenue.")
           ? item.id.slice("revenue.".length)
           : item.id;
-        // Confirming a stream `stageSpineFacts` already installed is a no-op, not a redefinition.
+        // Confirming a stream `commitSpineFacts` already installed is a no-op, not a redefinition.
         if (presentIds.has(`revenue.${slug}`)) continue;
         importSkeleton = addRevenueStream(importSkeleton, { id: slug, label: item.label });
       } else if (!presentIds.has(item.id)) {
@@ -400,6 +389,7 @@ export class FinancialModelService {
     working.statementMappingPlans = sortStatementPlans(working, normalizedPlans);
     working.categoryGroups = sortCategoryGroups(working, normalizedGroups);
     working.mappingException = null;
+    installWorkingCapitalIdentity(working);
     const calculated = recalculate(working);
     const changes: RevisionChange[] = [factsReviewedChange(parent.snapshot, input.decisions)];
     changes.push(...normalizedPlans.map((plan) => ({
@@ -437,15 +427,7 @@ export class FinancialModelService {
   ): CommitResult {
     const parent = this.loadForMutation(modelId, expectedRevision);
     const working = applyModelOperations(parent.snapshot, operations);
-    const advancement = operations.some((operation) => operation.kind === "advance_stage");
-    // Checked against `working` (pre-recalculate) so a still-unresolved wacc row fails fast with the
-    // sheet's own missing-inputs list, rather than surfacing as calculateValuation's generic
-    // missing_formula_input once recalculate() attempts the valuation it can no longer produce.
-    if (advancement && STAGE_ORDER.indexOf(working.lifecycleStage) >= STAGE_ORDER.indexOf("valued")) {
-      requireWaccResolved(working);
-    }
     const calculated = recalculate(working);
-    if (advancement) enforceStageGates(calculated);
     return this.commit(
       modelId,
       expectedRevision,
@@ -651,15 +633,72 @@ function recalculate(snapshot: FinancialModelSnapshot): FinancialModelSnapshot {
   });
   next.mappingException = reconciliationMappingException(next);
   next.engineVersion = ENGINE_VERSION;
-  next.valuation = next.lifecycleStage === "valued"
-    ? calculateValuation({
-        periods: next.periods,
-        lineItems: next.lineItems,
-        cells: next.cells,
-        valuationConfig: next.valuationConfig,
-      })
-    : null;
+  deriveLifecycle(next);
   return next;
+}
+
+/**
+ * Lifecycle 是事实的读数,不是门:引擎在每次重算后按模型的实际状态推导 stage,
+ * 估值一旦可算立即计算,算不出就保持 null——缺什么,表格和 WACC 表自己会显示。
+ */
+function deriveLifecycle(next: FinancialModelSnapshot): void {
+  if (next.lifecycleStage === "archived") return;
+  const passes = (gate: () => void): boolean => {
+    try {
+      gate();
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  let stage: LifecycleStage = "draft";
+  next.valuation = null;
+  if (passes(() => historyGate(next))) {
+    stage = "history_committed";
+    if (passes(() => requireRoleCells(next, "revenue_total", "forecast"))) {
+      stage = "revenue_forecast";
+      if (passes(() => requireRoleCells(next, "fcff", "forecast"))) {
+        stage = "operations_fcff";
+        if (passes(() => requireWaccResolved(next)) && passes(() => {
+          next.valuation = calculateValuation({
+            periods: next.periods,
+            lineItems: next.lineItems,
+            cells: next.cells,
+            valuationConfig: next.valuationConfig,
+          });
+        })) {
+          stage = "valued";
+        }
+      }
+    }
+  }
+  next.lifecycleStage = stage;
+}
+
+const OWC_ASSET_COMPONENTS = ["accounts_receivable", "inventory", "other_operating_current_assets"] as const;
+const OWC_LIABILITY_COMPONENTS = [
+  "accounts_payable", "deferred_revenue", "accrued_operating_liabilities", "other_operating_current_liabilities",
+] as const;
+
+/**
+ * The skeleton declares operating_working_capital historical:"formula" but cannot know the identity
+ * until the mapping has decided which components this issuer actually reports — a declared spine gap
+ * must drop out of the sum rather than null-poisoning the whole identity. Installed (and refreshed)
+ * on every history review, over exactly the components carrying committed facts.
+ */
+function installWorkingCapitalIdentity(snapshot: FinancialModelSnapshot): void {
+  const committed = new Set(snapshot.facts
+    .filter((fact) => fact.status === "committed" && fact.lineItemId !== undefined)
+    .map((fact) => fact.lineItemId));
+  const assets = OWC_ASSET_COMPONENTS.filter((id) => committed.has(id));
+  const liabilities = OWC_LIABILITY_COMPONENTS.filter((id) => committed.has(id));
+  if (assets.length === 0 && liabilities.length === 0) return;
+  let source = assets.length > 0 ? assets.join(" + ") : "0";
+  for (const liability of liabilities) source += ` - ${liability}`;
+  const historicalIds = snapshot.periods.filter((period) => period.cls !== "forecast").map((period) => period.id);
+  snapshot.formulas = snapshot.formulas.filter((formula) =>
+    !(formula.lineItemId === "operating_working_capital" && formula.appliesTo === "historical"));
+  snapshot.formulas.push({ lineItemId: "operating_working_capital", appliesTo: "historical", source, periodIds: historicalIds });
 }
 
 function defaultValuationConfig(periods: readonly Period[]): ValuationConfig {
@@ -727,26 +766,16 @@ function requireWaccResolved(snapshot: FinancialModelSnapshot): void {
   );
 }
 
-function enforceStageGates(snapshot: FinancialModelSnapshot): void {
-  const target = STAGE_ORDER.indexOf(snapshot.lifecycleStage);
-  if (target >= STAGE_ORDER.indexOf("history_committed")) historyGate(snapshot);
-  if (target >= STAGE_ORDER.indexOf("revenue_forecast")) {
-    requireRoleCells(snapshot, "revenue_total", "forecast");
-  }
-  if (target >= STAGE_ORDER.indexOf("operations_fcff")) {
-    requireRoleCells(snapshot, "fcff", "forecast");
-  }
-  if (target >= STAGE_ORDER.indexOf("valued") && snapshot.valuation === null) {
-    throw new FinancialModelError("missing_formula_input", "valued stage requires valuation output");
-  }
-}
-
 function historyGate(snapshot: FinancialModelSnapshot): void {
+  // Two evidence paths prove a reviewed history: the legacy statement-mapping plans, or committed
+  // facts from the unified-statements spine pipeline. Either satisfies the gate; neither does not.
+  const committedSpine = snapshot.facts.some((fact) =>
+    fact.status === "committed" && fact.provenance.sourceType === "unified_statements");
   if (snapshot.selectedHistoricalPeriodIds.length === 0
-    || snapshot.statementMappingPlans.length === 0) {
+    || (snapshot.statementMappingPlans.length === 0 && !committedSpine)) {
     throw new FinancialModelError(
       "history_review_required",
-      "history requires selected periods and reviewed statement mappings",
+      "history requires selected periods and a reviewed mapping (statement plans or committed spine facts)",
     );
   }
   const selected = new Set(snapshot.selectedHistoricalPeriodIds);
@@ -1045,8 +1074,7 @@ function operationChanges(
   next: FinancialModelSnapshot,
   operations: readonly ModelOperation[],
 ): RevisionChange[] {
-  let summarizedStage = parent.lifecycleStage;
-  return operations.map((operation): RevisionChange => {
+  const changes = operations.map((operation): RevisionChange => {
     switch (operation.kind) {
       case "replace_fact":
         return {
@@ -1109,15 +1137,15 @@ function operationChanges(
         };
       case "set_valuation_config":
         return { kind: "valuation_config_set" };
-      case "advance_stage": {
-        const from = summarizedStage;
-        summarizedStage = operation.stage;
-        return { kind: "stage_advanced", from, to: operation.stage };
-      }
       case "set_wacc_input":
         return { kind: "wacc_input_set", rowId: operation.input.rowId };
     }
   });
+  // Stage 由引擎推导:批次让模型跨过(或跌回)某个阶段时,变更记录如实反映。
+  if (parent.lifecycleStage !== next.lifecycleStage) {
+    changes.push({ kind: "stage_advanced", from: parent.lifecycleStage, to: next.lifecycleStage });
+  }
+  return changes;
 }
 
 function makeSummary(

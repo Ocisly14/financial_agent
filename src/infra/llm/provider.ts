@@ -8,6 +8,24 @@ export type ModelClass = "SMALL" | "MEDIUM" | "LARGE";
 export type LlmMessage = {
   role: "system" | "user" | "assistant" | "tool";
   content: string;
+  /** Marks the end of a cacheable prefix: everything up to and including this
+   * message is stable across calls and worth a provider-side cache breakpoint.
+   * Providers without prompt caching ignore it. */
+  cache?: boolean;
+};
+
+/** Native function-calling tool spec: schema-constrained decoding makes the
+ * provider guarantee well-formed JSON arguments, eliminating the class of
+ * "model hand-wrote JSON and dropped a brace" failures. */
+export type LlmToolSpec = {
+  name: string;
+  description: string;
+  inputSchema: JsonObject;
+};
+
+export type LlmToolCall = {
+  name: string;
+  input: JsonObject;
 };
 
 export type GenerateOptions = {
@@ -17,10 +35,14 @@ export type GenerateOptions = {
   signal?: AbortSignal;
   metadata?: JsonObject;
   onToken?: (delta: string) => void;
+  /** When set, the provider MUST answer with tool calls (tool_choice=any/required). */
+  tools?: LlmToolSpec[];
 };
 
 export type GenerateResult = {
   text: string;
+  /** Present when `options.tools` was set and the provider returned tool calls. */
+  toolCalls?: LlmToolCall[];
   metrics: {
     tokens_in: number;
     tokens_out: number;
@@ -58,7 +80,9 @@ export class ModelRouter {
       throw error;
     }
     const ms = Date.now() - start;
-    const preview = result.text.length > 200 ? result.text.slice(0, 200) + "…" : result.text;
+    const preview = result.toolCalls?.length
+      ? `tool_calls=[${result.toolCalls.map((c) => c.name).join(",")}]`
+      : (result.text.length > 200 ? result.text.slice(0, 200) + "…" : result.text);
     log.info(`[${label}] ${ms}ms | in=${result.metrics.tokens_in} out=${result.metrics.tokens_out} | ${preview}`);
     return result;
   }

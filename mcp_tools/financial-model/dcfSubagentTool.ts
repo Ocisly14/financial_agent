@@ -2,7 +2,7 @@ import type { RegisteredTool } from "../toolRegistry.ts";
 import type { JsonObject } from "../../src/framework/types.ts";
 import type { ModelRouter } from "../../src/infra/llm/provider.ts";
 import { FinancialModelService } from "../../src/financial-model/service.ts";
-import type { FinancialModelToolDeps } from "./financialModelTools.ts";
+import { refreshWaccSheetFromSpine, type FinancialModelToolDeps } from "./financialModelTools.ts";
 import { validate } from "./schemas.ts";
 import type { JsonSchema } from "../../src/framework/types.ts";
 import { createSpineMappingTools, createStatementUnificationTools, type LoadedWorkingSet } from "./mappingSubagentTools.ts";
@@ -85,8 +85,9 @@ export function createDcfSubagentTool(deps: {
           tools: loader.tools, unified: sourceReview.unifiedStatements });
         const mismatch = wrongIssuer(loader.loaded(), modelId);
         if (mismatch) return { summary: mismatch, error: { code: "subagent_loaded_wrong_issuer", message: mismatch } };
-        // Facts land as candidates, never committed: the subagent has no authority over a revision.
-        // The owning agent accepts them with review_financial_model_history.
+        // Facts commit directly — no staged intermediate: the pipeline verified roll-ups upstream,
+        // the engine re-validates via reconciliation on this commit, and the revision chain is the
+        // audit record. Corrections happen on later revisions (replace_fact / set_formula).
         const service = new FinancialModelService(deps.financial.modelStore, context.sessionId);
         const current = service.getModel(modelId);
         if (!("currentWorkbook" in current)) throw new Error("default model context expected");
@@ -100,17 +101,23 @@ export function createDcfSubagentTool(deps: {
           detailIds[detail.rowId]!,
           labelByRowId.get(detail.rowId) ?? detail.rowId,
         ]));
-        const staged = run.facts.length === 0 ? current.currentWorkbook
-          : service.stageSpineFacts(modelId, current.currentWorkbook.revision, { facts: run.facts, labels,
+        let committed = current.currentWorkbook;
+        if (run.facts.length > 0) {
+          const commit = service.commitSpineFacts(modelId, current.currentWorkbook.revision, { facts: run.facts, labels,
             historicalPeriodIds: current.currentWorkbook.periods.filter((period) => period.cls === "actual").map((period) => period.id),
-          }).currentWorkbook;
-        return { summary: composeSubagentReport(`spine_mapping staged ${run.facts.length} fact(s) at revision ${staged.revision} across `
+          });
+          // Committed facts are what make WACC terms derivable — derive them now, as their own
+          // revision, instead of waiting to be asked.
+          const waccOutcome = await refreshWaccSheetFromSpine(deps.financial, service, modelId, commit.revision);
+          committed = waccOutcome.kind === "refreshed" ? waccOutcome.result.currentWorkbook : commit.currentWorkbook;
+        }
+        return { summary: composeSubagentReport(`spine_mapping committed ${run.facts.length} fact(s) at revision ${committed.revision} across `
           + `${run.decision.mappings.length} spine mapping(s) and ${run.decision.detailRows.length} detail row(s)`
           + `${run.decision.spineGaps.length === 0 ? "" : `, ${run.decision.spineGaps.length} declared spine gap(s)`}`
           + `${run.coverageGaps.length === 0 ? "" : `, ${run.coverageGaps.length} coverage gap(s)`}`
-          + `${run.unresolvedFindings.length === 0 ? ". Accept them with review_financial_model_history."
+          + `${run.unresolvedFindings.length === 0 ? ""
             : ` — SHIPPED WITH ${run.unresolvedFindings.length} unresolved finding(s).`}`, run.notes),
-        generation_context: { data: { spineMapping: { revision: staged.revision,
+        generation_context: { data: { spineMapping: { revision: committed.revision,
           mappedTargetIds: run.decision.mappings.map((mapping) => mapping.targetId),
           detailLineItemIds: Object.keys(labels),
           spineGaps: run.decision.spineGaps, coverageGaps: run.coverageGaps,

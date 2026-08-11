@@ -95,18 +95,12 @@ function spineFact(lineItemId: string, periodId: string, value: number): Fact {
     provenance: { sourceType: "unified_statements", sourceRefs: [`unified.${lineItemId}.${periodId}`], asOfDate: "2026-08-07" } };
 }
 
-/** Stages and commits `revenue.total` actuals for FY2024/FY2025 directly onto the canonical target,
+/** Commits `revenue.total` actuals for FY2024/FY2025 directly onto the canonical target,
  * so a formula referencing `revenue.total` has an input to compute against. */
 function seedRevenueTotal(financial: FinancialModelToolDeps, modelId: string): void {
   const service = new FinancialModelService(financial.modelStore, "session-1");
   const facts = [spineFact("revenue.total", "FY2024", 100), spineFact("revenue.total", "FY2025", 110)];
-  service.stageSpineFacts(modelId, 0, { facts, historicalPeriodIds: ["FY2024", "FY2025"] });
-  const decisions: FactReviewDecision[] = facts.map((fact) => ({
-    decisionId: `commit-${fact.factId}`, factId: fact.factId, action: "commit",
-    mappedLineItemId: "revenue.total", rationale: "seed", reviewedBy: "agent-1", reviewedAt: "2026-08-04T12:00:00.000Z",
-  }));
-  service.reviewFacts(modelId, 1, { decisions, selectedHistoricalPeriodIds: ["FY2024", "FY2025"],
-    categoryLineItems: [], statementMappingPlans: [], categoryGroups: [] });
+  service.commitSpineFacts(modelId, 0, { facts, historicalPeriodIds: ["FY2024", "FY2025"] });
 }
 
 test("list returns catalog without values and marks axes with member trees", async () => {
@@ -291,7 +285,7 @@ test("calculate stages a mini sheet: out-of-order cross references compute in on
   seedRevenueTotal(financial, modelId);
   const { calculate } = tools(financial);
 
-  const result = await calculate.execute({ modelId, expectedRevision: 2, rows: [
+  const result = await calculate.execute({ modelId, expectedRevision: 1, rows: [
     { id: "b", formula: "a * 2" },
     { id: "a", formula: "revenue.total / revenue.total", description: "sanity ratio" },
   ] }, ctx);
@@ -301,7 +295,7 @@ test("calculate stages a mini sheet: out-of-order cross references compute in on
     rows: Array<{ lineItemId: string; label: string; description?: string; formula: string; values: Record<string, number | null> }>;
   };
   assert.equal(data.model_id, modelId);
-  assert.equal(data.revision, 3);
+  assert.equal(data.revision, 2);
   const b = data.rows.find((r) => r.lineItemId === "metric.custom.b")!;
   assert.equal(b.values["FY2024"], 2);
   assert.equal(b.values["FY2025"], 2);
@@ -318,7 +312,7 @@ test("a formula referencing a library row imports it deterministically and compu
   const { calculate } = tools(financial);
 
   // net_sales.region.us is in the operable library (step2 data layer) but NOT in the workbook.
-  const result = await calculate.execute({ modelId, expectedRevision: 2, rows: [
+  const result = await calculate.execute({ modelId, expectedRevision: 1, rows: [
     { id: "us_share", formula: "unified.net_sales.region.us / revenue.total", description: "US revenue share" },
   ] }, ctx);
   assert.equal(result.error, undefined, JSON.stringify(result.error));
@@ -352,7 +346,7 @@ test("two formulas sharing one library row import it once, and a later batch reu
   sourceReviewStore.save(modelId, review({ unifiedStatements: baseUnified() }));
   const { calculate } = tools(financial);
 
-  const first = await calculate.execute({ modelId, expectedRevision: 2, rows: [
+  const first = await calculate.execute({ modelId, expectedRevision: 1, rows: [
     { id: "us_share", formula: "unified.net_sales.region.us / revenue.total" },
     { id: "us_growth", formula: "YOY(unified.net_sales.region.us)" },
   ] }, ctx);
@@ -384,13 +378,13 @@ test("strict namespaces: unified.<rowId> reaches a shadowed library row, and the
   ] }) }));
   const { calculate } = tools(financial);
   // Bare library reference: rejected upfront, naming the prefix to use.
-  const bare = await calculate.execute({ modelId, expectedRevision: 2, rows: [
+  const bare = await calculate.execute({ modelId, expectedRevision: 1, rows: [
     { id: "us_x", formula: "net_sales.region.us / revenue.total" },
   ] }, ctx);
   assert.equal(bare.error?.code, "invalid_tool_input");
   assert.match(bare.error!.message, /unified\.net_sales\.region\.us/);
   // Explicit prefix reaches the library's Net sales (200/100) — no double-prefix, no ambiguity.
-  const result = await calculate.execute({ modelId, expectedRevision: 2, rows: [
+  const result = await calculate.execute({ modelId, expectedRevision: 1, rows: [
     { id: "lib_share", formula: "unified.revenue / revenue.total" },
     { id: "naive_share", formula: "revenue / revenue.total" },
   ] }, ctx);
@@ -413,7 +407,7 @@ test("a library row with a null period computes null there, not zero", async () 
   seedRevenueTotal(financial, modelId);
   sourceReviewStore.save(modelId, review({ unifiedStatements: baseUnified() }));
   const { calculate } = tools(financial);
-  const result = await calculate.execute({ modelId, expectedRevision: 2, rows: [
+  const result = await calculate.execute({ modelId, expectedRevision: 1, rows: [
     { id: "cogs_ratio", formula: "unified.cost_of_sales / revenue.total" }, // cost_of_sales FY2025 is null
   ] }, ctx);
   assert.equal(result.error, undefined, JSON.stringify(result.error));
@@ -427,7 +421,7 @@ test("an omitted unit is inferred from the formula, not defaulted to ratio", asy
   seedRevenueTotal(financial, modelId);
   const { calculate } = tools(financial);
   // A currency-valued formula and a batch cross-reference onto it — both without a declared unit.
-  const result = await calculate.execute({ modelId, expectedRevision: 2, rows: [
+  const result = await calculate.execute({ modelId, expectedRevision: 1, rows: [
     { id: "rev_delta", formula: "revenue.total - LAG(revenue.total, 1)" },
     { id: "rev_delta_share", formula: "rev_delta / revenue.total" },
   ] }, ctx);
@@ -444,12 +438,12 @@ test("a circular batch is rejected atomically", async () => {
   seedRevenueTotal(financial, modelId);
   const { calculate } = tools(financial);
 
-  const result = await calculate.execute({ modelId, expectedRevision: 2, rows: [
+  const result = await calculate.execute({ modelId, expectedRevision: 1, rows: [
     { id: "a", formula: "b + 1" },
     { id: "b", formula: "a + 1" },
   ] }, ctx);
   assert.ok(result.error);
-  assert.equal(financial.modelStore.getMeta(modelId)?.currentRevision, 2);
+  assert.equal(financial.modelStore.getMeta(modelId)?.currentRevision, 1);
 });
 
 test("duplicate slug in one batch is rejected before any operation runs", async () => {
@@ -457,12 +451,12 @@ test("duplicate slug in one batch is rejected before any operation runs", async 
   seedRevenueTotal(financial, modelId);
   const { calculate } = tools(financial);
 
-  const result = await calculate.execute({ modelId, expectedRevision: 2, rows: [
+  const result = await calculate.execute({ modelId, expectedRevision: 1, rows: [
     { id: "a", formula: "revenue.total" },
     { id: "a", formula: "revenue.total * 2" },
   ] }, ctx);
   assert.equal(result.error?.code, "invalid_tool_input");
-  assert.equal(financial.modelStore.getMeta(modelId)?.currentRevision, 2);
+  assert.equal(financial.modelStore.getMeta(modelId)?.currentRevision, 1);
 });
 
 test("a formula referencing an unknown line item fails the whole batch", async () => {
@@ -470,11 +464,11 @@ test("a formula referencing an unknown line item fails the whole batch", async (
   seedRevenueTotal(financial, modelId);
   const { calculate } = tools(financial);
 
-  const result = await calculate.execute({ modelId, expectedRevision: 2, rows: [
+  const result = await calculate.execute({ modelId, expectedRevision: 1, rows: [
     { id: "a", formula: "no_such_line_item * 2" },
   ] }, ctx);
   assert.ok(result.error);
-  assert.equal(financial.modelStore.getMeta(modelId)?.currentRevision, 2);
+  assert.equal(financial.modelStore.getMeta(modelId)?.currentRevision, 1);
 });
 
 test("a batch row id colliding with an existing model line item is rejected before any operation runs", async () => {
@@ -487,14 +481,14 @@ test("a batch row id colliding with an existing model line item is rejected befo
   // A batch defining a row with that same slug would silently shadow the real line item: every bare
   // "net_income" reference elsewhere in the batch would resolve to the placeholder, not the real row.
   const collidingId = "net_income";
-  const result = await calculate.execute({ modelId, expectedRevision: 2, rows: [
+  const result = await calculate.execute({ modelId, expectedRevision: 1, rows: [
     { id: collidingId, formula: "revenue.total * 0.1" },
     { id: "npm2", formula: `${collidingId} / revenue.total` },
   ] }, ctx);
   assert.equal(result.error?.code, "invalid_tool_input");
   assert.match(result.error!.message, new RegExp(collidingId));
   // Rejected atomically: the batch never touched the store.
-  assert.equal(financial.modelStore.getMeta(modelId)?.currentRevision, 2);
+  assert.equal(financial.modelStore.getMeta(modelId)?.currentRevision, 1);
 });
 
 test("a stale expectedRevision surfaces currentRevision in the error details, not just a bare code", async () => {
@@ -502,13 +496,13 @@ test("a stale expectedRevision surfaces currentRevision in the error details, no
   seedRevenueTotal(financial, modelId);
   const { calculate } = tools(financial);
 
-  // Model is at revision 2 after seeding; call with a stale expectedRevision of 1.
-  const result = await calculate.execute({ modelId, expectedRevision: 1, rows: [
+  // Model is at revision 1 after seeding; call with a stale expectedRevision of 0.
+  const result = await calculate.execute({ modelId, expectedRevision: 0, rows: [
     { id: "a", formula: "revenue.total" },
   ] }, ctx);
   assert.equal(result.error?.code, "revision_conflict");
   const data = result.generation_context!.data as unknown as { currentRevision?: number };
-  assert.equal(data.currentRevision, 2);
+  assert.equal(data.currentRevision, 1);
 });
 
 test("foreign owner gets financial_model_not_found", async () => {
@@ -516,7 +510,7 @@ test("foreign owner gets financial_model_not_found", async () => {
   seedRevenueTotal(financial, modelId);
   const { calculate } = tools(financial);
 
-  const result = await calculate.execute({ modelId, expectedRevision: 2, rows: [
+  const result = await calculate.execute({ modelId, expectedRevision: 1, rows: [
     { id: "a", formula: "revenue.total" },
   ] }, { agentId: "agent-2", sessionId: "s2" });
   assert.equal(result.error?.code, "financial_model_not_found");

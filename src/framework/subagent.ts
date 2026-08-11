@@ -1,4 +1,4 @@
-import type { ModelClass, ModelRouter } from "../infra/llm/provider.ts";
+import type { LlmMessage, LlmToolCall, LlmToolSpec, ModelClass, ModelRouter } from "../infra/llm/provider.ts";
 import { PromptRenderer, type PromptTemplate } from "./prompt.ts";
 import type { AgentKind, JsonObject, JsonSchema, JsonValue, TaskRequest, TaskResult, ToolDefinition } from "./types.ts";
 import type { McpToolRegistry } from "../../mcp_tools/toolRegistry.ts";
@@ -152,6 +152,68 @@ function formatToolArgs(schema: JsonSchema | undefined): string {
 }
 
 /** Render the allowed-tool list with their structured arg schemas for the prompt. */
+/** The explicit finish tool: with native function calling the model ends the
+ * loop by calling this, so the summary arrives as a schema-required argument
+ * instead of free text — an empty-summary "finish" cannot exist on this path. */
+const FINISH_TOOL: LlmToolSpec = {
+  name: "finish",
+  description: "Finish the task. Call this when the task is satisfied (or no available tool fits) — never alongside other tool calls.",
+  inputSchema: {
+    type: "object",
+    required: ["summary"],
+    properties: {
+      summary: { type: "string", description: "What you accomplished and, for model work, the model_id so a later task can resume. Must not be empty." },
+    },
+  },
+};
+
+/** Tool specs handed to the provider for native function calling: every allowed
+ * tool plus the explicit finish tool. */
+export function buildLoopToolSpecs(tools: ToolDefinition[]): LlmToolSpec[] {
+  return [
+    ...tools.map((tool): LlmToolSpec => ({
+      name: tool.name,
+      description: tool.description,
+      inputSchema: tool.inputSchema as unknown as JsonObject,
+    })),
+    FINISH_TOOL,
+  ];
+}
+
+/** 每步的请求前缀(tools + system + task)在 dispatch 内一字不变,只有
+ * [PROGRESS SO FAR] 之后在长。在 marker 处切开并打 cache 标记,provider 就能
+ * 把静态前缀走缓存读,每步只为动态尾部付全价。marker 缺失时退化为整段发送。 */
+const PROGRESS_MARKER = "[PROGRESS SO FAR]";
+export function splitForPromptCache(system: string, prompt: string): LlmMessage[] {
+  const index = prompt.indexOf(PROGRESS_MARKER);
+  if (index <= 0) {
+    return [{ role: "system", content: system, cache: true }, { role: "user", content: prompt }];
+  }
+  return [
+    { role: "system", content: system, cache: true },
+    { role: "user", content: prompt.slice(0, index), cache: true },
+    { role: "user", content: prompt.slice(index) },
+  ];
+}
+
+/** Map a native tool-call answer onto the loop's step shape. finish only counts
+ * when it is the sole call; mixed in with real calls it is dropped so the work
+ * runs and the model gets another chance to finish cleanly next step. */
+export function stepFromToolCalls(calls: LlmToolCall[]): SubagentStep {
+  const finish = calls.find((call) => call.name === FINISH_TOOL.name);
+  if (finish && calls.every((call) => call.name === FINISH_TOOL.name)) {
+    const summary = typeof finish.input["summary"] === "string" ? finish.input["summary"].trim() : "";
+    return { action: "finish", summary };
+  }
+  const toolCalls = calls
+    .filter((call) => call.name !== FINISH_TOOL.name)
+    .map((call): ToolCall => ({ tool: call.name, input: call.input }));
+  return { action: "call_tool", calls: toolCalls };
+}
+
+/** Render tools as prompt text. The subagent loop no longer uses this — the tools
+ *  reach the model as native specs (buildLoopToolSpecs), of which this rendering is
+ *  a strictly lossier copy. Kept for the eval harnesses that prompt without tools. */
 export function formatAllowedTools(tools: ToolDefinition[]): string {
   if (tools.length === 0) return "None";
   return tools.map((tool) => `- ${tool.name}: ${tool.description}${formatToolArgs(tool.inputSchema)}`).join("\n");
@@ -199,7 +261,6 @@ export class SubagentRuntime {
     const started = Date.now();
     const { state, parentEventId } = input;
     const allowed = new Map(input.allowedTools.map((tool) => [tool.name, tool]));
-    const toolsBlock = formatAllowedTools(input.allowedTools);
     let finishSummary = "";
     let llmCalls = 0;
     let awaitingApproval = false;
@@ -222,30 +283,71 @@ export class SubagentRuntime {
         modelContext: input.request.model_id
           ? `Resume model ${input.request.model_id}; refresh it before any mutation.`
           : "No existing model handle was supplied.",
-        allowedTools: toolsBlock,
-        progress: definition.name === "financial_modeling"
-          ? projectFinancialModelProgress(state.subagentToolOutputs(parentEventId), state.subagentToolErrors(parentEventId))
-          : state.subagentProgress(parentEventId),
+        progress: `(you are at step ${step} of your ${maxToolSteps}-step budget)\n` + (definition.name === "financial_modeling"
+          ? projectFinancialModelProgress(state.subagentToolOutputs(parentEventId), state.subagentToolErrors(parentEventId),
+            state.subagentNotes(parentEventId))
+          : state.subagentProgress(parentEventId)),
       });
 
       let completionText: string;
+      let completionToolCalls: LlmToolCall[] | undefined;
       try {
         const completion = await this.modelRouter.generate(
-          [
-            { role: "system", content: rendered.system },
-            { role: "user", content: rendered.prompt },
-          ],
-          { modelClass: definition.modelClass, temperature: 0.1, metadata: { mode: "subagent", agent: definition.name } },
+          splitForPromptCache(rendered.system, rendered.prompt),
+          { modelClass: definition.modelClass, temperature: 0.1, metadata: { mode: "subagent", agent: definition.name },
+            tools: buildLoopToolSpecs(input.allowedTools) },
         );
         completionText = completion.text;
+        completionToolCalls = completion.toolCalls;
         llmCalls++;
       } catch (error) {
         log.error(`[${definition.name}] LLM call failed at step ${step}`, { error: error instanceof Error ? error.message : String(error) });
         break;
       }
 
-      const stepObj = parseSubagentStep(completionText);
+      // Native function calls are schema-constrained JSON — no text parsing, no
+      // brace-balance failure mode. Text parsing remains the fallback for
+      // providers (and the mock) that answered with plain text.
+      const stepObj = completionToolCalls?.length
+        ? stepFromToolCalls(completionToolCalls)
+        : parseSubagentStep(completionText);
+
+      // 工具调用旁的文本是模型本步的 note("这一步在做什么")。记录并循环注入,
+      // 让它的推理跨步存活——否则每一步的结论随 completion 蒸发,模型会在
+      // 不变的上下文里重复同一个动作。
+      if (completionToolCalls?.length && completionText.trim() !== "") {
+        const note = completionText.trim().slice(0, 500);
+        log.info(`[${definition.name}] step ${step} note`, { note });
+        state.record(definition.name, "subagent_note", { task_id: parentEventId, step, note },
+          { isSidechain: true, parent: parentEventId });
+      }
       if (stepObj.action === "finish") {
+        // tool_choice 是 auto:模型可能只输出思考文本而不调任何工具。这不是收工——
+        // 打回让它行动,并把它的文本原样带回,让这段推理跨步存活。
+        const proseOnly = !completionToolCalls?.length && extractJsonObject(completionText) === null && completionText.trim() !== "";
+        if (proseOnly) {
+          log.info(`[${definition.name}] prose-only reply at step ${step}; nudging to act`, {});
+          state.record(definition.name, "tool_result", { task_id: parentEventId, name: `${definition.name}_runtime`, step,
+            error: { code: "no_action_taken",
+              message: `You replied with text but called no tool. Your note (kept for you): "${completionText.trim().slice(0, 600)}". Now act on it: call the tools it implies, or call finish with your summary.` } },
+          { isSidechain: true, parent: parentEventId });
+          continue;
+        }
+        // 解析兜底会把残缺输出当成 finish:空文本,或想调工具但 JSON 没写对
+        // (实测出现过长 batch 每个对象漏一个闭合括号)。这些不是真正的收工——
+        // 打回重试,由步数预算兜底终止。
+        const attemptedToolCall = /"action"\s*:\s*"call_tool"|"calls"\s*:\s*\[/.test(stepObj.summary);
+        if (stepObj.summary === "" || attemptedToolCall) {
+          log.warn(`[${definition.name}] unparseable completion at step ${step}; retrying instead of finishing`,
+            { attempted_tool_call: attemptedToolCall });
+          state.record(definition.name, "tool_result", { task_id: parentEventId, name: `${definition.name}_runtime`, step,
+            error: { code: "unparseable_step",
+              message: attemptedToolCall
+                ? "Your last reply looked like a tool call but was not valid JSON (likely unbalanced braces — check that every object is fully closed). Re-send it as strict JSON; if the batch is long, split it into smaller operation batches across steps."
+                : "Your last reply was empty or finished without a summary. Call one of the provided tools, or call finish with a non-empty summary." } },
+          { isSidechain: true, parent: parentEventId });
+          continue;
+        }
         exhausted = false;
         log.info(`[${definition.name}] finish at step ${step}`, { summary: stepObj.summary });
         finishSummary = stepObj.summary;
@@ -255,7 +357,7 @@ export class SubagentRuntime {
       log.info(`[${definition.name}] step ${step} — calling tools`, { tools: stepObj.calls.map((c) => c.tool) });
 
       if (definition.name === "financial_modeling" && violatesFinancialMutationSeriality(stepObj.calls)) {
-        state.record(definition.name, "tool_result", { task_id: parentEventId, name: "financial_modeling_runtime",
+        state.record(definition.name, "tool_result", { task_id: parentEventId, name: "financial_modeling_runtime", step,
           error: { code: "financial_mutation_serialization_required",
             message: "A revision mutation must be the only call in its step. Combine dependent changes into one ordered operations batch, then inspect the result in a later step." } },
         { isSidechain: true, parent: parentEventId });
@@ -264,7 +366,7 @@ export class SubagentRuntime {
 
       // Run this step's tool calls in parallel — they are independent (any tool
       // whose choice depends on a prior result is issued in a later iteration).
-      const toolResults = await Promise.all(stepObj.calls.map((call) => this.runToolCall(definition, input, call, allowed)));
+      const toolResults = await Promise.all(stepObj.calls.map((call) => this.runToolCall(definition, input, call, allowed, step)));
       if (definition.name === "financial_modeling" && allowed.has("get_financial_model")) {
         const stepConflict = toolResults.some((result) => result.errorCode === "revision_conflict");
         const modelId = stepConflict
@@ -310,21 +412,25 @@ export class SubagentRuntime {
     const outputs = state.subagentToolOutputs(parentEventId);
     const toolErrors = state.subagentToolErrors(parentEventId);
     const generationContexts = outputs.map((o) => o.generation_context).filter((c): c is NonNullable<typeof c> => Boolean(c));
-    const firstToolError = toolErrors.find((error) => error.code !== "financial_mutation_serialization_required"
+    // 运行时自愈类错误(串行纠正、重试提示)不算任务失败;而 agent 干净收工时,
+    // 中途已被它克服的工具报错也不该盖过 finish 总结。
+    const RUNTIME_NUDGE_CODES = new Set(["financial_mutation_serialization_required", "unparseable_step", "no_action_taken"]);
+    const firstToolError = toolErrors.find((error) => !RUNTIME_NUDGE_CODES.has(error.code)
       && !(recoveredRevisionConflict && error.code === "revision_conflict"));
+    const finished = finishSummary !== "";
     const latestModel = latestFinancialModelState(outputs);
     const result: TaskResult = {
       task_id: parentEventId,
       agent: definition.name,
-      status: firstToolError ? "failed" : "ok",
-      summary: firstToolError?.message ?? (finishSummary || (exhausted && definition.name === "financial_modeling"
+      status: !finished && firstToolError ? "failed" : "ok",
+      summary: finished ? finishSummary : (firstToolError?.message ?? (exhausted && definition.name === "financial_modeling"
         ? `Paused after ${maxToolSteps} tool steps; resume ${latestModel.model_id ?? input.request.model_id ?? "the model"} at revision ${latestModel.revision ?? "unknown"} (${latestModel.lifecycle_stage ?? "unknown stage"}).`
         : `${definition.name} completed task.`)),
       artifacts: outputs.flatMap((o) => o.artifacts ?? []),
       visualizations: outputs.flatMap((o) => o.visualizations ?? []),
       metrics: { ms: Date.now() - started, tool_calls: outputs.length + toolErrors.length, llm_calls: llmCalls },
     };
-    if (firstToolError) {
+    if (!finished && firstToolError) {
       result.error = { code: firstToolError.code, message: firstToolError.message };
     }
 
@@ -347,6 +453,7 @@ export class SubagentRuntime {
     input: RunSubagentInput,
     call: ToolCall,
     allowed: Map<string, ToolDefinition>,
+    step?: number,
   ): Promise<{ awaitingApproval: boolean; approvalId?: string; errorCode?: string }> {
     const { state, parentEventId } = input;
     const tool = allowed.get(call.tool);
@@ -394,7 +501,8 @@ export class SubagentRuntime {
     log.info(`[${definition.name}] tool result: ${tool.name}`, { summary: output.summary });
 
     const normalizedError = normalizeToolError(output);
-    const toolResultPayload: JsonObject = { tool_use_id: toolUseId, task_id: parentEventId, name: tool.name, summary: output.summary };
+    const toolResultPayload: JsonObject = { tool_use_id: toolUseId, task_id: parentEventId, name: tool.name, summary: output.summary,
+      ...(step === undefined ? {} : { step }) };
     if (output.generation_context) toolResultPayload.generation_context = output.generation_context as unknown as JsonObject;
     if (normalizedError) toolResultPayload.error = normalizedError;
     if (output.artifacts?.length) toolResultPayload.artifacts = output.artifacts as unknown as JsonObject[string];
@@ -433,15 +541,28 @@ function latestFinancialModelState(outputs: ReturnType<SessionState["subagentToo
   return {};
 }
 
+/** 查询类工具:结果不进 active_model_context,但 agent 的后续判断依赖它们,
+ * 所以全部保留,否则 agent 会因为看不到结果而无限重查。 */
+const FINANCIAL_QUERY_TOOLS = new Set([
+  "financial_search", "get_treasury_yield", "list_unified_statements", "get_unified_rows", "calculate_model_rows",
+]);
+
 function projectFinancialModelData(outputs: ReturnType<SessionState["subagentToolOutputs"]>): JsonObject {
   const revisions: JsonValue[] = [];
   let active: JsonObject = {};
   const subagentResults: JsonValue[] = [];
+  const skillReferences = new Map<string, JsonValue>();
+  const queryResults: JsonValue[] = [];
   for (const output of outputs) {
     const data = output.generation_context?.data;
     if (!data) continue;
+    if (output.name === "read_skill_reference" && typeof data["content"] === "string") {
+      skillReferences.set(`${data["skill"]}/${data["path"]}`, data["content"]);
+      continue;
+    }
     if (data["revision_summary"] && typeof data["revision_summary"] === "object") revisions.push(data["revision_summary"]);
     if (output.name === "run_dcf_subagent") subagentResults.push(data);
+    if (FINANCIAL_QUERY_TOOLS.has(output.name)) queryResults.push({ tool: output.name, data });
     if (typeof data["model_id"] === "string") {
       active = { model_id: data["model_id"], ...(typeof data["revision"] === "number" ? { revision: data["revision"] } : {}),
         ...(typeof data["lifecycle_stage"] === "string" ? { lifecycle_stage: data["lifecycle_stage"] } : {}),
@@ -451,19 +572,26 @@ function projectFinancialModelData(outputs: ReturnType<SessionState["subagentToo
         ...(data["revision_history"] !== undefined ? { revision_history: data["revision_history"] } : {}) };
     }
   }
-  return { revision_summaries: revisions, active_model_context: active, latest_subagent_results: subagentResults.slice(-2) };
+  return { revision_summaries: revisions, active_model_context: active, latest_subagent_results: subagentResults.slice(-2),
+    skill_references: Object.fromEntries(skillReferences), query_results: queryResults };
 }
 
 function projectFinancialModelProgress(
   outputs: ReturnType<SessionState["subagentToolOutputs"]>,
   errors: ReturnType<SessionState["subagentToolErrors"]>,
+  notes: { step: number; note: string }[],
 ): string {
-  if (outputs.length === 0 && errors.length === 0) return "(no tools called yet)";
-  return JSON.stringify({ ...projectFinancialModelData(outputs), errors: errors.slice(-2) });
+  if (outputs.length === 0 && errors.length === 0 && notes.length === 0) return "(no tools called yet)";
+  // 步号是时间坐标:模型由此能看出"报错发生在很多步之前,此后没再失败",
+  // 以及自己的 note 是否在原地重复。
+  return JSON.stringify({ ...projectFinancialModelData(outputs),
+    step_notes: notes.map((entry) => `step ${entry.step}: ${entry.note}`),
+    errors: errors.slice(-2).map((error) => ({ ...(error.step === undefined ? {} : { at_step: error.step }),
+      tool: error.name, code: error.code, message: error.message })) });
 }
 
 const FINANCIAL_MUTATION_TOOLS = new Set([
-  "create_financial_model", "review_financial_model_history", "apply_financial_model_operations", "archive_financial_model",
+  "create_financial_model", "apply_financial_model_operations", "archive_financial_model",
 ]);
 function violatesFinancialMutationSeriality(calls: ToolCall[]): boolean {
   return calls.some((call) => FINANCIAL_MUTATION_TOOLS.has(call.tool)) && calls.length !== 1;

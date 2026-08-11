@@ -134,26 +134,25 @@ test("golden service workflow maps statements once and produces a deterministic 
   assert.ok("rows" in sourceAudit);
   assert.equal(sourceAudit.rows.length, 10);
 
-  assert.equal(service.applyOperations("golden-dcf", 2, [
-    { kind: "advance_stage", stage: "history_committed" },
-  ]).revision, 3);
+  // Lifecycle is derived: committing the reviewed history alone reads as history_committed.
+  assert.equal(reviewed.status, "history_committed");
 
-  const revenueResult = service.applyOperations("golden-dcf", 3, [
+  const revenueResult = service.applyOperations("golden-dcf", 2, [
     setAssumption("growth.revenue.total", FORECASTS, [0.10]),
-    { kind: "advance_stage", stage: "revenue_forecast" },
   ]);
-  assert.equal(revenueResult.revision, 4);
+  assert.equal(revenueResult.revision, 3);
+  assert.equal(revenueResult.status, "revenue_forecast");
   assertRowValues(revenueResult.currentWorkbook.sections.revenue, "revenue.total", FORECASTS, FORECAST_EXPECTED.revenue);
 
-  const operatingResult = service.applyOperations("golden-dcf", 4, [
+  const operatingResult = service.applyOperations("golden-dcf", 3, [
     setAssumption("margin.operating", FORECASTS, [0.20]),
     setAssumption("tax_rate", FORECASTS, [0.25]),
     setAssumption("ratio.da_to_revenue", FORECASTS, [0.05]),
     setAssumption("ratio.capex_to_revenue", FORECASTS, [0.04]),
     setAssumption("ratio.operating_nwc_to_revenue", FORECASTS, [0.075]),
-    { kind: "advance_stage", stage: "operations_fcff" },
   ]);
-  assert.equal(operatingResult.revision, 5);
+  assert.equal(operatingResult.revision, 4);
+  assert.equal(operatingResult.status, "operations_fcff");
   assertRowValues(operatingResult.currentWorkbook.sections.operations, "operating_income", FORECASTS, FORECAST_EXPECTED.operatingIncome);
   assertRowValues(operatingResult.currentWorkbook.sections.operations, "nopat", FORECASTS, FORECAST_EXPECTED.nopat);
   assertRowValues(operatingResult.currentWorkbook.sections.operations, "depreciation_amortization", FORECASTS, FORECAST_EXPECTED.da);
@@ -165,47 +164,32 @@ test("golden service workflow maps statements once and produces a deterministic 
   assert.equal(cellValue(operatingResult.currentWorkbook.sections.metrics, "metric.roa", "FY2022"), HISTORICAL_EXPECTED.roaFY2022);
   assert.equal(cellValue(operatingResult.currentWorkbook.sections.metrics, "metric.roe", "FY2022"), HISTORICAL_EXPECTED.roeFY2022);
 
-  // Advancing to valued while the WACC sheet's wacc row is still unresolved is rejected before the
-  // engine even attempts the valuation, naming the sheet rows still missing rather than surfacing a
-  // generic missing-cell error.
-  assert.throws(() => service.applyOperations("golden-dcf", 5, [
+  // With the WACC sheet's wacc row still unresolved, the terminal/bridge batch commits fine but the
+  // model simply reads as not-yet-valued: valuation stays null until the discount rate exists.
+  const terminalSet = service.applyOperations("golden-dcf", 4, [
     setAssumption("terminal_growth", ["FY2026"], [0.03]),
     setAssumption("exit_multiple", ["FY2026"], [8]),
     notApplicable("lease_liabilities", ["FY2023"]),
     notApplicable("preferred_equity", ["FY2023"]),
     notApplicable("non_controlling_interests", ["FY2023"]),
     { kind: "set_valuation_config", config: valuationConfig() },
-    { kind: "advance_stage", stage: "valued" },
-  ]), (error: unknown) => {
-    assert.ok(error instanceof FinancialModelError);
-    assert.equal(error.code, "missing_formula_input");
-    assert.match(error.message, /WACC sheet/);
-    return true;
-  });
-  assert.equal(store.getRevision("golden-dcf")?.revision, 5, "the blocked attempt must not commit");
+  ]);
+  assert.equal(terminalSet.revision, 5);
+  assert.equal(terminalSet.status, "operations_fcff");
+  assert.equal(terminalSet.currentWorkbook.valuation ?? null, null);
 
   // The sheet is the single source for wacc: the engine derives what it can (here hand-supplied, since
-  // the fixture has no bar repository), the agent fills the two rows it never can.
+  // the fixture has no bar repository), the agent fills the two rows it never can. The moment the
+  // wacc row resolves, the valuation computes and the model reads as valued — no ceremony.
   const waccRefreshed = service.refreshWaccSheet("golden-dcf", 5, WACC_COMPUTED_INPUTS);
   assert.equal(waccRefreshed.revision, 6);
-  const waccFilled = service.applyOperations("golden-dcf", 6, [
+  const valued = service.applyOperations("golden-dcf", 6, [
     setWaccInputOp("risk_free_rate", 0.04, "Golden fixture risk-free rate."),
     setWaccInputOp("equity_risk_premium", 0.06, "Golden fixture equity risk premium — analyst judgment."),
   ]);
-  assert.equal(waccFilled.revision, 7);
-  const waccRow = waccFilled.currentWorkbook.waccSheet!.rows.find((row) => row.rowId === "wacc")!;
+  assert.equal(valued.revision, 7);
+  const waccRow = valued.currentWorkbook.waccSheet!.rows.find((row) => row.rowId === "wacc")!;
   assert.equal(waccRow.value, 0.10);
-
-  const valued = service.applyOperations("golden-dcf", 7, [
-    setAssumption("terminal_growth", ["FY2026"], [0.03]),
-    setAssumption("exit_multiple", ["FY2026"], [8]),
-    notApplicable("lease_liabilities", ["FY2023"]),
-    notApplicable("preferred_equity", ["FY2023"]),
-    notApplicable("non_controlling_interests", ["FY2023"]),
-    { kind: "set_valuation_config", config: valuationConfig() },
-    { kind: "advance_stage", stage: "valued" },
-  ]);
-  assert.equal(valued.revision, 8);
   assert.equal(valued.status, "valued");
   const valuation = valued.currentWorkbook.valuation!;
   assert.deepEqual(valuation.explicitPeriods.map((period) => period.fcff), FORECAST_EXPECTED.fcff);
@@ -237,10 +221,10 @@ test("golden service workflow maps statements once and produces a deterministic 
 
   const context = service.getModel("golden-dcf");
   assert.ok("currentWorkbook" in context);
-  assert.deepEqual(context.revisionHistory.map((revision) => revision.revision), [0, 1, 2, 3, 4, 5, 6, 7]);
-  assert.equal(context.currentWorkbook.revision, 8);
+  assert.deepEqual(context.revisionHistory.map((revision) => revision.revision), [0, 1, 2, 3, 4, 5, 6]);
+  assert.equal(context.currentWorkbook.revision, 7);
   assert.equal(context.currentWorkbook.mode, "dcf");
-  assert.equal(store.getRevision("golden-dcf")?.revision, 8);
+  assert.equal(store.getRevision("golden-dcf")?.revision, 7);
   const goldenAgentContext = JSON.stringify(context);
   const valuedSnapshot = financialModelSnapshotCodec.encode(
     store.getRevision("golden-dcf")!.snapshot,
@@ -267,18 +251,18 @@ test("golden service workflow maps statements once and produces a deterministic 
   // set_wacc_input is idempotent when replayed with the same value/rationale (asOfDate re-defaults to
   // the sheet's own fixed date each time), so replaying it changes nothing byte-for-byte — the same
   // repeatability guarantee the old wacc assumption replay exercised.
-  const repeatedOnce = reopenedService.applyOperations("golden-dcf", 8, [
+  const repeatedOnce = reopenedService.applyOperations("golden-dcf", 7, [
     setWaccInputOp("risk_free_rate", 0.04, "Golden fixture risk-free rate."),
   ]);
-  assert.equal(repeatedOnce.revision, 9);
+  assert.equal(repeatedOnce.revision, 8);
   assertSnapshotBytes(
     financialModelSnapshotCodec.encode(store.getRevision("golden-dcf")!.snapshot),
     valuedSnapshot,
   );
-  const repeatedTwice = reopenedService.applyOperations("golden-dcf", 9, [
+  const repeatedTwice = reopenedService.applyOperations("golden-dcf", 8, [
     setWaccInputOp("risk_free_rate", 0.04, "Golden fixture risk-free rate."),
   ]);
-  assert.equal(repeatedTwice.revision, 10);
+  assert.equal(repeatedTwice.revision, 9);
   assertSnapshotBytes(
     financialModelSnapshotCodec.encode(store.getRevision("golden-dcf")!.snapshot),
     valuedSnapshot,

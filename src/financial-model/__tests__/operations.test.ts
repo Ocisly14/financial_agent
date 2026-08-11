@@ -220,13 +220,13 @@ test("statement mapping stores decisions and installs its generated formula", ()
     && formula.source === "source.income_statement.revenue - source.income_statement.costs"), true);
 });
 
-test("stage transitions only move forward and an archived snapshot is immutable", () => {
-  const history = applyModelOperations(snapshot(), [{ kind: "advance_stage", stage: "history_committed" }]);
-  assert.equal(history.lifecycleStage, "history_committed");
-  invalid(() => applyModelOperations(history, [{ kind: "advance_stage", stage: "history_committed" }]));
+test("an archived snapshot is immutable and advance_stage is no longer an operation", () => {
   const archived = snapshot();
   archived.lifecycleStage = "archived";
-  invalid(() => applyModelOperations(archived, [{ kind: "advance_stage", stage: "valued" }]));
+  invalid(() => applyModelOperations(archived, [{ kind: "set_valuation_config", config: archived.valuationConfig }]));
+  // Lifecycle is derived by the engine now; the old advance_stage op no longer exists.
+  const advance = { kind: "advance_stage", stage: "valued" } as unknown as ModelOperation;
+  invalid(() => applyModelOperations(snapshot(), [advance]));
 });
 
 test("operation batch shape has no generic patch variant", () => {

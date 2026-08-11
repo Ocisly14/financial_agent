@@ -89,7 +89,8 @@ test("creates all canonical mapping targets with their documented units", () => 
     "operating_cash_flow", "reported_change_operating_assets_liabilities", "share_repurchases",
   ]) {
     assert.equal(byId(skeleton, id).role, "none");
-    assert.equal(byId(skeleton, id).historical, "none");
+    // "actual": history rows receive mapped filing facts, and the cells must surface them.
+    assert.equal(byId(skeleton, id).historical, "actual");
   }
   assert.deepEqual(byId(skeleton, "diluted_eps").unit, { kind: "per_share", code: "USD" });
   assert.deepEqual(byId(skeleton, "diluted_shares").unit, { kind: "shares" });
