@@ -606,6 +606,7 @@ test("needs_input emits a member_input_request frame carrying the member's ident
   const h = harness({
     run: async (input) => {
       const state = await h.sessions.getOrCreate(input.sessionId);
+      // Asked from one layer further in: the member Topic's own DCF subagent.
       state.recordUserInputRequest({
         request_id: "req_1",
         questions: [{
@@ -615,7 +616,7 @@ test("needs_input emits a member_input_request frame carrying the member's ident
           min_selections: 1,
           max_selections: 1,
         }],
-      });
+      }, "financial_modeling");
       return { response: "Please answer the questions below." };
     },
   });
@@ -626,6 +627,9 @@ test("needs_input emits a member_input_request frame carrying the member's ident
   assert.ok(frame, "a member_input_request frame should be emitted");
   assert.equal(frame.data.topicId, "room_a");
   assert.equal(frame.data.request.request_id, "req_1");
+  // Both layers survive the hop: which member, and who inside it asked. The
+  // controller's window renders them together ("<topic> · DCF modeling agent").
+  assert.equal(frame.data.request.asked_by, "financial_modeling");
 });
 
 test("a member that answers normally is unaffected", async () => {

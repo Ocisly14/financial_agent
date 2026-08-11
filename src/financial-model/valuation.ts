@@ -41,8 +41,14 @@ export type BridgeAdjustment = {
   refs: CellKey[];
 };
 
+/**
+ * One terminal-value method's full result. Both discount the same explicit forecast and differ only
+ * in what happens after it: `perpetuity_growth` compounds the final FCFF forever at the terminal
+ * growth rate, `exit_multiple` assumes the business is sold at a multiple of its terminal metric.
+ * They are computed side by side so the two can be read against each other.
+ */
 export type TerminalMethodResult = {
-  method: "gordon_growth" | "exit_multiple";
+  method: "perpetuity_growth" | "exit_multiple";
   explicitPeriods: ExplicitPeriodValue[];
   terminalValue: number;
   terminalPresentValue: number;
@@ -77,7 +83,7 @@ export type SensitivityMatrix = {
 
 export type ValuationOutput = {
   explicitPeriods: ExplicitPeriodValue[];
-  gordonGrowth: TerminalMethodResult;
+  perpetuityGrowth: TerminalMethodResult;
   exitMultiple: TerminalMethodResult;
   waccByGrowth: SensitivityMatrix;
   waccByMultiple: SensitivityMatrix;
@@ -194,16 +200,16 @@ export function calculateValuation(input: ValuationInput): ValuationOutput {
   const finalFcff = bound.fcff[bound.fcff.length - 1]!;
   const finalWacc = bound.wacc[bound.wacc.length - 1]!;
 
-  const gordonTerminalValue =
+  const perpetuityTerminalValue =
     finalFcff * (1 + bound.terminalGrowth) / (finalWacc - bound.terminalGrowth);
   const exitTerminalValue = bound.exitMetric * bound.exitMultiple;
 
-  const gordonGrowth = buildMethodResult(
-    "gordon_growth",
+  const perpetuityGrowth = buildMethodResult(
+    "perpetuity_growth",
     explicitPeriods,
     schedule.explicitPresentValue,
     finalFactor,
-    gordonTerminalValue,
+    perpetuityTerminalValue,
     bound,
     [bound.terminalGrowthRef],
   );
@@ -219,9 +225,9 @@ export function calculateValuation(input: ValuationInput): ValuationOutput {
 
   return {
     explicitPeriods,
-    gordonGrowth,
+    perpetuityGrowth,
     exitMultiple,
-    waccByGrowth: buildGordonSensitivity(bound, config),
+    waccByGrowth: buildPerpetuitySensitivity(bound, config),
     waccByMultiple: buildExitSensitivity(bound, config),
   };
 }
@@ -535,7 +541,7 @@ function buildMethodResult(
   };
 }
 
-function buildGordonSensitivity(
+function buildPerpetuitySensitivity(
   bound: BoundInputs,
   config: ResolvedValuationConfig,
 ): SensitivityMatrix {

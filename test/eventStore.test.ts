@@ -12,7 +12,7 @@ function makeEvent(overrides: Partial<SessionEvent> = {}): SessionEvent {
     timestamp: "2026-06-10T00:00:00.000Z",
     source: "user",
     kind: "user_message",
-    is_sidechain: false,
+    thread_id: "sess_1",
     turn: 1,
     payload: { content: "hi" },
     ...overrides,

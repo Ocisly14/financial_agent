@@ -3,6 +3,7 @@ import test from "node:test";
 import { InMemoryFilingInsightStore } from "../../filing-insights/store.ts";
 import { InMemoryFilingTableStore } from "../filingTableStore.ts";
 import { InMemorySourceReviewStore } from "../sourceReviewStore.ts";
+import { ArelleAdapterError } from "../arelleAdapter.ts";
 import type { PreparedStatementProvider } from "../preparedStatementProvider.ts";
 import { runStatementExtraction } from "../statementExtraction.ts";
 import { filingTable, PERIODS, REPORT_DATES } from "./curationFixtures.ts";
@@ -69,6 +70,53 @@ test("zero extracted tables is a failed ingestion", async () => {
     tableStore: new InMemoryFilingTableStore() }, "agent", request);
   assert.equal(result.status, "failed");
   assert.equal(result.error?.code, "incomplete_financial_statements");
+});
+
+// Insight extraction is the only part of an ingestion that spends model calls, and nothing
+// downstream requires a populated set — so it has an off switch, and off means the filing
+// documents are never even fetched.
+test("omitting the insight generator skips the whole insight pass without failing the ingestion", async () => {
+  let documentsFetched = 0;
+  const counting: PreparedStatementProvider = { ...provider(),
+    filingDocuments: async () => { documentsFetched += 1; throw new Error("offline"); } };
+  const result = await runStatementExtraction({ provider: counting, ingestionStore: new InMemorySourceReviewStore(),
+    insightStore: new InMemoryFilingInsightStore(), tableStore: new InMemoryFilingTableStore() }, "agent", request);
+
+  assert.equal(result.status, "ready");
+  assert.equal(documentsFetched, 0, "a disabled insight pass must not fetch filing documents");
+  assert.equal(result.filingInsights?.coverage.status, "unavailable");
+  assert.deepEqual(result.filingInsights?.coverage.failureCodes, ["filing_insights_disabled"]);
+  assert.deepEqual(result.filingInsights?.insights, []);
+  // The set still exists, so create_financial_model's filingInsightSetId plumbing is unchanged.
+  assert.ok(result.filingInsights?.insightSetId);
+});
+
+function failing(error: unknown): PreparedStatementProvider {
+  return { ...provider(), extract: async () => { throw error; } };
+}
+
+async function extractionFailure(error: unknown) {
+  return await runStatementExtraction({ provider: failing(error), ingestionStore: new InMemorySourceReviewStore(),
+    insightStore: new InMemoryFilingInsightStore(), generateInsights: async () => [],
+    tableStore: new InMemoryFilingTableStore() }, "agent", request);
+}
+
+// The agent reads `retryable` as permission to call the tool again. A misconfigured or
+// contract-breaking adapter answers identically every time, so re-calling it only burns steps.
+test("adapter misconfiguration and protocol breaches are not retryable", async () => {
+  for (const code of ["xbrl_runtime_unavailable", "xbrl_protocol_error"] as const) {
+    const result = await extractionFailure(new ArelleAdapterError(code, "boom"));
+    assert.equal(result.status, "failed");
+    assert.equal(result.error?.code, code);
+    assert.equal(result.error?.retryable, false, `${code} should not be retryable`);
+  }
+});
+
+test("an adapter timeout or crash stays retryable", async () => {
+  for (const code of ["xbrl_timeout", "xbrl_process_failed"] as const) {
+    const result = await extractionFailure(new ArelleAdapterError(code, "boom"));
+    assert.equal(result.error?.retryable, true, `${code} should be retryable`);
+  }
 });
 
 test("tables whose requested-period facts were all dropped are persisted but still fail ingestion", async () => {

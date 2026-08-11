@@ -355,3 +355,28 @@
         background-color: rgba(255, 255, 255, 0.3);
     }
 }
+
+@layer utilities {
+    @keyframes workbook-flash {
+        from { background-color: rgb(253 230 138 / 0.6); }
+        to { background-color: transparent; }
+    }
+    .animate-workbook-flash {
+        animation: workbook-flash 2s ease-out;
+    }
+
+    /* Same flash, dimmed for a dark ground: amber-200 at 60% alpha glares
+       against the near-black canvas, so dark swaps to amber-400 at a lower
+       alpha instead — same "something just changed" signal, no glare.
+       Overriding only `animation-name` (not the whole shorthand) keeps the
+       2s/ease-out timing from the base rule; `.dark …` outranks the bare
+       class on specificity alone, matching this file's existing
+       `.dark .custom-scrollbar` override pattern above. */
+    @keyframes workbook-flash-dark {
+        from { background-color: rgb(251 191 36 / 0.25); }
+        to { background-color: transparent; }
+    }
+    .dark .animate-workbook-flash {
+        animation-name: workbook-flash-dark;
+    }
+}

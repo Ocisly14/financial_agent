@@ -1,0 +1,46 @@
+import { FinancialModelError } from "../financial-model/errors.ts";
+import type { FinancialModelSnapshot } from "../financial-model/operations.ts";
+import { FinancialModelService, type RevisionChangeSummary } from "../financial-model/service.ts";
+import type { ModelStore, ModelView } from "../financial-model/store.ts";
+import type { ModelContextView } from "../financial-model/views.ts";
+
+export type FinancialModelReadDeps = {
+  modelStore: ModelStore<FinancialModelSnapshot, RevisionChangeSummary>;
+};
+
+/** The service takes a session id only to stamp `creatingSessionId` on writes.
+ *  These routes never write, so a constant is honest — inventing a session id
+ *  here would put a fictional author on nothing. */
+const READ_SESSION_ID = "http-read";
+
+export type RouteResult<T> = { status: 200; body: T } | { status: 404; body: { success: false; error: string } };
+
+/** The tab strip's source. A topic id IS its session id, so ownership is a
+ *  plain filter — no join table needed. Archived models are excluded: history
+ *  should stay readable by id, but a live tab strip is not where it belongs. */
+export function listTopicModels(
+  deps: FinancialModelReadDeps,
+  agentId: string,
+  topicId: string,
+): { status: 200; body: { models: ModelView[] } } {
+  const service = new FinancialModelService(deps.modelStore, READ_SESSION_ID);
+  const models = service.listModels({ ownerAgentId: agentId, originSessionId: topicId, includeArchived: false });
+  return { status: 200, body: { models } };
+}
+
+/** Passing no options is what makes `getModel` return the full context view
+ *  rather than a slice — see `FinancialModelService.getModel`. */
+export function getModelContext(
+  deps: FinancialModelReadDeps,
+  modelId: string,
+): RouteResult<ModelContextView> {
+  const service = new FinancialModelService(deps.modelStore, READ_SESSION_ID);
+  try {
+    return { status: 200, body: service.getModel(modelId) as ModelContextView };
+  } catch (error) {
+    if (error instanceof FinancialModelError && error.code === "financial_model_not_found") {
+      return { status: 404, body: { success: false, error: `model not found: ${modelId}` } };
+    }
+    throw error;
+  }
+}

@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { SessionState } from "../../framework/sessionState.ts";
+import { SessionState, type SessionEvent } from "../../framework/sessionState.ts";
 import { projectChatHistory } from "../chatHistory.ts";
 
 test("chat history projects user and assistant messages with durable UI metadata", () => {
   const state = new SessionState("room-1", "2026-07-29T00:00:00.000Z");
   state.beginTurn("Chart AAPL");
-  const dispatch = state.recordDispatch("market_data", "Load AAPL chart");
+  const thread = state.openThread("market_data");
+  const dispatch = state.recordDispatch("market_data", "Load AAPL chart", thread);
   state.recordTaskResult("market_data", dispatch.event_id, {
     task_id: dispatch.event_id,
     agent: "market_data",
@@ -31,6 +32,7 @@ test("chat history projects user and assistant messages with durable UI metadata
     taskId: dispatch.event_id,
     description: "Load AAPL chart",
     status: "completed",
+    threadId: thread,
     agent: "market_data",
     summary: "Chart loaded",
   }]);
@@ -92,10 +94,53 @@ test("chat history restores answered and skipped input cards", () => {
   assert.equal(projectChatHistory(skipped.allEvents())[1]?.content?.metadata?.inputRequest?.status, "skipped");
 });
 
+test("a restored card still names who asked", () => {
+  const state = new SessionState("room-asked-by", "2026-08-11T00:00:00.000Z");
+  state.beginTurn("Value AAPL");
+  state.recordUserInputRequest({
+    request_id: "input_dcf",
+    questions: [{
+      id: "basis",
+      question: "Which revenue basis?",
+      options: [{ id: "gaap", label: "GAAP" }, { id: "adj", label: "Adjusted" }],
+      min_selections: 1,
+      max_selections: 1,
+    }],
+  }, "financial_modeling");
+  state.recordReply("Please answer the questions below to continue.", true);
+
+  assert.equal(projectChatHistory(state.allEvents())[1]?.content?.metadata?.inputRequest?.asked_by, "financial_modeling");
+});
+
+test("a card recorded before asked_by existed reads as the Topic agent's own question", () => {
+  const state = new SessionState("room-legacy", "2026-08-11T00:00:00.000Z");
+  state.beginTurn("Help me choose");
+  state.recordUserInputRequest({
+    request_id: "input_legacy",
+    questions: [{
+      id: "risk",
+      question: "Risk level?",
+      options: [{ id: "low", label: "Low" }, { id: "high", label: "High" }],
+      min_selections: 1,
+      max_selections: 1,
+    }],
+  });
+  state.recordReply("Choose one.", true);
+  // Strip the field the way a session persisted before this change would have it.
+  const events: SessionEvent[] = state.allEvents().map((event) => {
+    if (event.kind !== "user_input_required") return event;
+    const { asked_by: _askedBy, ...payload } = event.payload;
+    return { ...event, payload };
+  });
+
+  assert.equal(projectChatHistory(events)[1]?.content?.metadata?.inputRequest?.asked_by, "orchestrator");
+});
+
 test("chat history carries retrieved sources so citations can be rendered inline", () => {
   const state = new SessionState("room-3", "2026-07-30T00:00:00.000Z");
   state.beginTurn("NVDA 有什么传闻");
-  const dispatch = state.recordDispatch("market_research", "Search NVDA rumours");
+  const thread = state.openThread("market_research");
+  const dispatch = state.recordDispatch("market_research", "Search NVDA rumours", thread);
   // A subagent's own tool call lands as a sidechain tool_result.
   state.record("market_research", "tool_result", {
     task_id: dispatch.event_id,
@@ -116,7 +161,7 @@ test("chat history carries retrieved sources so citations can be rendered inline
         ],
       },
     },
-  }, { parent: dispatch.event_id, isSidechain: true });
+  }, { parent: dispatch.event_id, threadId: thread });
   state.recordTaskResult("market_research", dispatch.event_id, {
     task_id: dispatch.event_id,
     agent: "market_research",

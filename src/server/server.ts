@@ -11,6 +11,8 @@ import type { TaskResult, UserInputAnswer, UserInputRequest, UserInputResponse }
 import { handleStockQuote, parseRangeDays } from "./stockMarketRoutes.ts";
 import { handleLinkPreview } from "./linkPreview.ts";
 import { projectChatHistory } from "./chatHistory.ts";
+import { getModelContext, listTopicModels } from "./financialModelRoutes.ts";
+import { getDefaultFinancialModelToolDeps } from "../../mcp_tools/financial-model/financialModelTools.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLIENT_DIST = path.resolve(__dirname, "../../client/dist");
@@ -664,6 +666,26 @@ export function createHttpServer(app: FinancialAgentApp): http.Server {
           return;
         }
         if (method === "POST") return await handleCreateTopic(req, res, app, agentId);
+      }
+
+      const topicModelsMatch = pathname.match(/^\/api\/agents\/([^/]+)\/topics\/([^/]+)\/models$/);
+      if (topicModelsMatch && method === "GET") {
+        const result = listTopicModels(
+          { modelStore: getDefaultFinancialModelToolDeps().modelStore },
+          decodeURIComponent(topicModelsMatch[1]!),
+          decodeURIComponent(topicModelsMatch[2]!),
+        );
+        return jsonOk(res, { success: true, ...result.body });
+      }
+
+      const financialModelMatch = pathname.match(/^\/api\/financial-models\/([^/]+)$/);
+      if (financialModelMatch && method === "GET") {
+        const result = getModelContext(
+          { modelStore: getDefaultFinancialModelToolDeps().modelStore },
+          decodeURIComponent(financialModelMatch[1]!),
+        );
+        if (result.status === 404) return jsonError(res, 404, result.body.error);
+        return jsonOk(res, { success: true, ...result.body });
       }
 
       const topicChartsMatch = pathname.match(/^\/api\/agents\/([^/]+)\/topics\/([^/]+)\/charts$/);

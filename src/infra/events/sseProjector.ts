@@ -16,7 +16,8 @@ export function projectEvent(event: SessionEvent, state: SessionState): SSEEvent
     case "dispatch":
       return [
         { type: "progress", task_id: event.event_id, phase: "subagent_started", pct: 5, note: `${p.agent as string} subagent started` },
-        { type: "dispatch", task_id: event.event_id, agent: p.agent as AgentKind, task: p.task as string },
+        { type: "dispatch", task_id: event.event_id, agent: p.agent as AgentKind, task: p.task as string,
+          thread_id: (p.child_thread_id as string) ?? event.session_id },
       ];
     case "task_result":
       return [
@@ -30,7 +31,9 @@ export function projectEvent(event: SessionEvent, state: SessionState): SSEEvent
     }
     case "tool_result": {
       const taskId = (p.task_id as string) ?? "";
-      return ((p.artifacts as ArtifactRef[] | undefined) ?? []).map((artifact) => ({ type: "artifact", task_id: taskId, artifact }));
+      const artifactFrames: SSEEvent[] = ((p.artifacts as ArtifactRef[] | undefined) ?? [])
+        .map((artifact) => ({ type: "artifact", task_id: taskId, artifact }));
+      return [...artifactFrames, ...modelRevisionFrames(p)];
     }
     case "approval_required":
       return [{ type: "approval_required", approval_id: p.approval_id as string, payload: p.payload as Record<string, never> }];
@@ -56,6 +59,58 @@ export function projectEvent(event: SessionEvent, state: SessionState): SSEEvent
 
 function asObject(value: JsonValue | undefined): JsonObject | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : undefined;
+}
+
+/** A committed model revision, projected out of whatever tool produced it.
+ *
+ * `changed_sections` alone is not enough to tell the UI which sheet moved:
+ * `ModelReadSection` covers the five DCF sections and the three source
+ * statements, and has no WACC member at all. A WACC refresh therefore shows up
+ * only as a change *kind*, which is why both travel on the frame. */
+function modelRevisionFrames(payload: JsonObject): SSEEvent[] {
+  const data = asObject(asObject(payload.generation_context)?.data);
+  if (!data) return [];
+  const modelId = data.model_id;
+  const revision = data.revision;
+  if (typeof modelId !== "string" || typeof revision !== "number") return [];
+
+  const summary = asObject(data.revision_summary);
+  const changes = Array.isArray(summary?.changes) ? summary.changes : [];
+  const sections = Array.isArray(summary?.changedSections) ? summary.changedSections : [];
+
+  const lineItemIds = new Set<string>();
+  const periodIds = new Set<string>();
+  const kinds = new Set<string>();
+  for (const raw of changes) {
+    const change = asObject(raw);
+    if (!change) continue;
+    if (typeof change.kind === "string") kinds.add(change.kind);
+    // The id-bearing keys across the RevisionChange union as of 02682e2:
+    // `lineItemId` (assumption_set / formula_set / fact_replaced /
+    // line_item_added / metric_added / line_item_source_set),
+    // `parentLineItemId` (category_group_set), `mappedLineItemIds`
+    // (statements_staged). Do not add speculative keys for kinds that do not
+    // exist — check the union in `src/financial-model/views.ts` first.
+    if (typeof change.lineItemId === "string") lineItemIds.add(change.lineItemId);
+    if (typeof change.parentLineItemId === "string") lineItemIds.add(change.parentLineItemId);
+    if (Array.isArray(change.mappedLineItemIds)) {
+      for (const id of change.mappedLineItemIds) if (typeof id === "string") lineItemIds.add(id);
+    }
+    if (Array.isArray(change.periodIds)) {
+      for (const id of change.periodIds) if (typeof id === "string") periodIds.add(id);
+    }
+  }
+
+  return [{
+    type: "model_revision",
+    model_id: modelId,
+    revision,
+    lifecycle_stage: typeof data.lifecycle_stage === "string" ? data.lifecycle_stage : "",
+    changed_sections: sections.filter((value): value is string => typeof value === "string"),
+    changed_line_item_ids: [...lineItemIds],
+    changed_period_ids: [...periodIds],
+    change_kinds: [...kinds],
+  }];
 }
 
 function strategyCreatedFrames(payload: JsonObject): SSEEvent[] {

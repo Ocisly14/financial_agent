@@ -9,6 +9,7 @@ import type {
     UserInputRequestView,
     UserInputSubmission,
 } from "@/types/core";
+import type { ModelContextView, ModelRevisionFrame, ModelView } from "@/types/financialModel";
 
 export type ProcessingStep = {
     id: string;
@@ -302,6 +303,16 @@ export const apiClient = {
             body: { op },
         }),
 
+    getTopicModels: (agentId: string, topicId: string) =>
+        fetcher({ url: `/api/agents/${agentId}/topics/${topicId}/models` }) as Promise<{
+            success: boolean; models: ModelView[];
+        }>,
+
+    getFinancialModel: (modelId: string) =>
+        fetcher({ url: `/api/financial-models/${modelId}` }) as Promise<
+            { success: boolean } & ModelContextView
+        >,
+
 };
 
 /** True when the browser/proxy tore down a fetch in a way typical of user abort or HTTP/2 reset. */
@@ -446,6 +457,7 @@ export class StreamingApiClient {
         language?: string,
         retryCount = 0,
         inputResponse?: UserInputSubmission,
+        onModelRevision?: (frame: ModelRevisionFrame) => void,
     ) {
         // Create a unique key for request deduplication.
         const classificationKeySegment = messageClassification ?? "";
@@ -558,7 +570,7 @@ export class StreamingApiClient {
                             status: 'in_progress',
                             message: `${parsed.agent ?? ''}: ${parsed.task ?? ''}`.trim(),
                             timestamp: Date.now(),
-                            data: { task_id: parsed.task_id, agent: parsed.agent, task: parsed.task },
+                            data: { task_id: parsed.task_id, agent: parsed.agent, task: parsed.task, thread_id: parsed.thread_id },
                         });
                         break;
                     case 'progress':
@@ -604,6 +616,12 @@ export class StreamingApiClient {
                                 status: parsed.status,
                             },
                         });
+                        break;
+                    case 'model_revision':
+                        // A committed model revision is not a unit of work — routing
+                        // it through onStep would file "the agent committed rev 47"
+                        // next to "the agent ran a scan" in the same progress list.
+                        onModelRevision?.(parsed as ModelRevisionFrame);
                         break;
                     case 'topic_focus':
                         // Research-layer transient frame (spec §4.5 / §7.5): the
@@ -850,6 +868,7 @@ export class StreamingApiClient {
                         language,
                         retryCount + 1,
                         inputResponse,
+                        onModelRevision,
                     );
                 }, delay);
                 return;

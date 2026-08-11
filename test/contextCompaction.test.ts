@@ -23,7 +23,8 @@ function buildSession(): SessionState {
 
   // Turn 1
   state.beginTurn("How is AAPL trading today?");
-  const dispatch = state.recordDispatch("market_data", "fetch AAPL price and volume");
+  const thread = state.openThread("market_data");
+  const dispatch = state.recordDispatch("market_data", "fetch AAPL price and volume", thread);
   state.recordTaskResult("market_data", dispatch.event_id, {
     task_id: dispatch.event_id,
     agent: "market_data",
@@ -77,16 +78,32 @@ test("compact() persists the compaction cache to the EventStore", async () => {
   assert.equal(persisted!.summaryText, "Summary through turn 1.");
 });
 
-test("compact() trims sidechain events within the compacted turn range", async () => {
+test("compact() trims a finished subagent thread within the compacted turn range", async () => {
   const state = buildSession();
-  state.record("market_data", "tool_result", { task_id: "fetch_aapl", output: "ok" }, { isSidechain: true, turn: 1 });
+  state.record("market_data", "tool_result", { task_id: "fetch_aapl", output: "ok" },
+    { threadId: "sess_1:market_data:1", turn: 1 });
 
   const router = new ModelRouter(fakeProvider("User is researching AAPL and MSFT market performance."));
   await compact(state, router, 1, 1);
 
-  // The sidechain event for turn 1 is trimmed along with the rest of turn 1.
+  // The thread was last dispatched in turn 1, so nothing is coming back to it.
   assert.deepEqual(new Set(state.allEvents().map((e) => e.turn)), new Set([2]));
-  assert.ok(!state.allEvents().some((e) => e.is_sidechain));
+  assert.ok(!state.allEvents().some((e) => e.thread_id !== "sess_1"));
+});
+
+test("compact() keeps a thread that is still being dispatched to", async () => {
+  const state = buildSession();
+  // Turn 1 work in a thread the orchestrator comes back to in turn 2.
+  const thread = "sess_1:market_data:1";
+  state.record("market_data", "tool_result", { task_id: "t1", output: "round one" }, { threadId: thread, turn: 1 });
+  state.recordDispatch("market_data", "follow up on the same thread", thread);
+
+  const router = new ModelRouter(fakeProvider("User is researching AAPL and MSFT market performance."));
+  await compact(state, router, 1, 1);
+
+  const kept = state.allEvents().filter((e) => e.thread_id === thread && e.turn === 1);
+  assert.equal(kept.length, 1, "the live thread's earlier round survives compaction");
+  assert.equal(kept[0]!.payload.output, "round one");
 });
 
 test("compact() merges with an existing summary on a second call", async () => {

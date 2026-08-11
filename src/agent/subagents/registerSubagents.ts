@@ -10,8 +10,13 @@ export function createSubagentRegistry(): SubagentRegistry {
     name: "financial_modeling",
     description: "Hierarchical DCF Agent that owns one revisioned model workflow and delegates statement extraction and mapping to private subagents, then authors the forecast and valuation itself.",
     modelClass: "MEDIUM",
+    // ask_user is the one subagent that gets it: a DCF runs for many turns on
+    // judgment calls only the user can settle (which segment basis, whose
+    // guidance to trust), and relaying those up through a task summary and back
+    // down through a re-dispatch loses the question. The dispatcher removes it
+    // again when no human is watching the stream.
     defaultTools: [...FINANCIAL_MODELING_TOOLS, STATEMENT_EXTRACTION_TOOL,
-      DCF_PRIVATE_SUBAGENT_TOOL, "financial_search"],
+      DCF_PRIVATE_SUBAGENT_TOOL, "financial_search", "ask_user"],
     // A full DCF authored by this agent alone (no drafting subagents) runs ~20-30 steps: 5 for the
     // data foundation, then serial mutation batches (each revision change must be a solo step) for
     // the forecast, WACC inputs, and stage advances. Progress is projected, not accumulated, so a

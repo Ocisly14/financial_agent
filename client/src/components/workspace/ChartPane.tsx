@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { BarChart3, Layers3 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { UUID } from "@/types/core";
@@ -22,8 +23,12 @@ const FLOATING_CHROME_HEIGHT = 60;
 /** One tab's chart, in whichever container is hosting it. Branching on `kind`
  *  rather than inspecting a symbol string is the whole point of the tagged
  *  union (design §6.2): the compiler, not a convention, keeps an overlay from
- *  being handed to the single-symbol renderer. */
-function ChartForTab({ tab, height }: { tab: TopicChartTab; height: number }) {
+ *  being handed to the single-symbol renderer.
+ *
+ *  A model tab never reaches here — it renders `modelPane` instead, at the
+ *  call site — so its kind is excluded from the prop type rather than given a
+ *  dead branch below. */
+function ChartForTab({ tab, height }: { tab: Exclude<TopicChartTab, { kind: "model" }>; height: number }) {
     if (tab.kind === "overlay") {
         return <OverlayChart overlay={tab.overlay} height={height} />;
     }
@@ -40,7 +45,8 @@ function ChartForTab({ tab, height }: { tab: TopicChartTab; height: number }) {
 }
 
 function tabTitle(tab: TopicChartTab): string {
-    return tab.kind === "symbol" ? tab.symbol : overlayTabLabel(tab.overlay.symbols);
+    if (tab.kind === "overlay") return overlayTabLabel(tab.overlay.symbols);
+    return tab.symbol;
 }
 
 /**
@@ -60,6 +66,8 @@ export function ChartPane({
     messages,
     streamingText,
     onCompare,
+    modelTabs = [],
+    modelPane = null,
 }: {
     agentId: UUID;
     topicId: UUID;
@@ -70,15 +78,62 @@ export function ChartPane({
      *  the member row is already the place membership is edited, and a second
      *  entry point on the tab row would be offering to compare a comparison. */
     onCompare?: (topicIds: string[]) => void;
+    /** The model workbook tab(s) — handed in rather than fetched here, same
+     *  reason ChartPane doesn't fetch chart data itself: a model is a backend
+     *  object TopicWorkspace already reads via `useFinancialModel`, not
+     *  something derived from `messages`/`streamingText` the way chart tabs
+     *  are. */
+    modelTabs?: Extract<TopicChartTab, { kind: "model" }>[];
+    /** Rendered content for whichever model tab is currently active. Passed
+     *  whole rather than assembled here, for the same reason as `modelTabs`. */
+    modelPane?: ReactNode;
 }) {
     const { t } = useTranslation();
-    const { tabs, activeKey, setActiveTab, addSymbol, closeTab, reorderTabs } = useTopicCharts(
+    const { tabs: chartTabs, activeKey: chartActiveKey, setActiveTab, addSymbol, closeTab, reorderTabs } = useTopicCharts(
         agentId,
         topicId,
         messages,
         streamingText,
     );
     const narrow = useIsNarrow();
+
+    // Model tabs are folded in here, not inside useTopicCharts: that hook's
+    // whole contract is "derived from message history, merged with a
+    // preference row" (see lib/topicCharts.ts), and a model tab is neither.
+    const tabs = useMemo<TopicChartTab[]>(() => [...chartTabs, ...modelTabs], [chartTabs, modelTabs]);
+
+    // useTopicCharts only resolves its own (chart) tab keys, so selecting a
+    // model tab would otherwise be silently overridden back onto a chart tab
+    // by its internal activeKey fallback on the very next render. Tracked
+    // separately here instead, and cleared the moment a chart tab is picked.
+    const [selectedModelKey, setSelectedModelKey] = useState<string | null>(null);
+    const handleSelectTab = useCallback(
+        (key: string) => {
+            if (key.startsWith("model:")) {
+                setSelectedModelKey(key);
+            } else {
+                setSelectedModelKey(null);
+                setActiveTab(key);
+            }
+        },
+        [setActiveTab],
+    );
+    const activeKey =
+        selectedModelKey && modelTabs.some((tab) => chartTabKey(tab) === selectedModelKey)
+            ? selectedModelKey
+            : chartActiveKey;
+
+    // The `×`. A model tab must not take the path that writes a hidden chart
+    // preference (design note, Task 10) — the next `model_revision` frame
+    // would just bring it back anyway, so a persisted "hidden" would only
+    // mean permanently hiding a model that is still growing.
+    const handleCloseTab = useCallback(
+        (key: string) => {
+            if (key.startsWith("model:")) return;
+            closeTab(key);
+        },
+        [closeTab],
+    );
 
     const containerRef = useRef<HTMLElement>(null);
     const headerRef = useRef<HTMLElement>(null);
@@ -169,9 +224,11 @@ export function ChartPane({
                         <Layers3 className="size-3" />
                         {active === undefined
                             ? t("charts.studyCount", { count: 0 })
-                            : active.kind === "overlay"
-                              ? t("charts.overlay.symbolCount", { count: active.overlay.symbols.length })
-                              : t("charts.studyCount", { count: active.studies.length })}
+                            : active.kind === "model"
+                              ? null
+                              : active.kind === "overlay"
+                                ? t("charts.overlay.symbolCount", { count: active.overlay.symbols.length })
+                                : t("charts.studyCount", { count: active.studies.length })}
                     </div>
                 </div>
 
@@ -179,8 +236,8 @@ export function ChartPane({
                     <ChartTabBar
                         tabs={stripTabs}
                         activeKey={active ? chartTabKey(active) : undefined}
-                        onSelect={setActiveTab}
-                        onClose={closeTab}
+                        onSelect={handleSelectTab}
+                        onClose={handleCloseTab}
                         onReorder={reorderTabs}
                         onAdd={addSymbol}
                         onDetach={narrow ? undefined : handleDetach}
@@ -194,7 +251,11 @@ export function ChartPane({
             <div className="relative h-0 min-h-0 flex-1 overflow-hidden">
                 <div className="custom-scrollbar absolute inset-0 overflow-y-auto overflow-x-hidden p-3">
                     {active ? (
-                        <ChartForTab key={chartTabKey(active)} tab={active} height={chartHeight} />
+                        active.kind === "model" ? (
+                            modelPane
+                        ) : (
+                            <ChartForTab key={chartTabKey(active)} tab={active} height={chartHeight} />
+                        )
                     ) : (
                         // Every tab is out in a window. Say so, rather than
                         // rendering a blank column that reads as a failure.
@@ -208,7 +269,11 @@ export function ChartPane({
             {/* Array order is z-order: the last entry is frontmost. */}
             {windows.map((entry, index) => {
                 const tab = byKey.get(entry.key);
-                if (!tab) return null;
+                // A model tab is never draggable (ChartTabBar), so this
+                // should be unreachable — kept as a guard so `ChartForTab`
+                // below stays statically safe rather than needing a runtime
+                // branch for a tab kind it was never meant to render.
+                if (!tab || tab.kind === "model") return null;
                 return (
                     <FloatingChart
                         key={entry.key}

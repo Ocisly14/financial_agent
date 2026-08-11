@@ -1,9 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import test from "node:test";
-
-const SCRIPT = fileURLToPath(new URL("../../../../scripts/xbrl/arelle_companion.py", import.meta.url));
+import { ARELLE_COMPANION_SCRIPT as SCRIPT } from "../arelleAdapter.ts";
 
 type Node = { nodeId: number; parentNodeId: number | null; conceptQName: string; label: string; abstract: boolean };
 

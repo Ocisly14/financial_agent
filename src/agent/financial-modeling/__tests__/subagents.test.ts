@@ -29,10 +29,11 @@ test("a resumed financial_modeling run refreshes the supplied model and pauses a
     execute: async () => { calls += 1; return { summary: "ok", generation_context: { data: { model_id: "m1", revision: 4,
       lifecycle_stage: "history_committed", revision_history: [{ revision: 0 }], current_workbook: { revision: 4 } } } }; } });
   const state = new SessionState("s", new Date().toISOString()); state.beginTurn("resume");
-  const dispatch = state.recordDispatch("financial_modeling", "continue");
+  const thread = state.openThread("financial_modeling");
+  const dispatch = state.recordDispatch("financial_modeling", "continue", thread);
   const definition = { ...createSubagentRegistry().get("financial_modeling"), defaultTools: ["get_financial_model"] };
   await new SubagentRuntime(new ModelRouter(provider), tools).run(definition, { sessionId: "s", agentId: "a", taskId: dispatch.event_id,
-    request: { agent: "financial_modeling", task: "continue", model_id: "m1" }, allowedTools: [tools.list()[0]!], state, parentEventId: dispatch.event_id });
+    request: { agent: "financial_modeling", task: "continue", model_id: "m1" }, allowedTools: [tools.list()[0]!], state, threadId: thread });
   const result = state.task(dispatch.event_id)?.result!;
   assert.equal(calls, 31, "one automatic resume refresh plus thirty budgeted steps");
   assert.match(result.summary, /Paused after 30 tool steps.*m1.*revision 4/);
@@ -54,10 +55,11 @@ test("financial_modeling runtime refuses parallel revision mutations before eith
   for (const name of ["apply_financial_model_operations", "archive_financial_model"]) tools.register({ name, description: name,
     category: "non_trading", inputSchema: { type: "object" }, execute: async () => { executions += 1; return { summary: "should not run" }; } });
   const state = new SessionState("s", new Date().toISOString()); state.beginTurn("mutate");
-  const dispatch = state.recordDispatch("financial_modeling", "mutate");
+  const thread = state.openThread("financial_modeling");
+  const dispatch = state.recordDispatch("financial_modeling", "mutate", thread);
   const definition = { ...createSubagentRegistry().get("financial_modeling"), defaultTools: tools.list().map((tool) => tool.name) };
   await new SubagentRuntime(new ModelRouter(provider), tools).run(definition, { sessionId: "s", agentId: "a", taskId: dispatch.event_id,
-    request: { agent: "financial_modeling", task: "mutate" }, allowedTools: tools.list(), state, parentEventId: dispatch.event_id });
+    request: { agent: "financial_modeling", task: "mutate" }, allowedTools: tools.list(), state, threadId: thread });
   assert.equal(executions, 0);
   assert.equal(correctionSeen, true);
   assert.equal(state.task(dispatch.event_id)?.result?.status, "ok");
@@ -79,10 +81,11 @@ test("native tool calls drive the loop: providers with toolCalls bypass text par
   tools.register({ name: "probe", description: "probe", category: "non_trading", inputSchema: { type: "object" },
     execute: async () => { probed += 1; return { summary: "probed" }; } });
   const state = new SessionState("s", new Date().toISOString()); state.beginTurn("fc");
-  const dispatch = state.recordDispatch("market_research", "look");
+  const thread = state.openThread("market_research");
+  const dispatch = state.recordDispatch("market_research", "look", thread);
   const definition = { ...createSubagentRegistry().get("market_research"), defaultTools: ["probe"] };
   await new SubagentRuntime(new ModelRouter(provider), tools).run(definition, { sessionId: "s", agentId: "a", taskId: dispatch.event_id,
-    request: { agent: "market_research", task: "look" }, allowedTools: [tools.list()[0]!], state, parentEventId: dispatch.event_id });
+    request: { agent: "market_research", task: "look" }, allowedTools: [tools.list()[0]!], state, threadId: thread });
   const result = state.task(dispatch.event_id)?.result!;
   assert.equal(probed, 1);
   assert.equal(result.summary, "done via finish tool");
@@ -101,10 +104,11 @@ test("a finish tool call with an empty summary is retried, not accepted", async 
   tools.register({ name: "probe", description: "probe", category: "non_trading", inputSchema: { type: "object" },
     execute: async () => ({ summary: "probed" }) });
   const state = new SessionState("s", new Date().toISOString()); state.beginTurn("fc2");
-  const dispatch = state.recordDispatch("market_research", "look");
+  const thread = state.openThread("market_research");
+  const dispatch = state.recordDispatch("market_research", "look", thread);
   const definition = { ...createSubagentRegistry().get("market_research"), defaultTools: ["probe"] };
   await new SubagentRuntime(new ModelRouter(provider), tools).run(definition, { sessionId: "s", agentId: "a", taskId: dispatch.event_id,
-    request: { agent: "market_research", task: "look" }, allowedTools: [tools.list()[0]!], state, parentEventId: dispatch.event_id });
+    request: { agent: "market_research", task: "look" }, allowedTools: [tools.list()[0]!], state, threadId: thread });
   assert.equal(state.task(dispatch.event_id)?.result?.summary, "second try");
   assert.equal(step, 2, "empty-summary finish consumed one retried step");
 });

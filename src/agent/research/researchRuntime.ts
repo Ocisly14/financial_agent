@@ -460,7 +460,9 @@ export class ResearchRuntime {
     const current: string[] = [];
 
     for (const event of state.allEvents()) {
-      if (event.is_sidechain) continue;
+      // Main thread only — a subagent's internal loop is not this controller's
+      // conversation.
+      if (event.thread_id !== state.mainThread) continue;
       const isCurrent = event.turn === turn;
       const line = this.renderEventLine(event, isCurrent);
       if (!line) continue;
@@ -535,7 +537,7 @@ export class ResearchRuntime {
         if (output.error) payload.error = output.error;
         state.record("orchestrator", "tool_result", payload);
         if (output.user_input_request) {
-          state.recordUserInputRequest(output.user_input_request);
+          state.recordUserInputRequest(output.user_input_request, "research_controller");
           return output.user_input_request;
         }
         return undefined;

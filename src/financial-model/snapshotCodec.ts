@@ -899,7 +899,7 @@ function normalizeTerminalMethodResult(
     method: enumValue(
       object.method,
       `${path}.method`,
-      ["gordon_growth", "exit_multiple"],
+      ["perpetuity_growth", "exit_multiple"],
     ),
     explicitPeriods: array(
       object.explicitPeriods,
@@ -995,7 +995,7 @@ function normalizeValuationOutput(
 ): ValuationOutput {
   const object = exactObject(value, path, [
     "explicitPeriods",
-    "gordonGrowth",
+    "perpetuityGrowth",
     "exitMultiple",
     "waccByGrowth",
     "waccByMultiple",
@@ -1006,9 +1006,9 @@ function normalizeValuationOutput(
       `${path}.explicitPeriods`,
       normalizeExplicitPeriodValue,
     ),
-    gordonGrowth: normalizeTerminalMethodResult(
-      object.gordonGrowth,
-      `${path}.gordonGrowth`,
+    perpetuityGrowth: normalizeTerminalMethodResult(
+      object.perpetuityGrowth,
+      `${path}.perpetuityGrowth`,
     ),
     exitMultiple: normalizeTerminalMethodResult(
       object.exitMultiple,
@@ -1023,7 +1023,7 @@ function normalizeValuationOutput(
       `${path}.waccByMultiple`,
     ),
   };
-  if (output.gordonGrowth.method !== "gordon_growth"
+  if (output.perpetuityGrowth.method !== "perpetuity_growth"
     || output.exitMultiple.method !== "exit_multiple") {
     throw invalid(path, "terminal method is stored in the wrong result field");
   }
@@ -1036,7 +1036,7 @@ function normalizeValuationOutput(
       throw invalid(path, `valuation references unknown period: ${explicit.periodId}`);
     }
   }
-  for (const method of [output.gordonGrowth, output.exitMultiple]) {
+  for (const method of [output.perpetuityGrowth, output.exitMultiple]) {
     for (const adjustment of method.bridge) {
       const item = itemById.get(adjustment.lineItemId);
       if (item === undefined || item.role !== adjustment.role) {

@@ -1,8 +1,18 @@
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import type { ArelleExtractionRequest, ArelleExtractionResponse } from "./types.ts";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
+
+/**
+ * The companion ships with the repo, so only the interpreter is an operator
+ * decision. Defaulting the args to `[]` instead would spawn a bare interpreter,
+ * which reads the piped request as its own program and exits 0 having printed
+ * nothing — a misconfiguration that arrives here disguised as truncated JSON.
+ */
+export const ARELLE_COMPANION_SCRIPT = fileURLToPath(
+  new URL("../../../scripts/xbrl/arelle_companion.py", import.meta.url));
 
 export class ArelleAdapterError extends Error {
   readonly code: "xbrl_runtime_unavailable" | "xbrl_timeout" | "xbrl_protocol_error" | "xbrl_process_failed";
@@ -130,7 +140,7 @@ function validateResponse(value: ArelleExtractionResponse): void {
 }
 
 function parseArgs(value: string | undefined): string[] {
-  if (!value?.trim()) return [];
+  if (!value?.trim()) return [ARELLE_COMPANION_SCRIPT];
   try {
     const parsed: unknown = JSON.parse(value);
     if (Array.isArray(parsed) && parsed.every((entry) => typeof entry === "string")) return parsed;

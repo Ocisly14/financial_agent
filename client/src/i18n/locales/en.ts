@@ -170,7 +170,6 @@ const en = {
             tabs: "The agent changed the charts",
             members: "The agent changed the members",
         },
-        memberAsked: "{{topic}} is asking",
         continueAfterMemberInput: "(Answered the follow-up questions above — please continue.)",
     },
     conversation: {
@@ -192,6 +191,20 @@ const en = {
             submitting: "Submitting…",
             answered: "Choices submitted",
             skipped: "Skipped",
+            // Every card names its asker. When the question came from one layer
+            // in (a Research member's own agent), both layers are named — the
+            // question came from someone else's window.
+            askedBy: "{{agent}} is asking",
+            askedByMember: "{{topic}} · {{agent}} is asking",
+            agentNames: {
+                orchestrator: "Analysis agent",
+                research_controller: "Research agent",
+                financial_modeling: "DCF modeling agent",
+                market_data: "Market data agent",
+                market_research: "Market research agent",
+                trading_operations: "Stock strategy agent",
+                fallback: "Agent",
+            },
         },
     },
     audio: {

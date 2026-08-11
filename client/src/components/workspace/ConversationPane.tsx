@@ -140,7 +140,7 @@ export function ConversationPane({ agentId, title, subtitle, stream, input, onIn
                                 ? (request, answers) => stream.submitMemberInput(memberTopicId, request, answers)
                                 : stream.submitUserInput
                         }
-                        {...(memberTopicName ? { attribution: memberTopicName } : {})}
+                        {...(memberTopicName ? { memberTopicName } : {})}
                     />
                 ) : null}
             </>

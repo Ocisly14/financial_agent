@@ -164,9 +164,9 @@ console.log(`\n## Agent's custom analysis rows (${customRows.length})`);
 for (const row of customRows) console.log(`  ${row.id} — ${(row.description ?? "").slice(0, 110)}`);
 console.log(`\nWACC: ${waccRow?.value === null || waccRow?.value === undefined ? "unresolved" : (waccRow.value * 100).toFixed(2) + "%"}`);
 if (snapshot.lifecycleStage === "valued" && valuation) {
-  const gordon = valuation["gordonGrowth"] as Record<string, number>;
+  const perpetuity = valuation["perpetuityGrowth"] as Record<string, number>;
   const exit = valuation["exitMultiple"] as Record<string, number>;
-  console.log(`Gordon: $${gordon["impliedValuePerShare"]?.toFixed(2)} /sh | Exit: $${exit["impliedValuePerShare"]?.toFixed(2)} /sh`);
+  console.log(`Perpetuity: $${perpetuity["impliedValuePerShare"]?.toFixed(2)} /sh | Exit: $${exit["impliedValuePerShare"]?.toFixed(2)} /sh`);
   console.log(`\n**PASS** — the agent reached valued on its own judgment in one dispatch.`);
 } else {
   console.log(`\n**INCOMPLETE** — lifecycle ${snapshot.lifecycleStage}; see summary above.`);

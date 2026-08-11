@@ -1,6 +1,19 @@
 import type { CitationSource } from "./citationSources.ts";
 export type AgentKind = "market_data" | "market_research" | "trading_operations" | "financial_modeling";
 
+/** The runtime companion to AgentKind, for the places that have to validate a
+ *  string that came from a model or from a stored id. */
+export const AGENT_KINDS: ReadonlySet<string> = new Set<AgentKind>([
+  "market_data",
+  "market_research",
+  "trading_operations",
+  "financial_modeling",
+]);
+
+export function isAgentKind(value: string): value is AgentKind {
+  return AGENT_KINDS.has(value);
+}
+
 export type TaskStatus = "ok" | "failed" | "timeout";
 
 export type SkillStatus = "loaded" | "ok" | "failed";
@@ -53,15 +66,40 @@ export type UserInputResponse = {
   answers: UserInputAnswer[];
 };
 
+/**
+ * Who asked. Three actors can: the Topic agent the user is talking to, the
+ * Research controller one layer above it, and the financial_modeling subagent
+ * one layer below. Every card is labelled with this, so a question that came
+ * from somewhere other than the visible speaker says so.
+ *
+ * It rides the event payload rather than the event's `source` field: the
+ * Research controller is not a `Source` (its runtime records as `orchestrator`),
+ * so `source` cannot express all three.
+ */
+export type UserInputAskedBy = "orchestrator" | "research_controller" | AgentKind;
+
 export type UserInputRequestView = UserInputRequest & {
   status: "pending" | "answered" | "skipped";
   answers?: UserInputAnswer[];
+  asked_by: UserInputAskedBy;
 };
 
 export type TaskRequest = {
   agent: AgentKind;
   task: string;
-  /** Resumption handle for long-running revisioned workflows. */
+  /**
+   * Continue an existing subagent thread instead of starting a fresh one. The
+   * id names a conversation the caller has already seen come back from a prior
+   * dispatch (`<topicId>:<agent>:<n>`); the run picks up that thread's whole
+   * history. Absent = open a new thread.
+   *
+   * Naming a thread that does not exist, or one belonging to a different agent,
+   * fails the task rather than silently opening a new one — silently starting
+   * over is exactly the continuity loss threads exist to prevent.
+   */
+  thread?: string;
+  /** The financial-model handle to refresh before mutating. Not a resumption
+   *  key — continuity is `thread`. */
   model_id?: string;
   tools?: string[];
   timeout_ms?: number;
@@ -156,11 +194,14 @@ export type SSEEvent =
   | { type: "workflow_started"; workflow_id: string; skill: string; workflow: string; title?: string }
   | { type: "workflow_step"; workflow_id: string; step_id: string; title: string; status: "pending" | "running" | "done" | "failed"; pct?: number; note?: string }
   | { type: "workflow_done"; workflow_id: string; status: "ok" | "failed"; summary: string }
-  | { type: "dispatch"; task_id: string; agent: AgentKind; task: string }
+  | { type: "dispatch"; task_id: string; agent: AgentKind; task: string; thread_id: string }
   | { type: "progress"; task_id: string; phase: string; pct?: number; note?: string }
   | { type: "task_done"; task_id: string; status: TaskStatus; summary: string }
   | { type: "strategy_created"; strategy_id: string; status?: string; summary?: string }
   | { type: "artifact"; task_id: string; artifact: ArtifactRef }
+  | { type: "model_revision"; model_id: string; revision: number; lifecycle_stage: string;
+      changed_sections: string[]; changed_line_item_ids: string[]; changed_period_ids: string[];
+      change_kinds: string[] }
   | { type: "approval_required"; approval_id: string; payload: JsonObject }
   | { type: "error"; scope: "main" | "task"; task_id?: string; message: string }
   | { type: "final"; sessionId: string; response: string; artifacts: { n: number; type: "file" | "url"; ref: string; label: string }[]; visualizations: JsonObject[]; sources: CitationSource[]; input_request?: UserInputRequestView }

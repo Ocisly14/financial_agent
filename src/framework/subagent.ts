@@ -1,9 +1,10 @@
 import type { LlmMessage, LlmToolCall, LlmToolSpec, ModelClass, ModelRouter } from "../infra/llm/provider.ts";
 import { PromptRenderer, type PromptTemplate } from "./prompt.ts";
-import type { AgentKind, JsonObject, JsonSchema, JsonValue, TaskRequest, TaskResult, ToolDefinition } from "./types.ts";
+import type { AgentKind, JsonObject, JsonSchema, JsonValue, TaskRequest, TaskResult, ToolDefinition, UserInputRequest } from "./types.ts";
 import type { McpToolRegistry } from "../../mcp_tools/toolRegistry.ts";
 import { newId } from "./ids.ts";
 import type { SessionState } from "./sessionState.ts";
+import { maybeCompactThread } from "./contextCompaction.ts";
 import { createLogger } from "../infra/logger/logger.ts";
 
 const log = createLogger("subagent");
@@ -231,11 +232,21 @@ function normalizeToolError(output: { summary: string; error?: { code: string; m
 export type RunSubagentInput = {
   sessionId: string;
   agentId: string;
+  /** The dispatch this run answers — where its task_result is written. */
   taskId: string;
   request: TaskRequest;
   allowedTools: ToolDefinition[];
   state: SessionState;       // the session event log — subagent records its internal trace here
-  parentEventId: string;     // the dispatch event this task hangs off (parent for sidechain events)
+  /**
+   * The conversation this run belongs to. Every event the agent writes is
+   * stamped with it, and [PROGRESS SO FAR] is projected from it — so a second
+   * dispatch naming the same thread comes back to its own notes and tool
+   * results instead of re-deriving them from the model alone.
+   *
+   * A thread outlives any one dispatch: `taskId` says which round this is,
+   * `threadId` says which conversation the rounds belong to.
+   */
+  threadId: string;
 };
 
 export class SubagentRuntime {
@@ -254,20 +265,41 @@ export class SubagentRuntime {
   /**
    * Run the subagent's tool-calling loop and WRITE its own task_result to the
    * session event log. Returns nothing — the subagent interacts only with state.
-   * Internal tool_use/tool_result are recorded as sidechain events. (Timeout /
+   * Internal tool_use/tool_result go on the agent's own thread. (Timeout /
    * subagent-throw is handled by the dispatcher, which writes the failure result.)
    */
   async run(definition: SubagentDefinition, input: RunSubagentInput): Promise<void> {
     const started = Date.now();
-    const { state, parentEventId } = input;
+    const { state, threadId } = input;
     const allowed = new Map(input.allowedTools.map((tool) => [tool.name, tool]));
     let finishSummary = "";
     let llmCalls = 0;
     let awaitingApproval = false;
     let pendingApprovalId: string | undefined;
     let recoveredRevisionConflict = false;
+    let pendingUserInput: UserInputRequest | undefined;
 
-    log.info(`[${definition.name}] start task`, { task: input.request.task, taskId: input.taskId });
+    log.info(`[${definition.name}] start task`, { task: input.request.task, taskId: input.taskId, threadId });
+
+    // A thread the agent has already worked in: mark the seam. Without it the
+    // notes read as one run whose step counter inexplicably restarts, and work
+    // it already finished looks like work still to do.
+    const priorRounds = state.subagentNotes({ thread: threadId }).length > 0;
+    if (priorRounds) {
+      const answered = state.threadPausedOnQuestion(threadId, input.taskId);
+      state.record(definition.name, "subagent_note", { task_id: input.taskId, step: 0,
+        note: answered
+          ? "[resumed] The user has answered the question above — their decision is in the task text. "
+            + "Everything before this line is your own work from before the question; do not redo it and do not ask again. Step numbering restarts here."
+          : `[new round] The orchestrator dispatched a follow-up task in this same thread: "${input.request.task}". `
+            + "Everything before this line is your own earlier work here; do not redo it. Step numbering restarts here." },
+      { threadId, parent: input.taskId });
+    }
+
+    // A thread that has run for many rounds can out-grow the prompt on its own.
+    // Fold its older rounds before rendering, so continuity costs bounded
+    // context rather than unbounded.
+    await maybeCompactThread(state, this.modelRouter, definition.name, threadId, input.taskId);
 
     if (definition.name === "financial_modeling" && input.request.model_id && allowed.has("get_financial_model")) {
       await this.runToolCall(definition, input, { tool: "get_financial_model", input: { modelId: input.request.model_id } }, allowed);
@@ -284,9 +316,11 @@ export class SubagentRuntime {
           ? `Resume model ${input.request.model_id}; refresh it before any mutation.`
           : "No existing model handle was supplied.",
         progress: `(you are at step ${step} of your ${maxToolSteps}-step budget)\n` + (definition.name === "financial_modeling"
-          ? projectFinancialModelProgress(state.subagentToolOutputs(parentEventId), state.subagentToolErrors(parentEventId),
-            state.subagentNotes(parentEventId))
-          : state.subagentProgress(parentEventId)),
+          // Thread scope, not task scope: continuing a thread means the agent
+          // comes back to everything it has done here, not just this round.
+          ? projectFinancialModelProgress(state.subagentToolOutputs({ thread: threadId }), state.subagentToolErrors({ thread: threadId }),
+            state.subagentNotes({ thread: threadId }))
+          : state.subagentProgress({ thread: threadId })),
       });
 
       let completionText: string;
@@ -318,8 +352,8 @@ export class SubagentRuntime {
       if (completionToolCalls?.length && completionText.trim() !== "") {
         const note = completionText.trim().slice(0, 500);
         log.info(`[${definition.name}] step ${step} note`, { note });
-        state.record(definition.name, "subagent_note", { task_id: parentEventId, step, note },
-          { isSidechain: true, parent: parentEventId });
+        state.record(definition.name, "subagent_note", { task_id: input.taskId, step, note },
+          { threadId, parent: input.taskId });
       }
       if (stepObj.action === "finish") {
         // tool_choice 是 auto:模型可能只输出思考文本而不调任何工具。这不是收工——
@@ -327,10 +361,10 @@ export class SubagentRuntime {
         const proseOnly = !completionToolCalls?.length && extractJsonObject(completionText) === null && completionText.trim() !== "";
         if (proseOnly) {
           log.info(`[${definition.name}] prose-only reply at step ${step}; nudging to act`, {});
-          state.record(definition.name, "tool_result", { task_id: parentEventId, name: `${definition.name}_runtime`, step,
+          state.record(definition.name, "tool_result", { task_id: input.taskId, name: `${definition.name}_runtime`, step,
             error: { code: "no_action_taken",
               message: `You replied with text but called no tool. Your note (kept for you): "${completionText.trim().slice(0, 600)}". Now act on it: call the tools it implies, or call finish with your summary.` } },
-          { isSidechain: true, parent: parentEventId });
+          { threadId, parent: input.taskId });
           continue;
         }
         // 解析兜底会把残缺输出当成 finish:空文本,或想调工具但 JSON 没写对
@@ -340,12 +374,12 @@ export class SubagentRuntime {
         if (stepObj.summary === "" || attemptedToolCall) {
           log.warn(`[${definition.name}] unparseable completion at step ${step}; retrying instead of finishing`,
             { attempted_tool_call: attemptedToolCall });
-          state.record(definition.name, "tool_result", { task_id: parentEventId, name: `${definition.name}_runtime`, step,
+          state.record(definition.name, "tool_result", { task_id: input.taskId, name: `${definition.name}_runtime`, step,
             error: { code: "unparseable_step",
               message: attemptedToolCall
                 ? "Your last reply looked like a tool call but was not valid JSON (likely unbalanced braces — check that every object is fully closed). Re-send it as strict JSON; if the batch is long, split it into smaller operation batches across steps."
                 : "Your last reply was empty or finished without a summary. Call one of the provided tools, or call finish with a non-empty summary." } },
-          { isSidechain: true, parent: parentEventId });
+          { threadId, parent: input.taskId });
           continue;
         }
         exhausted = false;
@@ -356,11 +390,22 @@ export class SubagentRuntime {
 
       log.info(`[${definition.name}] step ${step} — calling tools`, { tools: stepObj.calls.map((c) => c.tool) });
 
+      // ask_user ends the turn. Anything sharing its step would run, produce a
+      // result nobody reads (the loop stops), and be replayed on the resuming
+      // dispatch — so refuse the step and let the model re-issue the ask alone.
+      if (stepObj.calls.some((call) => call.tool === "ask_user") && stepObj.calls.length > 1) {
+        state.record(definition.name, "tool_result", { task_id: input.taskId, name: `${definition.name}_runtime`, step,
+          error: { code: "user_input_must_be_solo",
+            message: "ask_user ends your turn, so it must be the only call in its step. Re-issue it alone, or do the other work first and ask afterwards." } },
+        { threadId, parent: input.taskId });
+        continue;
+      }
+
       if (definition.name === "financial_modeling" && violatesFinancialMutationSeriality(stepObj.calls)) {
-        state.record(definition.name, "tool_result", { task_id: parentEventId, name: "financial_modeling_runtime", step,
+        state.record(definition.name, "tool_result", { task_id: input.taskId, name: "financial_modeling_runtime", step,
           error: { code: "financial_mutation_serialization_required",
             message: "A revision mutation must be the only call in its step. Combine dependent changes into one ordered operations batch, then inspect the result in a later step." } },
-        { isSidechain: true, parent: parentEventId });
+        { threadId, parent: input.taskId });
         continue;
       }
 
@@ -370,13 +415,27 @@ export class SubagentRuntime {
       if (definition.name === "financial_modeling" && allowed.has("get_financial_model")) {
         const stepConflict = toolResults.some((result) => result.errorCode === "revision_conflict");
         const modelId = stepConflict
-          ? latestFinancialModelState(state.subagentToolOutputs(parentEventId)).model_id ?? input.request.model_id
+          ? latestFinancialModelState(state.subagentToolOutputs({ thread: threadId })).model_id ?? input.request.model_id
           : undefined;
         if (modelId) {
           const refresh = await this.runToolCall(definition, input, { tool: "get_financial_model", input: { modelId } }, allowed);
           recoveredRevisionConflict = refresh.errorCode === undefined;
         }
       }
+      // A question is turn-ending: record it on the main channel so the client
+      // renders the card, then stop. The answer does not come back into this
+      // run — the user's reply starts a new turn, and the orchestrator resumes
+      // this work by dispatching this thread again, per the summary below.
+      pendingUserInput = toolResults.find((result) => result.userInputRequest)?.userInputRequest;
+      if (pendingUserInput) {
+        exhausted = false;
+        log.info(`[${definition.name}] paused for user input`, { request_id: pendingUserInput.request_id, threadId });
+        // The question goes on the main thread so the user sees it, tagged with
+        // the thread it came from so the answer can be routed straight back.
+        state.recordUserInputRequest(pendingUserInput, definition.name, threadId);
+        break;
+      }
+
       awaitingApproval = awaitingApproval || toolResults.some((result) => result.awaitingApproval);
       pendingApprovalId = toolResults.find((result) => result.approvalId)?.approvalId ?? pendingApprovalId;
       if (awaitingApproval) {
@@ -387,18 +446,18 @@ export class SubagentRuntime {
     }
 
     if (awaitingApproval) {
-      const resolved = await waitForTaskResult(state, parentEventId, APPROVAL_WAIT_MS);
+      const resolved = await waitForTaskResult(state, input.taskId, APPROVAL_WAIT_MS);
       if (!resolved) {
         if (pendingApprovalId) {
           state.record(
             definition.name,
             "approval_resolved",
-            { approval_id: pendingApprovalId, decision: "timeout" },
-            { parent: parentEventId },
+            { approval_id: pendingApprovalId, decision: "timeout", from_thread: threadId },
+            { parent: input.taskId },
           );
         }
-        state.recordTaskResult(definition.name, parentEventId, {
-          task_id: parentEventId,
+        state.recordTaskResult(definition.name, input.taskId, {
+          task_id: input.taskId,
           agent: definition.name,
           status: "timeout",
           summary: "Timed out waiting for user approval. The strategy was not activated.",
@@ -409,28 +468,38 @@ export class SubagentRuntime {
     }
 
     // Assemble the task_result from the tool outputs read back from the log.
-    const outputs = state.subagentToolOutputs(parentEventId);
-    const toolErrors = state.subagentToolErrors(parentEventId);
+    // TASK scope, not thread: this round reports the work it did. Widening it
+    // to the thread would re-attach every earlier round's artifacts to every
+    // later result.
+    const outputs = state.subagentToolOutputs({ task: input.taskId });
+    const toolErrors = state.subagentToolErrors({ task: input.taskId });
     const generationContexts = outputs.map((o) => o.generation_context).filter((c): c is NonNullable<typeof c> => Boolean(c));
     // 运行时自愈类错误(串行纠正、重试提示)不算任务失败;而 agent 干净收工时,
     // 中途已被它克服的工具报错也不该盖过 finish 总结。
-    const RUNTIME_NUDGE_CODES = new Set(["financial_mutation_serialization_required", "unparseable_step", "no_action_taken"]);
+    const RUNTIME_NUDGE_CODES = new Set(["financial_mutation_serialization_required", "unparseable_step", "no_action_taken",
+      "user_input_must_be_solo"]);
     const firstToolError = toolErrors.find((error) => !RUNTIME_NUDGE_CODES.has(error.code)
       && !(recoveredRevisionConflict && error.code === "revision_conflict"));
     const finished = finishSummary !== "";
-    const latestModel = latestFinancialModelState(outputs);
+    // Thread scope: this describes where the WORK stands, and the model handle
+    // may well have been established in an earlier round of this thread.
+    const latestModel = latestFinancialModelState(state.subagentToolOutputs({ thread: threadId }));
+    const pausedForInput = pendingUserInput
+      ? `Paused on ${pendingUserInput.questions.length} question${pendingUserInput.questions.length === 1 ? "" : "s"} for the user`
+        + `; dispatch thread ${threadId} again with their answer and I pick up where I stopped.`
+      : undefined;
     const result: TaskResult = {
-      task_id: parentEventId,
+      task_id: input.taskId,
       agent: definition.name,
-      status: !finished && firstToolError ? "failed" : "ok",
-      summary: finished ? finishSummary : (firstToolError?.message ?? (exhausted && definition.name === "financial_modeling"
-        ? `Paused after ${maxToolSteps} tool steps; resume ${latestModel.model_id ?? input.request.model_id ?? "the model"} at revision ${latestModel.revision ?? "unknown"} (${latestModel.lifecycle_stage ?? "unknown stage"}).`
-        : `${definition.name} completed task.`)),
+      status: !finished && !pausedForInput && firstToolError ? "failed" : "ok",
+      summary: pausedForInput ?? (finished ? finishSummary : (firstToolError?.message ?? (exhausted && definition.name === "financial_modeling"
+        ? `Paused after ${maxToolSteps} tool steps; dispatch thread ${threadId} again to continue ${latestModel.model_id ?? input.request.model_id ?? "the model"} at revision ${latestModel.revision ?? "unknown"} (${latestModel.lifecycle_stage ?? "unknown stage"}).`
+        : `${definition.name} completed task.`))),
       artifacts: outputs.flatMap((o) => o.artifacts ?? []),
       visualizations: outputs.flatMap((o) => o.visualizations ?? []),
       metrics: { ms: Date.now() - started, tool_calls: outputs.length + toolErrors.length, llm_calls: llmCalls },
     };
-    if (!finished && firstToolError) {
+    if (!finished && !pausedForInput && firstToolError) {
       result.error = { code: firstToolError.code, message: firstToolError.message };
     }
 
@@ -443,7 +512,7 @@ export class SubagentRuntime {
           tool_outputs: outputs.map((o) => ({ tool: o.name, summary: o.summary, data: o.generation_context?.data ?? {} })) } };
       if (prompts.length > 0) result.generation_context.prompt = prompts.join("\n\n");
     }
-    state.recordTaskResult(definition.name, parentEventId, result);
+    state.recordTaskResult(definition.name, input.taskId, result);
   }
 
   /** Execute one tool call and record its tool_use/tool_result (and any approval)
@@ -454,8 +523,8 @@ export class SubagentRuntime {
     call: ToolCall,
     allowed: Map<string, ToolDefinition>,
     step?: number,
-  ): Promise<{ awaitingApproval: boolean; approvalId?: string; errorCode?: string }> {
-    const { state, parentEventId } = input;
+  ): Promise<{ awaitingApproval: boolean; approvalId?: string; errorCode?: string; userInputRequest?: UserInputRequest }> {
+    const { state, threadId } = input;
     const tool = allowed.get(call.tool);
     if (!tool) {
       log.warn(`[${definition.name}] invalid tool requested: ${call.tool}`);
@@ -463,8 +532,8 @@ export class SubagentRuntime {
       state.record(
         definition.name,
         "tool_result",
-        { task_id: parentEventId, name: call.tool, error: { code: "invalid_tool", message: `"${call.tool}" is not an allowed tool — choose from the allowed list or finish.` } },
-        { isSidechain: true, parent: parentEventId },
+        { task_id: input.taskId, name: call.tool, error: { code: "invalid_tool", message: `"${call.tool}" is not an allowed tool — choose from the allowed list or finish.` } },
+        { threadId, parent: input.taskId },
       );
       return { awaitingApproval: false, errorCode: "invalid_tool" };
     }
@@ -474,8 +543,8 @@ export class SubagentRuntime {
     const useEv = state.record(
       definition.name,
       "tool_use",
-      { tool_use_id: toolUseId, task_id: parentEventId, name: tool.name, input: callInput },
-      { isSidechain: true, parent: parentEventId },
+      { tool_use_id: toolUseId, task_id: input.taskId, name: tool.name, input: callInput },
+      { threadId, parent: input.taskId },
     );
 
     log.info(`[${definition.name}] tool call: ${tool.name}`, { input: call.input });
@@ -492,8 +561,8 @@ export class SubagentRuntime {
       state.record(
         definition.name,
         "tool_result",
-        { tool_use_id: toolUseId, task_id: parentEventId, name: tool.name, error: { code: "tool_error", message: error instanceof Error ? error.message : String(error) } },
-        { isSidechain: true, parent: useEv.event_id },
+        { tool_use_id: toolUseId, task_id: input.taskId, name: tool.name, error: { code: "tool_error", message: error instanceof Error ? error.message : String(error) } },
+        { threadId, parent: useEv.event_id },
       );
       return { awaitingApproval: false, errorCode: "tool_error" };
     }
@@ -501,25 +570,33 @@ export class SubagentRuntime {
     log.info(`[${definition.name}] tool result: ${tool.name}`, { summary: output.summary });
 
     const normalizedError = normalizeToolError(output);
-    const toolResultPayload: JsonObject = { tool_use_id: toolUseId, task_id: parentEventId, name: tool.name, summary: output.summary,
+    const toolResultPayload: JsonObject = { tool_use_id: toolUseId, task_id: input.taskId, name: tool.name, summary: output.summary,
       ...(step === undefined ? {} : { step }) };
     if (output.generation_context) toolResultPayload.generation_context = output.generation_context as unknown as JsonObject;
     if (normalizedError) toolResultPayload.error = normalizedError;
     if (output.artifacts?.length) toolResultPayload.artifacts = output.artifacts as unknown as JsonObject[string];
     if (output.visualizations?.length) toolResultPayload.visualizations = output.visualizations;
-    state.record(definition.name, "tool_result", toolResultPayload, { isSidechain: true, parent: useEv.event_id });
+    state.record(definition.name, "tool_result", toolResultPayload, { threadId, parent: useEv.event_id });
 
     if (output.approval) {
       log.info(`[${definition.name}] approval required`, { approval_id: output.approval.approval_id });
       // Approval state lives in the log: approval_required with no matching
       // approval_resolved (within TTL) is pending. No separate store.
+      //
+      // Like a question, this goes on the MAIN thread — it has to reach the
+      // user — and carries the thread it came from rather than being buried in
+      // the agent's own trace where nobody would see it.
       state.record(
         definition.name,
         "approval_required",
-        { approval_id: output.approval.approval_id, payload: output.approval.payload },
-        { parent: parentEventId },
+        { approval_id: output.approval.approval_id, payload: output.approval.payload, from_thread: threadId },
+        { parent: input.taskId },
       );
       return { awaitingApproval: true, approvalId: output.approval.approval_id };
+    }
+
+    if (output.user_input_request) {
+      return { awaitingApproval: false, userInputRequest: output.user_input_request };
     }
 
     return normalizedError ? { awaitingApproval: false, errorCode: normalizedError.code } : { awaitingApproval: false };

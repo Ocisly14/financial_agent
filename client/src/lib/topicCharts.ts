@@ -18,7 +18,16 @@ export type OverlayChartTab = {
     overlay: OverlaySpec;
 };
 
-export type TopicChartTab = SymbolChartTab | OverlayChartTab;
+/** A model workbook tab. Unlike the other two it is not derived from message
+ *  history and never becomes a preference row — a model is an object the
+ *  backend owns, not something the user arranged. */
+export type ModelChartTab = {
+    kind: "model";
+    modelId: string;
+    symbol: string;
+};
+
+export type TopicChartTab = SymbolChartTab | OverlayChartTab | ModelChartTab;
 
 /**
  * The stable identity of a tab across the UI — tab-bar keys, the active-tab
@@ -31,6 +40,7 @@ export type TopicChartTab = SymbolChartTab | OverlayChartTab;
  * wrong tab. The prefix makes that impossible instead of unlikely.
  */
 export function chartTabKey(tab: TopicChartTab): string {
+    if (tab.kind === "model") return `model:${tab.modelId}`;
     return tab.kind === "symbol" ? `symbol:${tab.symbol}` : `overlay:${tab.id}`;
 }
 
@@ -53,10 +63,15 @@ function storedRange(value: number | null): StockRange | undefined {
  * It takes no part in the matching below — it only participates in the
  * final `sortOrder`-based ordering, same as everything else.
  */
+// A model tab is never produced here (see the doc comment above) — the
+// return type says so explicitly, rather than the wider `TopicChartTab[]`,
+// so every caller (including this file's own `orderOf` below) keeps the
+// narrower, accurate type instead of having to re-guard against a case that
+// can't happen.
 export function mergeTopicCharts(
     derived: SymbolChartWorkspace[],
     preferences: TopicChartPreference[],
-): TopicChartTab[] {
+): Exclude<TopicChartTab, { kind: "model" }>[] {
     const symbolPreferences = preferences.filter(
         (preference): preference is Extract<TopicChartPreference, { kind: "symbol" }> => preference.kind === "symbol",
     );
@@ -64,7 +79,7 @@ export function mergeTopicCharts(
         (preference): preference is Extract<TopicChartPreference, { kind: "overlay" }> => preference.kind === "overlay",
     );
     const byPreference = new Map(symbolPreferences.map((preference) => [preference.symbol, preference]));
-    const tabs: TopicChartTab[] = [];
+    const tabs: Exclude<TopicChartTab, { kind: "model" }>[] = [];
     const seen = new Set<string>();
 
     for (const chart of derived) {
@@ -111,7 +126,7 @@ export function mergeTopicCharts(
     // everything the topic ever accumulated. Among a batch that arrived together
     // the derived order holds, so they read in the order the answer mentioned them.
     const overlayOrderById = new Map(overlayPreferences.map((preference) => [preference.id, preference.sortOrder]));
-    const orderOf = (tab: TopicChartTab): number =>
+    const orderOf = (tab: Exclude<TopicChartTab, { kind: "model" }>): number =>
         tab.kind === "symbol"
             ? byPreference.get(tab.symbol)?.sortOrder ?? Number.MIN_SAFE_INTEGER
             : overlayOrderById.get(tab.id) ?? Number.MIN_SAFE_INTEGER;
@@ -132,11 +147,17 @@ export function mergeTopicCharts(
  * `handleReplaceTopicCharts`), so the id sent here is a throwaway: a stable,
  * locally-unique value is enough to satisfy the type, nothing reads it back. */
 export function preferencesFor(tabs: TopicChartTab[], hidden: string[] = []): TopicChartPreference[] {
-    const visible: TopicChartPreference[] = tabs.map((tab, index) =>
-        tab.kind === "symbol"
-            ? { id: tab.symbol, kind: "symbol", symbol: tab.symbol, range: null, hidden: false, sortOrder: index }
-            : { id: tab.id, kind: "overlay", overlay: tab.overlay, range: null, hidden: false, sortOrder: index },
-    );
+    // A model tab never becomes a preference row (see ModelChartTab's doc
+    // comment) — filtered here too, as a second line of defense alongside the
+    // `onClose` guard that keeps it from ever reaching this function in the
+    // first place.
+    const visible: TopicChartPreference[] = tabs
+        .filter((tab): tab is Exclude<TopicChartTab, { kind: "model" }> => tab.kind !== "model")
+        .map((tab, index) =>
+            tab.kind === "symbol"
+                ? { id: tab.symbol, kind: "symbol", symbol: tab.symbol, range: null, hidden: false, sortOrder: index }
+                : { id: tab.id, kind: "overlay", overlay: tab.overlay, range: null, hidden: false, sortOrder: index },
+        );
     return [
         ...visible,
         ...hidden.map((symbol, index) => ({

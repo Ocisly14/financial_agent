@@ -14,6 +14,15 @@ CREATE TABLE IF NOT EXISTS session_events (
   timestamp       TEXT NOT NULL,
   source          TEXT NOT NULL,
   kind            TEXT NOT NULL,
+  -- Which agent loop's conversation this event belongs to. The main
+  -- conversation's thread id IS the session_id; a subagent thread is
+  -- '<session_id>:<agent>:<n>'. This replaced the old is_sidechain boolean,
+  -- which answered the same question with less information.
+  thread_id       TEXT,
+  -- Legacy. Kept written and NOT NULL so a database written by this code still
+  -- opens under the previous build, and so the read-path fallback below can
+  -- reconstruct a thread for rows that predate thread_id. Nothing above the
+  -- row mapper reads it.
   is_sidechain    INTEGER NOT NULL,
   turn            INTEGER NOT NULL,
   payload_json    TEXT NOT NULL
@@ -117,6 +126,11 @@ const CHAT_ROOM_ADDED_COLUMNS: ReadonlyArray<{ name: string; ddl: string }> = [
   { name: "digest_through_turn", ddl: "digest_through_turn INTEGER NOT NULL DEFAULT 0" },
 ];
 
+/** Same mechanism as CHAT_ROOM_ADDED_COLUMNS, for `session_events`. */
+const SESSION_EVENT_ADDED_COLUMNS: ReadonlyArray<{ name: string; ddl: string }> = [
+  { name: "thread_id", ddl: "thread_id TEXT" },
+];
+
 /** Adds any of `CHAT_ROOM_ADDED_COLUMNS` the database does not have yet. Safe
  *  to run on every open: a database already carrying them does no writes. */
 function migrateChatRooms(db: DatabaseSync): void {
@@ -128,6 +142,20 @@ function migrateChatRooms(db: DatabaseSync): void {
   }
 }
 
+/** Adds `thread_id` to databases written before threads existed, then indexes
+ *  it. The index lives here rather than in SCHEMA because SCHEMA runs first —
+ *  on an old database the column does not exist yet at that point. */
+function migrateSessionEvents(db: DatabaseSync): void {
+  const existing = new Set(
+    (db.prepare("PRAGMA table_info(session_events)").all() as Array<{ name: string }>).map((row) => row.name),
+  );
+  for (const column of SESSION_EVENT_ADDED_COLUMNS) {
+    if (!existing.has(column.name)) db.exec(`ALTER TABLE session_events ADD COLUMN ${column.ddl}`);
+  }
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_session_events_session_thread
+             ON session_events (session_id, thread_id)`);
+}
+
 type EventRow = {
   event_id: string;
   parent_event_id: string | null;
@@ -135,10 +163,27 @@ type EventRow = {
   timestamp: string;
   source: string;
   kind: string;
+  thread_id: string | null;
   is_sidechain: number;
   turn: number;
   payload_json: string;
 };
+
+/**
+ * A thread for a row written before threads existed. The old model carried the
+ * same distinction in two weaker pieces: `is_sidechain` said "inside some
+ * subagent", and `payload.task_id` said which one. Together they reconstruct a
+ * thread id exactly, so no data migration is needed — old traces group the way
+ * they always did, just under a key that happens to be a dispatch event id.
+ *
+ * `liveThreads()` will not offer these to the orchestrator: it derives from a
+ * dispatch's `child_thread_id`, which old dispatches do not have. That is
+ * correct — those tasks were one-shot and there is nothing to resume.
+ */
+function legacyThreadId(row: EventRow, payload: JsonObject): string {
+  if (row.is_sidechain !== 1) return row.session_id;
+  return typeof payload.task_id === "string" ? payload.task_id : row.session_id;
+}
 
 type CompactionRow = {
   summarized_through_turn: number;
@@ -246,6 +291,7 @@ export class SqliteEventStore implements EventStore {
     db.exec("PRAGMA busy_timeout = 5000");
     db.exec(SCHEMA);
     migrateChatRooms(db);
+    migrateSessionEvents(db);
     return new SqliteEventStore(db);
   }
 
@@ -257,8 +303,8 @@ export class SqliteEventStore implements EventStore {
     this.db.prepare(
       `INSERT INTO session_events (
          event_id, parent_event_id, session_id, timestamp, source, kind,
-         is_sidechain, turn, payload_json
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         thread_id, is_sidechain, turn, payload_json
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       event.event_id,
       event.parent_event_id,
@@ -266,7 +312,10 @@ export class SqliteEventStore implements EventStore {
       event.timestamp,
       event.source,
       event.kind,
-      event.is_sidechain ? 1 : 0,
+      event.thread_id,
+      // Legacy column, still NOT NULL: anything off the main thread is what the
+      // old boolean called a sidechain.
+      event.thread_id === event.session_id ? 0 : 1,
       event.turn,
       JSON.stringify(event.payload),
     );
@@ -276,23 +325,26 @@ export class SqliteEventStore implements EventStore {
   async loadEvents(sessionId: string): Promise<SessionEvent[]> {
     const rows = this.db.prepare(
       `SELECT event_id, parent_event_id, session_id, timestamp, source, kind,
-              is_sidechain, turn, payload_json
+              thread_id, is_sidechain, turn, payload_json
        FROM session_events
        WHERE session_id = ?
        ORDER BY sequence ASC`,
     ).all(sessionId) as EventRow[];
 
-    return rows.map((row) => ({
-      event_id: row.event_id,
-      parent_event_id: row.parent_event_id,
-      session_id: row.session_id,
-      timestamp: row.timestamp,
-      source: row.source as Source,
-      kind: row.kind,
-      is_sidechain: row.is_sidechain === 1,
-      turn: row.turn,
-      payload: JSON.parse(row.payload_json) as JsonObject,
-    }));
+    return rows.map((row) => {
+      const payload = JSON.parse(row.payload_json) as JsonObject;
+      return {
+        event_id: row.event_id,
+        parent_event_id: row.parent_event_id,
+        session_id: row.session_id,
+        timestamp: row.timestamp,
+        source: row.source as Source,
+        kind: row.kind,
+        thread_id: row.thread_id ?? legacyThreadId(row, payload),
+        turn: row.turn,
+        payload,
+      };
+    });
   }
 
   async loadCompaction(sessionId: string): Promise<CompactionCache | undefined> {

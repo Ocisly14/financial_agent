@@ -4,13 +4,7 @@ import { parse as parseYaml } from "yaml";
 import type { Dispatcher } from "./dispatcher.ts";
 import type { SessionState } from "./sessionState.ts";
 import type { AgentKind, SkillLayer, SkillResult } from "./types.ts";
-
-const AGENT_KINDS: ReadonlySet<string> = new Set<AgentKind>([
-  "market_data",
-  "market_research",
-  "trading_operations",
-  "financial_modeling",
-]);
+import { AGENT_KINDS } from "./types.ts";
 
 const SKILL_LAYERS: ReadonlySet<string> = new Set<SkillLayer>(["topic", "research"]);
 
