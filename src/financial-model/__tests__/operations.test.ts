@@ -48,15 +48,11 @@ function snapshot(options: { metrics?: boolean; sources?: boolean; disclosures?:
     formulas: skeleton.formulas,
     compiledFormulas: [],
     selectedHistoricalPeriodIds: [],
-    statementMappingPlans: [],
     categoryGroups: [],
-    proposedStatementMappings: [],
     valuationConfig: structuredClone(CONFIG),
     cells: new Map(),
     diagnostics: [],
-    mappingDiagnostics: [],
     reconciliationResults: [],
-    mappingException: null,
     valuation: null,
     waccSheet: null,
     engineVersion: ENGINE_VERSION,
@@ -203,23 +199,6 @@ test("add_metric derives a registered CAGR definition", () => {
   assert.equal(next.formulas.some((formula) => formula.source === "CAGR(revenue.total, 4)"), true);
 });
 
-test("statement mapping stores decisions and installs its generated formula", () => {
-  const next = applyModelOperations(snapshot({ sources: true }), [{
-    kind: "set_statement_mapping_plan",
-    plan: {
-      targetLineItemId: "operating_expenses", periodIds: ["FY2024", "FY2025"],
-      members: [
-        { sourceLineItemId: "source.income_statement.revenue", treatment: "add" },
-        { sourceLineItemId: "source.income_statement.costs", treatment: "subtract" },
-      ],
-      reviewDecisionId: "mapping",
-    },
-  }]);
-  assert.equal(next.statementMappingPlans.length, 1);
-  assert.equal(next.formulas.some((formula) => formula.lineItemId === "operating_expenses"
-    && formula.source === "source.income_statement.revenue - source.income_statement.costs"), true);
-});
-
 test("an archived snapshot is immutable and advance_stage is no longer an operation", () => {
   const archived = snapshot();
   archived.lifecycleStage = "archived";
@@ -315,7 +294,7 @@ test("category group exact coverage is replaceable but same-category partial ove
   }]), FinancialModelError);
 });
 
-test("add_line_item creates non-revenue DCF details that statement mappings may target", () => {
+test("add_line_item creates non-revenue DCF details that a formula may drive", () => {
   const base = snapshot({ sources: true });
   const next = applyModelOperations(base, [
     {
@@ -323,20 +302,22 @@ test("add_line_item creates non-revenue DCF details that statement mappings may 
       lineItem: { parentId: "operating_expenses", id: "hosting", label: "Hosting expense" },
     },
     {
-      kind: "set_statement_mapping_plan",
-      plan: {
-        targetLineItemId: "operating_expenses.hosting", periodIds: ["FY2024", "FY2025"],
-        members: [{ sourceLineItemId: "source.income_statement.costs", treatment: "add" }],
-        reviewDecisionId: "map-hosting",
-      },
+      kind: "set_line_item_source",
+      lineItemId: "operating_expenses.hosting", range: "historical", source: "formula",
+    },
+    {
+      kind: "set_formula",
+      formula: { lineItemId: "operating_expenses.hosting", appliesTo: "historical",
+        source: "revenue.total * 0.1", periodIds: ["FY2024", "FY2025"] },
     },
   ]);
   const detail = next.lineItems.find((item) => item.id === "operating_expenses.hosting")!;
+  // The row is born inert on both sides; set_line_item_source is what opens it to a formula.
   assert.equal(detail.historical, "formula");
   assert.equal(detail.forecast, "none");
   assert.deepEqual(detail.unit, next.lineItems.find((item) => item.id === "operating_expenses")?.unit);
   assert.equal(next.formulas.some((formula) => formula.lineItemId === detail.id
-    && formula.source === "source.income_statement.costs"), true);
+    && formula.source === "revenue.total * 0.1"), true);
 });
 
 test("category groups reject source-statement rows as DCF members", () => {

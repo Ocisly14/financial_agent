@@ -194,19 +194,6 @@ function snapshot(): FinancialModelSnapshot {
       ast: parseFormula(formula.source),
     })),
     selectedHistoricalPeriodIds: ["FY2024", "FY2025"],
-    statementMappingPlans: [
-      {
-        targetLineItemId: "revenue.total",
-        periodIds: ["FY2024"],
-        members: [
-          {
-            sourceLineItemId: "source.income_statement.revenue",
-            treatment: "add",
-          },
-        ],
-        reviewDecisionId: "mapping-revenue-2024",
-      },
-    ],
     categoryGroups: [{
       parentLineItemId: "revenue.total",
       category: "产品披露",
@@ -214,27 +201,9 @@ function snapshot(): FinancialModelSnapshot {
       members: [{ lineItemId: "revenue.product", treatment: "add" }],
       reviewDecisionId: "review-product-category",
     }],
-    proposedStatementMappings: [
-      {
-        targetLineItemId: "revenue.total",
-        periodIds: ["FY2025"],
-        members: [
-          {
-            sourceLineItemId: "source.income_statement.revenue",
-            treatment: "add",
-          },
-        ],
-      },
-    ],
     valuationConfig: structuredClone(CONFIG),
     cells,
     diagnostics: [{ code: "missing_input", refs: [cellKey("fcff", "FY2026")] }],
-    mappingDiagnostics: [
-      {
-        code: "missing_input",
-        refs: [cellKey("source.income_statement.revenue", "FY2025")],
-      },
-    ],
     reconciliationResults: [{
       kind: "category",
       ruleId: "category:revenue.total:产品披露:review-product-category",
@@ -250,12 +219,23 @@ function snapshot(): FinancialModelSnapshot {
       parentLineItemId: "revenue.total",
       category: "产品披露",
       reviewDecisionId: "review-product-category",
+    }, {
+      // A failed check carries the unified trail spine_mapping stamped on the facts behind it.
+      kind: "accounting_identity",
+      identity: "gross_profit",
+      ruleId: "accounting_identity:gross_profit",
+      periodId: "FY2024",
+      status: "failed",
+      required: true,
+      actual: 100,
+      calculated: 95,
+      residual: 5,
+      difference: 5,
+      tolerance: 0.000001,
+      refs: [cellKey("revenue.total", "FY2024")],
+      parentLineItemId: "revenue.total",
+      unifiedTrail: [{ lineItemId: "revenue.total", rowIds: ["revenue", "other_revenue"] }],
     }],
-    mappingException: {
-      reason: "low_confidence",
-      sourceLineItemIds: ["source.income_statement.revenue"],
-      periodIds: ["FY2025"],
-    },
     valuation: null,
     waccSheet: waccSheetFixture(),
     engineVersion: "1.0.0",
@@ -286,7 +266,6 @@ test("snapshot round-trip preserves authoritative period order and every audit f
   ]);
   assert.deepEqual(decoded.facts, original.facts);
   assert.deepEqual(decoded.factReviewDecisions, original.factReviewDecisions);
-  assert.deepEqual(decoded.statementMappingPlans, original.statementMappingPlans);
 });
 
 test("an agent-authored WACC-sheet formula row (source: agent + formulaSource) round-trips through the codec", () => {

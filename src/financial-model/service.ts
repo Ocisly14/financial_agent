@@ -2,12 +2,11 @@ import { cellKey, splitCellKey, type CellKey } from "./dsl/graph.ts";
 import { parseFormula } from "./dsl/parser.ts";
 import { ENGINE_VERSION, evaluate } from "./engine.ts";
 import { FinancialModelError } from "./errors.ts";
-import { applyFactReview, resolveActiveFacts, stageFacts as stageFactCandidates } from "./factLifecycle.ts";
+import { resolveActiveFacts, stageFacts as stageFactCandidates } from "./factLifecycle.ts";
 import { installDefaultMetrics } from "./metrics.ts";
 import {
   applyModelOperations,
   type FinancialModelSnapshot,
-  type MappingException,
   type ModelOperation,
   type ModelQuery,
 } from "./operations.ts";
@@ -18,7 +17,6 @@ import {
   addDcfDetailLineItem,
   addRevenueStream,
   applyDcfCategoryGroups,
-  applyStatementMappingPlans,
   createSkeleton,
   validateRoleCardinality,
   type Skeleton,
@@ -34,23 +32,20 @@ import type {
 import type {
   Assumption,
   Diagnostic,
-  DcfCategoryGroup,
   Fact,
-  FactReviewDecision,
   LifecycleStage,
-  NewDcfCategoryLineItem,
   Period,
   PreparedStatementRow,
-  StatementMappingPlan,
   ValuationConfig,
 } from "./types.ts";
 import { calculateValuation, validateValuationConfig } from "./valuation.ts";
-import { applyComputedWaccInputs, createWaccSheet, recalculateWaccSheet, type WaccSheetAnyRowId, type WaccSheetComputedInput } from "./waccSheet.ts";
+import { applyComputedWaccInputs, createWaccSheet, recalculateWaccSheet, type WaccSheetComputedInput } from "./waccSheet.ts";
 import type { JsonObject } from "../framework/types.ts";
 import {
   buildModelContextView,
   buildWorkbookSlice,
   buildWorkbookView,
+  hasCommittedSpine,
   type CurrentWorkbookView,
   type HistoricalDcfCompletenessView,
   type ModelContextView,
@@ -85,14 +80,6 @@ export type StageSpineFactsInput = {
   historicalPeriodIds: readonly string[];
   /** Display labels for detail line items this call has to install, keyed by line item id. */
   labels?: Readonly<Record<string, string>>;
-};
-
-export type ReviewFactsInput = {
-  decisions: FactReviewDecision[];
-  selectedHistoricalPeriodIds: string[];
-  categoryLineItems: NewDcfCategoryLineItem[];
-  statementMappingPlans: StatementMappingPlan[];
-  categoryGroups: DcfCategoryGroup[];
 };
 
 export type CommitResult = {
@@ -154,17 +141,13 @@ export class FinancialModelService {
       formulas: skeleton.formulas,
       compiledFormulas: [],
       selectedHistoricalPeriodIds: [],
-      statementMappingPlans: [],
       categoryGroups: [],
-      proposedStatementMappings: [],
       valuationConfig: input.valuationConfig === undefined
         ? defaultValuationConfig(input.periods)
         : validateValuationConfig(input.valuationConfig),
       cells: new Map(),
       diagnostics: [],
-      mappingDiagnostics: [],
       reconciliationResults: [],
-      mappingException: null,
       valuation: null,
       waccSheet: recalculateWaccSheet(createWaccSheet(new Date().toISOString().slice(0, 10))),
       engineVersion: ENGINE_VERSION,
@@ -189,22 +172,6 @@ export class FinancialModelService {
       creatingSessionId: input.originSessionId,
     });
     return commitResult(revision);
-  }
-
-  stageFacts(modelId: string, expectedRevision: number, candidates: Fact[]): CommitResult {
-    const parent = this.loadForMutation(modelId, expectedRevision);
-    if (candidates.length === 0) {
-      throw new FinancialModelError("invalid_model_operation", "fact staging batch must not be empty");
-    }
-    const working = structuredClone(parent.snapshot);
-    working.facts = stageFactCandidates(working.facts, candidates);
-    const calculated = recalculate(working);
-    return this.commit(
-      modelId,
-      expectedRevision,
-      calculated,
-      makeSummary(calculated, [factsStagedChange(calculated, candidates)]),
-    );
   }
 
   /**
@@ -323,101 +290,6 @@ export class FinancialModelService {
       mappedLineItemIds: factChange.mappedLineItemIds,
       periodIds: factChange.periodIds,
     }]));
-  }
-
-  reviewFacts(modelId: string, expectedRevision: number, input: ReviewFactsInput): CommitResult {
-    const parent = this.loadForMutation(modelId, expectedRevision);
-    if (input.decisions.length === 0
-      && input.selectedHistoricalPeriodIds.length === 0
-      && input.categoryLineItems.length === 0
-      && input.statementMappingPlans.length === 0
-      && input.categoryGroups.length === 0) {
-      throw new FinancialModelError("invalid_model_operation", "fact review mutation must not be empty");
-    }
-    const working = structuredClone(parent.snapshot);
-    // When the review time is left to the agent it invents one. The ledger's clock is the host's.
-    const reviewedAt = new Date().toISOString();
-    const decisions = input.decisions.map((decision) => ({ ...structuredClone(decision), reviewedAt }));
-    ensureUniqueDecisionIds(working.factReviewDecisions, decisions);
-    working.facts = applyFactReview(working.facts, decisions);
-    working.factReviewDecisions.push(...decisions);
-    working.selectedHistoricalPeriodIds = normalizeSelectedPeriods(
-      working.periods,
-      input.selectedHistoricalPeriodIds,
-    );
-    const presentIds = new Set(working.lineItems.map((item) => item.id));
-    let importSkeleton = skeletonOf(working);
-    for (const item of input.categoryLineItems) {
-      if (item.parentLineItemId === "revenue") {
-        const slug = item.id.startsWith("revenue.")
-          ? item.id.slice("revenue.".length)
-          : item.id;
-        // Confirming a stream `commitSpineFacts` already installed is a no-op, not a redefinition.
-        if (presentIds.has(`revenue.${slug}`)) continue;
-        importSkeleton = addRevenueStream(importSkeleton, { id: slug, label: item.label });
-      } else if (!presentIds.has(item.id)) {
-        importSkeleton = addDcfDetailLineItem(importSkeleton, item);
-      }
-    }
-    acceptSkeleton(working, importSkeleton);
-    validateMappingPeriods(working, input.statementMappingPlans);
-    const normalizedPlans = input.statementMappingPlans.map((plan) => ({
-      ...structuredClone(plan),
-      periodIds: orderedPeriods(working, plan.periodIds),
-    }));
-    // The initial mapping is one shot: once plans exist, further changes go through
-    // `set_statement_mapping_plan` so each one is its own auditable operation.
-    if (working.statementMappingPlans.length > 0 && normalizedPlans.length > 0) {
-      throw new FinancialModelError(
-        "invalid_model_operation",
-        "initial statement mappings are already committed; use set_statement_mapping_plan",
-      );
-    }
-    let compiled = applyStatementMappingPlans(skeletonOf(working), normalizedPlans);
-    const normalizedGroups = input.categoryGroups.map((group) => ({
-      ...structuredClone(group),
-      periodIds: orderedPeriods(working, group.periodIds),
-    }));
-    if (working.categoryGroups.length > 0 && normalizedGroups.length > 0) {
-      throw new FinancialModelError(
-        "invalid_model_operation",
-        "initial category groups are already committed; use set_category_group",
-      );
-    }
-    compiled = applyDcfCategoryGroups(compiled, normalizedGroups);
-    acceptSkeleton(working, compiled);
-    working.statementMappingPlans = sortStatementPlans(working, normalizedPlans);
-    working.categoryGroups = sortCategoryGroups(working, normalizedGroups);
-    working.mappingException = null;
-    installWorkingCapitalIdentity(working);
-    const calculated = recalculate(working);
-    const changes: RevisionChange[] = [factsReviewedChange(parent.snapshot, input.decisions)];
-    changes.push(...normalizedPlans.map((plan) => ({
-      kind: "statement_mapping_plan_set" as const,
-      targetLineItemId: plan.targetLineItemId,
-      periodIds: orderedPeriods(calculated, plan.periodIds),
-    })));
-    changes.push(...input.categoryLineItems.map((item) => ({
-      kind: "line_item_added" as const,
-      lineItemId: item.parentLineItemId === "revenue"
-        ? `revenue.${item.id.replace(/^revenue\./, "")}`
-        : item.id.startsWith(`${item.parentLineItemId}.`)
-          ? item.id
-          : `${item.parentLineItemId}.${item.id}`,
-      parentId: item.parentLineItemId,
-    })));
-    changes.push(...normalizedGroups.map((group) => ({
-      kind: "category_group_set" as const,
-      parentLineItemId: group.parentLineItemId,
-      category: group.category,
-      periodIds: orderedPeriods(calculated, group.periodIds),
-    })));
-    return this.commit(
-      modelId,
-      expectedRevision,
-      calculated,
-      makeSummary(calculated, changes),
-    );
   }
 
   applyOperations(
@@ -624,14 +496,13 @@ function recalculate(snapshot: FinancialModelSnapshot): FinancialModelSnapshot {
   next.diagnostics = sortDiagnostics(
     output.order.flatMap((key) => next.cells.get(key)?.diagnostics ?? []),
   );
-  next.mappingDiagnostics = sortDiagnostics(next.mappingDiagnostics);
   next.reconciliationResults = reconcileDcf({
     periods: next.periods,
     lineItems: next.lineItems,
     cells: next.cells,
     categoryGroups: next.categoryGroups,
   });
-  next.mappingException = reconciliationMappingException(next);
+  attachUnifiedTrail(next);
   next.engineVersion = ENGINE_VERSION;
   deriveLifecycle(next);
   return next;
@@ -767,28 +638,27 @@ function requireWaccResolved(snapshot: FinancialModelSnapshot): void {
 }
 
 function historyGate(snapshot: FinancialModelSnapshot): void {
-  // Two evidence paths prove a reviewed history: the legacy statement-mapping plans, or committed
-  // facts from the unified-statements spine pipeline. Either satisfies the gate; neither does not.
-  const committedSpine = snapshot.facts.some((fact) =>
-    fact.status === "committed" && fact.provenance.sourceType === "unified_statements");
-  if (snapshot.selectedHistoricalPeriodIds.length === 0
-    || (snapshot.statementMappingPlans.length === 0 && !committedSpine)) {
+  if (snapshot.selectedHistoricalPeriodIds.length === 0 || !hasCommittedSpine(snapshot)) {
     throw new FinancialModelError(
       "history_review_required",
-      "history requires selected periods and a reviewed mapping (statement plans or committed spine facts)",
+      "history requires selected periods and committed spine facts",
     );
   }
   const selected = new Set(snapshot.selectedHistoricalPeriodIds);
-  if (snapshot.facts.some((fact) => fact.status === "staged" && selected.has(fact.periodId))) {
+  // Source-statement facts are the filing evidence library: the import stages them and nothing ever
+  // commits them, because the spine is mapped onto canonical rows rather than promoted out of these.
+  // Only a staged fact on a canonical row is an unreviewed value in the history the workbook computes
+  // from — counting the evidence rows here would pin every imported model at draft forever.
+  const sourceRowIds = new Set(snapshot.lineItems
+    .filter((item) => item.section.startsWith("source_"))
+    .map((item) => item.id));
+  const unreviewed = snapshot.facts.some((fact) => fact.status === "staged"
+    && selected.has(fact.periodId)
+    && !(fact.lineItemId !== undefined && sourceRowIds.has(fact.lineItemId)));
+  if (unreviewed) {
     throw new FinancialModelError(
       "history_review_required",
       "selected history still contains staged facts",
-    );
-  }
-  if (snapshot.mappingDiagnostics.length > 0) {
-    throw new FinancialModelError(
-      "unresolved_reconciliation",
-      "statement mapping diagnostics remain unresolved",
     );
   }
   const failedReconciliations = snapshot.reconciliationResults.filter(
@@ -811,17 +681,6 @@ function historyGate(snapshot: FinancialModelSnapshot): void {
       "required high-level DCF history is incomplete",
       { missing, historicalDcfCompleteness: completeness as unknown as JsonObject },
     );
-  }
-  for (const plan of snapshot.statementMappingPlans) {
-    for (const periodId of plan.periodIds) {
-      const value = snapshot.cells.get(cellKey(plan.targetLineItemId, periodId))?.value;
-      if (value === null || value === undefined) {
-        throw new FinancialModelError(
-          "history_review_required",
-          `mapped history is unresolved for ${plan.targetLineItemId}@${periodId}`,
-        );
-      }
-    }
   }
 }
 
@@ -884,114 +743,6 @@ function normalizeSelectedPeriods(periods: readonly Period[], selected: readonly
   return periods.filter((period) => selectedSet.has(period.id)).map((period) => period.id);
 }
 
-function validateMappingPeriods(
-  snapshot: FinancialModelSnapshot,
-  plans: readonly StatementMappingPlan[],
-): void {
-  const selected = new Set(snapshot.selectedHistoricalPeriodIds);
-  for (const plan of plans) {
-    if (new Set(plan.periodIds).size !== plan.periodIds.length) {
-      throw new FinancialModelError(
-        "invalid_model_operation",
-        `statement mapping repeats a period: ${plan.targetLineItemId}`,
-      );
-    }
-    for (const periodId of plan.periodIds) {
-      if (!selected.has(periodId)) {
-        throw new FinancialModelError(
-          "invalid_model_operation",
-          `statement mapping period was not selected: ${periodId}`,
-        );
-      }
-    }
-  }
-}
-
-function ensureUniqueDecisionIds(
-  existing: readonly FactReviewDecision[],
-  incoming: readonly FactReviewDecision[],
-): void {
-  const ids = new Set(existing.map((decision) => decision.decisionId));
-  for (const decision of incoming) {
-    if (ids.has(decision.decisionId)) {
-      throw new FinancialModelError(
-        "fact_conflict",
-        `fact review decision id already exists: ${decision.decisionId}`,
-      );
-    }
-    ids.add(decision.decisionId);
-  }
-}
-
-function isRevenueStreamId(lineItemId: string): boolean {
-  return lineItemId.startsWith("revenue.") && lineItemId !== "revenue.total";
-}
-
-function planKey(plan: StatementMappingPlan): string {
-  return `${plan.targetLineItemId}\u0000${[...plan.periodIds].sort().join(",")}`;
-}
-
-function referencesLineItem(source: string, lineItemId: string): boolean {
-  const escaped = lineItemId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`(^|[^A-Za-z0-9_.])${escaped}(?![A-Za-z0-9_.])`).test(source);
-}
-
-/** A stream the engine no longer produces is only retired when nothing else in the model needs it. */
-function streamIsReferenced(
-  snapshot: FinancialModelSnapshot,
-  skeleton: Skeleton,
-  streamId: string,
-): boolean {
-  const growthId = `growth.${streamId}`;
-  if (snapshot.categoryGroups.some((group) => group.members.some((member) =>
-    member.lineItemId === streamId || member.lineItemId === growthId))) return true;
-  return skeleton.formulas.some((formula) => formula.lineItemId !== streamId
-    && formula.lineItemId !== growthId
-    && (referencesLineItem(formula.source, streamId)
-      || referencesLineItem(formula.source, growthId)));
-}
-
-function removeRevenueStreams(skeleton: Skeleton, streamIds: ReadonlySet<string>): Skeleton {
-  if (streamIds.size === 0) return skeleton;
-  const removed = new Set<string>();
-  for (const id of streamIds) {
-    removed.add(id);
-    removed.add(`growth.${id}`);
-  }
-  return {
-    periods: skeleton.periods,
-    lineItems: skeleton.lineItems.filter((item) => !removed.has(item.id)),
-    formulas: skeleton.formulas.filter((formula) => !removed.has(formula.lineItemId)),
-  };
-}
-
-/**
- * Strips the historical coverage a superseded engine plan compiled, so the next plan set is written
- * onto a clean target instead of colliding with the previous run's partially overlapping coverage.
- */
-function dropHistoricalPlanFormulas(
-  skeleton: Skeleton,
-  plans: readonly StatementMappingPlan[],
-): Skeleton {
-  if (plans.length === 0) return skeleton;
-  const dropped = new Map<string, Set<string>>();
-  for (const plan of plans) {
-    const periods = dropped.get(plan.targetLineItemId) ?? new Set<string>();
-    for (const periodId of plan.periodIds) periods.add(periodId);
-    dropped.set(plan.targetLineItemId, periods);
-  }
-  return {
-    ...skeleton,
-    formulas: skeleton.formulas.filter((formula) => {
-      const periods = dropped.get(formula.lineItemId);
-      if (periods === undefined || formula.appliesTo !== "historical") return true;
-      const coverage = formula.periodIds;
-      if (coverage === undefined || coverage.length === 0) return true;
-      return !coverage.every((periodId) => periods.has(periodId));
-    }),
-  };
-}
-
 function skeletonOf(snapshot: FinancialModelSnapshot): Skeleton {
   return {
     periods: snapshot.periods,
@@ -1006,66 +757,18 @@ function acceptSkeleton(snapshot: FinancialModelSnapshot, skeleton: Skeleton): v
   snapshot.formulas = skeleton.formulas;
 }
 
-function sortStatementPlans(
-  snapshot: FinancialModelSnapshot,
-  plans: readonly StatementMappingPlan[],
-): StatementMappingPlan[] {
-  const periodPosition = new Map(snapshot.periods.map((period, index) => [period.id, index]));
-  return [...structuredClone(plans)].sort((left, right) =>
-    (periodPosition.get(left.periodIds[0]!) ?? Number.MAX_SAFE_INTEGER)
-      - (periodPosition.get(right.periodIds[0]!) ?? Number.MAX_SAFE_INTEGER)
-    || compareText(left.targetLineItemId, right.targetLineItemId)
-    || compareText(left.periodIds.join("\u0000"), right.periodIds.join("\u0000")));
-}
-
-function sortCategoryGroups(
-  snapshot: FinancialModelSnapshot,
-  groups: readonly DcfCategoryGroup[],
-): DcfCategoryGroup[] {
-  const periodPosition = new Map(snapshot.periods.map((period, index) => [period.id, index]));
-  const itemPosition = new Map(snapshot.lineItems.map((item) => [item.id, item.order]));
-  return [...structuredClone(groups)].sort((left, right) =>
-    (itemPosition.get(left.parentLineItemId) ?? Number.MAX_SAFE_INTEGER)
-      - (itemPosition.get(right.parentLineItemId) ?? Number.MAX_SAFE_INTEGER)
-    || compareText(left.parentLineItemId, right.parentLineItemId)
-    || compareText(left.category, right.category)
-    || (periodPosition.get(left.periodIds[0]!) ?? Number.MAX_SAFE_INTEGER)
-      - (periodPosition.get(right.periodIds[0]!) ?? Number.MAX_SAFE_INTEGER));
-}
-
+/** The candidate-count/coverage half of a `statements_staged` change; the caller supplies rowCount. */
 function factsStagedChange(
   snapshot: FinancialModelSnapshot,
   candidates: readonly Fact[],
-): Extract<RevisionChange, { kind: "facts_staged" }> {
+): Omit<Extract<RevisionChange, { kind: "statements_staged" }>, "kind" | "rowCount"> {
   return {
-    kind: "facts_staged",
     candidateCount: candidates.length,
     mappedLineItemIds: orderedLineItems(
       snapshot,
       candidates.flatMap((fact) => fact.lineItemId === undefined ? [] : [fact.lineItemId]),
     ),
     periodIds: orderedPeriods(snapshot, candidates.map((fact) => fact.periodId)),
-  };
-}
-
-function factsReviewedChange(
-  parent: FinancialModelSnapshot,
-  decisions: readonly FactReviewDecision[],
-): Extract<RevisionChange, { kind: "facts_reviewed" }> {
-  const byId = new Map(parent.facts.map((fact) => [fact.factId, fact]));
-  return {
-    kind: "facts_reviewed",
-    committed: decisions.filter((decision) => decision.action === "commit").length,
-    rejected: decisions.filter((decision) => decision.action === "reject").length,
-    superseded: decisions.filter((decision) => decision.action === "supersede").length,
-    lineItemIds: orderedLineItems(parent, decisions.flatMap((decision) => {
-      const id = decision.mappedLineItemId ?? byId.get(decision.factId)?.lineItemId;
-      return id === undefined ? [] : [id];
-    })),
-    periodIds: orderedPeriods(parent, decisions.flatMap((decision) => {
-      const id = byId.get(decision.factId)?.periodId;
-      return id === undefined ? [] : [id];
-    })),
   };
 }
 
@@ -1122,12 +825,6 @@ function operationChanges(
           appliesTo: operation.formula.appliesTo,
           periodIds: orderedPeriods(next, operation.formula.periodIds ?? []),
         };
-      case "set_statement_mapping_plan":
-        return {
-          kind: "statement_mapping_plan_set",
-          targetLineItemId: operation.plan.targetLineItemId,
-          periodIds: orderedPeriods(next, operation.plan.periodIds),
-        };
       case "set_category_group":
         return {
           kind: "category_group_set",
@@ -1159,7 +856,7 @@ function makeSummary(
   return {
     changes: normalized,
     changedSections,
-    warningCount: snapshot.diagnostics.length + snapshot.mappingDiagnostics.length
+    warningCount: snapshot.diagnostics.length
       + snapshot.reconciliationResults.filter((result) => result.status !== "passed").length,
     blockerCount: 0,
   };
@@ -1176,10 +873,8 @@ function sectionChanges(
   for (const change of changes) {
     const ids: string[] = [];
     if ("lineItemId" in change) ids.push(change.lineItemId);
-    if ("targetLineItemId" in change) ids.push(change.targetLineItemId);
     if ("parentLineItemId" in change) ids.push(change.parentLineItemId);
     if ("mappedLineItemIds" in change) ids.push(...change.mappedLineItemIds);
-    if ("lineItemIds" in change) ids.push(...change.lineItemIds);
     for (const id of ids) {
       const item = snapshot.lineItems.find((candidate) => candidate.id === id);
       if (item) sections.add(item.section);
@@ -1207,39 +902,30 @@ function sortDiagnostics(diagnostics: readonly Diagnostic[]): Diagnostic[] {
     || compareText(left.refs.join("\u0000"), right.refs.join("\u0000")));
 }
 
-function reconciliationMappingException(
-  snapshot: FinancialModelSnapshot,
-): MappingException | null {
-  const failed = snapshot.reconciliationResults.filter(
-    (result) => result.required && result.status === "failed",
-  );
-  if (failed.length === 0) {
-    return snapshot.mappingException?.reason === "reconciliation"
-      ? null
-      : snapshot.mappingException;
+/**
+ * Records, on every failed check, which unified statement rows produced the canonical values it
+ * compared. spine_mapping stamps each committed fact with the unified rows it summed
+ * (`provenance.concept`), so a broken identity can name its own inputs — the agent follows the
+ * rowIds into get_unified_rows instead of guessing which disclosure went wrong.
+ */
+function attachUnifiedTrail(snapshot: FinancialModelSnapshot): void {
+  const spineByCell = new Map<string, Fact>();
+  for (const fact of snapshot.facts) {
+    if (fact.status !== "committed" || fact.lineItemId === undefined) continue;
+    if (fact.provenance.sourceType !== "unified_statements") continue;
+    spineByCell.set(cellKey(fact.lineItemId, fact.periodId), fact);
   }
-
-  const affectedLineItems = new Set(
-    failed.flatMap((result) => result.refs.map((ref) => splitCellKey(ref as CellKey).lineItemId)),
-  );
-  const affectedPeriods = new Set(failed.map((result) => result.periodId));
-  const sourceLineItems = new Set<string>();
-  for (const plan of snapshot.statementMappingPlans) {
-    if (!affectedLineItems.has(plan.targetLineItemId)
-      || !plan.periodIds.some((periodId) => affectedPeriods.has(periodId))) continue;
-    for (const member of plan.members) sourceLineItems.add(member.sourceLineItemId);
-  }
-  const itemOrder = new Map(snapshot.lineItems.map((item) => [item.id, item.order]));
-  return {
-    reason: "reconciliation",
-    sourceLineItemIds: [...sourceLineItems].sort((left, right) =>
-      (itemOrder.get(left) ?? Number.MAX_SAFE_INTEGER)
-        - (itemOrder.get(right) ?? Number.MAX_SAFE_INTEGER)
-      || compareText(left, right)),
-    periodIds: snapshot.periods
-      .filter((period) => affectedPeriods.has(period.id))
-      .map((period) => period.id),
-  };
+  if (spineByCell.size === 0) return;
+  snapshot.reconciliationResults = snapshot.reconciliationResults.map((result) => {
+    if (result.status !== "failed") return result;
+    const unifiedTrail = result.refs.flatMap((ref) => {
+      const concept = spineByCell.get(ref)?.provenance.concept;
+      return concept === undefined || concept === ""
+        ? []
+        : [{ lineItemId: splitCellKey(ref as CellKey).lineItemId, rowIds: concept.split("+") }];
+    });
+    return unifiedTrail.length > 0 ? { ...result, unifiedTrail } : result;
+  });
 }
 
 function commitResult(
@@ -1255,10 +941,7 @@ function commitResult(
       revision.revision,
       revision.snapshot,
     ),
-    warnings: sortDiagnostics([
-      ...revision.snapshot.diagnostics,
-      ...revision.snapshot.mappingDiagnostics,
-    ]),
+    warnings: sortDiagnostics(revision.snapshot.diagnostics),
   };
 }
 

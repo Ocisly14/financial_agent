@@ -166,15 +166,30 @@ test("a review decision may omit reviewedAt, and the committed ledger carries th
   const { deps, tools } = run();
   const owner = { agentId: "owner-1", sessionId: "s" };
   await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1" }, owner);
-  const staged = deps.modelStore.getRevision("model-1")!.snapshot.facts.find((fact) => fact.status === "staged")!;
+  // replace_fact is the surviving path that writes review decisions, and it supersedes a COMMITTED
+  // fact — so commit one off the spine first, exactly as spine_mapping would.
+  const service = new FinancialModelService(deps.modelStore, "s");
+  const spine: Fact = { factId: "spine-revenue", status: "staged", lineItemId: "revenue.total", periodId: "FY2024",
+    value: 100, unit: { kind: "currency", code: "USD" },
+    provenance: { sourceType: "unified_statements", sourceRefs: ["unified.revenue.total"], asOfDate: "2026-02-01" } };
+  const committed = service.commitSpineFacts("model-1", 1, { facts: [spine], historicalPeriodIds: ["FY2024"] });
   const before = new Date().toISOString();
 
-  const service = new FinancialModelService(deps.modelStore, "s");
-  service.reviewFacts("model-1", 1, {
-    decisions: [{ decisionId: "d1", factId: staged.factId, action: "commit", mappedLineItemId: staged.lineItemId!,
-      rationale: "Confirmed against the filing", reviewedBy: "mapping_review_subagent" } as never],
-    selectedHistoricalPeriodIds: ["FY2024"], categoryLineItems: [], statementMappingPlans: [], categoryGroups: [],
-  });
+  // Neither decision carries a caller-supplied reviewedAt: the host stamps both.
+  const result = await tools.get("apply_financial_model_operations")!.execute({
+    modelId: "model-1", expectedRevision: committed.revision,
+    operations: [{
+      kind: "replace_fact",
+      replacement: { ...spine, factId: "spine-revenue-corrected", value: 101, supersedesFactId: "spine-revenue" },
+      commitDecision: { decisionId: "d1", factId: "spine-revenue-corrected", action: "commit",
+        mappedLineItemId: "revenue.total",
+        rationale: "Confirmed against the filing", reviewedBy: "financial_modeling" },
+      supersedeDecision: { decisionId: "d2", factId: "spine-revenue", action: "supersede",
+        replacementFactId: "spine-revenue-corrected",
+        rationale: "Superseded by the corrected figure", reviewedBy: "financial_modeling" },
+    }],
+  }, owner);
+  assert.equal(result.error, undefined);
 
   const stamped = deps.modelStore.getRevision("model-1")!.snapshot.factReviewDecisions.find((entry) => entry.decisionId === "d1");
   assert.ok(stamped, "the decision was committed");

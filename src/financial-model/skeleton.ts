@@ -8,7 +8,6 @@ import type {
   LineItemRole,
   Period,
   PreparedStatementRow,
-  StatementMappingPlan,
 } from "./types.ts";
 
 export type Skeleton = {
@@ -470,43 +469,6 @@ export function validateRoleCardinality(lineItems: readonly LineItem[]): void {
     const count = lineItems.filter((item) => item.role === role).length;
     if (count !== 1) invalid(`role ${role} must occur exactly once, received ${count}`);
   }
-}
-
-export function applyStatementMappingPlans(
-  skeleton: Skeleton,
-  plans: readonly StatementMappingPlan[],
-): Skeleton {
-  const ordered = normalizePlanOrder(skeleton, plans, (plan) => plan.targetLineItemId);
-  validatePlanOutputCoverage(ordered, (plan) => plan.targetLineItemId);
-  let next = cloneSkeleton(skeleton);
-
-  for (const plan of ordered) {
-    const periodIds = validatePeriodIds(next, plan.periodIds, "actual");
-    const target = requireLineItem(next, plan.targetLineItemId);
-    const agentDetailTarget = target.parentId !== undefined
-      && SAFE_DCF_DETAIL_PARENTS.has(target.parentId)
-      && (target.role === "none"
-        || (target.parentId === "revenue" && target.role === "revenue_stream"));
-    if ((!CANONICAL_MAPPING_IDS.has(target.id) && !agentDetailTarget) || isSourceRow(target)) {
-      invalid(`invalid statement mapping target: ${target.id}`);
-    }
-    const members = validateMembers(
-      next,
-      plan.members,
-      (member) => member.sourceLineItemId,
-      (item) => isSourceRow(item),
-      "statement mapping",
-    );
-    const included = members.filter((member) => member.treatment !== "exclude");
-    if (included.length === 0) invalid(`statement mapping for ${target.id} has no included members`);
-    const source = signedFormula(next, included.map((member) => ({
-      id: member.sourceLineItemId,
-      sign: member.treatment === "add" ? "add" as const : "subtract" as const,
-    })));
-    next = replaceFormulaCoverage(next, target.id, "historical", periodIds, source, new Set());
-    next.lineItems = next.lineItems.map((item) => item.id === target.id ? { ...item, historical: "formula" } : item);
-  }
-  return next;
 }
 
 /**

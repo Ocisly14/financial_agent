@@ -6,7 +6,7 @@ import type { ValuationOutput } from "./valuation.ts";
 import { WACC_SHEET_ROW_IDS, type WaccSheet, type WaccSheetAnyRowId, type WaccSheetRowId } from "./waccSheet.ts";
 import type {
   Assumption, CellSource, DcfCategoryGroup, Diagnostic, LifecycleStage, LineItemRole, Period,
-  ReconciliationResult, StatementMappingPlan, Unit, ValuationConfig,
+  ReconciliationResult, Unit, ValuationConfig,
 } from "./types.ts";
 import type { JsonObject } from "../framework/types.ts";
 
@@ -17,15 +17,12 @@ export type ModelReadSection = DcfWorkbookSection |
 export type RevisionChange =
   | { kind: "model_created" }
   | { kind: "statements_staged"; rowCount: number; candidateCount: number; mappedLineItemIds: string[]; periodIds: string[] }
-  | { kind: "facts_staged"; candidateCount: number; mappedLineItemIds: string[]; periodIds: string[] }
-  | { kind: "facts_reviewed"; committed: number; rejected: number; superseded: number; lineItemIds: string[]; periodIds: string[] }
   | { kind: "fact_replaced"; lineItemId: string; periodId: string }
   | { kind: "assumption_set"; lineItemId: string; periodIds: string[] }
   | { kind: "line_item_source_set"; lineItemId: string; range: "historical" | "forecast"; source: "actual" | "assumption" | "formula" | "none" }
   | { kind: "line_item_added"; lineItemId: string; parentId?: string }
   | { kind: "metric_added"; registryId: "cagr"; lineItemId: string }
   | { kind: "formula_set"; lineItemId: string; appliesTo: "historical" | "forecast"; periodIds: string[] }
-  | { kind: "statement_mapping_plan_set"; targetLineItemId: string; periodIds: string[] }
   | { kind: "category_group_set"; parentLineItemId: string; category: string; periodIds: string[] }
   | { kind: "valuation_config_set" }
   | { kind: "stage_advanced"; from: LifecycleStage; to: LifecycleStage }
@@ -62,7 +59,6 @@ export type WorkbookRowView = {
   lineItemId: string; label: string; parentId?: string; section: DcfWorkbookSection;
   role: LineItemRole; unit: Unit; order: number;
   sources: { historical: CellSource; forecast: CellSource };
-  mappingRefs: Array<{ periodIds: string[]; sourceLineItemIds: string[] }>;
   formulas: Array<{ appliesTo: "historical" | "forecast"; periodIds: string[]; source: string }>;
   assumptions: Assumption[];
   cells: Record<string, WorkbookCellView>;
@@ -73,9 +69,6 @@ export type SourceStatementRowView = { sourceLineItemId: string; label: string; 
 export type SourceStatementReviewView = {
   selectedPeriodIds: string[];
   sheets: Record<"income_statement" | "balance_sheet" | "cash_flow_statement", SourceStatementRowView[]>;
-  activeMappings: StatementMappingPlan[];
-  proposedMappings: Array<Omit<StatementMappingPlan, "reviewDecisionId">>;
-  diagnostics: Diagnostic[];
   reconciliations: ReconciliationResult[];
 };
 
@@ -103,7 +96,6 @@ export type WorkbookSliceView = {
   lineage?: {
     facts: FinancialModelSnapshot["facts"];
     factReviewDecisions: FinancialModelSnapshot["factReviewDecisions"];
-    statementMappingPlans: StatementMappingPlan[];
   };
 };
 export type ModelContextView = { model: ModelView; revisionHistory: RevisionSummary[]; currentWorkbook: CurrentWorkbookView };
@@ -134,6 +126,16 @@ function publicWaccSheet(waccSheet: WaccSheet | null): WaccSheet | null {
   return { asOfDate: clone.asOfDate, rows: clone.rows.filter((row) => PUBLIC_WACC_ROW_IDS.has(row.rowId)) };
 }
 
+/**
+ * Facts committed straight from the unified-statements spine are what prove a mapped history: they
+ * are the only thing that puts values on canonical rows, so until some exist the workbook is still
+ * a source-statement review rather than a DCF.
+ */
+export function hasCommittedSpine(snapshot: FinancialModelSnapshot): boolean {
+  return snapshot.facts.some((fact) =>
+    fact.status === "committed" && fact.provenance.sourceType === "unified_statements");
+}
+
 export function buildWorkbookView(
   modelId: string, revision: number, snapshot: FinancialModelSnapshot, options: WorkbookViewOptions = {},
 ): CurrentWorkbookView {
@@ -157,19 +159,16 @@ export function buildWorkbookView(
     valuation: structuredClone(snapshot.valuation),
     waccSheet: publicWaccSheet(snapshot.waccSheet),
   };
+  // A failed reconciliation no longer demotes the workbook: the failure reports itself on the
+  // reconciliation result (with its unified trail), so the DCF view stays readable while it is fixed.
   const mappingMode = options.includeSourceStatements === true
-    || snapshot.statementMappingPlans.length === 0
-    || snapshot.selectedHistoricalPeriodIds.length === 0
-    || snapshot.mappingException !== null;
+    || !hasCommittedSpine(snapshot)
+    || snapshot.selectedHistoricalPeriodIds.length === 0;
   if (!mappingMode) return { ...base, mode: "dcf" };
-  const limitToException = options.includeSourceStatements !== true
-    && snapshot.statementMappingPlans.length > 0
-    && snapshot.selectedHistoricalPeriodIds.length > 0
-    && snapshot.mappingException !== null;
   return {
     ...base,
     mode: "statement_mapping",
-    sourceStatementReview: buildSourceReview(snapshot, limitToException),
+    sourceStatementReview: buildSourceReview(snapshot),
   };
 }
 
@@ -215,9 +214,6 @@ export function buildWorkbookSlice(
   return { ...base, lineage: {
     facts: structuredClone(facts),
     factReviewDecisions: structuredClone(snapshot.factReviewDecisions.filter((decision) => factIds.has(decision.factId))),
-    statementMappingPlans: structuredClone(snapshot.statementMappingPlans.filter((plan) =>
-      selectedLineItems.has(plan.targetLineItemId)
-      || plan.members.some((member) => selectedLineItems.has(member.sourceLineItemId)))),
   } };
 }
 
@@ -277,11 +273,6 @@ function buildDcfRow(snapshot: FinancialModelSnapshot, id: string, periods = sna
         - (periodPosition.get(rightCoverage[0] ?? "") ?? Number.MAX_SAFE_INTEGER)
         || compareText(left.formula.source, right.formula.source);
     });
-  const mappingPlans = snapshot.statementMappingPlans
-    .filter((plan) => plan.targetLineItemId === id
-      && plan.periodIds.some((periodId) => selectedPeriodIds.has(periodId)))
-    .sort((left, right) => (periodPosition.get(left.periodIds[0] ?? "") ?? Number.MAX_SAFE_INTEGER)
-      - (periodPosition.get(right.periodIds[0] ?? "") ?? Number.MAX_SAFE_INTEGER));
   const assumptions = snapshot.assumptions
     .filter((assumption) => assumption.lineItemId === id
       && assumption.periods.some((periodId) => selectedPeriodIds.has(periodId)))
@@ -292,12 +283,6 @@ function buildDcfRow(snapshot: FinancialModelSnapshot, id: string, periods = sna
     lineItemId: item.id, label: item.label, section: item.section as DcfWorkbookSection,
     role: item.role, unit: structuredClone(item.unit), order: item.order,
     sources: { historical: item.historical, forecast: item.forecast },
-    mappingRefs: mappingPlans.map((plan) => ({
-      periodIds: orderedPeriodIds(snapshot, plan.periodIds),
-      sourceLineItemIds: plan.members.filter((member) => member.treatment !== "exclude")
-        .map((member) => member.sourceLineItemId)
-        .sort((left, right) => itemOrder(snapshot, left) - itemOrder(snapshot, right) || compareText(left, right)),
-    })),
     formulas: formulas.map(({ formula }) => ({ appliesTo: formula.appliesTo,
       periodIds: formula.periodIds === undefined
         ? periodsForClass(snapshot, formula.appliesTo)
@@ -318,34 +303,16 @@ function buildSourceRow(snapshot: FinancialModelSnapshot, id: string, periods = 
   return { sourceLineItemId: id, label: item.label, unit: structuredClone(item.unit), cells: buildCells(snapshot, id, periods) };
 }
 
-function buildSourceReview(snapshot: FinancialModelSnapshot, limitToException: boolean): SourceStatementReviewView {
-  const exceptionIds = new Set(limitToException ? snapshot.mappingException?.sourceLineItemIds ?? [] : []);
-  const exceptionPeriods = new Set(limitToException ? snapshot.mappingException?.periodIds ?? [] : []);
-  const displayedPeriods = limitToException
-    ? snapshot.periods.filter((period) => exceptionPeriods.has(period.id))
-    : snapshot.periods;
-  const sheet = (section: string) => orderedItems(snapshot).filter((row) =>
-    row.section === section && (!limitToException || exceptionIds.has(row.id)))
-    .map((row) => buildSourceRow(snapshot, row.id, displayedPeriods));
+function buildSourceReview(snapshot: FinancialModelSnapshot): SourceStatementReviewView {
+  const sheet = (section: string) => orderedItems(snapshot)
+    .filter((row) => row.section === section)
+    .map((row) => buildSourceRow(snapshot, row.id, snapshot.periods));
   return {
-    selectedPeriodIds: limitToException
-      ? orderedPeriodIds(snapshot, snapshot.mappingException?.periodIds ?? [])
-      : orderedPeriodIds(snapshot, snapshot.selectedHistoricalPeriodIds),
+    selectedPeriodIds: orderedPeriodIds(snapshot, snapshot.selectedHistoricalPeriodIds),
     sheets: {
       income_statement: sheet("source_income_statement"), balance_sheet: sheet("source_balance_sheet"),
       cash_flow_statement: sheet("source_cash_flow"),
     },
-    activeMappings: structuredClone(snapshot.statementMappingPlans
-      .filter((plan) => !limitToException
-        || plan.members.some((member) => exceptionIds.has(member.sourceLineItemId)))
-      .sort((left, right) => firstPeriodPosition(snapshot, left.periodIds) - firstPeriodPosition(snapshot, right.periodIds)
-        || compareText(left.targetLineItemId, right.targetLineItemId))),
-    proposedMappings: structuredClone(snapshot.proposedStatementMappings
-      .filter((plan) => !limitToException
-        || plan.members.some((member) => exceptionIds.has(member.sourceLineItemId)))
-      .sort((left, right) => firstPeriodPosition(snapshot, left.periodIds) - firstPeriodPosition(snapshot, right.periodIds)
-        || compareText(left.targetLineItemId, right.targetLineItemId))),
-    diagnostics: structuredClone(snapshot.mappingDiagnostics),
     reconciliations: structuredClone(snapshot.reconciliationResults),
   };
 }
@@ -438,10 +405,10 @@ function validateSummary(summary: RevisionChangeSummary, snapshot: FinancialMode
     queryError("malformed revision change summary");
   }
   const validKinds = new Set([
-    "model_created", "statements_staged", "facts_staged", "facts_reviewed",
+    "model_created", "statements_staged",
     "fact_replaced", "assumption_set",
     "line_item_source_set", "line_item_added", "metric_added", "formula_set",
-    "statement_mapping_plan_set", "category_group_set", "valuation_config_set",
+    "category_group_set", "valuation_config_set",
     "stage_advanced", "archived", "wacc_sheet_refreshed", "wacc_input_set",
   ]);
   const sections = [
@@ -532,16 +499,6 @@ function validateChange(change: RevisionChange, snapshot: FinancialModelSnapshot
         || !validLineArray(change.mappedLineItemIds)
         || !validPeriodArray(change.periodIds)) queryError("malformed statements_staged change");
       return;
-    case "facts_staged":
-      if (!nonNegativeInteger(change.candidateCount)
-        || !validLineArray(change.mappedLineItemIds)
-        || !validPeriodArray(change.periodIds)) queryError("malformed facts_staged change");
-      return;
-    case "facts_reviewed":
-      if (![change.committed, change.rejected, change.superseded].every(nonNegativeInteger)
-        || !validLineArray(change.lineItemIds)
-        || !validPeriodArray(change.periodIds)) queryError("malformed facts_reviewed change");
-      return;
     case "fact_replaced":
       if (!validLine(change.lineItemId) || !validPeriod(change.periodId)) queryError("malformed fact_replaced change");
       return;
@@ -568,11 +525,6 @@ function validateChange(change: RevisionChange, snapshot: FinancialModelSnapshot
       if (!validLine(change.lineItemId)
         || !new Set(["historical", "forecast"]).has(change.appliesTo)
         || !validPeriodArray(change.periodIds)) queryError("malformed formula_set change");
-      return;
-    case "statement_mapping_plan_set":
-      if (!validLine(change.targetLineItemId) || !validPeriodArray(change.periodIds)) {
-        queryError("malformed statement_mapping_plan_set change");
-      }
       return;
     case "category_group_set":
       if (!validLine(change.parentLineItemId)

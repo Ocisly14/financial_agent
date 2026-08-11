@@ -5,12 +5,12 @@ import { evaluate, ENGINE_VERSION } from "../engine.ts";
 import { FinancialModelError } from "../errors.ts";
 import { installDefaultMetrics } from "../metrics.ts";
 import type { FinancialModelSnapshot } from "../operations.ts";
-import { addSourceStatementRows, applyStatementMappingPlans, createSkeleton } from "../skeleton.ts";
+import { addSourceStatementRows, createSkeleton } from "../skeleton.ts";
 import type { ModelView, Revision, RevisionHeader } from "../store.ts";
 import {
   buildModelContextView, buildWorkbookSlice, buildWorkbookView, type RevisionChangeSummary,
 } from "../views.ts";
-import type { Period, ValuationConfig } from "../types.ts";
+import type { Fact, Period, ValuationConfig } from "../types.ts";
 
 const periods: Period[] = [
   { id: "FY2024", label: "FY2024", start: "2024-01-01", end: "2024-12-31", cls: "actual" },
@@ -27,22 +27,22 @@ function snapshot(mapped = false): FinancialModelSnapshot {
     sourceLineItemId: "source.income_statement.revenue", statement: "income_statement",
     label: "Revenue", unit: { kind: "currency", code: "USD" }, order: 1,
   }]);
-  const plans = [{
-    targetLineItemId: "revenue.total", periodIds: ["FY2024"],
-    members: [{ sourceLineItemId: "source.income_statement.revenue", treatment: "add" as const }],
-    reviewDecisionId: "mapping-1",
-  }];
-  if (mapped) skeleton = applyStatementMappingPlans(skeleton, plans);
+  // "Mapped" now means spine_mapping committed canonical facts — there are no mapping plans.
+  const spineFacts = mapped ? [{
+    factId: "spine-revenue", status: "committed" as const, lineItemId: "revenue.total", periodId: "FY2024",
+    value: 100, unit: { kind: "currency", code: "USD" },
+    provenance: { sourceType: "unified_statements", sourceRefs: ["unified.revenue.total"], asOfDate: "2025-01-01" },
+  }] satisfies Fact[] : [];
   skeleton = installDefaultMetrics(skeleton, periods);
-  const output = evaluate({ periods, lineItems: skeleton.lineItems, facts: [], assumptions: [],
+  const output = evaluate({ periods, lineItems: skeleton.lineItems, facts: spineFacts, assumptions: [],
     formulas: skeleton.formulas, valuationConfig });
   return {
     lifecycleStage: mapped ? "history_committed" : "draft", periods: structuredClone(periods),
-    lineItems: skeleton.lineItems, facts: [], factReviewDecisions: [], assumptions: [], formulas: skeleton.formulas,
+    lineItems: skeleton.lineItems, facts: spineFacts, factReviewDecisions: [], assumptions: [], formulas: skeleton.formulas,
     compiledFormulas: skeleton.formulas.map((formula) => ({ ...formula, ast: parseFormula(formula.source) })),
-    selectedHistoricalPeriodIds: mapped ? ["FY2024"] : [], statementMappingPlans: mapped ? plans : [],
-    categoryGroups: [], proposedStatementMappings: [],
-    valuationConfig, cells: output.cells, diagnostics: [], mappingDiagnostics: [], reconciliationResults: [], mappingException: null,
+    selectedHistoricalPeriodIds: mapped ? ["FY2024"] : [],
+    categoryGroups: [],
+    valuationConfig, cells: output.cells, diagnostics: [], reconciliationResults: [],
     valuation: null, waccSheet: null, engineVersion: ENGINE_VERSION,
   };
 }
@@ -96,8 +96,8 @@ test("model context accepts prepared-statement and fact-review revision summarie
     blockerCount: 0,
   };
   fixture.current.changeSummary = {
-    changes: [{ kind: "facts_reviewed", committed: 1, rejected: 0, superseded: 0,
-      lineItemIds: ["source.income_statement.revenue"], periodIds: ["FY2024"] }],
+    changes: [{ kind: "statements_staged", rowCount: 1, candidateCount: 1,
+      mappedLineItemIds: ["source.income_statement.revenue"], periodIds: ["FY2024"] }],
     changedSections: ["history"],
     warningCount: 0,
     blockerCount: 0,
@@ -107,12 +107,12 @@ test("model context accepts prepared-statement and fact-review revision summarie
   assert.doesNotThrow(() => buildModelContextView(fixture.meta, fixture.headers, fixture.current));
 });
 
-test("after history mapping the default workbook is DCF-only with compact mapping refs", () => {
+test("once the spine is committed the default workbook is DCF-only", () => {
   const view = buildWorkbookView("m", 1, snapshot(true));
   assert.equal(view.mode, "dcf");
   assert.equal("sourceStatementReview" in view, false);
   const revenue = view.sections.revenue.find((row) => row.lineItemId === "revenue.total")!;
-  assert.deepEqual(revenue.mappingRefs, [{ periodIds: ["FY2024"], sourceLineItemIds: ["source.income_statement.revenue"] }]);
+  assert.equal(revenue.cells["FY2024"]?.value, 100);
 });
 
 test("not-modeled cells remain distinct from modeled missing inputs", () => {
@@ -173,9 +173,11 @@ test("active formulas and assumptions appear once at row level while ASTs stay o
     sourceType: "user", sourceRefs: ["input"], asOfDate: "2025-01-01", rationale: "Test WACC",
   });
   const view = buildWorkbookView("m", 1, model);
-  const revenue = view.sections.revenue.find((row) => row.lineItemId === "revenue.total")!;
+  // revenue.total is fact-driven off the committed spine, so read the formula count from a row the
+  // default skeleton actually drives historically.
+  const fcff = view.sections.dcf.find((row) => row.lineItemId === "fcff")!;
   const wacc = view.sections.dcf.find((row) => row.lineItemId === "wacc")!;
-  assert.equal(revenue.formulas.filter((formula) => formula.appliesTo === "historical").length, 1);
+  assert.equal(fcff.formulas.filter((formula) => formula.appliesTo === "historical").length, 1);
   assert.deepEqual(wacc.assumptions.map((entry) => entry.assumptionId), ["wacc-1"]);
   const json = JSON.stringify(view);
   assert.equal(json.includes("compiledFormulas"), false);
@@ -205,26 +207,6 @@ test("cell projection distinguishes divide-by-zero and N/A and retains N/A assum
   assert.equal(margin.cells.FY2024?.status, "divide_by_zero");
 });
 
-test("mapping exceptions reopen only affected source rows and periods", () => {
-  const model = snapshot(true);
-  model.lineItems.push({
-    id: "source.balance_sheet.cash", label: "Cash", role: "none",
-    unit: { kind: "currency", code: "USD" }, section: "source_balance_sheet", order: 2,
-    historical: "actual", forecast: "none",
-  });
-  model.mappingException = {
-    reason: "restatement",
-    sourceLineItemIds: ["source.income_statement.revenue"],
-    periodIds: ["FY2024"],
-  };
-  const view = buildWorkbookView("m", 2, model);
-  assert.equal(view.mode, "statement_mapping");
-  assert.equal(view.sourceStatementReview.sheets.income_statement.length, 1);
-  assert.equal(view.sourceStatementReview.sheets.balance_sheet.length, 0);
-  assert.deepEqual(Object.keys(view.sourceStatementReview.sheets.income_statement[0]!.cells), ["FY2024"]);
-  assert.deepEqual(view.sourceStatementReview.selectedPeriodIds, ["FY2024"]);
-});
-
 test("explicit lineage slices expand only records for selected coordinates", () => {
   const model = snapshot(true);
   model.facts.push(
@@ -243,7 +225,6 @@ test("explicit lineage slices expand only records for selected coordinates", () 
     cellRefs: [{ lineItemId: "source.income_statement.revenue", periodId: "FY2024" }],
   }, true);
   assert.deepEqual(view.lineage?.facts.map((fact) => fact.factId), ["selected"]);
-  assert.deepEqual(view.lineage?.statementMappingPlans.map((plan) => plan.targetLineItemId), ["revenue.total"]);
 });
 
 test("model context contains prior summaries and exactly one current workbook", () => {
@@ -259,7 +240,7 @@ test("model context contains prior summaries and exactly one current workbook", 
 test("model context rejects malformed summaries and inconsistent current headers", () => {
   const malformed = contextFixture();
   malformed.headers[0]!.changeSummary = {
-    changes: [{ kind: "facts_staged" } as never],
+    changes: [{ kind: "statements_staged" } as never],
     changedSections: ["history"], warningCount: 0, blockerCount: 0,
   };
   assert.throws(() => buildModelContextView(malformed.meta, malformed.headers, malformed.current), FinancialModelError);

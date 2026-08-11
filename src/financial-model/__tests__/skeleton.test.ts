@@ -6,7 +6,6 @@ import {
   addRevenueStream,
   addSourceStatementRows,
   applyDcfCategoryGroups,
-  applyStatementMappingPlans,
   createSkeleton,
   validateRoleCardinality,
   type Skeleton,
@@ -151,25 +150,6 @@ test("adding a revenue stream creates its value and growth rows atomically", () 
   invalidFormula(() => addRevenueStream(base, { id: "Not-Semantic", label: "Bad" }));
 });
 
-test("a reviewed statement plan maps several source categories into one canonical DCF row", () => {
-  const withSources = addSourceStatementRows(createSkeleton({ currency: "USD", periods: PERIODS }), [
-    { sourceLineItemId: "source.income_statement.r_and_d", label: "Research and development", statement: "income_statement", unit: USD, order: 1 },
-    { sourceLineItemId: "source.income_statement.sga", label: "Selling, general and administrative", statement: "income_statement", unit: USD, order: 2 },
-  ]);
-  const mapped = applyStatementMappingPlans(withSources, [{
-    targetLineItemId: "operating_expenses",
-    periodIds: ["FY2024", "FY2025"],
-    members: [
-      { sourceLineItemId: "source.income_statement.r_and_d", treatment: "add" },
-      { sourceLineItemId: "source.income_statement.sga", treatment: "add" },
-    ],
-    reviewDecisionId: "review-map-1",
-  }]);
-  assertFormula(mapped, "operating_expenses", "historical",
-    "source.income_statement.r_and_d + source.income_statement.sga", ["FY2024", "FY2025"]);
-  assert.equal(byId(mapped, "operating_expenses").historical, "formula");
-});
-
 test("rejects duplicate fixed roles", () => {
   const disclosures = withDisclosures();
   const duplicateRole = {
@@ -279,38 +259,3 @@ test("forecast category ambiguity, source rows, incompatible units, duplicates, 
   }]));
 });
 
-test("statement mappings may target Agent-created DCF detail rows", () => {
-  let skeleton = createSkeleton({ currency: "USD", periods: PERIODS });
-  skeleton = addDcfDetailLineItem(skeleton, {
-    parentLineItemId: "cost_of_revenue",
-    id: "hosting",
-    label: "Hosting costs",
-  });
-  skeleton = addSourceStatementRows(skeleton, [{
-    sourceLineItemId: "source.income_statement.hosting", statement: "income_statement",
-    label: "Hosting", unit: USD, order: 1,
-  }]);
-  const mapped = applyStatementMappingPlans(skeleton, [{
-    targetLineItemId: "cost_of_revenue.hosting", periodIds: ["FY2024", "FY2025"],
-    members: [{ sourceLineItemId: "source.income_statement.hosting", treatment: "add" }],
-    reviewDecisionId: "map-hosting",
-  }]);
-  assertFormula(mapped, "cost_of_revenue.hosting", "historical",
-    "source.income_statement.hosting", ["FY2024", "FY2025"]);
-});
-
-test("statement mappings may target Agent-created revenue stream value rows", () => {
-  let skeleton = createSkeleton({ currency: "USD", periods: PERIODS });
-  skeleton = addRevenueStream(skeleton, { id: "services", label: "Services" });
-  skeleton = addSourceStatementRows(skeleton, [{
-    sourceLineItemId: "source.income_statement.services", statement: "income_statement",
-    label: "Services revenue", unit: USD, order: 1,
-  }]);
-  const mapped = applyStatementMappingPlans(skeleton, [{
-    targetLineItemId: "revenue.services", periodIds: ["FY2024", "FY2025"],
-    members: [{ sourceLineItemId: "source.income_statement.services", treatment: "add" }],
-    reviewDecisionId: "map-services",
-  }]);
-  assertFormula(mapped, "revenue.services", "historical",
-    "source.income_statement.services", ["FY2024", "FY2025"]);
-});

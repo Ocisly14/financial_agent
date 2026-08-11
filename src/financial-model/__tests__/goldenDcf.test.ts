@@ -9,8 +9,7 @@ import { FinancialModelService } from "../service.ts";
 import { financialModelSnapshotCodec } from "../snapshotCodec.ts";
 import { SqliteModelStore, type SnapshotCodec } from "../store.ts";
 import type {
-  Assumption, Fact, FactReviewDecision, Period, PreparedStatementRow, StatementMappingPlan,
-  DcfCategoryGroup, Unit, ValuationConfig,
+  Assumption, Fact, Period, PreparedStatementRow, Unit, ValuationConfig,
 } from "../types.ts";
 import type { WaccSheetComputedInput } from "../waccSheet.ts";
 import type { RevisionChangeSummary, WorkbookRowView } from "../views.ts";
@@ -110,31 +109,35 @@ test("golden service workflow maps statements once and produces a deterministic 
   );
   const service = new FinancialModelService(store, "golden-session");
 
+  // The three revisions the production path actually walks: a value-free model, the filing import
+  // (source rows plus their staged evidence facts), then spine_mapping's canonical facts committed
+  // straight onto the spine — no review ceremony in between.
   const created = service.createModel({
     modelId: "golden-dcf", ownerAgentId: "agent", originSessionId: "golden-session",
     symbol: "GOLD", metadata: { companyName: "Golden Co" }, reportingCurrency: "USD",
-    periods: PERIODS, preparedStatementRows: SOURCES.map(({ values: _values, ...row }) => row),
+    periods: PERIODS, preparedStatementRows: [],
   });
   assert.equal(created.revision, 0);
-  assert.equal(created.currentWorkbook.mode, "statement_mapping");
 
-  const facts = buildFacts();
-  assert.equal(service.stageFacts("golden-dcf", 0, facts).revision, 1);
-  const reviewed = service.reviewFacts("golden-dcf", 1, {
-    decisions: facts.map(commitDecision), selectedHistoricalPeriodIds: ACTUALS,
-    categoryLineItems: [],
-    statementMappingPlans: mappingPlans(),
-    categoryGroups: [workingCapitalGroup()],
+  const imported = service.stagePreparedStatements(
+    "golden-dcf", 0, SOURCES.map(({ values: _values, ...row }) => row), buildFacts(),
+  );
+  assert.equal(imported.revision, 1);
+  assert.equal(imported.currentWorkbook.mode, "statement_mapping");
+
+  const reviewed = service.commitSpineFacts("golden-dcf", 1, {
+    facts: buildSpineFacts(), historicalPeriodIds: ACTUALS,
   });
   assert.equal(reviewed.revision, 2);
   assert.equal(reviewed.currentWorkbook.mode, "dcf");
   assert.equal("sourceStatementReview" in reviewed.currentWorkbook, false);
 
+  // The filing import stays readable as evidence after the spine commits over it.
   const sourceAudit = service.getModel("golden-dcf", { section: "source_income_statement" });
   assert.ok("rows" in sourceAudit);
   assert.equal(sourceAudit.rows.length, 10);
 
-  // Lifecycle is derived: committing the reviewed history alone reads as history_committed.
+  // Lifecycle is derived: committing the spine alone reads as history_committed.
   assert.equal(reviewed.status, "history_committed");
 
   const revenueResult = service.applyOperations("golden-dcf", 2, [
@@ -283,56 +286,47 @@ function buildFacts(): Fact[] {
   })));
 }
 
-function commitDecision(fact: Fact): FactReviewDecision {
-  return { decisionId: `commit:${fact.factId}`, factId: fact.factId, action: "commit",
-    mappedLineItemId: fact.lineItemId!, rationale: "Reviewed golden source fact", reviewedBy: "golden-agent",
-    reviewedAt: "2024-02-02T00:00:00.000Z" };
-}
+/** What spine_mapping produces for this fixture: canonical spine targets fed by the same filing rows
+ *  the source statements carry, so every golden number stays single-sourced in SOURCES. A target with
+ *  no periodIds covers all three actuals; the bridge rows are point-in-time at FY2023. The operating
+ *  working-capital identity is not listed — commitSpineFacts installs it. */
+const SPINE: { target: string; parts: [PreparedStatementRow["statement"], string][]; periodIds?: string[]; unit?: Unit }[] = [
+  { target: "revenue.total", parts: [["income_statement", "revenue"]] },
+  { target: "cost_of_revenue", parts: [["income_statement", "cost_of_revenue"]] },
+  { target: "gross_profit", parts: [["income_statement", "gross_profit"]] },
+  { target: "operating_income", parts: [["income_statement", "operating_income"]] },
+  { target: "depreciation_amortization", parts: [["income_statement", "da"]] },
+  { target: "pretax_income", parts: [["income_statement", "pretax"]] },
+  { target: "income_tax_expense", parts: [["income_statement", "tax"]] },
+  { target: "net_income", parts: [["income_statement", "net_income"]] },
+  { target: "operating_expenses", parts: [["income_statement", "rd"], ["income_statement", "sga"]] },
+  { target: "capital_expenditures", parts: [["cash_flow_statement", "capex"]] },
+  { target: "accounts_receivable", parts: [["balance_sheet", "ar"]] },
+  { target: "inventory", parts: [["balance_sheet", "inventory"]] },
+  { target: "accounts_payable", parts: [["balance_sheet", "ap"]] },
+  { target: "total_assets", parts: [["balance_sheet", "assets"]] },
+  { target: "shareholders_equity", parts: [["balance_sheet", "equity"]] },
+  { target: "cash_and_equivalents", parts: [["balance_sheet", "cash"]] },
+  { target: "short_term_investments", parts: [["balance_sheet", "sti"]] },
+  { target: "debt", parts: [["balance_sheet", "debt"]] },
+  { target: "cash_available_for_bridge", parts: [["balance_sheet", "cash"]], periodIds: ["FY2023"] },
+  { target: "non_operating_investments", parts: [["balance_sheet", "sti"]], periodIds: ["FY2023"] },
+  { target: "diluted_shares", parts: [["balance_sheet", "shares"]], periodIds: ["FY2023"], unit: SHARES },
+];
 
-function mappingPlans(): StatementMappingPlan[] {
-  const one = (targetLineItemId: string, sourceId: string, periodIds = ACTUALS): StatementMappingPlan => ({
-    targetLineItemId, periodIds: [...periodIds],
-    members: [{ sourceLineItemId: sourceId, treatment: "add" }], reviewDecisionId: `map:${targetLineItemId}`,
-  });
-  const id = (statement: PreparedStatementRow["statement"], slug: string) => `source.${statement}.${slug}`;
-  return [
-    one("revenue.total", id("income_statement", "revenue")),
-    one("cost_of_revenue", id("income_statement", "cost_of_revenue")),
-    one("gross_profit", id("income_statement", "gross_profit")),
-    one("operating_income", id("income_statement", "operating_income")),
-    one("depreciation_amortization", id("income_statement", "da")),
-    one("pretax_income", id("income_statement", "pretax")),
-    one("income_tax_expense", id("income_statement", "tax")),
-    one("net_income", id("income_statement", "net_income")),
-    { targetLineItemId: "operating_expenses", periodIds: [...ACTUALS], reviewDecisionId: "map:operating_expenses",
-      members: [
-        { sourceLineItemId: id("income_statement", "rd"), treatment: "add" },
-        { sourceLineItemId: id("income_statement", "sga"), treatment: "add" },
-      ] },
-    one("capital_expenditures", id("cash_flow_statement", "capex")),
-    one("accounts_receivable", id("balance_sheet", "ar")),
-    one("inventory", id("balance_sheet", "inventory")),
-    one("accounts_payable", id("balance_sheet", "ap")),
-    one("total_assets", id("balance_sheet", "assets")),
-    one("shareholders_equity", id("balance_sheet", "equity")),
-    one("cash_and_equivalents", id("balance_sheet", "cash")),
-    one("short_term_investments", id("balance_sheet", "sti")),
-    one("debt", id("balance_sheet", "debt")),
-    one("cash_available_for_bridge", id("balance_sheet", "cash"), ["FY2023"]),
-    one("non_operating_investments", id("balance_sheet", "sti"), ["FY2023"]),
-    one("diluted_shares", id("balance_sheet", "shares"), ["FY2023"]),
-  ];
-}
-
-function workingCapitalGroup(): DcfCategoryGroup {
-  return { parentLineItemId: "operating_working_capital", category: "经营性营运资本",
-    periodIds: [...ACTUALS], reviewDecisionId: "wc-review", members: [
-    { lineItemId: "accounts_receivable", treatment: "add" },
-    { lineItemId: "inventory", treatment: "add" },
-    { lineItemId: "accounts_payable", treatment: "subtract" },
-    { lineItemId: "cash_and_equivalents", treatment: "exclude" },
-    { lineItemId: "debt", treatment: "exclude" },
-  ] };
+function buildSpineFacts(): Fact[] {
+  const sourceValues = (statement: PreparedStatementRow["statement"], slug: string): number[] =>
+    SOURCES.find((definition) => definition.sourceLineItemId === `source.${statement}.${slug}`)!.values;
+  return SPINE.flatMap((entry) => (entry.periodIds ?? ACTUALS).map((periodId) => {
+    const index = ACTUALS.indexOf(periodId);
+    return {
+      factId: `${entry.target}@${periodId}`, status: "staged" as const,
+      lineItemId: entry.target, periodId,
+      value: entry.parts.reduce((sum, [statement, slug]) => sum + sourceValues(statement, slug)[index]!, 0),
+      unit: entry.unit ?? USD,
+      provenance: { sourceType: "unified_statements", sourceRefs: [`unified.${entry.target}`], asOfDate: "2024-02-01" },
+    };
+  }));
 }
 
 function setAssumption(lineItemId: string, periods: string[], values: number[]): ModelOperation {

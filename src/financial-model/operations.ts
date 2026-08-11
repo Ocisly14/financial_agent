@@ -5,7 +5,6 @@ import {
   addDcfDetailLineItem,
   addRevenueStream,
   applyDcfCategoryGroups,
-  applyStatementMappingPlans,
   type Skeleton,
 } from "./skeleton.ts";
 import { validateValuationConfig, type ValuationOutput } from "./valuation.ts";
@@ -28,7 +27,6 @@ import type {
   Period,
   PeriodClass,
   ReconciliationResult,
-  StatementMappingPlan,
   Unit,
   ValuationConfig,
 } from "./types.ts";
@@ -81,7 +79,6 @@ export type ModelOperation =
   | { kind: "import_source_row"; row: ImportedSourceRow }
   | { kind: "add_metric"; metric: MetricRequest }
   | { kind: "set_formula"; formula: Formula }
-  | { kind: "set_statement_mapping_plan"; plan: StatementMappingPlan }
   | { kind: "set_category_group"; group: DcfCategoryGroup }
   | { kind: "set_valuation_config"; config: ValuationConfig }
   | { kind: "set_wacc_input"; input: SetWaccInputOperation };
@@ -112,11 +109,6 @@ export type ImportedSourceRow = {
 
 export type CompiledFormula = Formula & { ast: Ast };
 
-export type MappingException = {
-  reason: "unmapped" | "restatement" | "structure_change" | "reconciliation" | "low_confidence";
-  sourceLineItemIds: string[];
-  periodIds: string[];
-};
 
 export type FinancialModelSnapshot = {
   /** Immutable revision link; insight bodies are stored outside this snapshot. */
@@ -130,15 +122,11 @@ export type FinancialModelSnapshot = {
   formulas: Formula[];
   compiledFormulas: CompiledFormula[];
   selectedHistoricalPeriodIds: string[];
-  statementMappingPlans: StatementMappingPlan[];
   categoryGroups: DcfCategoryGroup[];
-  proposedStatementMappings: Array<Omit<StatementMappingPlan, "reviewDecisionId">>;
   valuationConfig: ValuationConfig;
   cells: Map<CellKey, Cell>;
   diagnostics: Diagnostic[];
-  mappingDiagnostics: Diagnostic[];
   reconciliationResults: ReconciliationResult[];
-  mappingException: MappingException | null;
   valuation: ValuationOutput | null;
   waccSheet: WaccSheet | null;
   engineVersion: string;
@@ -574,16 +562,6 @@ export function applyModelOperations(
         next.formulas = subtractFormulaCoverage(next, operation.formula);
         next.formulas.push(structuredClone(operation.formula));
         break;
-      case "set_statement_mapping_plan": {
-        const compiled = applyStatementMappingPlans(skeletonOf(next), [operation.plan]);
-        acceptSkeleton(next, compiled);
-        next.statementMappingPlans = replacePlan(
-          next.statementMappingPlans,
-          operation.plan,
-          (left, right) => left.targetLineItemId === right.targetLineItemId,
-        );
-        break;
-      }
       case "set_category_group": {
         const group = normalizeCategoryGroup(next, operation.group);
         const groups = replaceCategoryGroup(next, group);

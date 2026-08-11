@@ -6,7 +6,6 @@ import type { Formula } from "./engine.ts";
 import type {
   CompiledFormula,
   FinancialModelSnapshot,
-  MappingException,
 } from "./operations.ts";
 import { buildGrid } from "./periodGrid.ts";
 import type { SnapshotCodec } from "./store.ts";
@@ -29,7 +28,6 @@ import type {
   PeriodClass,
   Provenance,
   ReconciliationResult,
-  StatementMappingPlan,
   Unit,
   ValuationConfig,
 } from "./types.ts";
@@ -63,15 +61,11 @@ const SNAPSHOT_FIELDS = [
   "formulas",
   "compiledFormulas",
   "selectedHistoricalPeriodIds",
-  "statementMappingPlans",
   "categoryGroups",
-  "proposedStatementMappings",
   "valuationConfig",
   "cells",
   "diagnostics",
-  "mappingDiagnostics",
   "reconciliationResults",
-  "mappingException",
   "valuation",
   "engineVersion",
 ] as const;
@@ -236,24 +230,12 @@ function normalizeSnapshot(
     "$.selectedHistoricalPeriodIds",
     (period) => period.cls !== "forecast",
   );
-  const statementMappingPlans = array(
-    root.statementMappingPlans,
-    "$.statementMappingPlans",
-    (entry, path) => normalizeStatementMappingPlan(entry, path, true),
-  );
   const categoryGroups = array(
     root.categoryGroups,
     "$.categoryGroups",
     normalizeDcfCategoryGroup,
   );
-  const proposedStatementMappings = array(
-    root.proposedStatementMappings,
-    "$.proposedStatementMappings",
-    (entry, path) => normalizeStatementMappingPlan(entry, path, false),
-  );
   validatePlans(
-    statementMappingPlans,
-    proposedStatementMappings,
     categoryGroups,
     itemById,
     periodById,
@@ -272,23 +254,12 @@ function normalizeSnapshot(
 
   const cells = normalizeCells(root.cells, representation, periods, lineItems, periodById, itemById);
   const diagnostics = array(root.diagnostics, "$.diagnostics", normalizeDiagnostic);
-  const mappingDiagnostics = array(
-    root.mappingDiagnostics,
-    "$.mappingDiagnostics",
-    normalizeDiagnostic,
-  );
   const reconciliationResults = array(
     root.reconciliationResults,
     "$.reconciliationResults",
     normalizeReconciliationResult,
   );
   validateReconciliationResults(reconciliationResults, itemById, periodById);
-  const mappingException = root.mappingException === null
-    ? null
-    : normalizeMappingException(root.mappingException, "$.mappingException");
-  if (mappingException !== null) {
-    validateMappingException(mappingException, itemById, periodById);
-  }
   const valuation = root.valuation === null
     ? null
     : normalizeValuationOutput(root.valuation, "$.valuation", itemById, periodById);
@@ -314,15 +285,11 @@ function normalizeSnapshot(
     formulas,
     compiledFormulas,
     selectedHistoricalPeriodIds,
-    statementMappingPlans,
     categoryGroups,
-    proposedStatementMappings,
     valuationConfig,
     cells,
     diagnostics,
-    mappingDiagnostics,
     reconciliationResults,
-    mappingException,
     valuation,
     waccSheet,
     engineVersion: nonemptyString(root.engineVersion, "$.engineVersion"),
@@ -341,15 +308,11 @@ function toWireSnapshot(snapshot: FinancialModelSnapshot): PlainObject {
     formulas: snapshot.formulas,
     compiledFormulas: snapshot.compiledFormulas,
     selectedHistoricalPeriodIds: snapshot.selectedHistoricalPeriodIds,
-    statementMappingPlans: snapshot.statementMappingPlans,
     categoryGroups: snapshot.categoryGroups,
-    proposedStatementMappings: snapshot.proposedStatementMappings,
     valuationConfig: snapshot.valuationConfig,
     cells: [...snapshot.cells].map(([key, cellValue]) => ({ key, cell: cellValue })),
     diagnostics: snapshot.diagnostics,
-    mappingDiagnostics: snapshot.mappingDiagnostics,
     reconciliationResults: snapshot.reconciliationResults,
-    mappingException: snapshot.mappingException,
     valuation: snapshot.valuation,
     waccSheet: snapshot.waccSheet,
     engineVersion: snapshot.engineVersion,
@@ -631,61 +594,6 @@ function normalizeCompiledFormula(value: unknown, path: string): CompiledFormula
   return { ...formula, ast };
 }
 
-function normalizeStatementMappingPlan(
-  value: unknown,
-  path: string,
-  reviewed: true,
-): StatementMappingPlan;
-function normalizeStatementMappingPlan(
-  value: unknown,
-  path: string,
-  reviewed: false,
-): Omit<StatementMappingPlan, "reviewDecisionId">;
-function normalizeStatementMappingPlan(
-  value: unknown,
-  path: string,
-  reviewed: boolean,
-): StatementMappingPlan | Omit<StatementMappingPlan, "reviewDecisionId"> {
-  const required = reviewed
-    ? ["targetLineItemId", "periodIds", "members", "reviewDecisionId"] as const
-    : ["targetLineItemId", "periodIds", "members"] as const;
-  const object = exactObject(value, path, required);
-  const base = {
-    targetLineItemId: nonemptyString(
-      object.targetLineItemId,
-      `${path}.targetLineItemId`,
-    ),
-    periodIds: stringArray(object.periodIds, `${path}.periodIds`),
-    members: array(object.members, `${path}.members`, (entry, memberPath) => {
-      const member = exactObject(
-        entry,
-        memberPath,
-        ["sourceLineItemId", "treatment"],
-      );
-      return {
-        sourceLineItemId: nonemptyString(
-          member.sourceLineItemId,
-          `${memberPath}.sourceLineItemId`,
-        ),
-        treatment: enumValue(
-          member.treatment,
-          `${memberPath}.treatment`,
-          ["add", "subtract", "exclude"],
-        ),
-      };
-    }),
-  };
-  return reviewed
-    ? {
-        ...base,
-        reviewDecisionId: nonemptyString(
-          object.reviewDecisionId,
-          `${path}.reviewDecisionId`,
-        ),
-      }
-    : base;
-}
-
 function normalizeDcfCategoryGroup(value: unknown, path: string): DcfCategoryGroup {
   const object = exactObject(value, path, [
     "parentLineItemId",
@@ -798,8 +706,17 @@ function normalizeReconciliationResult(value: unknown, path: string): Reconcilia
     "residual", "difference", "tolerance", "refs", "parentLineItemId",
   ] as const;
   const object = kind === "category"
-    ? exactObject(value, path, [...sharedFields, "category", "reviewDecisionId"])
-    : exactObject(value, path, [...sharedFields, "identity"]);
+    ? exactObject(value, path, [...sharedFields, "category", "reviewDecisionId"], ["unifiedTrail"])
+    : exactObject(value, path, [...sharedFields, "identity"], ["unifiedTrail"]);
+  const unifiedTrail = hasOwn(object, "unifiedTrail")
+    ? array(object.unifiedTrail, `${path}.unifiedTrail`, (entry, entryPath) => {
+      const step = exactObject(entry, entryPath, ["lineItemId", "rowIds"]);
+      return {
+        lineItemId: nonemptyString(step.lineItemId, `${entryPath}.lineItemId`),
+        rowIds: stringArray(step.rowIds, `${entryPath}.rowIds`),
+      };
+    })
+    : undefined;
   const common = {
     ruleId: nonemptyString(object.ruleId, `${path}.ruleId`),
     periodId: nonemptyString(object.periodId, `${path}.periodId`),
@@ -816,6 +733,7 @@ function normalizeReconciliationResult(value: unknown, path: string): Reconcilia
     tolerance: finiteNumber(object.tolerance, `${path}.tolerance`),
     refs: stringArray(object.refs, `${path}.refs`),
     parentLineItemId: nonemptyString(object.parentLineItemId, `${path}.parentLineItemId`),
+    ...(unifiedTrail === undefined ? {} : { unifiedTrail }),
   };
   if (kind === "category") {
     return {
@@ -915,26 +833,6 @@ function normalizeCells(
     return lineItem !== 0 ? lineItem : compareText(left.key, right.key);
   });
   return new Map(entries.map((entry) => [entry.key, entry.cell]));
-}
-
-function normalizeMappingException(value: unknown, path: string): MappingException {
-  const object = exactObject(
-    value,
-    path,
-    ["reason", "sourceLineItemIds", "periodIds"],
-  );
-  return {
-    reason: enumValue(
-      object.reason,
-      `${path}.reason`,
-      ["unmapped", "restatement", "structure_change", "reconciliation", "low_confidence"],
-    ),
-    sourceLineItemIds: stringArray(
-      object.sourceLineItemIds,
-      `${path}.sourceLineItemIds`,
-    ),
-    periodIds: stringArray(object.periodIds, `${path}.periodIds`),
-  };
 }
 
 function normalizeExplicitPeriodValue(
@@ -1438,24 +1336,10 @@ function formulaIdentity(formula: Formula): string {
 }
 
 function validatePlans(
-  statements: readonly StatementMappingPlan[],
-  proposed: readonly Omit<StatementMappingPlan, "reviewDecisionId">[],
   categoryGroups: readonly DcfCategoryGroup[],
   itemById: ReadonlyMap<string, LineItem>,
   periodById: ReadonlyMap<string, Period>,
 ): void {
-  const statementCoverage = new Set<string>();
-  for (const [index, plan] of statements.entries()) {
-    validateStatementPlan(plan, `$.statementMappingPlans[${index}]`, itemById, periodById);
-    for (const periodId of plan.periodIds) {
-      const key = `${plan.targetLineItemId}\u0000${periodId}`;
-      if (statementCoverage.has(key)) throw invalid("$.statementMappingPlans", `overlapping plan coverage: ${key}`);
-      statementCoverage.add(key);
-    }
-  }
-  for (const [index, plan] of proposed.entries()) {
-    validateStatementPlan(plan, `$.proposedStatementMappings[${index}]`, itemById, periodById);
-  }
   const categoryCoverage = new Set<string>();
   const categoryForecastOwners = new Set<string>();
   for (const [index, group] of categoryGroups.entries()) {
@@ -1486,42 +1370,6 @@ function validatePlans(
   }
 }
 
-function validateStatementPlan(
-  plan: Omit<StatementMappingPlan, "reviewDecisionId">,
-  path: string,
-  itemById: ReadonlyMap<string, LineItem>,
-  periodById: ReadonlyMap<string, Period>,
-): void {
-  requireItem(plan.targetLineItemId, itemById, `${path}.targetLineItemId`);
-  validatePeriodReferences(
-    plan.periodIds,
-    periodById,
-    `${path}.periodIds`,
-    (period) => period.cls === "actual",
-  );
-  uniqueStrings(plan.members.map((member) => member.sourceLineItemId), `${path}.members`);
-  for (const member of plan.members) {
-    const item = requireItem(member.sourceLineItemId, itemById, `${path}.members`);
-    if (!item.section.startsWith("source_")) {
-      throw invalid(path, `statement member is not a source row: ${item.id}`);
-    }
-  }
-}
-
-function validateMappingException(
-  exception: MappingException,
-  itemById: ReadonlyMap<string, LineItem>,
-  periodById: ReadonlyMap<string, Period>,
-): void {
-  validatePeriodReferences(exception.periodIds, periodById, "$.mappingException.periodIds");
-  uniqueStrings(exception.sourceLineItemIds, "$.mappingException.sourceLineItemIds");
-  for (const id of exception.sourceLineItemIds) {
-    const item = requireItem(id, itemById, "$.mappingException.sourceLineItemIds");
-    if (!item.section.startsWith("source_")) {
-      throw invalid("$.mappingException", `mapping exception row is not a source row: ${id}`);
-    }
-  }
-}
 
 function validateReconciliationResults(
   results: readonly ReconciliationResult[],

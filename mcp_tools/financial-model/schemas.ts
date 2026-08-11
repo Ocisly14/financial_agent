@@ -1,6 +1,5 @@
 import type { JsonObject, JsonSchema, JsonValue } from "../../src/framework/types.ts";
 import type { ModelOperation } from "../../src/financial-model/operations.ts";
-import type { ReviewFactsInput } from "../../src/financial-model/service.ts";
 import { WACC_SHEET_ROW_IDS } from "../../src/financial-model/waccSheet.ts";
 
 const string = (description?: string): JsonSchema => ({ type: "string", ...(description ? { description } : {}) });
@@ -13,24 +12,14 @@ const array = (items: JsonSchema): JsonSchema => ({ type: "array", items });
 const HOST_STAMPED = string("Ignored. The host stamps the review time.");
 
 export const unitSchema = object({ kind: { type: "string", enum: ["currency", "percent", "ratio", "shares", "per_share", "number"] }, code: string("Required for currency/per_share") }, ["kind"]);
-const mappingMember = object({ sourceLineItemId: string(), treatment: { type: "string", enum: ["add", "subtract", "exclude"] } }, ["sourceLineItemId", "treatment"]);
 const groupMember = object({ lineItemId: string(), treatment: { type: "string", enum: ["add", "subtract", "exclude"] } }, ["lineItemId", "treatment"]);
-export const reviewInputSchema = object({
-  modelId: string(), expectedRevision: number, selectedHistoricalPeriodIds: strings,
-  decisions: array(object({ decisionId: string(), factId: string(), action: { type: "string", enum: ["commit", "reject", "supersede"] },
-    mappedLineItemId: string(), replacementFactId: string(), rationale: string(), reviewedBy: string(), reviewedAt: HOST_STAMPED },
-  ["decisionId", "factId", "action", "rationale", "reviewedBy"])),
-  categoryLineItems: array(object({ id: string(), label: string(), parentLineItemId: string() }, ["id", "label", "parentLineItemId"])),
-  statementMappingPlans: array(object({ targetLineItemId: string(), periodIds: strings, members: array(mappingMember), reviewDecisionId: string() },
-    ["targetLineItemId", "periodIds", "members", "reviewDecisionId"])),
-  categoryGroups: array(object({ parentLineItemId: string(), category: string(), periodIds: strings, members: array(groupMember), reviewDecisionId: string() },
-    ["parentLineItemId", "category", "periodIds", "members", "reviewDecisionId"])),
-}, ["modelId", "expectedRevision", "selectedHistoricalPeriodIds", "decisions", "categoryLineItems", "statementMappingPlans", "categoryGroups"]);
-
 const provenance = object({ sourceType: string(), sourceRefs: strings, asOfDate: string(), decimals: number, accession: string(), concept: string(), filingUrl: string() },
   ["sourceType", "sourceRefs", "asOfDate"]);
 const fact = object({ factId: string(), status: { type: "string", enum: ["staged"] }, lineItemId: string(), periodId: string(), value: number,
-  unit: unitSchema, provenance }, ["factId", "status", "periodId", "value", "unit", "provenance"]);
+  unit: unitSchema, provenance,
+  // Required by the engine's supersede pairing, so replace_fact is unusable without it.
+  supersedesFactId: string("The committed fact this one replaces. Required for replace_fact.") },
+["factId", "status", "periodId", "value", "unit", "provenance"]);
 const decision = (actions: string[]) => object({ decisionId: string(), factId: string(), action: { type: "string", enum: actions }, mappedLineItemId: string(),
   replacementFactId: string(), rationale: string(), reviewedBy: string(), reviewedAt: HOST_STAMPED }, ["decisionId", "factId", "action", "rationale", "reviewedBy"]);
 const assumption = object({ assumptionId: string(), lineItemId: string(), periods: strings,
@@ -41,8 +30,6 @@ const assumption = object({ assumptionId: string(), lineItemId: string(), period
   ["assumptionId", "lineItemId", "periods", "payload", "sourceType", "sourceRefs", "asOfDate", "rationale"]);
 const formula = object({ lineItemId: string(), appliesTo: { type: "string", enum: ["historical", "forecast"] }, source: string(), periodIds: strings },
   ["lineItemId", "appliesTo", "source"]);
-const mappingPlan = object({ targetLineItemId: string(), periodIds: strings, members: array(mappingMember), reviewDecisionId: string() },
-  ["targetLineItemId", "periodIds", "members", "reviewDecisionId"]);
 const categoryGroup = object({ parentLineItemId: string(), category: string(), periodIds: strings, members: array(groupMember), reviewDecisionId: string() },
   ["parentLineItemId", "category", "periodIds", "members", "reviewDecisionId"]);
 const sensitivity = object({ waccDeltas: array(number), terminalGrowthDeltas: array(number), exitMultipleDeltas: array(number) },
@@ -63,7 +50,6 @@ const operationVariants: JsonSchema[] = [
   object({ kind: { type: "string", enum: ["add_metric"] }, metric: object({ registryId: { type: "string", enum: ["cagr"] },
     targetLineItemId: string(), lookbackPeriods: number }, ["registryId", "targetLineItemId", "lookbackPeriods"]) }, ["kind", "metric"]),
   object({ kind: { type: "string", enum: ["set_formula"] }, formula }, ["kind", "formula"]),
-  object({ kind: { type: "string", enum: ["set_statement_mapping_plan"] }, plan: mappingPlan }, ["kind", "plan"]),
   object({ kind: { type: "string", enum: ["set_category_group"] }, group: categoryGroup }, ["kind", "group"]),
   object({ kind: { type: "string", enum: ["set_valuation_config"] }, config: valuation }, ["kind", "config"]),
   object({ kind: { type: "string", enum: ["set_wacc_input"] }, rowId: { type: "string", enum: [...WACC_SHEET_ROW_IDS] },
@@ -74,12 +60,8 @@ const operationVariants: JsonSchema[] = [
 export const operationsInputSchema = object({ modelId: string(), expectedRevision: number,
   operations: { type: "array", items: { type: "object", oneOf: operationVariants } } }, ["modelId", "expectedRevision", "operations"]);
 
-export function parseHistoryReviewInput(input: JsonObject): ReviewFactsInput {
-  validate(input, reviewInputSchema, "$", true);
-  return input as unknown as ReviewFactsInput;
-}
-
-/** 单批操作上限:长 JSON 输出的结构错误率随长度累积,超限直接拒绝并提示拆批。 */
+/** Per-batch operation cap: structural errors in long JSON output accumulate with length, so an
+ *  oversized batch is rejected outright with a hint to split it. */
 export const MAX_OPERATIONS_PER_BATCH = 10;
 
 export function parseOperations(input: JsonObject): ModelOperation[] {
@@ -93,8 +75,8 @@ export function parseOperations(input: JsonObject): ModelOperation[] {
     const rawOps = Array.isArray(input["operations"]) ? input["operations"] as JsonObject[] : [];
     if (match && rawOps[Number(match[1])]) {
       const kind = rawOps[Number(match[1])]?.["kind"];
-      const known = new Set(["replace_fact", "set_assumption", "set_line_item_source", "add_line_item", "import_source_row",
-        "add_metric", "set_formula", "set_statement_mapping_plan", "set_category_group", "set_valuation_config", "set_wacc_input"]);
+      const known = new Set(["replace_fact", "set_assumption", "set_line_item_source", "add_line_item",
+        "add_metric", "set_formula", "set_category_group", "set_valuation_config", "set_wacc_input"]);
       const hint = typeof kind === "string"
         ? (known.has(kind) ? ` (operation kind "${kind}" — a field is missing or malformed)`
           : ` (unknown operation kind "${kind}"; allowed kinds: ${[...known].join(", ")})`)

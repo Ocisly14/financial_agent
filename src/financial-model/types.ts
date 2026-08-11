@@ -225,6 +225,12 @@ type ReconciliationValues = {
   tolerance: number;
   /** Parent and included DCF cell coordinates in calculation order. */
   refs: string[];
+  /**
+   * Only on a failed check: for each canonical cell in `refs`, the unified statement rows its
+   * committed spine fact was summed from, read off that fact's provenance. This is the repair
+   * trail — feed the rowIds to get_unified_rows to see the inputs behind a broken identity.
+   */
+  unifiedTrail?: Array<{ lineItemId: string; rowIds: string[] }>;
 };
 
 export type ReconciliationResult =
@@ -240,16 +246,6 @@ export type ReconciliationResult =
       parentLineItemId: string;
     });
 
-export type StatementMappingPlan = {
-  targetLineItemId: string;
-  /** Plans for one target cover disjoint actual-period sets. */
-  periodIds: string[];
-  members: Array<{
-    sourceLineItemId: string;
-    treatment: "add" | "subtract" | "exclude";
-  }>;
-  reviewDecisionId: string;
-};
 
 type DiscountConvention = "year_end" | "mid_year";
 
