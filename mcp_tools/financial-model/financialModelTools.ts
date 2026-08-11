@@ -119,11 +119,19 @@ async function createModel(deps: FinancialModelToolDeps, input: JsonObject, cont
       ...(ingestion.presentationExtracts ? { presentationExtracts: ingestion.presentationExtracts } : {}),
       dimensionalDisclosures: prepared.dimensionalDisclosures,
       coverage: prepared.coverage, filings: prepared.filings });
-    const currentWorkbook = enrichWorkbook(imported.currentWorkbook, deps.sourceReviewStore.get(modelId));
-    return success(`Created ${symbol} financial model ${modelId} at revision ${imported.revision}. Run statement_unification, then spine_mapping, to populate the spine.`,
+    // The workbook is deliberately NOT returned here. At this revision it is the raw filing rows,
+    // unmapped — hundreds of lines the agent can form no judgment about, and whose only consumer is
+    // statement_unification, which reads them from the store rather than from this response. Returning
+    // it cost ~430k characters that then rode along in every later step's context, for nothing.
+    // Coverage is what this stage is actually judged on; `get_financial_model` with a section serves
+    // anyone who does want to look.
+    return success(`Created ${symbol} financial model ${modelId} at revision ${imported.revision} with `
+      + `${prepared.rows.length} source row(s) staged. Run statement_unification, then spine_mapping, to populate the spine. `
+      + `The workbook is not included at this revision — read it with get_financial_model (pass a section) if you need it.`,
       { model_id: modelId, revision: imported.revision,
         lifecycle_stage: imported.status, revision_summary: imported.revisionSummary, filing_insights: filingInsights ?? null,
-        statement_coverage: prepared.coverage, current_workbook: currentWorkbook, warnings: imported.warnings });
+        statement_coverage: prepared.coverage, staged_row_count: prepared.rows.length,
+        warning_summary: summarizeDiagnostics(imported.warnings) });
   } catch (error) {
     if (error instanceof FinancialModelError) return toolError(error);
     return failure("financial_model_creation_failed", error instanceof Error ? error.message : String(error), { model_id: modelId, retryable: true });
@@ -286,6 +294,24 @@ function enrichWorkbook<T extends JsonValue>(workbook: T, source: ReturnType<Sou
     source_conflict_count: source.verification?.columnConflicts.length ?? 0,
   } };
 }
+/**
+ * Diagnostics carry a `refs` list per entry, so a freshly staged import runs to tens of thousands of
+ * characters of cell keys. What the agent can act on at that point is the shape — which kinds, how
+ * many, an example of each — not the enumeration. It reads the individual refs from the workbook when
+ * a specific number turns out to be wrong.
+ */
+function summarizeDiagnostics(warnings: { code: string; refs: string[] }[]): JsonObject {
+  const byCode = new Map<string, { count: number; example?: string }>();
+  for (const warning of warnings) {
+    const entry = byCode.get(warning.code) ?? { count: 0 };
+    entry.count += 1;
+    if (entry.example === undefined && warning.refs[0] !== undefined) entry.example = warning.refs[0];
+    byCode.set(warning.code, entry);
+  }
+  return { total: warnings.length,
+    by_code: Object.fromEntries([...byCode].map(([code, entry]) => [code, entry as unknown as JsonValue])) };
+}
+
 function success(summary: string, data: JsonObject): ToolExecutionResult { return { summary, generation_context: { data } }; }
 export function failure(code: string, message: string, data: JsonObject = {}): ToolExecutionResult { return { summary: message, error: { code, message }, generation_context: { data: { ...data, error: code } } }; }
 export function toolError(error: unknown): ToolExecutionResult {

@@ -364,16 +364,13 @@ export class OrchestratorRuntime {
       if (stepObj.skill && validSkills.has(stepObj.skill)) {
         if (status) state.recordReply(status, false);
         state.record("orchestrator", "skill_invoke", { skill: stepObj.skill });
-        // Sections + allowance must be installed before invoke() runs: a code-backed
-        // workflow can dispatch from inside invoke(), so installing them after would
-        // let that dispatch bypass the skill's declared agents/tools entirely.
+        // Sections + granted tools must be installed before invoke() runs: a
+        // code-backed workflow can dispatch from inside invoke(), and a dispatch
+        // that happened before the install would run without the skill's grant.
         const invoked = this.skills.get(stepObj.skill);
         if (invoked) {
           dispatcher.setSkillSections(invoked.agentSections);
-          dispatcher.setSkillAllowance({
-            ...(invoked.agents ? { agents: invoked.agents } : {}),
-            ...(invoked.tools ? { tools: invoked.tools } : {}),
-          });
+          dispatcher.setSkillTools(invoked.tools);
         }
         skillResult = await this.skills.invoke(stepObj.skill, {
           sessionId: input.sessionId,

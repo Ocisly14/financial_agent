@@ -4,6 +4,9 @@ import type { AgentKind, JsonObject, JsonSchema, JsonValue, TaskRequest, TaskRes
 import type { McpToolRegistry } from "../../mcp_tools/toolRegistry.ts";
 import { newId } from "./ids.ts";
 import type { SessionState } from "./sessionState.ts";
+import type { SkillRegistry } from "./skill.ts";
+import { INVOKE_SKILL } from "./skillTools.ts";
+import { assertToolAllowedForAgent } from "./toolAccess.ts";
 import { maybeCompactThread } from "./contextCompaction.ts";
 import { createLogger } from "../infra/logger/logger.ts";
 
@@ -18,6 +21,12 @@ export type SubagentDefinition = {
   description: string;
   modelClass: ModelClass;
   defaultTools: string[];
+  /**
+   * agent 层技能的名字。归属声明在这里而不是技能的 frontmatter 里，理由和
+   * defaultTools 一样：一个 agent 能用什么，应该在注册表一处看全，而不是散到
+   * skills/ 目录里反查谁认领了它。
+   */
+  skills?: string[];
   systemPrompt: PromptTemplate;
   maxToolSteps?: number;
 };
@@ -253,13 +262,58 @@ export class SubagentRuntime {
   private readonly renderer = new PromptRenderer();
   private readonly modelRouter: ModelRouter;
   private readonly toolRegistry: McpToolRegistry;
+  private readonly skills: SkillRegistry | undefined;
 
   constructor(
     modelRouter: ModelRouter,
     toolRegistry: McpToolRegistry,
+    /** Absent in harnesses that prompt without skills; the roster then renders as "(none)". */
+    skills?: SkillRegistry,
   ) {
     this.modelRouter = modelRouter;
     this.toolRegistry = toolRegistry;
+    this.skills = skills;
+  }
+
+  /** The agent's own skill roster, rendered for its prompt. Names come from the
+   *  subagent registry, descriptions from the skill files. */
+  private renderSkillRoster(definition: SubagentDefinition): string {
+    const names = definition.skills ?? [];
+    if (names.length === 0 || !this.skills) return "(none)";
+    const lines = names.flatMap((name) => {
+      const skill = this.skills!.get(name, "agent");
+      return skill ? [`- ${skill.name}: ${skill.description}`] : [];
+    });
+    return lines.length ? lines.join("\n") : "(none)";
+  }
+
+  /**
+   * Fold the tools an invoked skill declares into the live set, so the agent can
+   * call them from its next step. A name that is unregistered, or that the
+   * category gate refuses for this agent, is skipped with a warning rather than
+   * failing the task: a skill over-declaring one tool should not cost a DCF its
+   * whole round.
+   */
+  private grantSkillTools(definition: SubagentDefinition, granted: unknown, allowed: Map<string, ToolDefinition>): void {
+    if (!Array.isArray(granted)) return;
+    for (const name of granted) {
+      if (typeof name !== "string" || allowed.has(name)) continue;
+      const tool = this.toolRegistry.get(name);
+      if (!tool) {
+        log.warn(`[${definition.name}] skill grants unregistered tool: ${name}`);
+        continue;
+      }
+      try {
+        assertToolAllowedForAgent(definition.name, name, tool.category);
+      } catch (error) {
+        log.warn(`[${definition.name}] skill grant refused by category gate: ${name}`,
+          { error: error instanceof Error ? error.message : String(error) });
+        continue;
+      }
+      const { execute: _execute, ...spec } = tool;
+      allowed.set(name, spec);
+      log.info(`[${definition.name}] skill granted tool: ${name}`);
+    }
   }
 
   /**
@@ -271,7 +325,10 @@ export class SubagentRuntime {
   async run(definition: SubagentDefinition, input: RunSubagentInput): Promise<void> {
     const started = Date.now();
     const { state, threadId } = input;
+    // Live, not a snapshot: invoke_skill folds the skill's declared tools in here
+    // and the next step's specs are built from it.
     const allowed = new Map(input.allowedTools.map((tool) => [tool.name, tool]));
+    const skillRoster = this.renderSkillRoster(definition);
     let finishSummary = "";
     let llmCalls = 0;
     let awaitingApproval = false;
@@ -312,6 +369,7 @@ export class SubagentRuntime {
       // tool results (state) and decides whether to call another tool or finish.
       const rendered = this.renderer.render(definition.systemPrompt, {
         task: input.request.task,
+        skills: skillRoster,
         modelContext: input.request.model_id
           ? `Resume model ${input.request.model_id}; refresh it before any mutation.`
           : "No existing model handle was supplied.",
@@ -328,8 +386,11 @@ export class SubagentRuntime {
       try {
         const completion = await this.modelRouter.generate(
           splitForPromptCache(rendered.system, rendered.prompt),
+          // Built from the live set, so a skill's grant reaches the model. This is
+          // the one thing that can change the cached request prefix mid-run; an
+          // invoke_skill therefore costs one cache miss, and only one.
           { modelClass: definition.modelClass, temperature: 0.1, metadata: { mode: "subagent", agent: definition.name },
-            tools: buildLoopToolSpecs(input.allowedTools) },
+            tools: buildLoopToolSpecs([...allowed.values()]) },
         );
         completionText = completion.text;
         completionToolCalls = completion.toolCalls;
@@ -538,6 +599,26 @@ export class SubagentRuntime {
       return { awaitingApproval: false, errorCode: "invalid_tool" };
     }
 
+    // Ownership lives here rather than in the tool: `execute` is a pure
+    // (input) => result and does not know who called it. A name outside this
+    // agent's roster never reaches the registry, so no other agent's guidance
+    // can enter this context.
+    if (tool.name === INVOKE_SKILL) {
+      const requested = typeof call.input["skill"] === "string" ? call.input["skill"] : "";
+      const roster = definition.skills ?? [];
+      if (!roster.includes(requested)) {
+        const message = `"${requested}" is not one of your skills — choose from: ${roster.join(", ") || "(none)"}.`;
+        log.warn(`[${definition.name}] skill outside roster: ${requested}`);
+        state.record(
+          definition.name,
+          "tool_result",
+          { task_id: input.taskId, name: tool.name, error: { code: "skill_not_allowed", message } },
+          { threadId, parent: input.taskId },
+        );
+        return { awaitingApproval: false, errorCode: "skill_not_allowed" };
+      }
+    }
+
     const callInput: JsonObject = { ...call.input };
     const toolUseId = newId("tooluse");
     const useEv = state.record(
@@ -577,6 +658,10 @@ export class SubagentRuntime {
     if (output.artifacts?.length) toolResultPayload.artifacts = output.artifacts as unknown as JsonObject[string];
     if (output.visualizations?.length) toolResultPayload.visualizations = output.visualizations;
     state.record(definition.name, "tool_result", toolResultPayload, { threadId, parent: useEv.event_id });
+
+    if (tool.name === INVOKE_SKILL && !normalizedError) {
+      this.grantSkillTools(definition, output.generation_context?.data?.["tools"], allowed);
+    }
 
     if (output.approval) {
       log.info(`[${definition.name}] approval required`, { approval_id: output.approval.approval_id });
@@ -624,36 +709,76 @@ const FINANCIAL_QUERY_TOOLS = new Set([
   "financial_search", "get_treasury_yield", "list_unified_statements", "get_unified_rows", "calculate_model_rows",
 ]);
 
+/** 提取结果里唯一跨步必需的是 ingestionRunId 和覆盖率;诊断按 playbook 只在覆盖率
+ *  短缺时才用来判断,所以留计数加一个样本,不把 309 条原样搬进上下文。 */
+function compactExtraction(raw: JsonObject): JsonObject {
+  const diagnostics = Array.isArray(raw["diagnostics"]) ? raw["diagnostics"] : [];
+  return {
+    ...(raw["ingestionRunId"] !== undefined ? { ingestionRunId: raw["ingestionRunId"] } : {}),
+    ...(raw["statementCoverage"] !== undefined ? { statementCoverage: raw["statementCoverage"] } : {}),
+    ...(raw["filingInsightSetId"] !== undefined ? { filingInsightSetId: raw["filingInsightSetId"] } : {}),
+    ...(raw["status"] !== undefined ? { status: raw["status"] } : {}),
+    diagnostic_count: diagnostics.length,
+    ...(diagnostics.length ? { diagnostic_sample: diagnostics.slice(0, 5) as JsonValue } : {}),
+  };
+}
+
 function projectFinancialModelData(outputs: ReturnType<SessionState["subagentToolOutputs"]>): JsonObject {
   const revisions: JsonValue[] = [];
   let active: JsonObject = {};
   const subagentResults: JsonValue[] = [];
   const skillReferences = new Map<string, JsonValue>();
+  // 技能正文必须跨步存活:这份投影就是 agent 每一步的全部上下文,漏掉它等于
+  // invoke 完下一步方法论就没了。
+  const skillGuidance = new Map<string, JsonValue>();
   const queryResults: JsonValue[] = [];
+  let extraction: JsonObject | undefined;
+  const otherResults: JsonValue[] = [];
   for (const output of outputs) {
     const data = output.generation_context?.data;
-    if (!data) continue;
-    if (output.name === "read_skill_reference" && typeof data["content"] === "string") {
-      skillReferences.set(`${data["skill"]}/${data["path"]}`, data["content"]);
-      continue;
+    if (data) {
+      if (output.name === "read_skill_reference" && typeof data["content"] === "string") {
+        skillReferences.set(`${data["skill"]}/${data["path"]}`, data["content"]);
+        continue;
+      }
+      if (output.name === INVOKE_SKILL && typeof data["content"] === "string") {
+        skillGuidance.set(String(data["skill"]), data["content"]);
+        continue;
+      }
+      let captured = false;
+      if (data["revision_summary"] && typeof data["revision_summary"] === "object") { revisions.push(data["revision_summary"]); captured = true; }
+      if (output.name === "run_dcf_subagent") { subagentResults.push(data); captured = true; }
+      if (FINANCIAL_QUERY_TOOLS.has(output.name)) { queryResults.push({ tool: output.name, data }); captured = true; }
+      // 提取结果单独一格,后一次覆盖前一次:agent 需要的是 ingestionRunId 和覆盖率,
+      // 不是 309 条诊断乘以重试次数。没有这一格,提取就等于没发生过,agent 会一直重跑。
+      if (data["extraction"] && typeof data["extraction"] === "object") {
+        extraction = compactExtraction(data["extraction"] as JsonObject);
+        captured = true;
+      }
+      if (typeof data["model_id"] === "string") {
+        active = { model_id: data["model_id"], ...(typeof data["revision"] === "number" ? { revision: data["revision"] } : {}),
+          ...(typeof data["lifecycle_stage"] === "string" ? { lifecycle_stage: data["lifecycle_stage"] } : {}),
+          ...(data["current_workbook"] ? { current_workbook: data["current_workbook"] } : {}),
+          ...(data["workbook_slice"] ? { workbook_slice: data["workbook_slice"] } : {}),
+          ...(data["filing_insights"] !== undefined ? { filing_insights: data["filing_insights"] } : {}),
+          ...(data["revision_history"] !== undefined ? { revision_history: data["revision_history"] } : {}) };
+        captured = true;
+      }
+      if (captured) continue;
     }
-    if (data["revision_summary"] && typeof data["revision_summary"] === "object") revisions.push(data["revision_summary"]);
-    if (output.name === "run_dcf_subagent") subagentResults.push(data);
-    if (FINANCIAL_QUERY_TOOLS.has(output.name)) queryResults.push({ tool: output.name, data });
-    if (typeof data["model_id"] === "string") {
-      active = { model_id: data["model_id"], ...(typeof data["revision"] === "number" ? { revision: data["revision"] } : {}),
-        ...(typeof data["lifecycle_stage"] === "string" ? { lifecycle_stage: data["lifecycle_stage"] } : {}),
-        ...(data["current_workbook"] ? { current_workbook: data["current_workbook"] } : {}),
-        ...(data["workbook_slice"] ? { workbook_slice: data["workbook_slice"] } : {}),
-        ...(data["filing_insights"] !== undefined ? { filing_insights: data["filing_insights"] } : {}),
-        ...(data["revision_history"] !== undefined ? { revision_history: data["revision_history"] } : {}) };
-    }
+    // 兜底。上面每一个分支都是白名单,而白名单漏掉一个工具的后果不是"少点信息",
+    // 是那次调用在 agent 眼里从未发生——它会照着看得见的证据重跑,直到步数耗尽。
+    // summary 本来就是为压缩而写的,足够它知道自己做过什么。
+    otherResults.push({ tool: output.name, summary: output.summary });
   }
   return { revision_summaries: revisions, active_model_context: active, latest_subagent_results: subagentResults.slice(-2),
-    skill_references: Object.fromEntries(skillReferences), query_results: queryResults };
+    skill_guidance: Object.fromEntries(skillGuidance),
+    skill_references: Object.fromEntries(skillReferences), query_results: queryResults,
+    ...(extraction ? { latest_extraction: extraction } : {}),
+    other_results: otherResults.slice(-8) };
 }
 
-function projectFinancialModelProgress(
+export function projectFinancialModelProgress(
   outputs: ReturnType<SessionState["subagentToolOutputs"]>,
   errors: ReturnType<SessionState["subagentToolErrors"]>,
   notes: { step: number; note: string }[],

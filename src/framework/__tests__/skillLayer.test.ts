@@ -95,3 +95,55 @@ test("splitAgentSections separates the topic section from agent sections", () =>
   assert.equal(split.topicSection, "Ask politely.");
   assert.equal(split.agentSections.market_data, "Fetch.");
 });
+
+const AGENT_SKILL = `---
+name: gamma
+description: An agent-layer skill.
+layer: agent
+tools: [stock_sma]
+---
+The whole body is the guidance.
+`;
+
+test("an agent-layer skill keeps its whole body and may grant tools", async () => {
+  const registry = new SkillRegistry();
+  await registry.loadFromDirectory(await skillRoot("gamma", AGENT_SKILL));
+  const skill = registry.get("gamma", "agent");
+
+  assert.equal(skill?.layer, "agent");
+  assert.equal(skill?.body.trim(), "The whole body is the guidance.");
+  assert.deepEqual(skill?.tools, ["stock_sma"]);
+  assert.deepEqual(skill?.agentSections, {});
+});
+
+test("an agent-layer skill is invisible to the topic and research layers", async () => {
+  const registry = new SkillRegistry();
+  await registry.loadFromDirectory(await skillRoot("gamma", AGENT_SKILL));
+
+  assert.equal(registry.get("gamma"), undefined);
+  assert.equal(registry.get("gamma", "research"), undefined);
+  assert.deepEqual(registry.list().map((s) => s.name), []);
+  // getAnyLayer is the deliberate exception: references are guidance text, not
+  // capability, so read_skill_reference resolves across layers.
+  assert.equal(registry.getAnyLayer("gamma")?.name, "gamma");
+});
+
+test("an agent-layer skill may not carry an agent section", async () => {
+  const root = await skillRoot("gamma", `${AGENT_SKILL}\n## for: market_data\nExtra.\n`);
+  const registry = new SkillRegistry();
+  await assert.rejects(() => registry.loadFromDirectory(root),
+    /agent-layer skill gamma carries a '## for: market_data' section/);
+});
+
+test("an agent-layer skill may not carry a topic section", async () => {
+  const root = await skillRoot("gamma", `${AGENT_SKILL}\n## for: topic\nExtra.\n`);
+  const registry = new SkillRegistry();
+  await assert.rejects(() => registry.loadFromDirectory(root),
+    /agent-layer skill gamma carries a '## for: topic' section/);
+});
+
+test("an agent-layer skill may not declare a workflow", async () => {
+  const root = await skillRoot("gamma", AGENT_SKILL.replace("layer: agent", "layer: agent\nworkflow: probe"));
+  const registry = new SkillRegistry();
+  await assert.rejects(() => registry.loadFromDirectory(root), /agent-layer skill gamma may not declare 'workflow'/);
+});

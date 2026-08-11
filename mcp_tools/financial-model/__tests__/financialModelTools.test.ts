@@ -383,3 +383,20 @@ test("an agent-preset risk_free_rate survives the Treasury-feed auto-refresh unt
   assert.equal(rows.find((row) => row.rowId === "risk_free_rate")?.value, 0.05);
   restoreFetch();
 });
+test("create returns the coverage baseline without the workbook, which is unmapped filing rows at this revision", async () => {
+  const { tools } = run();
+  const result = await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1" }, { agentId: "owner-1", sessionId: "s1" });
+  const data = result.generation_context!.data;
+
+  // The regression this pins: current_workbook rode along here at ~430k characters, and the
+  // projection then re-sent it in every later step's context — for rows only unification reads,
+  // and it reads them from the store.
+  assert.equal(data["current_workbook"], undefined);
+  assert.equal(data["warnings"], undefined);
+  // What the stage is actually judged on stays.
+  assert.ok(data["statement_coverage"]);
+  assert.equal(typeof data["staged_row_count"], "number");
+  assert.equal(typeof (data["warning_summary"] as { total: number }).total, "number");
+  assert.match(result.summary, /source row\(s\) staged/);
+  assert.match(result.summary, /get_financial_model/);
+});

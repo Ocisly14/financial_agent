@@ -6,7 +6,7 @@ import type { SessionState } from "./sessionState.ts";
 import type { AgentKind, SkillLayer, SkillResult } from "./types.ts";
 import { AGENT_KINDS } from "./types.ts";
 
-const SKILL_LAYERS: ReadonlySet<string> = new Set<SkillLayer>(["topic", "research"]);
+const SKILL_LAYERS: ReadonlySet<string> = new Set<SkillLayer>(["topic", "research", "agent"]);
 
 /** `## for:` 的第四个合法目标。member Topic 不是 AgentKind——它没有角色，
  *  只有"被问什么"的区别——所以它的小节存在独立字段里，不混进 agentSections。 */
@@ -22,7 +22,10 @@ export type SkillDefinition = {
   agentSections: Partial<Record<AgentKind, string>>;
   /** `## for: topic` 的内容。只有 research 层的技能会有。 */
   topicSection?: string;
-  agents?: AgentKind[];
+  /**
+   * 这个技能激活后**额外授予**的工具，叠加在 agent 自己的池之上。它只放宽，
+   * 从不收窄——领域隔离由 toolAccess 的 category 门负责，那道门对每个名字照跑。
+   */
   tools?: string[];
   workflow?: string;
 };
@@ -83,6 +86,17 @@ export class SkillRegistry {
     return skill && skill.layer === layer ? skill : undefined;
   }
 
+  /**
+   * 不限层的按名查找。技能名在这个 Map 里就是全局唯一键，所以按名解析没有歧义。
+   *
+   * 层隔离的是**发现与调用**——谁能在自己的清单里看见它、谁能 invoke 它。references
+   * 是文字指导而非能力，read_skill_reference 因此走这条：一个 agent 层技能的 playbook
+   * 不该因为查找默认落在 topic 层而取不到。
+   */
+  getAnyLayer(name: string): SkillDefinition | undefined {
+    return this.skills.get(name);
+  }
+
   async invoke(name: string, context: WorkflowContext): Promise<SkillResult> {
     const skill = this.skills.get(name);
     if (!skill) {
@@ -112,6 +126,30 @@ export class SkillRegistry {
       };
     }
     return workflow(skill, context);
+  }
+}
+
+/**
+ * agent 声明的技能必须存在，且必须是 agent 层的。启动期就抛——一个静默消失的
+ * 技能是最难查的一类问题：agent 会照着 prompt 里的清单去 invoke，拿到
+ * skill_not_found，然后凭记忆把方法论编出来，日志里看不出区别。
+ */
+export function assertSubagentSkills(
+  definitions: { name: string; skills?: string[] }[],
+  skills: SkillRegistry,
+): void {
+  for (const definition of definitions) {
+    for (const name of definition.skills ?? []) {
+      const skill = skills.getAnyLayer(name);
+      if (!skill) {
+        throw new Error(`subagent ${definition.name} declares unknown skill '${name}'`);
+      }
+      if (skill.layer !== "agent") {
+        throw new Error(
+          `subagent ${definition.name} declares skill '${name}', which is a ${skill.layer}-layer skill; only agent-layer skills can be owned by an agent`,
+        );
+      }
+    }
   }
 }
 
@@ -170,6 +208,14 @@ function parseSkillMarkdown(filePath: string, dir: string, raw: string): SkillDe
     const first = Object.keys(split.agentSections)[0];
     throw new Error(`research-layer skill ${name} carries a '## for: ${first}' section: ${filePath}`);
   }
+  // agent 层的受众就是注册它的那个 agent，正文整篇都是写给它的。分小节意味着
+  // 这份文件还想服务第二种读者——那是 topic 层的形态，不是这一层的。
+  if (layer === "agent") {
+    const section = Object.keys(split.agentSections)[0] ?? (split.topicSection === undefined ? undefined : TOPIC_SECTION_TARGET);
+    if (section !== undefined) {
+      throw new Error(`agent-layer skill ${name} carries a '## for: ${section}' section; its body is the whole guidance: ${filePath}`);
+    }
+  }
 
   const skill: SkillDefinition = {
     name,
@@ -182,17 +228,11 @@ function parseSkillMarkdown(filePath: string, dir: string, raw: string): SkillDe
   };
   if (split.topicSection !== undefined) skill.topicSection = split.topicSection;
 
-  const agents = optionalStringArray(frontmatter, "agents", filePath);
-  if (agents) {
-    if (layer === "research") {
-      throw new Error(`research-layer skill ${name} may not declare 'agents': ${filePath}`);
-    }
-    for (const agent of agents) {
-      if (!AGENT_KINDS.has(agent)) {
-        throw new Error(`skill ${name} declares unknown agent '${agent}': ${filePath}`);
-      }
-    }
-    skill.agents = agents as AgentKind[];
+  // `agents:` 曾是派活白名单。它被删掉了：技能是指导，不是沙箱——越权由 toolAccess
+  // 的 category 门管，跑题由技能正文和 orchestrator 自己的判断管。留着不报错会让
+  // 作者以为白名单还在生效，所以写了就抛。
+  if (frontmatter["agents"] !== undefined) {
+    throw new Error(`skill ${name} declares 'agents', which no longer exists — a skill guides, it does not gate: ${filePath}`);
   }
 
   const tools = optionalStringArray(frontmatter, "tools", filePath);
@@ -204,8 +244,9 @@ function parseSkillMarkdown(filePath: string, dir: string, raw: string): SkillDe
   }
 
   if (frontmatter["workflow"] !== undefined) {
-    if (layer === "research") {
-      throw new Error(`research-layer skill ${name} may not declare 'workflow': ${filePath}`);
+    // workflow handler 拿的是 Dispatcher；research 控制器和 subagent 都没有。
+    if (layer !== "topic") {
+      throw new Error(`${layer}-layer skill ${name} may not declare 'workflow': ${filePath}`);
     }
     skill.workflow = requireString(frontmatter, "workflow", filePath);
   }

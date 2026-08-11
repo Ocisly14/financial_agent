@@ -18,7 +18,7 @@ Read the response like this:
 
 - **One run, many models.** The ingestion run is reusable: calling create_financial_model on it again mints a fresh, independent model version of the same issuer (scenario variants, a clean re-do). Never re-extract just to get a second model.
 - **Version hygiene**: the mapping subagents resolve the model you name in run_dcf_subagent's `modelId`, so parallel versions are safe — but archive_financial_model the ones you abandon, and list_financial_models when resuming to find what exists.
-- The response's `statement_coverage` and `current_workbook` are your baseline; note the revision number — every later mutation demands the exact expectedRevision.
+- The response's `statement_coverage`, `staged_row_count` and `warning_summary` are your baseline; note the revision number — every later mutation demands the exact expectedRevision. The workbook itself is deliberately not returned here: at this revision it is the unmapped filing rows, which unification reads from the store. Call `get_financial_model` with a `section` if you ever need to look.
 
 ## When to stop and re-extract
 

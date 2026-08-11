@@ -19,7 +19,6 @@ test("the shipped stock-analysis skill loads with narrow research access", async
 
   assert.ok(skill, "stock-analysis skill should be discovered");
   assert.equal(skill.layer, "topic");
-  assert.deepEqual(skill.agents, ["market_data", "market_research"]);
   assert.ok(skill.tools?.includes("get_stock_price"));
   assert.ok(skill.tools?.includes("get_sector_analysis"));
   assert.ok(skill.tools?.includes("get_sec_company_profile"));

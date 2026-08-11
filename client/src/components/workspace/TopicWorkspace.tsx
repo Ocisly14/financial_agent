@@ -366,7 +366,6 @@ export function TopicWorkspace({
             <StatusBar
                 topic={activeTopic}
                 research={research ? { name: research.name, memberCount: members.length } : undefined}
-                isConnected={stream.isConnected}
                 onOpenRail={narrow ? () => setRailSheetOpen(true) : undefined}
             />
 

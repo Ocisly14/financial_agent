@@ -1,4 +1,5 @@
 import { SubagentRegistry } from "../../framework/subagent.ts";
+import { SKILL_FRAMEWORK_TOOLS } from "../../framework/skillTools.ts";
 import { financialModelingSubagentPrompt, marketDataSubagentPrompt, marketResearchSubagentPrompt, tradingOperationsSubagentPrompt } from "../prompts/subagentPrompts.ts";
 import { FINANCIAL_MODELING_TOOLS, MARKET_DATA_TOOLS, MARKET_RESEARCH_TOOLS, TRADING_OPERATIONS_TOOLS } from "../../../mcp_tools/registerTools.ts";
 import { DCF_PRIVATE_SUBAGENT_TOOL } from "../../../mcp_tools/financial-model/dcfSubagentTool.ts";
@@ -8,7 +9,7 @@ export function createSubagentRegistry(): SubagentRegistry {
   const registry = new SubagentRegistry();
   registry.register({
     name: "financial_modeling",
-    description: "Hierarchical DCF Agent that owns one revisioned model workflow and delegates statement extraction and mapping to private subagents, then authors the forecast and valuation itself.",
+    description: "Hierarchical DCF Agent that owns one revisioned model workflow and delegates statement extraction and mapping to private subagents, then authors the forecast and valuation itself. Dispatch it for a DCF, intrinsic value, fair value, or any fundamentals-based valuation of a specific company; it runs for several rounds, so continue its thread rather than starting a new one.",
     modelClass: "MEDIUM",
     // ask_user is the one subagent that gets it: a DCF runs for many turns on
     // judgment calls only the user can settle (which segment basis, whose
@@ -16,7 +17,11 @@ export function createSubagentRegistry(): SubagentRegistry {
     // down through a re-dispatch loses the question. The dispatcher removes it
     // again when no human is watching the stream.
     defaultTools: [...FINANCIAL_MODELING_TOOLS, STATEMENT_EXTRACTION_TOOL,
-      DCF_PRIVATE_SUBAGENT_TOOL, "financial_search", "ask_user"],
+      DCF_PRIVATE_SUBAGENT_TOOL, "financial_search", "ask_user",
+      ...SKILL_FRAMEWORK_TOOLS],
+    // 方法论归它自己取:invoke_skill 拿六阶段地图,再按阶段 read_skill_reference
+    // 取 playbook。不靠 orchestrator 转达,所以中途换 orchestrator 也不会丢。
+    skills: ["dcf-modeling"],
     // A full DCF authored by this agent alone (no drafting subagents) runs ~20-30 steps: 5 for the
     // data foundation, then serial mutation batches (each revision change must be a solo step) for
     // the forecast, WACC inputs, and stage advances. Progress is projected, not accumulated, so a

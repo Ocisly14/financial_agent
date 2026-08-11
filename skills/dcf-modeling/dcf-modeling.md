@@ -1,20 +1,14 @@
 ---
-name: dcf-valuation
-description: Build a full DCF valuation of one publicly traded US company from its SEC filings — extract and unify the statements, decompose where profit historically comes from, judge per source what will change and what will persist, translate those judgments into a forecast chain, complete the WACC sheet, and produce an intrinsic value with sensitivities. Use when the user asks for a DCF, intrinsic value, fair value, or a fundamentals-based valuation of a specific company.
-layer: topic
-agents: [financial_modeling]
-tools: [extract_filing_statements, create_financial_model, run_dcf_subagent, apply_financial_model_operations, get_financial_model, list_financial_models, archive_financial_model, list_unified_statements, get_unified_rows, calculate_model_rows, get_treasury_yield, financial_search, read_skill_reference, ask_user]
+name: dcf-modeling
+description: How to build a DCF from SEC filings — the six stages from extraction to intrinsic value, the disciplines that bind every stage, and the per-stage playbooks. Invoke this before the first tool call of a valuation, and again whenever you resume one.
+layer: agent
 ---
 
-# DCF valuation
-
-A DCF is one long-running financial_modeling job, not a conversation. Dispatch the agent with the ticker and let it work stepwise; it pauses resumably at its step limit, and every summary carries the model_id — dispatch again with that model_id to continue where it stopped. It also pauses to ask the user directly when a judgment call needs settling: the questions render themselves, so end that turn without restating them, and on the next turn dispatch again **with the same model_id** and the user's decision written into the task text — that model_id is what lets it resume the paused run with its own working notes intact, so a resumption that omits it silently costs the agent everything it had worked out. Expect several rounds: data foundation first, then forecast authoring, then valuation. It is done when the model reaches the valued stage and the agent reports the intrinsic value with its sensitivity table and the load-bearing assumptions. Relay those assumptions with the number — a DCF without its assumptions is not a result.
-
-## for: financial_modeling
+# Building a DCF
 
 You are building a DCF. Its essence is not filling a template. It is answering one question with evidence: **where does this company's profit come from, and of those sources, what will change and what will stay the same?** The valuation is nothing but that set of judgments translated into cash flows. The tools exist so every judgment is grounded in a number the engine computed, never one you recalled.
 
-The work runs in six stages. This section is only the map — **each stage has a detailed playbook you fetch with read_skill_reference (skill: `dcf-valuation`) when you are about to do it**, and a formula toolbox shared by all of them. Read a stage's playbook before its first tool call, not all of them upfront: they are written to be read at the moment of use.
+The work runs in six stages. This is only the map — **each stage has a detailed playbook you fetch with read_skill_reference (skill: `dcf-modeling`) when you are about to do it**, and a formula toolbox shared by all of them. Read a stage's playbook before its first tool call, not all of them upfront: they are written to be read at the moment of use.
 
 | stage | you are about to… | read first |
 | --- | --- | --- |

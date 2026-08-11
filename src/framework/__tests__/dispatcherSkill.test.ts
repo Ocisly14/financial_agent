@@ -68,23 +68,15 @@ test("with no skill active every task is untouched", async () => {
   assert.equal(seen[0]!.task, "analyse NVDA");
 });
 
-test("dispatching to an agent the active skill did not declare is refused before the run", async () => {
+test("an active skill no longer gates which agent may be dispatched to", async () => {
   const { dispatcher, seen, state, turn } = harness();
-  dispatcher.setSkillAllowance({ agents: ["market_data"] });
+  // `agents:` was a whitelist and is gone: a skill guides, it does not gate.
+  // Dispatching outside the skill's subject matter is off-topic, not a breach —
+  // the category gate is what keeps agents out of each other's domains.
+  dispatcher.setSkillSections({ market_data: "RSI period 14" });
 
   await dispatcher.dispatch([{ agent: "market_research", task: "find news" }]);
 
-  assert.equal(seen.length, 0);
-  const [result] = state.turnResults(turn);
-  assert.equal(result?.status, "failed");
-  assert.equal(result?.error?.code, "agent_not_allowed");
-});
-
-test("an allowance listing the agent lets the task through", async () => {
-  const { dispatcher, seen } = harness();
-  dispatcher.setSkillAllowance({ agents: ["market_data"] });
-
-  await dispatcher.dispatch([{ agent: "market_data", task: "analyse NVDA" }]);
-
   assert.equal(seen.length, 1);
+  assert.equal(state.turnResults(turn).length, 0);
 });

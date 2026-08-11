@@ -13,14 +13,13 @@ async function loadAll(): Promise<SkillRegistry> {
   return registry;
 }
 
-test("sector-analysis loads as a topic skill with narrow agent and tool access", async () => {
+test("sector-analysis loads as a topic skill with its own tool grant and agent sections", async () => {
   const registry = await loadAll();
   const skill = registry.get("sector-analysis");
 
   assert.ok(skill, "sector-analysis skill should load");
   assert.equal(skill.layer, "topic");
   assert.equal(registry.get("sector-analysis", "research"), undefined);
-  assert.deepEqual(skill.agents, ["market_data", "market_research"]);
   assert.deepEqual(skill.tools, ["get_sector_analysis", "financial_search"]);
   assert.ok(skill.agentSections.market_data);
   assert.ok(skill.agentSections.market_research);

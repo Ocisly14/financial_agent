@@ -18,7 +18,7 @@ export type TaskStatus = "ok" | "failed" | "timeout";
 
 export type SkillStatus = "loaded" | "ok" | "failed";
 
-export type SkillLayer = "topic" | "research";
+export type SkillLayer = "topic" | "research" | "agent";
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
