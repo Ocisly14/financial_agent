@@ -1,32 +1,47 @@
 import { SubagentRegistry } from "../../framework/subagent.ts";
-import { newsResearchSubagentPrompt, onchainDataSubagentPrompt, tradeSubagentPrompt } from "../prompts/subagentPrompts.ts";
-import { NEWS_RESEARCH_TOOLS, ONCHAIN_DATA_TOOLS, TRADING_TOOLS } from "../../../mcp_tools/registerTools.ts";
+import { financialModelingSubagentPrompt, marketDataSubagentPrompt, marketResearchSubagentPrompt, tradingOperationsSubagentPrompt } from "../prompts/subagentPrompts.ts";
+import { FINANCIAL_MODELING_TOOLS, MARKET_DATA_TOOLS, MARKET_RESEARCH_TOOLS, TRADING_OPERATIONS_TOOLS } from "../../../mcp_tools/registerTools.ts";
+import { DCF_PRIVATE_SUBAGENT_TOOL } from "../../../mcp_tools/financial-model/dcfSubagentTool.ts";
+import { STATEMENT_EXTRACTION_TOOL } from "../../../mcp_tools/financial-model/statementExtractionTool.ts";
 
 export function createSubagentRegistry(): SubagentRegistry {
   const registry = new SubagentRegistry();
   registry.register({
-    name: "onchain_data",
-    description:
-      "Quantitative crypto data agent for live market data, technical analysis, charts, on-chain activity, flow/positioning, launchpad metrics, Fear & Greed market context, and supporting web search.",
+    name: "financial_modeling",
+    description: "Hierarchical DCF Agent that owns one revisioned model workflow and delegates statement extraction and mapping to private subagents, then authors the forecast and valuation itself.",
     modelClass: "MEDIUM",
-    defaultTools: [...ONCHAIN_DATA_TOOLS],
-    systemPrompt: onchainDataSubagentPrompt,
+    defaultTools: [...FINANCIAL_MODELING_TOOLS, STATEMENT_EXTRACTION_TOOL,
+      DCF_PRIVATE_SUBAGENT_TOOL, "financial_search"],
+    // A full DCF authored by this agent alone (no drafting subagents) runs ~20-30 steps: 5 for the
+    // data foundation, then serial mutation batches (each revision change must be a solo step) for
+    // the forecast, WACC inputs, and stage advances. Progress is projected, not accumulated, so a
+    // higher cap does not grow the context; the resumable pause remains the runaway guard.
+    maxToolSteps: 30,
+    systemPrompt: financialModelingSubagentPrompt,
   });
   registry.register({
-    name: "news_research",
+    name: "market_data",
     description:
-      "News and research agent for crypto news, web/current-events research, and institutional adoption context.",
+      "Stock market data agent for live quotes, charts, and independently selected technical-indicator calculations backed by the stock bar database.",
     modelClass: "MEDIUM",
-    defaultTools: [...NEWS_RESEARCH_TOOLS],
-    systemPrompt: newsResearchSubagentPrompt,
+    defaultTools: [...MARKET_DATA_TOOLS],
+    systemPrompt: marketDataSubagentPrompt,
   });
   registry.register({
-    name: "trade",
+    name: "market_research",
     description:
-      "CEX trading workflow agent for manual order previews, approval requests, balances, positions, orders, fills, PnL, and price-driven auto-trading strategy draft/create/start/list/manage tasks.",
+      "Company and cross-market research agent for official SEC filings and XBRL facts, financial news, current events, macro themes, institutional activity, and asset-specific research.",
     modelClass: "MEDIUM",
-    defaultTools: [...TRADING_TOOLS],
-    systemPrompt: tradeSubagentPrompt,
+    defaultTools: [...MARKET_RESEARCH_TOOLS],
+    systemPrompt: marketResearchSubagentPrompt,
+  });
+  registry.register({
+    name: "trading_operations",
+    description:
+      "US stock and ETF strategy agent for creating, approving, monitoring, pausing, resuming, and cancelling paper/shadow strategies driven by price or technical indicators.",
+    modelClass: "MEDIUM",
+    defaultTools: [...TRADING_OPERATIONS_TOOLS],
+    systemPrompt: tradingOperationsSubagentPrompt,
   });
   return registry;
 }

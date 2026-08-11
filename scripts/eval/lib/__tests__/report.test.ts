@@ -11,8 +11,8 @@ test("exit 0 when no gate violations", () => {
 });
 
 test("exit 1 and lists violations", () => {
-  const r: EvalResult[] = [{ category: "④ safety", metrics: {}, gateViolations: ["category leak: cex_create_order"], lines: ["④ safety: FAIL"] }];
+  const r: EvalResult[] = [{ category: "④ safety", metrics: {}, gateViolations: ["category leak: create_strategy"], lines: ["④ safety: FAIL"] }];
   const out = renderReport(r);
   assert.equal(out.exitCode, 1);
-  assert.match(out.text, /category leak: cex_create_order/);
+  assert.match(out.text, /category leak: create_strategy/);
 });

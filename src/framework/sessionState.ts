@@ -1,5 +1,14 @@
 import { newId } from "./ids.ts";
-import type { AgentKind, ArtifactRef, GenerationContext, JsonObject, TaskResult } from "./types.ts";
+import type {
+  AgentKind,
+  ArtifactRef,
+  GenerationContext,
+  JsonObject,
+  TaskResult,
+  UserInputRequest,
+  UserInputRequestView,
+  UserInputResponse,
+} from "./types.ts";
 import type { CompactionCache, EventStore } from "./eventStore.ts";
 
 /**
@@ -22,7 +31,7 @@ import type { CompactionCache, EventStore } from "./eventStore.ts";
  * transport; the two are not the same concern.
  */
 
-export type Source = "user" | "orchestrator" | "onchain_data" | "news_research" | "trade" | "skill";
+export type Source = "user" | "orchestrator" | "market_data" | "market_research" | "trading_operations" | "financial_modeling" | "skill";
 
 export interface SessionEvent {
   event_id: string;
@@ -41,10 +50,11 @@ const APPROVAL_TTL_MS = 15 * 60_000;
 /** Allowed (source, kind) pairs. Lightweight fail-fast guard against dirty events. */
 const KINDS: Record<Source, ReadonlySet<string>> = {
   user: new Set(["user_message"]),
-  orchestrator: new Set(["reply", "dispatch", "skill_invoke", "error", "tool_use", "tool_result"]),
-  onchain_data: new Set(["task_result", "tool_use", "tool_result"]),
-  news_research: new Set(["task_result", "tool_use", "tool_result"]),
-  trade: new Set(["task_result", "tool_use", "tool_result", "approval_required", "approval_resolved"]),
+  orchestrator: new Set(["reply", "dispatch", "skill_invoke", "skill_result", "error", "tool_use", "tool_result", "user_input_required"]),
+  market_data: new Set(["task_result", "tool_use", "tool_result", "subagent_note"]),
+  market_research: new Set(["task_result", "tool_use", "tool_result", "subagent_note"]),
+  trading_operations: new Set(["task_result", "tool_use", "tool_result", "approval_required", "approval_resolved", "subagent_note"]),
+  financial_modeling: new Set(["task_result", "tool_use", "tool_result", "subagent_note"]),
   skill: new Set(["skill_invoke", "workflow_started", "workflow_step", "workflow_done"]),
 };
 
@@ -123,9 +133,14 @@ export class SessionState {
 
   // ── convenience writers ──────────────────────────────────────────────
   /** Start a new user turn and record the message. Returns the new turn number. */
-  beginTurn(content: string): number {
+  beginTurn(content: string, inputResponse?: UserInputResponse): number {
     this.turn += 1;
-    this.record("user", "user_message", { content });
+    const payload: JsonObject = { content };
+    if (inputResponse) {
+      payload.response_to = inputResponse.request_id;
+      payload.input_response = inputResponse as unknown as JsonObject;
+    }
+    this.record("user", "user_message", payload);
     return this.turn;
   }
 
@@ -183,6 +198,7 @@ export class SessionState {
     const payload: JsonObject = { status: result.status, summary: result.summary };
     if (result.generation_context) payload.generation_context = result.generation_context as unknown as JsonObject;
     if (result.artifacts) payload.artifacts = result.artifacts as unknown as JsonObject[string];
+    if (result.visualizations) payload.visualizations = result.visualizations;
     if (result.error) payload.error = result.error;
     if (result.metrics) payload.metrics = result.metrics as unknown as JsonObject;
     return this.record(agent, "task_result", payload, { parent: dispatchEventId });
@@ -212,6 +228,7 @@ export class SessionState {
       };
       if (resultEv.payload.generation_context) result.generation_context = resultEv.payload.generation_context as unknown as GenerationContext;
       if (resultEv.payload.artifacts) result.artifacts = resultEv.payload.artifacts as unknown as ArtifactRef[];
+      if (resultEv.payload.visualizations) result.visualizations = resultEv.payload.visualizations as JsonObject[];
       if (resultEv.payload.error) result.error = resultEv.payload.error as { code: string; message: string };
       if (resultEv.payload.metrics) result.metrics = resultEv.payload.metrics as unknown as NonNullable<TaskResult["metrics"]>;
       out.result = result;
@@ -239,7 +256,15 @@ export class SessionState {
   subagentProgress(dispatchEventId: string): string {
     const lines: string[] = [];
     for (const e of this.events) {
-      if (!e.is_sidechain || e.kind !== "tool_result" || e.payload.task_id !== dispatchEventId) continue;
+      if (!e.is_sidechain || e.payload.task_id !== dispatchEventId) continue;
+      // 每步的 note 与工具结果按时间交错:模型上一步"打算做什么"的一行字
+      // 跨步存活,是它自己的连续性记忆。
+      if (e.kind === "subagent_note") {
+        const step = typeof e.payload.step === "number" ? ` step ${e.payload.step}` : "";
+        lines.push(`[note${step}] ${e.payload.note as string}`);
+        continue;
+      }
+      if (e.kind !== "tool_result") continue;
       const name = (e.payload.name as string) ?? "tool";
       const err = e.payload.error as { message?: string } | undefined;
       if (err) {
@@ -255,33 +280,49 @@ export class SessionState {
 
   /** Successful tool outputs for a subagent task, read from the log, used to
    *  assemble the task_result's generation_context. */
-  subagentToolOutputs(dispatchEventId: string): { name: string; summary: string; generation_context?: GenerationContext; artifacts?: ArtifactRef[] }[] {
-    const out: { name: string; summary: string; generation_context?: GenerationContext; artifacts?: ArtifactRef[] }[] = [];
+  subagentToolOutputs(dispatchEventId: string): { name: string; summary: string; generation_context?: GenerationContext; artifacts?: ArtifactRef[]; visualizations?: JsonObject[] }[] {
+    const out: { name: string; summary: string; generation_context?: GenerationContext; artifacts?: ArtifactRef[]; visualizations?: JsonObject[] }[] = [];
     for (const e of this.events) {
       if (!e.is_sidechain || e.kind !== "tool_result" || e.payload.task_id !== dispatchEventId || e.payload.error) continue;
-      const item: { name: string; summary: string; generation_context?: GenerationContext; artifacts?: ArtifactRef[] } = {
+      const item: { name: string; summary: string; generation_context?: GenerationContext; artifacts?: ArtifactRef[]; visualizations?: JsonObject[] } = {
         name: (e.payload.name as string) ?? "tool",
         summary: e.payload.summary as string,
       };
       if (e.payload.generation_context) item.generation_context = e.payload.generation_context as unknown as GenerationContext;
       if (e.payload.artifacts) item.artifacts = e.payload.artifacts as unknown as ArtifactRef[];
+      if (e.payload.visualizations) item.visualizations = e.payload.visualizations as JsonObject[];
       out.push(item);
     }
     return out;
   }
 
-  subagentToolErrors(dispatchEventId: string): { name: string; code: string; message: string; summary?: string }[] {
-    const out: { name: string; code: string; message: string; summary?: string }[] = [];
+  /** Every per-step note the subagent wrote for this task, in order, with the
+   * step it was written at — the step numbers are what let the model see its
+   * own repetition ("I have said 'check once' for ten steps straight"). */
+  subagentNotes(dispatchEventId: string): { step: number; note: string }[] {
+    const notes: { step: number; note: string }[] = [];
+    for (const e of this.events) {
+      if (!e.is_sidechain || e.kind !== "subagent_note" || e.payload.task_id !== dispatchEventId) continue;
+      if (typeof e.payload.note === "string") {
+        notes.push({ step: typeof e.payload.step === "number" ? e.payload.step : 0, note: e.payload.note });
+      }
+    }
+    return notes;
+  }
+
+  subagentToolErrors(dispatchEventId: string): { name: string; code: string; message: string; summary?: string; step?: number }[] {
+    const out: { name: string; code: string; message: string; summary?: string; step?: number }[] = [];
     for (const e of this.events) {
       if (!e.is_sidechain || e.kind !== "tool_result" || e.payload.task_id !== dispatchEventId) continue;
       const err = e.payload.error as { code?: string; message?: string } | undefined;
       if (!err) continue;
-      const item: { name: string; code: string; message: string; summary?: string } = {
+      const item: { name: string; code: string; message: string; summary?: string; step?: number } = {
         name: (e.payload.name as string) ?? "tool",
         code: err.code ?? "tool_error",
         message: err.message ?? (e.payload.summary as string | undefined) ?? "Tool failed.",
       };
       if (typeof e.payload.summary === "string") item.summary = e.payload.summary;
+      if (typeof e.payload.step === "number") item.step = e.payload.step;
       out.push(item);
     }
     return out;
@@ -300,6 +341,49 @@ export class SessionState {
     if (resolved) return undefined;
     if (Date.now() - new Date(req.timestamp).getTime() > APPROVAL_TTL_MS) return undefined;
     return { approval_id: approvalId, payload: req.payload.payload as JsonObject };
+  }
+
+  recordUserInputRequest(request: UserInputRequest): SessionEvent {
+    return this.record("orchestrator", "user_input_required", {
+      request: request as unknown as JsonObject,
+    });
+  }
+
+  /** The request plus its append-only derived state. The first later user turn
+   *  either answers this exact request or skips it by moving on. */
+  userInputRequest(requestId: string): UserInputRequestView | undefined {
+    const event = [...this.events].reverse().find((candidate) => {
+      if (candidate.kind !== "user_input_required") return false;
+      const request = candidate.payload.request as unknown as UserInputRequest | undefined;
+      return request?.request_id === requestId;
+    });
+    if (!event) return undefined;
+    return this.userInputViewForEvent(event);
+  }
+
+  pendingUserInput(requestId: string): UserInputRequest | undefined {
+    const view = this.userInputRequest(requestId);
+    if (!view || view.status !== "pending") return undefined;
+    const { status: _status, answers: _answers, ...request } = view;
+    return request;
+  }
+
+  userInputRequestForTurn(turn: number): UserInputRequestView | undefined {
+    const event = this.events.find((candidate) => candidate.turn === turn && candidate.kind === "user_input_required");
+    return event ? this.userInputViewForEvent(event) : undefined;
+  }
+
+  private userInputViewForEvent(event: SessionEvent): UserInputRequestView {
+    const request = event.payload.request as unknown as UserInputRequest;
+    const nextUserMessage = this.events.find(
+      (candidate) => candidate.kind === "user_message" && candidate.turn > event.turn,
+    );
+    if (!nextUserMessage) return { ...request, status: "pending" };
+    const response = nextUserMessage.payload.input_response as unknown as UserInputResponse | undefined;
+    if (nextUserMessage.payload.response_to === request.request_id && response) {
+      return { ...request, status: "answered", answers: response.answers };
+    }
+    return { ...request, status: "skipped" };
   }
 
   /** Fold workflow_* events into a progress view. Replaces the old workflows store. */
@@ -357,7 +441,20 @@ export class SessionState {
       if (e.kind === "reply") progressLines.push(`You: ${e.payload.content as string}`);
       else if (e.kind === "dispatch") progressLines.push(`[dispatch → ${e.payload.agent}] ${e.payload.task as string}`);
       else if (e.kind === "skill_invoke") progressLines.push(`[skill ${e.payload.skill as string}]`);
+      // The orchestrator's own errors — a malformed step, a protocol violation —
+      // are the one class of failure it can actually correct, but only if it can
+      // see them. Without this the same bad step just repeats until the budget runs out.
+      else if (e.kind === "error") progressLines.push(`[error] ${e.payload.message as string}`);
+      else if (e.kind === "skill_result") {
+        const content = e.payload.content as string | undefined;
+        progressLines.push(
+          content
+            ? `[skill ${e.payload.skill as string}]\n${content}`
+            : `[skill ${e.payload.skill as string}] ${e.payload.summary as string}`,
+        );
+      }
       else if (e.kind === "approval_required" && this.isApprovalPendingEvent(e)) progressLines.push(this.formatApprovalRequiredLine(e));
+      else if (e.kind === "user_input_required") progressLines.push(this.formatUserInputRequiredLine(e));
       else if (e.kind === "task_result") progressLines.push(this.formatTaskResultLine(e, artifacts));
       else if (e.kind === "tool_result" && !e.is_sidechain) {
         const name = e.payload.name as string;
@@ -368,7 +465,7 @@ export class SessionState {
           const gc = e.payload.generation_context as GenerationContext | undefined;
           const lines = [`[${name} result] ${e.payload.summary as string}`];
           if (gc) {
-            lines.push(`  generation_context_prompt: ${gc.prompt}`);
+            if (gc.prompt) lines.push(`  generation_context_prompt: ${gc.prompt}`);
             lines.push(`  generation_data: ${JSON.stringify(gc.data)}`);
           }
           progressLines.push(lines.join("\n"));
@@ -411,7 +508,7 @@ export class SessionState {
     const parts: string[] = [`[${agent} result] status=${e.payload.status as string} | ${e.payload.summary as string}`];
     if (error) parts.push(`  error(${error.code}): ${error.message}`);
     if (gc) {
-      parts.push(`  generation_context_prompt: ${gc.prompt}`);
+      if (gc.prompt) parts.push(`  generation_context_prompt: ${gc.prompt}`);
       parts.push(`  generation_data: ${JSON.stringify(gc.data)}`);
     }
     for (const artifact of evArtifacts) {
@@ -423,11 +520,18 @@ export class SessionState {
   }
 
   private formatApprovalRequiredLine(e: SessionEvent): string {
+    const approvalId = e.payload.approval_id as string;
     const payload = e.payload.payload as JsonObject | undefined;
     const summary = payload
-      ? `${payload["side"] ?? "ORDER"} ${payload["symbol"] ?? ""} on ${payload["exchange"] ?? "exchange"}`.trim()
-      : "trade order";
-    return `[trade approval_required] approval_id=${e.payload.approval_id as string} | ${summary} is awaiting user approval; no order has been submitted yet.`;
+      ? String(payload["summary"] ?? `strategy ${String(payload["strategy_id"] ?? approvalId)}`)
+      : `strategy ${approvalId}`;
+    return `[strategy approval_required] approval_id=${approvalId} | ${summary} is awaiting user approval; the strategy has not been activated yet.`;
+  }
+
+  private formatUserInputRequiredLine(e: SessionEvent): string {
+    const request = e.payload.request as unknown as UserInputRequest;
+    const questions = request.questions.map((question) => question.question).join(" | ");
+    return `[user input requested] request_id=${request.request_id} | ${questions}`;
   }
 
   private isApprovalPendingEvent(e: SessionEvent): boolean {
@@ -512,6 +616,19 @@ export class SessionRegistry {
 
   get(sessionId: string): SessionState | undefined {
     return this.sessions.get(sessionId);
+  }
+
+  /** Load the complete durable event log for chat-history projection.
+   *  Unlike SessionState.allEvents(), this still includes compacted turns. */
+  async loadEvents(sessionId: string): Promise<SessionEvent[]> {
+    if (this.store) return this.store.loadEvents(sessionId);
+    const state = await this.getOrCreate(sessionId);
+    return [...state.allEvents()];
+  }
+
+  /** Evict a deleted room so a later request cannot reuse stale in-memory events. */
+  delete(sessionId: string): void {
+    this.sessions.delete(sessionId);
   }
 
   findPendingApproval(approvalId: string): { state: SessionState; event: SessionEvent; payload: JsonObject } | undefined {

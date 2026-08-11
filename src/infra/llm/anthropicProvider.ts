@@ -1,12 +1,46 @@
-import type { LlmMessage, LlmProvider, GenerateOptions, GenerateResult } from "./provider.ts";
+import type { LlmMessage, LlmProvider, LlmToolCall, GenerateOptions, GenerateResult } from "./provider.ts";
+import type { JsonObject } from "../../framework/types.ts";
 
+// `||`, not `??`: a declared-but-empty LLM_MODEL_* in .env is an unset override, and `??`
+// would forward "" as the model id.
 const MODEL_MAP: Record<string, string> = {
-  SMALL:  process.env["LLM_MODEL_SMALL"]  ?? "claude-haiku-4-5-20251001",
-  MEDIUM: process.env["LLM_MODEL_MEDIUM"] ?? "claude-sonnet-4-6",
-  LARGE:  process.env["LLM_MODEL_LARGE"]  ?? "claude-opus-4-8",
+  SMALL:  process.env["LLM_MODEL_SMALL"]  || "claude-haiku-4-5-20251001",
+  MEDIUM: process.env["LLM_MODEL_MEDIUM"] || "claude-sonnet-5",
+  LARGE:  process.env["LLM_MODEL_LARGE"]  || "claude-opus-5",
 };
 
-type AnthropicMessage = { role: "user" | "assistant"; content: string };
+type AnthropicTextBlock = { type: "text"; text: string; cache_control?: { type: "ephemeral" } };
+type AnthropicMessage = { role: "user" | "assistant"; content: AnthropicTextBlock[] };
+
+/** Fold conversation messages into alternating-role block messages, stamping a
+ * cache breakpoint on each block whose source message ended a cacheable prefix.
+ * A breakpoint caches the entire request prefix before it (tools + system +
+ * earlier blocks), so the growing tail is the only full-price part per step. */
+function toAnthropicMessages(messages: { role: string; content: string; cache?: boolean }[]): AnthropicMessage[] {
+  const out: AnthropicMessage[] = [];
+  for (const message of messages) {
+    const role = message.role === "assistant" ? "assistant" : "user";
+    const block: AnthropicTextBlock = { type: "text", text: message.content,
+      ...(message.cache ? { cache_control: { type: "ephemeral" as const } } : {}) };
+    const last = out[out.length - 1];
+    if (last && last.role === role) last.content.push(block);
+    else out.push({ role, content: [block] });
+  }
+  return out;
+}
+
+// Claude 5 and later reject `temperature` outright ("`temperature` is deprecated for this model").
+// Learned per model id at runtime rather than from a hardcoded list, so a newer model that also
+// drops the parameter costs one retry instead of a 400 that kills the caller's loop.
+const temperatureDeprecated = new Set<string>();
+
+// max_tokens is mandatory, so "no limit" means each model's own ceiling. We ask for more than any
+// model allows and let the 400 tell us the real number (it states it verbatim), rather than
+// maintaining a per-model table that goes stale. Claude 5 thinks adaptively and charges thinking
+// against this budget, so a low cap silently yields a reply with zero text blocks.
+const REQUESTED_MAX_TOKENS = Number(process.env["LLM_MAX_TOKENS"] || 200_000);
+const modelMaxTokens = new Map<string, number>();
+const MAX_TOKENS_CEILING = /max_tokens:\s*\d+\s*>\s*(\d+)/;
 
 export class AnthropicProvider implements LlmProvider {
   name = "anthropic";
@@ -24,43 +58,71 @@ export class AnthropicProvider implements LlmProvider {
 
     // Split system message from conversation messages
     const systemMsg = messages.find((m) => m.role === "system");
-    const conversation: AnthropicMessage[] = messages
-      .filter((m) => m.role !== "system")
-      .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+    const conversation = toAnthropicMessages(messages.filter((m) => m.role !== "system"));
 
-    const body = {
-      model,
-      max_tokens: 4096,
-      temperature: options.temperature ?? 0.2,
-      ...(systemMsg ? { system: systemMsg.content } : {}),
-      messages: conversation,
-      stream: options.onToken ? true : false,
-    };
-
-    const response = await fetch(`${this.baseUrl}/v1/messages`, {
+    const post = () => fetch(`${this.baseUrl}/v1/messages`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "x-api-key": this.apiKey,
         "anthropic-version": "2023-06-01",
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify({
+        model,
+        max_tokens: modelMaxTokens.get(model) ?? REQUESTED_MAX_TOKENS,
+        ...(temperatureDeprecated.has(model) ? {} : { temperature: options.temperature ?? 0.2 }),
+        ...(systemMsg
+          ? { system: systemMsg.cache
+            ? [{ type: "text", text: systemMsg.content, cache_control: { type: "ephemeral" } }]
+            : systemMsg.content }
+          : {}),
+        // Native function calling: the schema constrains decoding, so tool inputs
+        // arrive as guaranteed-parseable JSON instead of hand-written text.
+        // tool_choice stays "auto", never "any": forced tool use disables adaptive
+        // thinking, which in practice collapses planning into reflexive repeat calls.
+        ...(options.tools?.length
+          ? {
+            tools: options.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.inputSchema })),
+            tool_choice: { type: "auto" },
+          }
+          : {}),
+        messages: conversation,
+        // Always stream, even with no onToken subscriber. A non-streamed request sends no headers
+        // until generation finishes, and undici gives up at 300s — which a long adaptive-thinking
+        // reply routinely exceeds. Streaming returns headers immediately, so wall-clock stops
+        // mattering; the deltas are simply accumulated when nobody is listening.
+        stream: true,
+      }),
       ...(options.signal ? { signal: options.signal } : {}),
     });
 
-    if (!response.ok) {
+    // Both corrections are learned once per model per process, so steady state is a single request.
+    let response = await post();
+    for (let attempt = 0; attempt < 2 && !response.ok; attempt += 1) {
       const err = await response.text();
-      throw new Error(`Anthropic API error ${response.status}: ${err}`);
+      if (response.status !== 400) throw new Error(`Anthropic API error ${response.status}: ${err}`);
+      const ceiling = MAX_TOKENS_CEILING.exec(err);
+      if (ceiling) modelMaxTokens.set(model, Number(ceiling[1]));
+      else if (/`?temperature`? is deprecated/i.test(err)) temperatureDeprecated.add(model);
+      else throw new Error(`Anthropic API error 400: ${err}`);
+      response = await post();
     }
+    if (!response.ok) throw new Error(`Anthropic API error ${response.status}: ${await response.text()}`);
 
     let text = "";
     let tokensIn = 0;
     let tokensOut = 0;
+    const toolCalls: LlmToolCall[] = [];
 
-    if (options.onToken && response.body) {
+    if (response.body) {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buf = "";
+      let stopReason = "?";
+      const blockTypes: string[] = [];
+      // tool_use inputs stream as input_json_delta chunks per block index; the
+      // accumulated string is complete JSON once the block stops.
+      const toolBlocks = new Map<number, { name: string; json: string }>();
 
       while (true) {
         const { done, value } = await reader.read();
@@ -75,10 +137,29 @@ export class AnthropicProvider implements LlmProvider {
           try {
             const event = JSON.parse(data) as Record<string, unknown>;
             if (event.type === "content_block_delta") {
-              const delta = (event.delta as Record<string, unknown>)?.text as string | undefined;
+              // Only text_delta carries `text`; thinking_delta carries `thinking`, so thinking blocks
+              // are skipped here exactly as the non-streamed path filters them out of `content`.
+              const eventDelta = event.delta as Record<string, unknown> | undefined;
+              const delta = eventDelta?.text as string | undefined;
               if (delta) {
                 text += delta;
-                options.onToken(delta);
+                options.onToken?.(delta);
+              }
+              const partialJson = eventDelta?.type === "input_json_delta" ? eventDelta.partial_json as string | undefined : undefined;
+              const block = toolBlocks.get(event.index as number);
+              if (partialJson !== undefined && block) block.json += partialJson;
+            } else if (event.type === "content_block_start") {
+              const contentBlock = event.content_block as Record<string, unknown> | undefined;
+              const type = contentBlock?.type as string | undefined;
+              if (type) blockTypes.push(type);
+              if (type === "tool_use") {
+                toolBlocks.set(event.index as number, { name: contentBlock?.name as string, json: "" });
+              }
+            } else if (event.type === "content_block_stop") {
+              const block = toolBlocks.get(event.index as number);
+              if (block) {
+                toolCalls.push({ name: block.name, input: block.json.trim() === "" ? {} : JSON.parse(block.json) as JsonObject });
+                toolBlocks.delete(event.index as number);
               }
             } else if (event.type === "message_start") {
               const usage = (event.message as Record<string, unknown>)?.usage as Record<string, number> | undefined;
@@ -86,24 +167,43 @@ export class AnthropicProvider implements LlmProvider {
             } else if (event.type === "message_delta") {
               const usage = (event.usage as Record<string, number> | undefined);
               tokensOut = usage?.output_tokens ?? 0;
+              const reason = (event.delta as Record<string, unknown>)?.stop_reason as string | undefined;
+              if (reason) stopReason = reason;
             }
           } catch {
             // skip malformed SSE lines
           }
         }
       }
+      if (text === "" && toolCalls.length === 0) {
+        // Claude 5 thinks adaptively, and thinking blocks draw from the same max_tokens budget.
+        // Callers parse `text` as JSON, so an all-thinking reply would surface as their own
+        // "did not return JSON" — name the real cause here instead.
+        throw new Error(`Anthropic returned no text block (model=${model} stop_reason=${stopReason} max_tokens=${modelMaxTokens.get(model) ?? REQUESTED_MAX_TOKENS} output_tokens=${tokensOut} blocks=[${blockTypes.join(",")}])`);
+      }
     } else {
       const json = (await response.json()) as {
-        content: Array<{ type: string; text?: string }>;
+        content: Array<{ type: string; text?: string; name?: string; input?: JsonObject }>;
+        stop_reason?: string;
         usage?: { input_tokens?: number; output_tokens?: number };
       };
       text = json.content.filter((b) => b.type === "text").map((b) => b.text ?? "").join("");
+      for (const block of json.content) {
+        if (block.type === "tool_use" && block.name) toolCalls.push({ name: block.name, input: block.input ?? {} });
+      }
       tokensIn = json.usage?.input_tokens ?? 0;
       tokensOut = json.usage?.output_tokens ?? 0;
+      if (text === "" && toolCalls.length === 0) {
+        // Claude 5 thinks adaptively, and thinking blocks draw from the same max_tokens budget.
+        // Callers parse `text` as JSON, so an all-thinking reply would surface as their own
+        // "did not return JSON" — name the real cause here instead.
+        throw new Error(`Anthropic returned no text block (model=${model} stop_reason=${json.stop_reason ?? "?"} max_tokens=${modelMaxTokens.get(model) ?? REQUESTED_MAX_TOKENS} output_tokens=${tokensOut} blocks=[${json.content.map((b) => b.type).join(",")}])`);
+      }
     }
 
     return {
       text,
+      ...(toolCalls.length > 0 ? { toolCalls } : {}),
       metrics: {
         tokens_in: tokensIn,
         tokens_out: tokensOut,

@@ -9,32 +9,35 @@
  */
 import { readFile } from "node:fs/promises";
 import {
-  createCexCreateStrategyTool,
-  createCexStartStrategyTool,
-  createCexManageStrategyTool,
+  createCreateStrategyTool,
+  createStartStrategyTool,
+  createManageStrategyTool,
 } from "../mcp_tools/trading/strategyTools.ts";
 import { strategyPath } from "../src/trading/persistence/paths.ts";
 
 const ctx = { sessionId: "test-strategy" };
-const create = createCexCreateStrategyTool();
-const start = createCexStartStrategyTool();
-const manage = createCexManageStrategyTool();
+const create = createCreateStrategyTool();
+const start = createStartStrategyTool();
+const manage = createManageStrategyTool();
 
 function hr(label: string): void {
   console.log(`\n──────── ${label} ────────`);
 }
 
-// 1. Valid strategy: "BTC drops 5% within 10 min → sell 10% of position (paper)".
+// 1. Valid strategy: "AAPL drops 5% within 10 min → buy $500 (paper)".
 hr("1. create valid rolling_change strategy");
 const validInput = {
-  task: "If BTC drops 5% in 10 minutes, sell 10% of my position",
+  task: "If AAPL drops 5% in 10 minutes, buy $500",
   user_id: "tester",
-  name: "BTC 5% stop",
-  symbol: "BTCUSDT",
+  name: "AAPL dip entry",
+  symbol: "AAPL",
   mode: "paper",
-  price_trigger: { type: "rolling_change", direction: "down", pct: 5, window_minutes: 10, confirm_samples: 2 },
-  action: { side: "SELL", size: { type: "pct_of_position", value: 10 }, order_type: "marketable_limit", max_slippage_bps: 50 },
-  recurrence: { mode: "one_shot", reanchor: false, trigger_count: 0 },
+  phases: [{
+    name: "Entry",
+    price_trigger: { type: "rolling_change", direction: "down", pct: 5, window_minutes: 10, confirm_samples: 2 },
+    action: { side: "BUY", size: { type: "fixed_quote_usd", value: 500 }, order_type: "marketable_limit", max_slippage_bps: 50 },
+    recurrence: { mode: "one_shot", reanchor: false, trigger_count: 0 },
+  }],
 };
 const createRes = await create.execute(validInput, ctx);
 console.log("summary:", createRes.summary);
@@ -54,17 +57,17 @@ console.log(JSON.stringify(onDisk, null, 2));
 const ok =
   onDisk.id === strategyId &&
   onDisk.status === "draft" &&
-  onDisk.symbol === "BTCUSDT" &&
-  onDisk.dsl.price_trigger.type === "rolling_change" &&
-  onDisk.dsl.price_trigger.pct === 5 &&
-  onDisk.dsl.action.order_type === "marketable_limit" &&
+  onDisk.symbol === "AAPL" &&
+  onDisk.dsl.phases[0].price_trigger.type === "rolling_change" &&
+  onDisk.dsl.phases[0].price_trigger.pct === 5 &&
+  onDisk.dsl.phases[0].action.order_type === "marketable_limit" &&
   onDisk.dsl.mode === "paper";
 console.log(ok ? "✅ round-trip fields match" : "❌ round-trip MISMATCH");
 
 // 3. Invalid strategy: rolling_change missing pct should be rejected.
 hr("3. create invalid strategy (rolling_change missing pct)");
 const badRes = await create.execute(
-  { task: "bad", symbol: "ETHUSDT", price_trigger: { type: "rolling_change", direction: "down", window_minutes: 10 }, action: { side: "SELL", size: { type: "pct_of_position", value: 50 }, order_type: "market" }, recurrence: { mode: "one_shot", reanchor: false, trigger_count: 0 } },
+  { task: "bad", name: "Bad MSFT strategy", symbol: "MSFT", phases: [{ name: "Bad phase", price_trigger: { type: "rolling_change", direction: "down", window_minutes: 10 }, action: { side: "SELL", size: { type: "pct_of_position", value: 50 }, order_type: "market" }, recurrence: { mode: "one_shot", reanchor: false, trigger_count: 0 } }] },
   ctx,
 );
 console.log("summary:", badRes.summary);
@@ -83,4 +86,4 @@ console.log("summary:", getRes.summary);
 
 hr("done");
 console.log(`Inspect the file at: ${filePath}`);
-console.log("(cancel it with cex_manage_strategy op=cancel, or delete the file, when finished.)");
+console.log("(cancel it with manage_strategy op=cancel, or delete the file, when finished.)");

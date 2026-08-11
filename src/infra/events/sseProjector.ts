@@ -1,6 +1,7 @@
 import { createLogger } from "../logger/logger.ts";
 import type { SessionEvent, SessionState } from "../../framework/sessionState.ts";
 import type { AgentKind, ArtifactRef, JsonObject, JsonValue, SSEEvent } from "../../framework/types.ts";
+import { collectTurnSources } from "../../framework/citationSources.ts";
 
 const log = createLogger("orchestrator");
 
@@ -40,6 +41,10 @@ export function projectEvent(event: SessionEvent, state: SessionState): SSEEvent
     case "workflow_done":
       return [{ type: "workflow_done", workflow_id: p.workflow_id as string, status: p.status as "ok" | "failed", summary: p.summary as string }];
     case "error":
+      // A protocol violation is the orchestrator talking to itself: it reads the
+      // message back on the next step and corrects. Surfacing it would show the
+      // user an error for something that self-heals within the same turn.
+      if (p.scope === "protocol") return [];
       return [{ type: "error", scope: (p.scope as "main" | "task") ?? "main", message: p.message as string }];
     case "reply":
       if (p.final !== true) return [{ type: "step_reply", content: p.content as string }];
@@ -62,7 +67,7 @@ function strategyCreatedFrames(payload: JsonObject): SSEEvent[] {
   const outputs = Array.isArray(data.tool_outputs) ? data.tool_outputs : [];
   return outputs
     .map((value) => asObject(value))
-    .filter((output) => output?.tool === "cex_create_strategy")
+    .filter((output) => output?.tool === "create_strategy")
     .map((output) => asObject(output?.data))
     .filter((createData): createData is JsonObject => typeof createData?.strategy_id === "string")
     .map((createData) => {
@@ -83,14 +88,25 @@ function tokenize(reply: string): SSEEvent[] {
 }
 
 function buildFinal(event: SessionEvent, state: SessionState): SSEEvent {
-  const artifacts: { n: number; type: string; ref: string; label: string }[] = [];
+  const artifacts: { n: number; type: "file" | "url"; ref: string; label: string }[] = [];
+  const visualizations: JsonObject[] = [];
   let n = 1;
   for (const result of state.turnResults(event.turn)) {
+    visualizations.push(...(result.visualizations ?? []));
     for (const a of result.artifacts ?? []) {
       artifacts.push({ n: n++, type: a.type, ref: a.ref, label: a.label ?? "" });
     }
   }
-  return { type: "final", sessionId: state.session_id, response: event.payload.content as string, artifacts };
+  const inputRequest = state.userInputRequestForTurn(event.turn);
+  return {
+    type: "final",
+    sessionId: state.session_id,
+    response: event.payload.content as string,
+    artifacts,
+    visualizations,
+    sources: collectTurnSources(state.allEvents(), event.turn),
+    ...(inputRequest ? { input_request: inputRequest } : {}),
+  };
 }
 
 /**

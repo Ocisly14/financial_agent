@@ -5,9 +5,9 @@
  *   node --env-file=.env --experimental-strip-types scripts/test-agent.ts
  *
  * Tests:
- *   1. Market price query  → get_crypto_price → markdown table + price section
- *   2. Web search query    → web_search       → Sources citation section
- *   3. Price chart request → price_chart      → {{artifact:N}} placeholder
+ *   1. Stock price query   → get_stock_price  → markdown table + price section
+ *   2. Financial research  → financial_search → Sources citation section
+ *   3. Stock chart request → get_stock_price  → inline <StockChart /> component
  */
 
 import { createFinancialAgentApp } from "../src/agent/createApp.ts";
@@ -60,19 +60,19 @@ async function main() {
   let totalPass = 0;
   let totalFail = 0;
 
-  // ── Test 1: Market price ──────────────────────────────────────────────────
-  section("Test 1 — Market price (BTC)")
-  info("Query: 'BTC今天价格怎么样？'");
+  // ── Test 1: Stock price ───────────────────────────────────────────────────
+  section("Test 1 — Stock price (AAPL)")
+  info("Query: 'AAPL今天价格怎么样？'");
 
-  const t1 = await runCase(app, "smoke-1", "BTC今天价格怎么样？");
+  const t1 = await runCase(app, "smoke-1", "AAPL今天价格怎么样？");
   console.log(`\n${DIM}Response:${RESET}\n${t1.response.slice(0, 800)}${t1.response.length > 800 ? "\n…(truncated)" : ""}\n`);
 
   const checks1 = [
     check("Response is non-empty", t1.response.trim().length > 0),
     check("Tasks dispatched (≥1)", t1.taskResults.length >= 1),
     check("Contains markdown (## or ** or |)", /##|^\*\*|^\|/m.test(t1.response)),
-    check("Mentions BTC or price", /btc|price|价格|\$|USD/i.test(t1.response)),
-    check("No raw file paths exposed", !/\/Users\/|\.\/charts\//i.test(t1.response)),
+    check("Mentions AAPL or price", /aapl|price|价格|\$|USD/i.test(t1.response)),
+    check("No raw file paths exposed", !/\/Users\//i.test(t1.response)),
     check("No raw JSON leak ({ status: )", !/\{\s*"status"\s*:/.test(t1.response)),
   ];
   printChecks(checks1);
@@ -96,45 +96,32 @@ async function main() {
       /sources|来源|参考|http[s]?:\/\//i.test(t2.response),
       "expected Sources section or URL link",
     ),
-    check("No raw file paths exposed", !/\/Users\/|\.\/charts\//i.test(t2.response)),
+    check("No raw file paths exposed", !/\/Users\//i.test(t2.response)),
   ];
   printChecks(checks2);
   totalPass += checks2.filter((c) => c.ok).length;
   totalFail += checks2.filter((c) => !c.ok).length;
 
-  // ── Test 3: Price chart with artifact placeholder ─────────────────────────
-  section("Test 3 — Price chart artifact placeholder")
-  info("Query: '给我画一个BTC最近30天的价格图'");
+  // ── Test 3: Inline live stock chart ───────────────────────────────────────
+  section("Test 3 — Inline live stock chart")
+  info("Query: '给我画一个AAPL最近1年的股票价格图'");
 
-  const t3 = await runCase(app, "smoke-3", "给我画一个BTC最近30天的价格图");
+  const t3 = await runCase(app, "smoke-3", "给我画一个AAPL最近1年的股票价格图");
   console.log(`\n${DIM}Response:${RESET}\n${t3.response.slice(0, 800)}${t3.response.length > 800 ? "\n…(truncated)" : ""}\n`);
 
-  // Collect all artifacts from task results
-  const artifacts = (t3.taskResults as Array<{ artifacts?: Array<{ type: string; ref: string; label?: string }> }>)
-    .flatMap((r) => r.artifacts ?? []);
-
-  const hasArtifactPlaceholder = /\{\{artifact:\d+\}\}/.test(t3.response);
-  const hasChartArtifact = artifacts.some((a) => a.type === "chart");
+  const hasStockChart = /<StockChart\s+symbol=["']AAPL["'](?:\s+range=["']1Y["'])?\s*\/>/i.test(t3.response);
 
   const checks3 = [
     check("Response is non-empty", t3.response.trim().length > 0),
     check("Tasks dispatched (≥1)", t3.taskResults.length >= 1),
     check(
-      "Chart artifact in task results",
-      hasChartArtifact,
-      hasChartArtifact ? undefined : "price_chart tool did not return a chart artifact (API key missing?)",
+      "Inline StockChart component in response",
+      hasStockChart,
+      hasStockChart ? undefined : "agent didn't embed the live StockChart component",
     ),
-    check(
-      "{{artifact:N}} placeholder in response",
-      hasArtifactPlaceholder,
-      hasArtifactPlaceholder ? undefined : "agent didn't use artifact embed syntax",
-    ),
-    check("No raw file paths exposed", !/\/Users\/|\.\/charts\//i.test(t3.response)),
+    check("No raw file paths exposed", !/\/Users\//i.test(t3.response)),
   ];
   printChecks(checks3);
-  if (hasChartArtifact) {
-    info(`Chart artifact: ${artifacts.find((a) => a.type === "chart")?.ref ?? "(none)"}`);
-  }
   totalPass += checks3.filter((c) => c.ok).length;
   totalFail += checks3.filter((c) => !c.ok).length;
 

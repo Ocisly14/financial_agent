@@ -6,6 +6,48 @@
 
 export type UUID = string;
 
+export type UserInputOption = {
+  id: string;
+  label: string;
+  description?: string;
+  recommended?: boolean;
+};
+
+export type UserInputQuestion = {
+  id: string;
+  header?: string;
+  question: string;
+  options: UserInputOption[];
+  min_selections: number;
+  max_selections: number;
+};
+
+export type UserInputAnswer = {
+  question_id: string;
+  selected_option_ids: string[];
+};
+
+export type UserInputRequestView = {
+  request_id: string;
+  questions: UserInputQuestion[];
+  status: "pending" | "answered" | "skipped";
+  answers?: UserInputAnswer[];
+};
+
+/** A member Topic's own question, surfaced on the Research stream (see the
+ *  member-input-passthrough design). `topicId` is the session the answer must
+ *  be POSTed to — NOT the Research session the card is displayed in. */
+export type MemberInputRequestFrame = {
+    topicId: string;
+    topicName: string;
+    request: UserInputRequestView;
+};
+
+export type UserInputSubmission = {
+  requestId: string;
+  answers: Array<{ questionId: string; selectedOptionIds: string[] }>;
+};
+
 export interface Character {
   name?: string;
   username?: string;
@@ -27,14 +69,6 @@ export interface Content {
   [k: string]: any;
 }
 
-// CEX trading types — the original @elizaos/core shapes were richer than we
-// need (this UI is present-but-inert here). Keep them fully permissive so the
-// verbatim-copied trading dialogs type-check without reproducing the schema.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type cexParamDef = any;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type CEXCanonicalExchangeCapabilities = any;
-
 // Auto-trading strategy types — mirrors src/trading/persistence/strategyStore.ts
 // and mcp_tools/trading/strategy/{priceStrategy,priceTrigger}.ts. Kept minimal
 // and permissive (extra fields via [k: string]: any) since the client never
@@ -51,12 +85,26 @@ export type StrategyLifecycle =
   | "failed";
 
 export interface PriceTrigger {
-  type: "rolling_change" | "absolute_threshold" | "trailing_stop";
-  direction: "up" | "down";
+  type:
+    | "rolling_change"
+    | "absolute_threshold"
+    | "relative_change"
+    | "trailing_stop"
+    | "rsi_threshold"
+    | "macd_cross"
+    | "moving_average_cross";
+  direction: "up" | "down" | "above" | "below" | "bullish" | "bearish";
   pct?: number;
   window_minutes?: number;
   price?: number;
   reference_price?: number;
+  threshold?: number;
+  period?: number;
+  fast_period?: number;
+  slow_period?: number;
+  signal_period?: number;
+  average_type?: "sma" | "ema";
+  timeframe?: string;
   confirm_samples?: number;
   [k: string]: any;
 }
@@ -84,7 +132,7 @@ export interface StrategyRecurrence {
 export interface PriceStrategyDSL {
   name: string;
   symbol: string;
-  mode: "paper" | "shadow" | "live";
+  mode: "paper" | "shadow";
   phases: StrategyPhase[];
   guardrails?: { max_notional_usd?: number; total_budget_usd?: number };
   [k: string]: any;
@@ -93,10 +141,16 @@ export interface PriceStrategyDSL {
 export interface StrategyPhase {
   id: string;
   name: string;
-  status: "active" | "running" | "completed" | "paused" | "failed";
+  status: "waiting" | "active" | "running" | "completed" | "paused" | "cancelled" | "failed";
+  depends_on: string[];
+  activate_on: "first_fill" | "phase_completed";
+  price_anchor?: { type: "phase_fill"; phase_id: string };
+  cancel_group?: string;
   price_trigger: PriceTrigger;
   action: StrategyAction;
   recurrence: StrategyRecurrence;
+  last_fill?: { execution_id: string; price: number; quantity: number; side: "BUY" | "SELL"; at: string };
+  cancel_reason?: string;
   failure_reason?: string;
   [k: string]: any;
 }
@@ -112,6 +166,72 @@ export interface StoredStrategy {
   failure_reason?: string;
   [k: string]: any;
 }
+
+/** What kind of investigation a Topic is. Mirrors `TOPIC_CATEGORIES` in
+ *  src/infra/db/sqliteEventStore.ts — the array ORDER is also the order the
+ *  rail prints the groups in, so the two must not drift.
+ *
+ *  Each boundary falls where the reader's next action differs, which is why
+ *  asset class (crypto / commodities / FX) is deliberately absent: it is an
+ *  orthogonal axis that surfaces through `leadSymbol` instead. */
+export const TOPIC_CATEGORIES = [
+  "single_name",
+  "comparative",
+  "sector",
+  "macro",
+  "strategy",
+  "portfolio",
+] as const;
+
+export type TopicCategory = (typeof TOPIC_CATEGORIES)[number];
+
+export type TopicSummary = {
+  id: string;
+  name: string;
+  /** Derived from the topic's charts — the first visible chart (lowest sort order). Never written directly. */
+  leadSymbol: string | null;
+  createdAt: number;
+  lastMessage: { text: string; createdAt: number } | null;
+  messageCount: number;
+  /** Background SMALL-model blurb. Null until the topic has had a turn. */
+  summary: string | null;
+  category: TopicCategory | null;
+  /** True once the user picked the category by hand — the model stops overwriting it. */
+  categoryLocked: boolean;
+};
+
+/** A multi-ticker comparison a topic_charts row of kind "overlay" carries.
+ *  Mirrors `OverlaySpec` in src/infra/db/sqliteEventStore.ts. */
+/** `range` is a number of trading days — see client/src/lib/stockChart.ts. */
+export type OverlaySpec = { symbols: string[]; range: number; normalize: "pct" | "index100" };
+
+/** The user's intent for the chart-tab set. Does not include study content — that's derived from
+ *  messages. A discriminated union, not two nullable fields, mirroring
+ *  `TopicChartPreferenceRow` in src/infra/db/sqliteEventStore.ts byte for byte: a nullable-both-fields
+ *  shape would push every use site back to hand-rolled null checks instead of letting the compiler
+ *  force the branch. */
+export type TopicChartPreference =
+  | { id: string; kind: "symbol"; symbol: string; /** null means follow the range derived from the messages. */ range: number | null; hidden: boolean; sortOrder: number }
+  | { id: string; kind: "overlay"; overlay: OverlaySpec; range: number | null; hidden: boolean; sortOrder: number };
+
+// ── Research (phase 2 research layer, docs/superpowers/specs/2026-07-30-research-layer-design.md) ──
+// A Research groups several Topics under one controller agent that can ask
+// them questions and compare them. Its id doubles as its chat session id,
+// exactly like a Topic (see src/server/server.ts).
+
+export type ResearchSummary = {
+  id: string;
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+  memberCount: number;
+};
+
+/** A Research's member, resolved server-side to the same shape the Topic
+ *  routes return (GET/PUT .../researches/:id/members). A member whose Topic
+ *  was deleted is silently skipped rather than returned as a hole — see
+ *  `researchMembers()` in src/server/server.ts. */
+export type ResearchMember = TopicSummary;
 
 export interface ExecutionLogEntry {
   ts: string;

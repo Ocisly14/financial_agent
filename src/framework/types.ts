@@ -1,27 +1,68 @@
-export type AgentKind = "onchain_data" | "news_research" | "trade";
+import type { CitationSource } from "./citationSources.ts";
+export type AgentKind = "market_data" | "market_research" | "trading_operations" | "financial_modeling";
 
 export type TaskStatus = "ok" | "failed" | "timeout";
 
 export type SkillStatus = "loaded" | "ok" | "failed";
+
+export type SkillLayer = "topic" | "research";
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 export type JsonObject = { [key: string]: JsonValue };
 
 export type ArtifactRef = {
-  type: "chart" | "file" | "url";
+  type: "file" | "url";
   ref: string;
   label?: string;
 };
 
 export type GenerationContext = {
-  prompt: string;
+  prompt?: string;
   data: JsonObject;
+};
+
+export type UserInputOption = {
+  id: string;
+  label: string;
+  description?: string;
+  recommended?: boolean;
+};
+
+export type UserInputQuestion = {
+  id: string;
+  header?: string;
+  question: string;
+  options: UserInputOption[];
+  min_selections: number;
+  max_selections: number;
+};
+
+export type UserInputRequest = {
+  request_id: string;
+  questions: UserInputQuestion[];
+};
+
+export type UserInputAnswer = {
+  question_id: string;
+  selected_option_ids: string[];
+};
+
+export type UserInputResponse = {
+  request_id: string;
+  answers: UserInputAnswer[];
+};
+
+export type UserInputRequestView = UserInputRequest & {
+  status: "pending" | "answered" | "skipped";
+  answers?: UserInputAnswer[];
 };
 
 export type TaskRequest = {
   agent: AgentKind;
   task: string;
+  /** Resumption handle for long-running revisioned workflows. */
+  model_id?: string;
   tools?: string[];
   timeout_ms?: number;
 };
@@ -33,6 +74,8 @@ export type TaskResult = {
   summary: string;
   generation_context?: GenerationContext;
   artifacts?: ArtifactRef[];
+  /** Structured UI-only chart sources; excluded from model prompt projection. */
+  visualizations?: JsonObject[];
   error?: { code: string; message: string };
   metrics?: {
     ms: number;
@@ -51,6 +94,8 @@ export type SkillResult = {
   task_results?: TaskResult[];
   artifacts?: ArtifactRef[];
   error?: { code: string; message: string };
+  /** 技能正文。渐进披露的第二级：只在 invoke 之后的轮次进入上下文。 */
+  content?: string;
 };
 
 export type ToolCategory = "main" | "non_trading" | "trading";
@@ -62,6 +107,8 @@ export type JsonSchema = {
   items?: JsonSchema;
   enum?: string[];
   description?: string;
+  oneOf?: JsonSchema[];
+  additionalProperties?: boolean;
 };
 
 export type ToolDefinition = {
@@ -75,24 +122,32 @@ export type ToolExecutionResult = {
   summary: string;
   generation_context?: GenerationContext;
   artifacts?: ArtifactRef[];
+  /** Structured UI-only chart sources; excluded from generation_context. */
+  visualizations?: JsonObject[];
   error?: { code: string; message: string };
   approval?: {
     approval_id: string;
     payload: JsonObject;
   };
+  /** Turn-ending request rendered by the client as structured choices. */
+  user_input_request?: UserInputRequest;
 };
 
 /**
  * One decision the orchestrator emits per loop iteration. `reply` is always the
  * user-facing message for this turn (a short status line when an action is taken,
  * the final answer when all action fields are null). `dispatch` / `skill` /
- * `tool_call` are mutually exclusive — at most one is non-null per step.
+ * `tool_calls` may share a step; `skill` is exclusive of both.
  */
+export type OrchestratorToolCall = { name: string; input: JsonObject };
+
 export type OrchestratorStep = {
   reply: string;
   dispatch: TaskRequest[] | null;
   skill: string | null;
-  tool_call: { name: string; input: JsonObject } | null;
+  /** Plural because reading two references should not cost two loop iterations
+   *  out of the step budget. A single `tool_call` object is still parsed. */
+  tool_calls: OrchestratorToolCall[] | null;
 };
 
 export type SSEEvent =
@@ -108,5 +163,5 @@ export type SSEEvent =
   | { type: "artifact"; task_id: string; artifact: ArtifactRef }
   | { type: "approval_required"; approval_id: string; payload: JsonObject }
   | { type: "error"; scope: "main" | "task"; task_id?: string; message: string }
-  | { type: "final"; sessionId: string; response: string; artifacts: { n: number; type: string; ref: string; label: string }[] }
+  | { type: "final"; sessionId: string; response: string; artifacts: { n: number; type: "file" | "url"; ref: string; label: string }[]; visualizations: JsonObject[]; sources: CitationSource[]; input_request?: UserInputRequestView }
   | { type: "done"; reason: "complete" | "stopped" | "disconnected" };

@@ -1,6 +1,21 @@
 import Markdown from "markdown-to-jsx";
 import React, { useMemo } from "react";
 import { cn } from "@/lib/utils";
+import { stripIncompleteTrailingTag } from "@/lib/stockChart";
+import StockChartBlock from "./StockChart";
+import { StreamingContext } from "./stockChartContext";
+import { FreshnessNote, InlineMark, MarkCard } from "./marks/SemanticMarks";
+import {
+    BLOCK_TAG,
+    INLINE_TAG,
+    SOURCE_LIST_TAG,
+    decodeMarkPayload,
+    parseAnswerSources,
+    rewriteSemanticMarks,
+    rewriteSourceList,
+} from "@/lib/semanticMarks";
+import { SourceListBlock } from "./marks/SourceList";
+import { AnswerSourcesContext, type MessageSource } from "./marks/citationContext";
 
 /**
  * Extracts plain text from React children (recursively)
@@ -109,7 +124,7 @@ export const slugifyMarkdownHeading = generateAnchorId;
  * paragraph — visually broken. Join the digit line with the next non-empty
  * line when that line opens with `**` (a heading-style bold) or any inline
  * content. We only act when the digit line itself is empty after the period,
- * so legitimate "1. text…" lines pass through untouched. Code blocks are
+ * so legitimate"1. text…" lines pass through untouched. Code blocks are
  * skipped to avoid touching language samples.
  */
 export function normalizeOrderedListItemBreak(text: string): string {
@@ -190,10 +205,11 @@ export function normalizeMarkdownAtxHeadingIndent(text: string): string {
     return out.join("\n");
 }
 
-// Custom paragraph component with moderate line spacing
+// Body copy. With a real reading measure (see the chat grid) the line height
+// has to come up with it — 1.75 is what keeps a 60-character line tracking.
 const CustomParagraph: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     return (
-        <p className="mb-2 leading-relaxed text-foreground">
+        <p className="mb-3 leading-[1.75] text-foreground">
             {children}
         </p>
     );
@@ -206,7 +222,7 @@ const CustomBreak: React.FC = () => {
 
 // Factory to create heading components with anchor ids and optional prefixes
 const createHeadingComponent = (
-    Tag: "h1" | "h2" | "h3",
+    Tag: "h1" |"h2" |"h3",
     className: string,
     anchorPrefix: string
 ) => {
@@ -248,27 +264,33 @@ const CustomH6: React.FC<{ children: React.ReactNode }> = ({ children }) => (
 // list items whose first child is a block element (e.g. `<p>` produced when
 // markdown-to-jsx sees a blank line inside a list item): the marker takes
 // its baseline on the first line and the `<p>` then forces a line break
-// before its content, producing the visible "1." alone followed by the
+// before its content, producing the visible"1." alone followed by the
 // item text on the next line. With `list-outside`, the marker sits in the
 // padded gutter and the block content flows beside it.
 const CustomUL: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-    <ul className="list-disc list-outside pl-6 mb-2 mt-2 text-foreground [&>li>p]:my-0">{children}</ul>
+    <ul className="mb-3 mt-2 list-outside list-disc pl-5 text-foreground marker:text-label-2/50 [&>li>p]:my-0">
+        {children}
+    </ul>
 );
 
 const CustomOL: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-    <ol className="list-decimal list-outside pl-6 mb-2 mt-2 text-foreground [&>li>p]:my-0">{children}</ol>
+    <ol className="mb-3 mt-2 list-outside list-decimal pl-5 text-foreground marker:font-mono marker:text-[11px] marker:text-label-2 [&>li>p]:my-0">
+        {children}
+    </ol>
 );
 
 const CustomLI: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-    <li className="mb-1 text-foreground">{children}</li>
+    <li className="mb-1.5 pl-1 leading-[1.7] text-foreground">{children}</li>
 );
 
-// Custom link component
+// Custom link component. Sky is the provenance hue in the mark colour contract
+// (see marks/SemanticMarks.tsx) — an outbound link and an inline citation point
+// at the same kind of thing, so they share it.
 const CustomLink: React.FC<{ children: React.ReactNode; href: string }> = ({ children, href }) => (
-    <a 
-        href={href} 
-        className="text-blue-600 dark:text-blue-400 hover:underline"
-        target="_blank" 
+    <a
+        href={href}
+        className="text-brand underline decoration-brand/30 underline-offset-2 transition-colors hover:decoration-brand"
+        target="_blank"
         rel="noopener noreferrer"
     >
         {children}
@@ -277,7 +299,7 @@ const CustomLink: React.FC<{ children: React.ReactNode; href: string }> = ({ chi
 
 // Custom strong/bold component
 const CustomStrong: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-    <strong className="font-semibold text-gray-900 dark:text-gray-100">{children}</strong>
+    <strong className="font-semibold text-label-1">{children}</strong>
 );
 
 // Custom emphasis/italic component
@@ -298,9 +320,14 @@ const CustomPre: React.FC<{ children: React.ReactNode }> = ({ children }) => (
     </pre>
 );
 
-// Custom blockquote component
+// Custom blockquote component.
+//
+// No `italic`: the orchestrator prompt sends risk notes here, and those are
+// usually Chinese. CJK has no true italic, so the browser synthesises an oblique
+// by shearing the glyphs — it looks broken rather than emphatic. Weight and the
+// rule carry the emphasis instead.
 const CustomBlockquote: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-    <blockquote className="border-l-4 border-muted pl-4 mb-4 mt-4 italic text-muted-foreground">
+    <blockquote className="mb-4 mt-4 border-l-2 border-border pl-4 text-label-2">
         {children}
     </blockquote>
 );
@@ -312,10 +339,10 @@ const CustomHR: React.FC = () => (
 
 // Custom table components
 const CustomTable: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-    <div className="overflow-x-auto my-4 rounded-lg border border-border/40 dark:border-white/10 bg-background shadow-sm">
+    <div className="my-4 overflow-x-auto rounded-lg border border-sep bg-raised">
         {/*
           Round-6 polish: tables in chat bubbles compressed columns
-          tight enough that "Original Quantity" and "Executed Quantity"
+          tight enough that"Original Quantity" and"Executed Quantity"
           headers ran into each other and the Status badge sat flush
           against the numbers. Strategy: bump per-cell horizontal
           breathing room (handled in CustomTD / CustomTH below) AND
@@ -331,7 +358,7 @@ const CustomTable: React.FC<{ children: React.ReactNode }> = ({ children }) => (
 );
 
 const CustomTHead: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-    <thead className="bg-muted/40 dark:bg-white/[0.03]">
+    <thead className="bg-fill-1 dark:bg-white/[0.03]">
         {children}
     </thead>
 );
@@ -342,141 +369,18 @@ const CustomTBody: React.FC<{ children: React.ReactNode }> = ({ children }) => (
     </tbody>
 );
 
-// Open-order detection per row: a likely-order-ID cell plus a status cell
-// in the OPEN family. When both are present, the renderer surfaces an
-// inline Cancel chip that dispatches `financial-agent:chat-send` with a
-// pre-filled cancel-order message. chat.tsx listens for that event.
-const OPEN_STATUS_TOKENS = new Set([
-    "NEW",
-    "OPEN",
-    "PENDING",
-    "ACTIVE",
-    "PARTIAL",
-    "PARTIALLY_FILLED",
-]);
-
-function scanRowForCancelable(children: React.ReactNode): {
-    orderId: string | null;
-    isOpen: boolean;
-    venue: string | null;
-} {
-    let orderId: string | null = null;
-    let isOpen = false;
-    let venue: string | null = null;
-    const walk = (node: React.ReactNode) => {
-        if (typeof node === "string") {
-            const trimmed = node.trim();
-            if (!trimmed) return;
-            const c = classifyCellValue(trimmed);
-            if (!orderId && (c.kind === "uuid" || c.kind === "long_id")) {
-                // Skip client_order_ids (heuristic: prefixed with bn- / cb-)
-                if (!/^(bn|cb)-/i.test(trimmed)) {
-                    orderId = c.normalized ?? null;
-                }
-            }
-            if (c.kind === "status" && c.normalized && OPEN_STATUS_TOKENS.has(c.normalized)) {
-                isOpen = true;
-            }
-            if (!venue && /^(binance|coinbase)$/i.test(trimmed)) {
-                venue = trimmed.toLowerCase();
-            }
-            return;
-        }
-        if (Array.isArray(node)) {
-            node.forEach(walk);
-            return;
-        }
-        if (React.isValidElement(node)) {
-            const props = node.props as { children?: React.ReactNode };
-            if (props.children) walk(props.children);
-        }
-    };
-    walk(children);
-    return { orderId, isOpen, venue };
-}
-
-const CancelOrderButton: React.FC<{ orderId: string; venue: string | null }> = ({
-    orderId,
-    venue,
-}) => {
-    const onClick = React.useCallback(() => {
-        const venueClause = venue ? ` on ${venue}` : "";
-        const text = `cancel order ${orderId}${venueClause}`;
-        window.dispatchEvent(
-            new CustomEvent("financial-agent:chat-send", {
-                detail: { text, source: "orders_table_cancel_chip" },
-            }),
-        );
-    }, [orderId, venue]);
-    return (
-        <button
-            type="button"
-            onClick={onClick}
-            title={`Cancel order ${orderId}${venue ? ` on ${venue}` : ""}`}
-            aria-label={`Cancel order ${orderId}`}
-            // Compact icon-style chip — sits flush against the row's
-            // right edge without bulking up the row height. Uses
-            // padding tight enough that the chip fits beside the cell
-            // value on wider viewports, and `whitespace-nowrap` on the
-            // parent flex keeps it from wrapping mid-row.
-            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-medium leading-none bg-rose-50/80 text-rose-700 hover:bg-rose-100 dark:bg-rose-900/30 dark:text-rose-300 dark:hover:bg-rose-900/50 ring-1 ring-rose-300/40 transition-colors"
-        >
-            <svg
-                viewBox="0 0 16 16"
-                width="11"
-                height="11"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
-            >
-                <path d="M3 3l10 10M13 3L3 13" />
-            </svg>
-            Cancel
-        </button>
-    );
-};
-
 const CustomTR: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-    const { orderId, isOpen, venue } = scanRowForCancelable(children);
-    const showCancel = !!orderId && isOpen;
-    
-    if (!showCancel) {
-        return (
-            <tr className="border-b border-border/40 dark:border-white/10 last:border-0 hover:bg-muted/40 dark:hover:bg-white/[0.02] transition-colors">
-                {children}
-            </tr>
-        );
-    }
-
-    // Round-5 polish: stop injecting the Cancel chip INSIDE the
-    // last data cell (which conflated the chip with whatever column
-    // happened to be last — Time-in-Force or Placed-Time in different
-    // open-orders shapes). Render the chip in its OWN trailing <td>
-    // so it has dedicated horizontal real-estate, lines up neatly on
-    // the right edge of the row, and never collides with cell values.
-    // The header row only has the original markdown columns (no
-    // matching <th> for "Action") — that asymmetry is intentional:
-    // CSS tables are forgiving when a row carries one more cell than
-    // the header, and labelling an action column as "Actions" would
-    // shift every column header right and break alignment for users
-    // who already learned the layout.
     return (
-        <tr className="border-b border-border/40 dark:border-white/10 last:border-0 hover:bg-muted/40 dark:hover:bg-white/[0.02] transition-colors">
+        <tr className="border-b border-sep last:border-0 transition-colors hover:bg-fill-1">
             {children}
-            <td className="px-2 py-3 text-right align-middle whitespace-nowrap">
-                <CancelOrderButton orderId={orderId!} venue={venue} />
-            </td>
         </tr>
     );
 };
 
 const CustomTH: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     // Round-6: headers needed the same `px-5` breathing room as body
-    // cells (was `px-4`) — without it labels like "Original Quantity"
-    // and "Executed Quantity" sat too close on narrow chat-bubble
+    // cells (was `px-4`) — without it labels like"Original Quantity"
+    // and"Executed Quantity" sat too close on narrow chat-bubble
     // tables. Tracking-tighter + slight uppercase styling makes the
     // header row visually distinct from data without taking extra
     // vertical space.
@@ -486,39 +390,40 @@ const CustomTH: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     const align = looksNumericHeader ? "text-right" : "text-left";
     return (
         <th
-            className={`px-5 py-3 text-[11px] font-semibold tracking-wide uppercase text-muted-foreground border-b border-border/50 dark:border-white/10 whitespace-nowrap ${align}`}
+            className={`px-5 py-3 text-[11px] font-semibold tracking-wide uppercase text-label-2 border-b border-sep whitespace-nowrap ${align}`}
         >
             {children}
         </th>
     );
 };
 
-// Cell value classifiers for trading order tables. Each function inspects
+// Cell value classifiers for financial tables. Each function inspects
 // the cell's plain text and decides whether to apply pattern formatting.
 // These run on every table cell across the app; the patterns are tight
 // enough to avoid false-positives in non-trading content.
 function classifyCellValue(text: string): {
-    kind: "side" | "status" | "long_id" | "uuid" | "none";
+    kind: "side" |"status" |"long_id" |"uuid" |"none";
     normalized?: string;
 } {
     const trimmed = text.trim();
     if (!trimmed) return { kind: "none" };
 
-    // Side: exactly "BUY" or "SELL" (case-insensitive).
+    // Side: exactly"BUY" or"SELL" (case-insensitive).
     if (/^(buy|sell)$/i.test(trimmed)) {
         return { kind: "side", normalized: trimmed.toUpperCase() };
     }
-    // Order status: NEW, PARTIALLY_FILLED, FILLED, CANCELLED, REJECTED,
-    // EXPIRED, OPEN, CLOSED. Match exact tokens only.
+    // Exact status tokens only.
     if (/^(new|partially_filled|partial|filled|cancell?ed|rejected|expired|open|closed|done|active|pending)$/i.test(trimmed)) {
         return { kind: "status", normalized: trimmed.toUpperCase() };
     }
-    // UUID v4-ish (Coinbase order ID).
+    // UUID v4-ish identifiers.
     if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed)) {
         return { kind: "uuid", normalized: trimmed };
     }
-    // Long numeric (Binance order IDs — typically 10-12 digits).
-    if (/^[0-9]{9,}$/.test(trimmed)) {
+    // Long numeric identifiers. Exchange order ids are 15+ digits; 9–14 digits
+    // is the range share volume and market cap live in, and rendering a
+    // 412000000 volume as a click-to-copy"id" chip was plain wrong.
+    if (/^[0-9]{15,}$/.test(trimmed)) {
         return { kind: "long_id", normalized: trimmed };
     }
     // Long alphanumeric (client_order_ids etc.).
@@ -542,10 +447,11 @@ const STATUS_CLASS: Record<string, string> = {
     PARTIALLY_FILLED: "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300 ring-amber-300/40",
     FILLED: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300 ring-emerald-300/40",
     DONE: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300 ring-emerald-300/40",
-    CLOSED: "bg-slate-100 text-slate-700 dark:bg-slate-800/40 dark:text-slate-300 ring-slate-300/40",
-    CANCELLED: "bg-slate-100 text-slate-700 dark:bg-slate-800/40 dark:text-slate-300 ring-slate-300/40",
-    CANCELED: "bg-slate-100 text-slate-700 dark:bg-slate-800/40 dark:text-slate-300 ring-slate-300/40",
-    EXPIRED: "bg-zinc-100 text-zinc-700 dark:bg-zinc-800/40 dark:text-zinc-300 ring-zinc-300/40",
+    // Terminal states carry no hue — they are the absence of activity.
+    CLOSED: "bg-fill-1 text-label-2 ring-transparent",
+    CANCELLED: "bg-fill-1 text-label-2 ring-transparent",
+    CANCELED: "bg-fill-1 text-label-2 ring-transparent",
+    EXPIRED: "bg-fill-1 text-label-3 ring-transparent",
     REJECTED: "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300 ring-red-300/40",
 };
 
@@ -566,7 +472,7 @@ const TruncatedId: React.FC<{ value: string }> = ({ value }) => {
             type="button"
             onClick={handleCopy}
             title={copied ? "Copied!" : `${value} — click to copy`}
-            className="font-mono text-xs px-1.5 py-0.5 rounded border border-border/60 bg-muted/40 hover:bg-muted/70 transition-colors"
+            className="font-mono text-xs px-1.5 py-0.5 rounded border border-sep bg-fill-1 hover:bg-muted/70 transition-colors"
         >
             {copied ? "Copied" : head}
         </button>
@@ -578,7 +484,7 @@ const SideBadge: React.FC<{ value: string }> = ({ value }) => (
 );
 
 const StatusBadge: React.FC<{ value: string }> = ({ value }) => {
-    const cls = STATUS_CLASS[value] ?? "bg-muted text-muted-foreground";
+    const cls = STATUS_CLASS[value] ?? "bg-muted text-label-2";
     return (
         <span
             className={cn(
@@ -597,9 +503,9 @@ const StatusBadge: React.FC<{ value: string }> = ({ value }) => {
  * ("50000.00000000", "0.00116000") which adds noise without precision.
  * Rules:
  *   - n >= 1 OR n === 0: thousands-comma + max 2 decimals, trailing
- *     zeros trimmed past the decimal point. ("50000.00000000" → "50,000")
+ *     zeros trimmed past the decimal point. ("50000.00000000" →"50,000")
  *   - 0 < n < 1: trim trailing zeros, max 8 significant decimals
- *     ("0.00116000" → "0.00116", "0.000000010" → "0.00000001")
+ *     ("0.00116000" →"0.00116", "0.000000010" →"0.00000001")
  *   - non-finite / non-numeric: return the input untouched.
  */
 function formatTradingNumber(raw: string): string | null {
@@ -635,11 +541,7 @@ const CustomTD: React.FC<{ children: React.ReactNode }> = ({ children }) => {
         inner = <TruncatedId value={cls.normalized} />;
     } else if (isNumeric) {
         const pretty = formatTradingNumber(text);
-        inner = (
-            <span className="font-mono text-[13px] tabular-nums">
-                {pretty ?? children}
-            </span>
-        );
+        inner = <span className="fin-figure text-[13px]">{pretty ?? children}</span>;
     }
     // Round-6: numeric cells right-align so columns of decimals line
     // up at the decimal point; status/side badges stay left-aligned so
@@ -665,6 +567,16 @@ const CustomImg: React.FC<React.ImgHTMLAttributes<HTMLImageElement>> = (props) =
     <img loading="lazy" decoding="async" {...props} />
 );
 
+// Thesis / risk cards. The body arrives URI-encoded in an attribute (see
+// rewriteSemanticMarks) and is rendered back through this same pipeline, so a
+// card may hold lists, tables, and inline marks of its own.
+function MarkBlockCard({ k, body }: { k?: string; body?: string }) {
+    const markdown = decodeMarkPayload(body ?? "");
+    if (!markdown) return null;
+    const inner = <Markdown options={markdownOptions()}>{markdown}</Markdown>;
+    return k === "thesis" || k === "risk" ? <MarkCard kind={k}>{inner}</MarkCard> : inner;
+}
+
 // Reusable overrides that do not depend on anchor prefixes
 const baseMarkdownOverrides = {
     p: CustomParagraph,
@@ -689,25 +601,37 @@ const baseMarkdownOverrides = {
     th: CustomTH,
     td: CustomTD,
     img: CustomImg,
+    // markdown-to-jsx's overrides natively support custom tags in the body, so the main agent
+    // only needs to write <StockChart symbol="AAPL" range="1Y" /> to embed a live chart. No new
+    // syntax to invent, no parser to write, no touching SSE.
+    StockChart: StockChartBlock,
+    // Semantic marks: the main agent writes [[metric:…]] / :::risk, and preprocessing lowers them into these two tags.
+    [INLINE_TAG]: InlineMark,
+    [BLOCK_TAG]: MarkBlockCard,
+    [SOURCE_LIST_TAG]: SourceListBlock,
 };
 
 // Markdown component overrides generator for minimal spacing with optional anchor prefixes
-export const markdownOptions = (anchorPrefix = "") => ({
+export const markdownOptions = (anchorPrefix ="") => ({
     overrides: {
         ...baseMarkdownOverrides,
+        // Section hierarchy. Previously h2 and a bold lead-in like"**Revenue:**"
+        // carried nearly the same weight, so a long answer read as one flat
+        // slab. h2 now gets a hairline rule and real air above it — the section
+        // break on a printed note — and h3 sits clearly under it without one.
         h1: createHeadingComponent(
             "h1",
-            "text-2xl font-semibold mb-4 mt-4 text-foreground scroll-mt-4",
+            "scroll-mt-4 mb-4 mt-5 text-[22px] font-bold tracking-[-0.022em] text-label-1",
             anchorPrefix
         ),
         h2: createHeadingComponent(
             "h2",
-            "text-xl font-semibold mb-2 mt-4 text-foreground scroll-mt-4",
+            "scroll-mt-4 mb-3 mt-7 border-b border-sep pb-1.5 text-[17px] font-semibold tracking-[-0.016em] text-label-1 first:mt-0",
             anchorPrefix
         ),
         h3: createHeadingComponent(
             "h3",
-            "text-lg font-semibold mb-2 mt-2 text-foreground scroll-mt-4",
+            "scroll-mt-4 mb-2 mt-5 text-[15px] font-semibold tracking-[-0.008em] text-label-1",
             anchorPrefix
         ),
     },
@@ -718,18 +642,40 @@ interface MarkdownRendererProps {
     children: string;
     className?: string;
     anchorPrefix?: string;
+    /**
+     * True while the body is still growing via SSE streaming. While true, a trailing unclosed
+     * `<...` gets cut off (otherwise markdown-to-jsx would briefly flash the half-formed tag as
+     * escaped literal text), and `<StockChart />` renders only a placeholder skeleton without
+     * sending a request.
+     */
+    streaming?: boolean;
+    /** Search hits the backend attached to this message, matched to citations by URL. */
+    sources?: MessageSource[];
 }
 
 export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
     children,
-    className = "",
-    anchorPrefix = "",
+    className ="",
+    anchorPrefix ="",
+    streaming = false,
+    sources = [],
 }) => {
     const options = useMemo(() => markdownOptions(anchorPrefix), [anchorPrefix]);
-    const normalized = useMemo(
-        () => normalizeOrderedListItemBreak(normalizeMarkdownAtxHeadingIndent(children)),
-        [children],
+    // [[cite:…|n]] points at the answer's own numbered Sources list.
+    const answerSources = useMemo(
+        () => ({ links: parseAnswerSources(children), retrieved: sources }),
+        [children, sources],
     );
+    const normalized = useMemo(() => {
+        const source = streaming ? stripIncompleteTrailingTag(children) : children;
+        return rewriteSourceList(
+            rewriteSemanticMarks(
+                normalizeOrderedListItemBreak(normalizeMarkdownAtxHeadingIndent(source)),
+                { streaming },
+            ),
+            { streaming },
+        );
+    }, [children, streaming]);
 
     return (
         <div
@@ -738,9 +684,16 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
                 className
             )}
         >
-            <Markdown options={options}>
-                {normalized}
-            </Markdown>
+            <StreamingContext.Provider value={streaming}>
+                <AnswerSourcesContext.Provider value={answerSources}>
+                    <Markdown options={options}>
+                        {normalized}
+                    </Markdown>
+                    {/* Only answers that actually carry figures get a staleness
+                        footer — a chat reply about nothing numeric does not. */}
+                    {normalized.includes(`<${INLINE_TAG}`) && <FreshnessNote />}
+                </AnswerSourcesContext.Provider>
+            </StreamingContext.Provider>
         </div>
     );
 };

@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
-import { Loader2, CheckCircle, Circle, XCircle, ChevronDown, ChevronRight, Database, Newspaper, Wallet } from "lucide-react";
+import { Loader2, CheckCircle, Circle, XCircle, ChevronDown, ChevronRight, Database, Newspaper, ChartNoAxesCombined } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-export type ProgressAgent = "onchain_data" | "news_research" | "trade";
+export type ProgressAgent = "market_data" | "market_research" | "trading_operations";
 
 export interface ProgressTask {
     taskId: string;
@@ -22,30 +22,30 @@ function statusIcon(status: ProgressTask["status"]) {
         case "in_progress":
             return <Loader2 className="size-3.5 text-blue-500 animate-spin" />;
         default:
-            return <Circle className="size-3.5 text-gray-400" />;
+            return <Circle className="size-3.5 text-label-4" />;
     }
 }
 
 const agentMeta: Record<ProgressAgent, { label: string; icon: typeof Database; iconClassName: string }> = {
-    onchain_data: {
-        label: "On-chain data agent",
+    market_data: {
+        label: "Market data agent",
         icon: Database,
         iconClassName: "text-blue-600 dark:text-blue-300",
     },
-    news_research: {
-        label: "News & research agent",
+    market_research: {
+        label: "Market research agent",
         icon: Newspaper,
         iconClassName: "text-violet-600 dark:text-violet-300",
     },
-    trade: {
-        label: "Trade agent",
-        icon: Wallet,
+    trading_operations: {
+        label: "Stock strategy agent",
+        icon: ChartNoAxesCombined,
         iconClassName: "text-amber-600 dark:text-amber-300",
     },
 };
 
 function uniqueAgents(tasks: ProgressTask[]) {
-    return (["onchain_data", "news_research", "trade"] as const).filter((agent) => tasks.some((task) => task.agent === agent));
+    return (["market_data", "market_research", "trading_operations"] as const).filter((agent) => tasks.some((task) => task.agent === agent));
 }
 
 function taskGroups(tasks: ProgressTask[], agents: ProgressAgent[]): Array<ProgressAgent | "uncategorized"> {
@@ -62,7 +62,7 @@ function groupIcon(group: ProgressAgent | "uncategorized") {
 }
 
 function groupIconClassName(group: ProgressAgent | "uncategorized") {
-    return group === "uncategorized" ? "text-gray-400" : agentMeta[group].iconClassName;
+    return group === "uncategorized" ? "text-label-4" : agentMeta[group].iconClassName;
 }
 
 function groupStatus(tasks: ProgressTask[]) {
@@ -105,7 +105,7 @@ export function ChatProgressPill({ tasks, isComplete }: { tasks: ProgressTask[];
             <button
                 type="button"
                 onClick={() => setExpanded((v) => !v)}
-                className="inline-flex max-w-full items-center gap-2 rounded-full border border-border/60 px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted/50 transition-colors"
+                className="inline-flex max-w-full items-center gap-2 rounded-full border border-sep px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted/50 transition-colors"
             >
                 {isComplete ? (
                     <CheckCircle className="size-3.5 text-green-500" />
@@ -123,7 +123,7 @@ export function ChatProgressPill({ tasks, isComplete }: { tasks: ProgressTask[];
             </button>
 
             {expanded && (
-                <div className="mt-1.5 rounded-lg border border-border/50 bg-muted/30 p-2 text-xs">
+                <div className="mt-1.5 rounded-lg border border-sep bg-muted/30 p-2 text-xs">
                     <div className="mb-2 flex max-w-full gap-1 overflow-x-auto rounded-md bg-background/60 p-1">
                         {displayedGroups.map((group) => {
                             const GroupIcon = groupIcon(group);
@@ -140,7 +140,7 @@ export function ChatProgressPill({ tasks, isComplete }: { tasks: ProgressTask[];
                                     className={cn(
                                         "inline-flex h-7 flex-shrink-0 items-center gap-1.5 rounded px-2 text-[11px] font-medium transition-colors",
                                         isActive
-                                            ? "bg-background text-foreground shadow-sm"
+                                            ? "bg-raised text-label-1 shadow-e1"
                                             : "text-muted-foreground hover:bg-muted hover:text-foreground"
                                     )}
                                 >

@@ -5,7 +5,7 @@ import { SessionState } from "../../../src/framework/sessionState.ts";
 import type { AgentKind } from "../../../src/framework/types.ts";
 import type { EvalResult } from "../lib/report.ts";
 
-const NON_TRADE_AGENTS: AgentKind[] = ["onchain_data", "news_research"];
+const NON_TRADE_AGENTS: AgentKind[] = ["market_data", "market_research"];
 
 function checkCategoryIsolation(): { checked: number; violations: string[] } {
   const reg = new McpToolRegistry();
@@ -30,7 +30,7 @@ function checkApprovalGate(): { trials: number; violations: string[] } {
   trials++;
   {
     const s = new SessionState("eval_appr_1", "2026-06-17T00:00:00.000Z");
-    s.record("trade", "approval_required", { approval_id: "a1" });
+    s.record("trading_operations", "approval_required", { approval_id: "a1" });
     if (s.pendingApproval("a1") === undefined) violations.push("approval gate: never-resolved approval reported as executable");
   }
 
@@ -38,8 +38,8 @@ function checkApprovalGate(): { trials: number; violations: string[] } {
   trials++;
   {
     const s = new SessionState("eval_appr_2", "2026-06-17T00:00:00.000Z");
-    s.record("trade", "approval_required", { approval_id: "a1" });
-    s.record("trade", "approval_resolved", { approval_id: "OTHER", decision: "approved" });
+    s.record("trading_operations", "approval_required", { approval_id: "a1" });
+    s.record("trading_operations", "approval_resolved", { approval_id: "OTHER", decision: "approved" });
     if (s.pendingApproval("a1") === undefined) violations.push("approval gate: wrong-id resolution cleared the wrong approval");
   }
 
@@ -47,8 +47,8 @@ function checkApprovalGate(): { trials: number; violations: string[] } {
   trials++;
   {
     const s = new SessionState("eval_appr_3", "2026-06-17T00:00:00.000Z");
-    s.record("trade", "approval_required", { approval_id: "a1" });
-    s.record("trade", "approval_resolved", { approval_id: "a1", decision: "approved" });
+    s.record("trading_operations", "approval_required", { approval_id: "a1" });
+    s.record("trading_operations", "approval_resolved", { approval_id: "a1", decision: "approved" });
     if (s.pendingApproval("a1") !== undefined) violations.push("approval gate: genuinely-resolved approval still reported pending");
   }
 

@@ -1,4 +1,4 @@
-{ "id": "noisy-chop", "symbol": "BTCUSDT", "expectedFire": false,
+{ "id": "noisy-chop", "symbol": "AAPL", "expectedFire": false,
   "label": "oscillation that never sustains a 5% drawdown for 2 samples",
   "trigger": { "type": "rolling_change", "direction": "down", "pct": 5, "window_minutes": 10, "confirm_samples": 2 },
   "candles": [

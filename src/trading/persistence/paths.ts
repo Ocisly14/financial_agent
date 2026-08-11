@@ -10,4 +10,3 @@ export const strategyPath = (id: string): string => join(strategiesDir(), `strat
 export const executionsLogPath = (): string => join(strategiesDir(), "executions.log.jsonl");
 export const costBasisPath = (): string => join(tradingDir(), "cost_basis.json");
 export const dailyPnlPath = (utcDate: string): string => join(tradingDir(), `daily_pnl_${utcDate}.json`);
-export const riskConfigPath = (): string => join(tradingDir(), "risk_config.json");

@@ -2,11 +2,22 @@ import type { PriceStrategyDSL, StrategyPhase } from "@/types/core";
 
 function phaseTrigger(phase: StrategyPhase): string {
     const t = phase.price_trigger;
-    return t.type === "rolling_change"
-        ? `${t.direction === "down" ? "drops" : "rises"} ${t.pct}% within ${t.window_minutes}m`
-        : t.type === "absolute_threshold"
-            ? `price ${t.direction === "down" ? "<" : ">"} ${t.price}`
-            : `trailing ${t.direction === "down" ? "stop" : "rebound"} ${t.pct}%`;
+    switch (t.type) {
+        case "rolling_change":
+            return `${t.direction === "down" ? "drops" : "rises"} ${t.pct}% within ${t.window_minutes}m`;
+        case "absolute_threshold":
+            return `price ${t.direction === "down" ? "<" : ">"} ${t.price}`;
+        case "relative_change":
+            return `${t.direction === "down" ? "falls" : "rises"} ${t.pct}% from anchor`;
+        case "trailing_stop":
+            return `trailing ${t.direction === "down" ? "stop" : "rebound"} ${t.pct}%`;
+        case "rsi_threshold":
+            return `${t.timeframe} RSI(${t.period}) ${t.direction === "below" ? "<" : ">"} ${t.threshold}`;
+        case "macd_cross":
+            return `${t.timeframe} MACD(${t.fast_period},${t.slow_period},${t.signal_period}) ${t.direction} cross`;
+        case "moving_average_cross":
+            return `${t.timeframe} ${t.average_type?.toUpperCase()}(${t.fast_period},${t.slow_period}) ${t.direction} cross`;
+    }
 }
 
 function phaseSize(phase: StrategyPhase): string {
@@ -21,7 +32,11 @@ function phaseSize(phase: StrategyPhase): string {
 }
 
 export function summarizePhase(phase: StrategyPhase): string {
-    return `${phase.name}: ${phaseTrigger(phase)} -> ${phase.action.side} ${phaseSize(phase)}`;
+    const dependency = phase.depends_on.length > 0
+        ? ` after ${phase.depends_on.join("+")} ${phase.activate_on === "first_fill" ? "fills" : "completes"}`
+        : "";
+    const oco = phase.cancel_group ? ` [OCO ${phase.cancel_group}]` : "";
+    return `${phase.name}${dependency}: ${phaseTrigger(phase)} -> ${phase.action.side} ${phaseSize(phase)}${oco}`;
 }
 
 export function summarizeStrategy(dsl: PriceStrategyDSL): string {

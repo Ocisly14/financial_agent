@@ -43,7 +43,7 @@ async function runSinglePhase(): Promise<void> {
     console.log(`${r.intentMatch ? "✔" : "✘"} ${c.id}: ${c.input}`);
   }
   const n = cases.length;
-  console.log("\n=== ① NL→DSL fidelity — single-phase (live Gemini) ===");
+  console.log("\n=== ① NL→DSL fidelity — single-phase (configured LLM) ===");
   console.log(`① nl-dsl:   intent-match ${pct(intentMatches / n)} · tool-select ${pct(toolMatches / n)}  (n=${n})`);
   for (const [k, v] of Object.entries(fieldTotals)) {
     console.log(`   ${k}: ${pct(v.ok / v.n)}`);
@@ -71,7 +71,7 @@ async function runMultiPhase(): Promise<void> {
     console.log(`${r.intentMatch ? "✔" : "✘"} ${c.id} (${r.phasesMatched}/${r.phasesTotal} phases): ${c.input}`);
   }
   const n = cases.length;
-  console.log("\n=== ① NL→DSL fidelity — multi-phase (live Gemini) ===");
+  console.log("\n=== ① NL→DSL fidelity — multi-phase (configured LLM) ===");
   console.log(`① multi:    intent-match ${pct(intentMatches / n)} · tool-select ${pct(toolMatches / n)}  (n=${n})`);
   console.log(`   phase-count-correct: ${pct(phaseCountMatches / n)}`);
   console.log(`   per-phase fidelity:  ${pct(phasesMatched / phasesTotal)} (${phasesMatched}/${phasesTotal} phases)`);

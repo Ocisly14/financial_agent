@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { Dispatcher } from "../framework/dispatcher.ts";
 import { OrchestratorRuntime } from "../framework/orchestrator.ts";
 import { SkillRegistry } from "../framework/skill.ts";
+import { createReadSkillReferenceTool, createRunSkillScriptTool } from "../framework/skillTools.ts";
 import { SubagentRuntime } from "../framework/subagent.ts";
 import { MockLlmProvider, ModelRouter, type LlmProvider } from "../infra/llm/provider.ts";
 import { AnthropicProvider } from "../infra/llm/anthropicProvider.ts";
@@ -11,11 +12,15 @@ import { GoogleVertexProvider } from "../infra/llm/googleVertexProvider.ts";
 import { McpToolRegistry } from "../../mcp_tools/toolRegistry.ts";
 import { registerAllTools } from "../../mcp_tools/registerTools.ts";
 import { SessionRegistry } from "../framework/sessionState.ts";
-import type { EventStore } from "../framework/eventStore.ts";
-import { MongoEventStore } from "../infra/db/mongoEventStore.ts";
+import { SqliteEventStore } from "../infra/db/sqliteEventStore.ts";
 import { orchestratorPrompt } from "./prompts/orchestratorPrompt.ts";
 import { createSubagentRegistry } from "./subagents/registerSubagents.ts";
-import { runComprehensiveAnalysisWorkflow } from "./workflows/comprehensiveAnalysis.ts";
+import { ResearchRuntime } from "./research/researchRuntime.ts";
+import { TopicDigestScheduler } from "../server/topicDigestScheduler.ts";
+import { researchPrompt } from "./research/researchPrompt.ts";
+import { getDefaultFinancialModelToolDeps } from "../../mcp_tools/financial-model/financialModelTools.ts";
+import { createDcfSubagentTool } from "../../mcp_tools/financial-model/dcfSubagentTool.ts";
+import { createStatementExtractionTool } from "../../mcp_tools/financial-model/statementExtractionTool.ts";
 
 export type FinancialAgentApp = Awaited<ReturnType<typeof createFinancialAgentApp>>;
 
@@ -23,17 +28,23 @@ export async function createFinancialAgentApp() {
   const eventStore = await resolveEventStore();
   const sessions = new SessionRegistry(eventStore);
   const toolRegistry = new McpToolRegistry();
-  registerAllTools(toolRegistry);
-
   const modelRouter = new ModelRouter(resolveLlmProvider());
+  const financialModelDeps = getDefaultFinancialModelToolDeps();
+  registerAllTools(toolRegistry, { financialModelDeps });
+  // Both need the router, which registerAllTools has no handle on: extraction for its small-model
+  // insight pass, the subagent tool for the subagents themselves.
+  toolRegistry.register(createStatementExtractionTool({ modelRouter, financial: financialModelDeps }));
+  toolRegistry.register(createDcfSubagentTool({ modelRouter, financial: financialModelDeps }));
   const subagents = createSubagentRegistry();
   const subagentRuntime = new SubagentRuntime(modelRouter, toolRegistry);
   const skills = new SkillRegistry();
-  skills.registerWorkflow("comprehensive-analysis", runComprehensiveAnalysisWorkflow);
   await skills.loadFromDirectory(resolveSkillsPath());
 
-  const dispatcherFactory = (sessionId: string) =>
-    new Dispatcher(sessionId, subagents, subagentRuntime, toolRegistry, sessions.getExisting(sessionId));
+  toolRegistry.register(createReadSkillReferenceTool(skills));
+  toolRegistry.register(createRunSkillScriptTool(skills));
+
+  const dispatcherFactory = (sessionId: string, agentId: string) =>
+    new Dispatcher(sessionId, subagents, subagentRuntime, toolRegistry, sessions.getExisting(sessionId), agentId);
 
   const orchestrator = new OrchestratorRuntime(
     orchestratorPrompt,
@@ -45,13 +56,34 @@ export async function createFinancialAgentApp() {
     sessions,
   );
 
+  // The Research controller (spec §4). It sits BESIDE the orchestrator, not
+  // above it: `ask_topic` calls `orchestrator.run` — the same method a human
+  // turn goes through — so the Topic agent never learns who is asking.
+  const researchRuntime = new ResearchRuntime({
+    prompt: researchPrompt,
+    modelRouter,
+    store: eventStore,
+    sessions,
+    topicOrchestrator: orchestrator,
+    tools: toolRegistry,
+    skills,
+  });
+
+  // Keeps every Topic's own summary and category current, in the background.
+  // Nothing reads from it — it only writes to `chat_rooms` — so both the
+  // sidebar and the Research roster pick the result up through the store.
+  const topicDigests = new TopicDigestScheduler({ store: eventStore, sessions, modelRouter });
+
   return {
+    eventStore,
     sessions,
     toolRegistry,
     modelRouter,
     subagents,
     skills,
     orchestrator,
+    researchRuntime,
+    topicDigests,
     createDispatcher: dispatcherFactory,
   };
 }
@@ -98,16 +130,11 @@ export function resolveLlmProvider(): LlmProvider {
   return new MockLlmProvider();
 }
 
-async function resolveEventStore(): Promise<EventStore | undefined> {
-  const uri = process.env["MONGODB_URI"] ?? "mongodb://localhost:27017/financial-agent";
-  try {
-    return await MongoEventStore.connect(uri);
-  } catch (err) {
-    console.warn(
-      `[sessions] could not connect to MongoDB at ${uri}; sessions will not persist across restarts: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return undefined;
-  }
+async function resolveEventStore(): Promise<SqliteEventStore> {
+  const databasePath = path.resolve(process.env["SESSION_DB_PATH"] ?? "data/sessions.sqlite");
+  const store = SqliteEventStore.open(databasePath);
+  console.log(`[sessions] SQLite persistence enabled at ${databasePath}`);
+  return store;
 }
 
 function resolveSkillsPath(): string {

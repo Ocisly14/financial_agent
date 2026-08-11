@@ -15,7 +15,8 @@ import {
   type StrategyLifecycle,
   type ManageOp as StoreManageOp,
 } from "../../src/trading/persistence/strategyStore.ts";
-import { fetchMidPrice } from "../../src/trading/marketData.ts";
+import { fetchStockStrategyPrice } from "../../src/trading/stockStrategyMarketData.ts";
+import { wakeMonitor } from "../../src/trading/strategyMonitor.ts";
 
 let idCounter = 0;
 function newStrategyId(): string {
@@ -24,43 +25,77 @@ function newStrategyId(): string {
 
 const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
 
-// ── cex_create_strategy ──────────────────────────────────────────────────────
-export function createCexCreateStrategyTool(): RegisteredTool {
+// ── create_strategy ──────────────────────────────────────────────────────────
+export function createCreateStrategyTool(): RegisteredTool {
   return {
-    name: "cex_create_strategy",
+    name: "create_strategy",
     description:
-      "Create ONE price-driven auto-trading strategy as a DRAFT (does not run yet). " +
-      "Use this for ANY buy/sell that should fire on a FUTURE price condition — a % move within a window, crossing a price level, or a trailing stop — whether a SINGLE conditional leg ('buy $300 of BTC if it drops 5%') or a multi-phase plan (entry + take-profit + stop, DCA ladder, tiered take-profit). NOT for execute-now orders (use cex_prepare_order). " +
-      "Put EVERY leg in the single phases[] array; never call this tool more than once for one plan. Use the exact field names, types and enums from the args schema below — do not rename or invent fields. " +
-      "Do not invent values the user did not give: if a required field is missing (e.g. a rolling-change window_minutes, a threshold, or an order size), finish and name the missing field instead of calling this tool. Time-based DCA (e.g. weekly buys) is not supported. Then call cex_start_strategy to request activation.",
+      "Create ONE price-driven US stock or ETF strategy as a DRAFT (does not run yet). " +
+      "Use this for a future price or technical-indicator condition — a percentage move, price level, fill-relative move, trailing stop, RSI threshold, MACD cross, or SMA/EMA cross — whether a single conditional phase or a dependency-driven multi-phase plan. This tool does not place immediate broker orders. " +
+      "Put EVERY leg in the single phases[] array; use depends_on for phases that must wait for earlier fills/completion and cancel_group for mutually exclusive exits. Never call this tool more than once for one plan. Use the exact field names, types and enums from the args schema below — do not rename or invent fields. " +
+      "Do not invent values the user did not give: if a required field is missing (for example a rolling-change window_minutes, threshold, or action size), name the missing field instead of calling this tool. Time-based DCA is not supported. Strategies support paper and shadow evaluation only; live broker execution is unavailable. Then call start_strategy to request activation.",
     category: "trading",
     inputSchema: {
       type: "object",
-      required: ["task", "name", "symbol", "phases"],
+      required: ["name", "symbol", "phases"],
       properties: {
-        task: { type: "string", description: "Natural-language description of the user's intent." },
         user_id: { type: "string", description: "Owner id for per-user state. Defaults to 'default'." },
         name: { type: "string", description: "Human-friendly strategy plan name." },
-        symbol: { type: "string", description: "Full Binance pair, e.g. BTCUSDT." },
-        mode: { type: "string", enum: ["paper", "shadow", "live"], description: "defaults to paper" },
+        symbol: { type: "string", description: "US stock or ETF ticker, e.g. AAPL, MSFT, SPY, or BRK.B." },
+        mode: { type: "string", enum: ["paper", "shadow"], description: "Defaults to paper. Live broker execution is not supported." },
         phases: {
           type: "array",
-          description: "every leg of the plan",
+          description: "Every leg of the plan. Root phases without dependencies monitor in parallel; dependent phases wait until their dependencies are satisfied.",
           items: {
             type: "object",
             required: ["name", "price_trigger", "action", "recurrence"],
             properties: {
+              id: { type: "string", description: "Stable phase id. Required in practice when another phase refers to this phase." },
               name: { type: "string" },
+              depends_on: {
+                type: "array",
+                items: { type: "string" },
+                description: "Phase ids that must satisfy activate_on before this phase becomes active. Omit or use [] for an immediately active root phase.",
+              },
+              activate_on: {
+                type: "string",
+                enum: ["first_fill", "phase_completed"],
+                description: "How every dependency is satisfied. Use first_fill for entry→exit workflows; defaults to phase_completed.",
+              },
+              price_anchor: {
+                type: "object",
+                required: ["type", "phase_id"],
+                description: "Seed a relative_change or trailing_stop trigger from an earlier phase's actual simulated fill price.",
+                properties: {
+                  type: { type: "string", enum: ["phase_fill"] },
+                  phase_id: { type: "string", description: "The dependency phase whose latest fill supplies the anchor." },
+                },
+              },
+              cancel_group: {
+                type: "string",
+                description: "OCO group name. When this phase fills, other non-terminal phases in the same group are cancelled.",
+              },
               price_trigger: {
                 type: "object",
                 required: ["type", "direction"],
                 properties: {
-                  type: { type: "string", enum: ["rolling_change", "absolute_threshold", "trailing_stop"] },
-                  direction: { type: "string", enum: ["up", "down"] },
-                  pct: { type: "number", description: "required for rolling_change & trailing_stop" },
+                  type: { type: "string", enum: ["rolling_change", "absolute_threshold", "relative_change", "trailing_stop", "rsi_threshold", "macd_cross", "moving_average_cross"] },
+                  direction: {
+                    type: "string",
+                    enum: ["up", "down", "above", "below", "bullish", "bearish"],
+                    description: "up/down for price triggers; above/below for RSI; bullish/bearish for MACD or moving-average crosses",
+                  },
+                  pct: { type: "number", description: "required for rolling_change, relative_change & trailing_stop" },
                   window_minutes: { type: "integer", description: "required for rolling_change" },
                   price: { type: "number", description: "required for absolute_threshold" },
-                  reference_price: { type: "number", description: "optional anchor for trailing_stop" },
+                  reference_price: { type: "number", description: "Explicit anchor for relative_change or trailing_stop. Omit when price_anchor supplies a phase fill." },
+                  threshold: { type: "number", description: "required RSI threshold from 0 to 100" },
+                  period: { type: "integer", description: "RSI period; defaults to 14" },
+                  fast_period: { type: "integer", description: "fast MACD or moving-average period; defaults to 12 for MACD and 20 for moving averages" },
+                  slow_period: { type: "integer", description: "slow MACD or moving-average period; defaults to 26 for MACD and 50 for moving averages" },
+                  signal_period: { type: "integer", description: "MACD signal period; defaults to 9" },
+                  average_type: { type: "string", enum: ["sma", "ema"], description: "moving-average type; defaults to sma" },
+                  timeframe: { type: "string", description: "1Day or any 1-390 minute/hour interval such as 15Min, 1h, or 4Hour; defaults to 1Day" },
                   confirm_samples: { type: "integer", description: "default 2" },
                 },
               },
@@ -117,8 +152,9 @@ export function createCexCreateStrategyTool(): RegisteredTool {
       // Creation-time level check for absolute_threshold phases (avoid surprise "active immediately").
       if (input["force"] !== true) {
         try {
-          const mid = await fetchMidPrice(dsl.symbol);
+          const mid = await fetchStockStrategyPrice(dsl.symbol);
           for (const phase of dsl.phases) {
+            if (phase.status !== "active") continue;
             const t = phase.price_trigger;
             if (t.type !== "absolute_threshold") continue;
             const already =
@@ -147,7 +183,7 @@ export function createCexCreateStrategyTool(): RegisteredTool {
         dsl,
       };
       await saveStrategy(strategy);
-      const summary = `Created draft strategy ${id}: ${summarizePriceStrategy(dsl)}. Call cex_start_strategy to request activation.`;
+      const summary = `Created draft strategy ${id}: ${summarizePriceStrategy(dsl)}. Call start_strategy to request activation.`;
       return {
         summary,
         generation_context: { prompt: "Confirm the draft multi-phase strategy was created and tell the user to start it when ready.", data: { strategy_id: id, status: "draft", phases: dsl.phases.length, summary: summarizePriceStrategy(dsl) } },
@@ -156,10 +192,10 @@ export function createCexCreateStrategyTool(): RegisteredTool {
   };
 }
 
-// ── cex_start_strategy ───────────────────────────────────────────────────────
-export function createCexStartStrategyTool(): RegisteredTool {
+// ── start_strategy ───────────────────────────────────────────────────────────
+export function createStartStrategyTool(): RegisteredTool {
   return {
-    name: "cex_start_strategy",
+    name: "start_strategy",
     description:
       "Request activation of a DRAFT strategy. This does NOT activate it directly — it moves " +
       "the strategy to pending_approval and returns an approval request; the user must confirm " +
@@ -167,9 +203,8 @@ export function createCexStartStrategyTool(): RegisteredTool {
     category: "trading",
     inputSchema: {
       type: "object",
-      required: ["task", "strategy_id"],
+      required: ["strategy_id"],
       properties: {
-        task: { type: "string", description: "Natural-language request." },
         strategy_id: { type: "string", description: "The strategy id to start." },
       },
     },
@@ -207,17 +242,16 @@ export function createCexStartStrategyTool(): RegisteredTool {
   };
 }
 
-// ── cex_list_strategies ──────────────────────────────────────────────────────
-export function createCexListStrategiesTool(): RegisteredTool {
+// ── list_strategies ──────────────────────────────────────────────────────────
+export function createListStrategiesTool(): RegisteredTool {
   return {
-    name: "cex_list_strategies",
-    description: "List auto-trading strategies (optionally filtered by status), with current price and a short distance-to-trigger note where applicable.",
+    name: "list_strategies",
+    description: "List stock price strategies (optionally filtered by status), with the current price where available.",
     category: "trading",
     inputSchema: {
       type: "object",
-      required: ["task"],
+      required: [],
       properties: {
-        task: { type: "string", description: "Natural-language request." },
         status: { type: "string", description: "Optional status filter (draft|pending_approval|active|running|paused|completed|cancelled|failed)." },
       },
     },
@@ -227,7 +261,7 @@ export function createCexListStrategiesTool(): RegisteredTool {
       const rows = await Promise.all(
         all.map(async (s) => {
           let price = 0;
-          try { price = await fetchMidPrice(s.symbol); } catch { /* ignore */ }
+          try { price = await fetchStockStrategyPrice(s.symbol); } catch { /* ignore */ }
           return {
             strategy_id: s.id,
             symbol: s.symbol,
@@ -247,20 +281,19 @@ export function createCexListStrategiesTool(): RegisteredTool {
   };
 }
 
-// ── cex_manage_strategy ──────────────────────────────────────────────────────
+// ── manage_strategy ──────────────────────────────────────────────────────────
 const VALID_OPS = ["pause", "resume", "cancel", "get"] as const;
 type ManageOp = (typeof VALID_OPS)[number];
 
-export function createCexManageStrategyTool(): RegisteredTool {
+export function createManageStrategyTool(): RegisteredTool {
   return {
-    name: "cex_manage_strategy",
+    name: "manage_strategy",
     description: "Manage one strategy: op=get (details + execution history), pause, resume, or cancel. Pause/resume toggle active<->paused; cancel is terminal.",
     category: "trading",
     inputSchema: {
       type: "object",
-      required: ["task", "strategy_id", "op"],
+      required: ["strategy_id", "op"],
       properties: {
-        task: { type: "string", description: "Natural-language request." },
         strategy_id: { type: "string", description: "The strategy id." },
         op: { type: "string", description: "get | pause | resume | cancel.", enum: ["get", "pause", "resume", "cancel"] },
       },
@@ -298,6 +331,9 @@ export function createCexManageStrategyTool(): RegisteredTool {
       if (op === "pause") {
         return { summary: `Strategy ${id} paused.`, generation_context: { prompt: "Confirm pause.", data: { strategy_id: id, status: "paused" } } };
       }
+      // Resuming is the other way a strategy becomes active, so it too has to
+      // pull the monitor out of its idle heartbeat.
+      wakeMonitor();
       return { summary: `Strategy ${id} resumed (active).`, generation_context: { prompt: "Confirm resume.", data: { strategy_id: id, status: "active" } } };
     },
   };

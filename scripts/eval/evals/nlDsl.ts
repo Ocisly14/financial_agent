@@ -1,7 +1,7 @@
 import { normalizePriceStrategyInput } from "../../../mcp_tools/trading/strategy/priceStrategy.ts";
 import { McpToolRegistry } from "../../../mcp_tools/toolRegistry.ts";
-import { registerAllTools, TRADING_TOOLS } from "../../../mcp_tools/registerTools.ts";
-import { tradeSubagentPrompt } from "../../../src/agent/prompts/subagentPrompts.ts";
+import { registerAllTools, TRADING_OPERATIONS_TOOLS } from "../../../mcp_tools/registerTools.ts";
+import { tradingOperationsSubagentPrompt } from "../../../src/agent/prompts/subagentPrompts.ts";
 import { PromptRenderer } from "../../../src/framework/prompt.ts";
 import { ModelRouter } from "../../../src/infra/llm/provider.ts";
 import { resolveLlmProvider } from "../../../src/agent/createApp.ts";
@@ -49,7 +49,7 @@ export function scoreCase(generated: GenCall | null, gold: GoldDsl): {
     side: String(action["side"] ?? "") === gold.side,
     sizing_kind: String(size["type"] ?? size["kind"] ?? "") === gold.sizing_kind,
     sizing_value: Number(size["value"] ?? 0) === gold.sizing_value,
-    symbol: symbol.toUpperCase().startsWith(gold.symbol.replace(/USDT?$/i, "").toUpperCase()),
+    symbol: symbol.toUpperCase() === gold.symbol.toUpperCase(),
     recurrence_mode: String(recurrence["mode"] ?? "") === gold.recurrence_mode,
   };
   const critical = ["tool", "trigger_type", "direction", "threshold", "side", "sizing_kind", "sizing_value"];
@@ -64,6 +64,7 @@ export function scoreCase(generated: GenCall | null, gold: GoldDsl): {
 // budget guardrails, recurrence detail) are scored separately from single-phase.
 
 export type GoldPhase = {
+  id?: string; depends_on?: string[]; activate_on?: string; price_anchor_phase_id?: string; cancel_group?: string;
   trigger_type: string; direction: string; pct?: number; price?: number; window_minutes?: number;
   side: string; sizing_kind: string; sizing_value: number;
   order_type?: string; max_slippage_bps?: number; confirm_samples?: number;
@@ -82,6 +83,7 @@ export type MultiScore = {
   phasesTotal: number;
   guardrailsMatch: boolean;
   modeMatch: boolean;
+  workflowMatch: boolean;
   intentMatch: boolean;    // tool + every gold phase fully matched + correct count + guardrails + mode
 };
 
@@ -111,6 +113,44 @@ function phaseFullyMatches(gen: Record<string, unknown>, gold: GoldPhase): boole
   if (gold.max_triggers !== undefined && Number(recurrence["max_triggers"]) !== gold.max_triggers) return false;
   if (gold.cooldown_minutes !== undefined && Number(recurrence["cooldown_minutes"]) !== gold.cooldown_minutes) return false;
   if (gold.reanchor !== undefined && Boolean(recurrence["reanchor"]) !== gold.reanchor) return false;
+  if (gold.activate_on !== undefined && String(gen["activate_on"] ?? "") !== gold.activate_on) return false;
+  return true;
+}
+
+function workflowMatches(
+  genPhases: Record<string, unknown>[],
+  goldPhases: GoldPhase[],
+  matchedIndexes: number[],
+): boolean {
+  if (matchedIndexes.length !== goldPhases.length || matchedIndexes.some((index) => index < 0)) return false;
+  const goldIdToIndex = new Map(goldPhases.map((phase, index) => [phase.id, index] as const).filter(([id]) => id !== undefined));
+  const generatedIdForGold = (goldId: string): string | undefined => {
+    const goldIndex = goldIdToIndex.get(goldId);
+    if (goldIndex === undefined) return undefined;
+    return String(genPhases[matchedIndexes[goldIndex]!]!["id"] ?? "") || undefined;
+  };
+
+  const generatedOcoByGoldGroup = new Map<string, string>();
+  for (const [goldIndex, gold] of goldPhases.entries()) {
+    const generated = genPhases[matchedIndexes[goldIndex]!]!;
+    if (gold.depends_on !== undefined) {
+      const actual = Array.isArray(generated["depends_on"]) ? (generated["depends_on"] as unknown[]).map(String).sort() : [];
+      const expected = gold.depends_on.map(generatedIdForGold);
+      if (expected.some((id) => id === undefined) || actual.join("|") !== (expected as string[]).sort().join("|")) return false;
+    }
+    if (gold.price_anchor_phase_id !== undefined) {
+      const expectedAnchor = generatedIdForGold(gold.price_anchor_phase_id);
+      const anchor = (generated["price_anchor"] ?? {}) as Record<string, unknown>;
+      if (!expectedAnchor || String(anchor["phase_id"] ?? "") !== expectedAnchor) return false;
+    }
+    if (gold.cancel_group !== undefined) {
+      const actualGroup = String(generated["cancel_group"] ?? "");
+      if (!actualGroup) return false;
+      const prior = generatedOcoByGoldGroup.get(gold.cancel_group);
+      if (prior !== undefined && prior !== actualGroup) return false;
+      generatedOcoByGoldGroup.set(gold.cancel_group, actualGroup);
+    }
+  }
   return true;
 }
 
@@ -124,7 +164,7 @@ function guardrailsMatch(gen: Record<string, unknown>, gold: GoldMultiDsl["guard
 export function scoreMultiCase(generated: GenCall | null, gold: GoldMultiDsl): MultiScore {
   const phasesTotal = gold.phases.length;
   if (!generated) {
-    return { toolMatch: false, phaseCountMatch: false, phasesMatched: 0, phasesTotal, guardrailsMatch: false, modeMatch: false, intentMatch: false };
+    return { toolMatch: false, phaseCountMatch: false, phasesMatched: 0, phasesTotal, guardrailsMatch: false, modeMatch: false, workflowMatch: false, intentMatch: false };
   }
   const toolMatch = generated.tool === gold.tool;
   let genPhases: Record<string, unknown>[] = [];
@@ -144,15 +184,18 @@ export function scoreMultiCase(generated: GenCall | null, gold: GoldMultiDsl): M
   // Greedy, order-independent: each gold phase claims one unused fully-correct generated phase.
   const used = new Set<number>();
   let matched = 0;
+  const matchedIndexes: number[] = [];
   for (const gp of gold.phases) {
     const idx = genPhases.findIndex((gen, i) => !used.has(i) && phaseFullyMatches(gen, gp));
+    matchedIndexes.push(idx);
     if (idx >= 0) { used.add(idx); matched++; }
   }
   const phaseCountMatch = genPhases.length === phasesTotal;
   const grMatch = guardrailsMatch(gens, gold.guardrails);
   const modeMatch = gold.mode === undefined ? true : mode === gold.mode;
-  const intentMatch = toolMatch && phaseCountMatch && matched === phasesTotal && grMatch && modeMatch;
-  return { toolMatch, phaseCountMatch, phasesMatched: matched, phasesTotal, guardrailsMatch: grMatch, modeMatch, intentMatch };
+  const workflowMatch = workflowMatches(genPhases, gold.phases, matchedIndexes);
+  const intentMatch = toolMatch && phaseCountMatch && matched === phasesTotal && grMatch && modeMatch && workflowMatch;
+  return { toolMatch, phaseCountMatch, phasesMatched: matched, phasesTotal, guardrailsMatch: grMatch, modeMatch, workflowMatch, intentMatch };
 }
 
 function extractJsonObject(text: string): string | null {
@@ -187,7 +230,7 @@ function ensureWiring(): { allowedTools: string; renderer: PromptRenderer; route
   if (!cachedAllowedTools || !cachedRenderer || !cachedRouter) {
     const registry = new McpToolRegistry();
     registerAllTools(registry);
-    const tradingDefs = registry.list().filter((t) => (TRADING_TOOLS as readonly string[]).includes(t.name));
+    const tradingDefs = registry.list().filter((t) => (TRADING_OPERATIONS_TOOLS as readonly string[]).includes(t.name));
     cachedAllowedTools = formatAllowedTools(tradingDefs);
     cachedRenderer = new PromptRenderer();
     // Reuse the app's provider resolution so ① runs on the SAME provider the agent
@@ -199,14 +242,14 @@ function ensureWiring(): { allowedTools: string; renderer: PromptRenderer; route
 
 export async function generateStrategyCall(input: string): Promise<GenCall | null> {
   const { allowedTools, renderer, router } = ensureWiring();
-  const { system, prompt } = renderer.render(tradeSubagentPrompt, {
+  const { system, prompt } = renderer.render(tradingOperationsSubagentPrompt, {
     allowedTools,
     task: input,
     progress: "(nothing yet)",
   });
   const res = await router.generate(
     [{ role: "system", content: system }, { role: "user", content: prompt }],
-    { modelClass: "MEDIUM", temperature: 0, metadata: { mode: "subagent", agent: "trade" } },
+    { modelClass: "MEDIUM", temperature: 0, metadata: { mode: "subagent", agent: "trading_operations" } },
   );
   const calls = parseCalls(res.text);
   return calls[0] ?? null;

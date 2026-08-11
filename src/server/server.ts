@@ -5,25 +5,15 @@ import { fileURLToPath } from "node:url";
 import { newId } from "../framework/ids.ts";
 import { attachSse } from "../infra/events/sseProjector.ts";
 import type { FinancialAgentApp } from "../agent/createApp.ts";
-import type { JsonObject, TaskResult, ToolExecutionResult } from "../framework/types.ts";
-import { binanceFetch } from "../../mcp_tools/trading/binanceClient.ts";
-import { coinbaseFetch } from "../../mcp_tools/trading/coinbaseAuth.ts";
-import { reconciliationService } from "../trading/reconciliation.ts";
-import { fetchCandles } from "../trading/marketData.ts";
-import {
-  killSwitchStore,
-  consentStore,
-  tradingPrefsStore,
-  activeWorkflows,
-} from "../trading/stores.ts";
+import type { TopicChartPreferenceRow, TopicCategory } from "../infra/db/sqliteEventStore.ts";
+import { asTopicCategory, TOPIC_CATEGORIES } from "../infra/db/sqliteEventStore.ts";
+import type { TaskResult, UserInputAnswer, UserInputRequest, UserInputResponse } from "../framework/types.ts";
+import { handleStockQuote, parseRangeDays } from "./stockMarketRoutes.ts";
+import { handleLinkPreview } from "./linkPreview.ts";
+import { projectChatHistory } from "./chatHistory.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-// client/dist is two levels up from src/server/
 const CLIENT_DIST = path.resolve(__dirname, "../../client/dist");
-const CHART_DIR = path.resolve(process.env["CHART_OUTPUT_DIR"] ?? "./charts");
-// Public market-data host (klines/ticker/depth/exchangeInfo). Defaults to
-// Binance's official, non-geo-restricted data mirror; override per region.
-const BINANCE_DATA_BASE = process.env["BINANCE_DATA_BASE"] || "https://data-api.binance.vision";
 
 const MIME_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -38,64 +28,33 @@ const MIME_TYPES: Record<string, string> = {
   ".ttf": "font/ttf",
 };
 
+type ActiveWorkflow = { kind: "task_chain"; startedAt: number; sessionId?: string };
+const activeWorkflows = new Map<string, ActiveWorkflow>();
 
-// ── Static exchange registry ───────────────────────────────────────────────────
-const SUPPORTED_EXCHANGES = [
-  {
-    id: "binance",
-    name: "Binance",
-    defaultAuthType: "api_key",
-    authTypes: [
-      {
-        type: "api_key",
-        fields: [
-          { id: "api_key", label: "API Key", type: "secret" as const, required: true },
-          { id: "api_secret", label: "API Secret", type: "secret" as const, required: true },
-        ],
-      },
-    ],
-  },
-  {
-    id: "coinbase",
-    name: "Coinbase Advanced Trade",
-    defaultAuthType: "cdp_key",
-    authTypes: [
-      {
-        type: "cdp_key",
-        fields: [
-          { id: "api_key_name", label: "API Key Name", type: "string" as const, required: true, description: "CDP key path, e.g. organizations/.../apiKeys/..." },
-          { id: "api_secret", label: "Private Key (PEM)", type: "secret" as const, required: true },
-        ],
-      },
-    ],
-  },
-];
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-function setCors(req: http.IncomingMessage, res: http.ServerResponse) {
+function setCors(req: http.IncomingMessage, res: http.ServerResponse): void {
   const origin = req.headers.origin;
   res.setHeader("Access-Control-Allow-Origin", origin ?? "*");
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Credentials", "true");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Agent-Id");
 }
 
 async function readBody(req: http.IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
     req.on("error", reject);
   });
 }
 
-function jsonOk(res: http.ServerResponse, data: unknown) {
+function jsonOk(res: http.ServerResponse, data: unknown): void {
   res.writeHead(200, { "Content-Type": "application/json" });
   res.end(JSON.stringify(data));
 }
 
-function jsonError(res: http.ServerResponse, status: number, message: string) {
+function jsonError(res: http.ServerResponse, status: number, message: string): void {
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify({ success: false, error: message }));
 }
@@ -111,83 +70,12 @@ function findApprovalContext(
     const pending = state?.pendingApproval(approvalId);
     if (state && pending) {
       const event = [...state.allEvents()].reverse().find(
-        (e) => e.kind === "approval_required" && e.payload.approval_id === approvalId,
+        (candidate) => candidate.kind === "approval_required" && candidate.payload.approval_id === approvalId,
       );
       if (event) return { state, event, payload: pending.payload };
     }
   }
   return app.sessions.findPendingApproval(approvalId);
-}
-
-function isOrderFailure(output: ToolExecutionResult): boolean {
-  const data = output.generation_context?.data;
-  return Boolean(output.error || data?.["error"] || data?.["blocked"] || /\b(failed|blocked)\b/i.test(output.summary));
-}
-
-function responseOrderFromResult(output: ToolExecutionResult, fallback: JsonObject): JsonObject {
-  const data = output.generation_context?.data ?? {};
-  const order: JsonObject = {
-    orderId: data["orderId"] ?? data["order_id"] ?? fallback["client_order_id"] ?? "unknown",
-    status: data["status"] ?? (isOrderFailure(output) ? "failed" : "submitted"),
-  };
-  const exchange = data["exchange"] ?? fallback["exchange"];
-  const symbol = data["symbol"] ?? fallback["symbol"];
-  const side = data["side"] ?? fallback["side"];
-  if (exchange !== undefined) order["exchange"] = exchange;
-  if (symbol !== undefined) order["symbol"] = symbol;
-  if (side !== undefined) order["side"] = side;
-  if (data["paper"] !== undefined) order["paper"] = data["paper"];
-  if (data["fillPrice"] !== undefined) order["fillPrice"] = data["fillPrice"];
-  return order;
-}
-
-function normalizeOrderSymbol(symbol: string, quoteInput: unknown): { symbol: string; quote: string } {
-  const defaultQuote = typeof quoteInput === "string" && quoteInput.trim()
-    ? quoteInput.trim().toUpperCase()
-    : "USDT";
-  const cleaned = symbol.trim().toUpperCase();
-  const pairMatch = cleaned.match(/^([A-Z0-9]+)[/_-]([A-Z0-9]+)$/);
-  if (pairMatch) return { symbol: pairMatch[1]!, quote: pairMatch[2]! };
-  for (const quote of ["USDT", "USDC", "USD", "BTC", "ETH", "BNB"]) {
-    if (cleaned.endsWith(quote) && cleaned.length > quote.length) {
-      return { symbol: cleaned.slice(0, -quote.length), quote };
-    }
-  }
-  return { symbol: cleaned, quote: defaultQuote };
-}
-
-function asFiniteNumber(value: unknown): number | undefined {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && value.trim()) {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  return undefined;
-}
-
-function parseOrderConfiguration(value: unknown): Record<string, unknown> | undefined {
-  if (!value) return undefined;
-  if (typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
-  if (typeof value !== "string" || !value.trim()) return undefined;
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? parsed as Record<string, unknown>
-      : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function firstOrderConfigInner(value: unknown): Record<string, unknown> {
-  const config = parseOrderConfiguration(value);
-  if (!config) return {};
-  for (const inner of Object.values(config)) {
-    if (inner && typeof inner === "object" && !Array.isArray(inner)) {
-      return inner as Record<string, unknown>;
-    }
-  }
-  return {};
 }
 
 function recordApprovalTaskResult(
@@ -196,131 +84,491 @@ function recordApprovalTaskResult(
   approvalId: string | undefined,
   decision: string,
   result: TaskResult,
-) {
+): void {
   if (!approvalContext || !approvalId || !approvalTaskId) return;
   approvalContext.state.record(
-    "trade",
+    "trading_operations",
     "approval_resolved",
     { approval_id: approvalId, decision, summary: result.summary },
     { parent: approvalContext.event.event_id },
   );
-  approvalContext.state.recordTaskResult("trade", approvalTaskId, result);
+  approvalContext.state.recordTaskResult("trading_operations", approvalTaskId, result);
 }
 
-function sseWrite(res: http.ServerResponse, data: unknown) {
+function sseWrite(res: http.ServerResponse, data: unknown): void {
   res.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
-// Resolve Binance creds from env — credential fields in the trading UI are
-// optional; fall back to server-side env vars so the UI works without
-// exposing keys in query strings.
-function getBinanceCreds(sp: URLSearchParams) {
+type ChatBody = {
+  message?: string;
+  sessionId?: string;
+  inputResponse?: {
+    requestId?: unknown;
+    answers?: unknown;
+  };
+};
+
+export function validateUserInputAnswers(
+  request: UserInputRequest,
+  rawAnswers: unknown,
+): { response: UserInputResponse; message: string } | { error: string } {
+  if (!Array.isArray(rawAnswers)) return { error: "inputResponse.answers must be an array" };
+
+  const byQuestion = new Map<string, string[]>();
+  for (const raw of rawAnswers) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      return { error: "each input response answer must be an object" };
+    }
+    const answer = raw as { questionId?: unknown; selectedOptionIds?: unknown };
+    if (typeof answer.questionId !== "string" || !Array.isArray(answer.selectedOptionIds)) {
+      return { error: "each answer requires questionId and selectedOptionIds" };
+    }
+    if (byQuestion.has(answer.questionId)) return { error: `duplicate answer for question '${answer.questionId}'` };
+    if (!answer.selectedOptionIds.every((id): id is string => typeof id === "string")) {
+      return { error: `selectedOptionIds for '${answer.questionId}' must contain only strings` };
+    }
+    if (new Set(answer.selectedOptionIds).size !== answer.selectedOptionIds.length) {
+      return { error: `selectedOptionIds for '${answer.questionId}' must be unique` };
+    }
+    byQuestion.set(answer.questionId, answer.selectedOptionIds);
+  }
+
+  if (byQuestion.size !== request.questions.length) {
+    return { error: "answers must include every question exactly once" };
+  }
+
+  const answers: UserInputAnswer[] = [];
+  const lines: string[] = [];
+  for (const question of request.questions) {
+    const selected = byQuestion.get(question.id);
+    if (!selected) return { error: `missing answer for question '${question.id}'` };
+    if (selected.length < question.min_selections || selected.length > question.max_selections) {
+      return {
+        error: `question '${question.id}' requires ${question.min_selections}-${question.max_selections} selections`,
+      };
+    }
+    const options = new Map(question.options.map((option) => [option.id, option]));
+    const unknown = selected.find((id) => !options.has(id));
+    if (unknown) return { error: `unknown option '${unknown}' for question '${question.id}'` };
+    answers.push({ question_id: question.id, selected_option_ids: selected });
+    lines.push(`${question.question}: ${selected.map((id) => options.get(id)!.label).join(", ")}`);
+  }
+
   return {
-    apiKey: sp.get("api_key") ?? process.env["BINANCE_API_KEY"] ?? "",
-    apiSecret: sp.get("api_secret") ?? process.env["BINANCE_API_SECRET"] ?? "",
+    response: { request_id: request.request_id, answers },
+    message: lines.join("\n"),
   };
 }
-
-function getCoinbaseCreds(sp: URLSearchParams) {
-  return {
-    apiKeyName: sp.get("api_key_name") ?? process.env["COINBASE_API_KEY_NAME"] ?? "",
-    apiKeySecret: sp.get("api_secret") ?? process.env["COINBASE_PRIVATE_KEY"] ?? "",
-  };
-}
-
-// ── Route handlers ────────────────────────────────────────────────────────────
 
 async function handleChat(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   app: FinancialAgentApp,
-) {
-  let body: { message?: string; sessionId?: string };
+): Promise<void> {
+  let body: ChatBody;
   try {
-    body = JSON.parse(await readBody(req));
+    body = JSON.parse(await readBody(req)) as ChatBody;
   } catch {
-    res.writeHead(400, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "Invalid JSON body" }));
-    return;
+    return jsonError(res, 400, "Invalid JSON body");
   }
 
-  const message = (body.message ?? "").trim();
-  if (!message) {
-    res.writeHead(400, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "message is required" }));
-    return;
+  if (body.inputResponse && !body.sessionId) {
+    return jsonError(res, 400, "sessionId is required for inputResponse");
   }
-
   const sessionId = body.sessionId ?? newId("sess");
+  const agentId = (req.headers["x-agent-id"] as string | undefined) ?? "default";
+  const state = await app.sessions.getOrCreate(sessionId);
+
+  let message: string;
+  let inputResponse: UserInputResponse | undefined;
+  if (body.inputResponse) {
+    const requestId = body.inputResponse.requestId;
+    if (typeof requestId !== "string" || !requestId.trim()) {
+      return jsonError(res, 400, "inputResponse.requestId is required");
+    }
+    const requestView = state.userInputRequest(requestId);
+    if (!requestView) return jsonError(res, 404, "user input request not found");
+    if (requestView.status !== "pending") return jsonError(res, 409, `user input request is ${requestView.status}`);
+    const request = state.pendingUserInput(requestId)!;
+    const validated = validateUserInputAnswers(request, body.inputResponse.answers);
+    if ("error" in validated) return jsonError(res, 400, validated.error);
+    inputResponse = validated.response;
+    message = validated.message;
+  } else {
+    message = (body.message ?? "").trim();
+    if (!message) return jsonError(res, 400, "message is required");
+  }
+
+  // A Research id is also its session id (spec §3), exactly like a Topic id.
+  // So the ONE thing that decides which runtime handles this turn is whether a
+  // `researches` row exists for it. Critically, a Research session must NOT go
+  // through `ensureTopic`: that would insert a phantom `chat_rooms` row with
+  // the same id, and the Research would then show up in the Topic sidebar and
+  // shadow itself.
+  const research = app.eventStore.getResearch(agentId, sessionId);
+  if (!research) app.eventStore.ensureTopic(agentId, sessionId, defaultRoomName());
 
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
-    "Connection": "keep-alive",
+    Connection: "keep-alive",
     "X-Session-Id": sessionId,
   });
 
-  const keepaliveMs = parseInt(process.env["SSE_KEEPALIVE_INTERVAL"] ?? "15000");
+  const keepaliveMs = Number.parseInt(process.env["SSE_KEEPALIVE_INTERVAL"] ?? "15000", 10);
   const keepalive = setInterval(() => res.write(": ping\n\n"), keepaliveMs);
-  const unsub = attachSse(await app.sessions.getOrCreate(sessionId), (frame) => sseWrite(res, frame));
-
-  // Track workflow as active for the Stop-button rehydration route
-  const agentIdHeader = (req.headers["x-agent-id"] as string | undefined) ?? "default";
-  activeWorkflows.set(agentIdHeader, { kind: "task_chain", startedAt: Date.now(), sessionId });
+  const unsubscribe = attachSse(state, (frame) => sseWrite(res, frame));
+  activeWorkflows.set(agentId, { kind: "task_chain", startedAt: Date.now(), sessionId });
 
   try {
-    await app.orchestrator.run({ sessionId, userMessage: message });
-  } catch (err) {
-    sseWrite(res, { type: "error", scope: "main", message: String(err) });
+    if (research) {
+      await app.researchRuntime.run({
+        agentId,
+        researchId: sessionId,
+        researchName: research.name,
+        userMessage: message,
+        ...(inputResponse ? { inputResponse } : {}),
+        // §4.5: the driven Topic's own dispatch / tool_call / task_done frames
+        // are never forwarded here — they belong to that Topic's stream. What
+        // reaches this stream is the one compressed line the toolset emits.
+        emit: (frame) => sseWrite(res, { type: frame.name, ...frame.data }),
+      });
+      // `appendEvent` bumps `chat_rooms.updated_at`, which a Research has no row
+      // in; without this the sidebar would order Researches by creation only.
+      app.eventStore.renameResearch(agentId, sessionId, research.name);
+    } else {
+      await app.orchestrator.run({ agentId, sessionId, userMessage: message, ...(inputResponse ? { inputResponse } : {}) });
+    }
+  } catch (error) {
+    sseWrite(res, { type: "error", scope: "main", message: String(error) });
   } finally {
     clearInterval(keepalive);
-    unsub();
-    activeWorkflows.delete(agentIdHeader);
+    unsubscribe();
+    activeWorkflows.delete(agentId);
+    // The turn is over — the one moment at which this Topic's history is a
+    // complete thought. Arming the debounce here (rather than when the user
+    // sent the message) is what stops the summariser reading a half-streamed
+    // reply. Research sessions are excluded: they have no `chat_rooms` row.
+    if (!research) app.topicDigests.schedule(sessionId);
     res.end();
   }
 }
 
-async function handleChart(pathname: string, res: http.ServerResponse, headOnly = false) {
-  const filename = path.basename(decodeURIComponent(pathname.slice("/charts/".length)));
-  if (!filename || filename.includes("..")) {
-    res.writeHead(400);
-    res.end("Bad filename");
-    return;
-  }
-
-  const filePath = path.join(CHART_DIR, filename);
-  const resolved = path.resolve(filePath);
-  if (!resolved.startsWith(CHART_DIR + path.sep) && resolved !== CHART_DIR) {
-    res.writeHead(403);
-    res.end("Forbidden");
-    return;
-  }
-
-  try {
-    const content = await fs.readFile(filePath);
-    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-    res.end(headOnly ? undefined : content);
-  } catch {
-    res.writeHead(404, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: `Chart not found: ${filename}` }));
-  }
+async function handleChatHistory(
+  res: http.ServerResponse,
+  app: FinancialAgentApp,
+  sessionId: string,
+  searchParams: URLSearchParams,
+): Promise<void> {
+  const allMessages = projectChatHistory(await app.sessions.loadEvents(sessionId));
+  const requestedLimit = Number.parseInt(searchParams.get("limit") ?? "200", 10);
+  const limit = Number.isFinite(requestedLimit) ? Math.min(Math.max(requestedLimit, 1), 500) : 200;
+  const before = searchParams.get("before");
+  const beforeIndex = before ? allMessages.findIndex((message) => message.id === before) : -1;
+  const end = beforeIndex >= 0 ? beforeIndex : allMessages.length;
+  const start = Math.max(0, end - limit);
+  const messages = allMessages.slice(start, end);
+  jsonOk(res, { sessionId, messages, hasMore: start > 0, oldestId: messages[0]?.id });
 }
 
-async function handleStatic(pathname: string, res: http.ServerResponse) {
-  const safePath = pathname === "/" || pathname === "" ? "/index.html" : pathname;
-  const ext = path.extname(safePath);
-  const filePath = path.join(CLIENT_DIST, safePath);
+function defaultRoomName(): string {
+  const now = new Date();
+  const pad = (value: number): string => String(value).padStart(2, "0");
+  return `Chat ${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+}
 
+async function handleCreateTopic(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  app: FinancialAgentApp,
+  agentId: string,
+): Promise<void> {
+  let body: { name?: string } = {};
+  const rawBody = await readBody(req);
+  if (rawBody) {
+    try {
+      body = JSON.parse(rawBody) as { name?: string };
+    } catch {
+      return jsonError(res, 400, "Invalid JSON body");
+    }
+  }
+  const topicId = newId("room");
+  const topic = app.eventStore.createTopic(agentId, topicId, body.name?.trim() || defaultRoomName());
+  jsonOk(res, { success: true, topic });
+}
+
+async function handleUpdateTopic(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  app: FinancialAgentApp,
+  agentId: string,
+  topicId: string,
+): Promise<void> {
+  let body: { name?: string; category?: string | null };
+  try {
+    body = JSON.parse(await readBody(req));
+  } catch {
+    return jsonError(res, 400, "invalid json");
+  }
+
+  const patch: { name?: string; category?: TopicCategory | null } = {};
+  if (body.name !== undefined) {
+    const name = body.name.trim();
+    if (!name) return jsonError(res, 400, "name must not be empty");
+    patch.name = name;
+  }
+  if (body.category !== undefined) {
+    // `null` is the "back to automatic" signal, not an invalid category — it
+    // clears the lock and lets the next digest choose again.
+    if (body.category !== null && asTopicCategory(body.category) === null) {
+      return jsonError(res, 400, `category must be null or one of: ${TOPIC_CATEGORIES.join(", ")}`);
+    }
+    patch.category = body.category === null ? null : asTopicCategory(body.category);
+  }
+
+  if (!app.eventStore.updateTopic(agentId, topicId, patch)) {
+    return jsonError(res, 404, "topic not found");
+  }
+  jsonOk(res, { success: true, topic: { id: topicId, ...patch } });
+}
+
+// Byte-identical to the ticker regex in client/src/lib/chartWorkspace.ts's `ticker()` — a
+// mismatch here would let the frontend display a symbol the backend refuses to store.
+const TICKER_PATTERN = /^[A-Z][A-Z.-]{0,5}$/;
+
+function normalizeTicker(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const symbol = value.trim().toUpperCase();
+  return TICKER_PATTERN.test(symbol) ? symbol : undefined;
+}
+
+/** Same rules as chartWorkspace.ts's overlay parsing (design §2): dedupe, keep 2-6 valid
+ *  tickers (truncating past 6 rather than rejecting), fall back to "pct" for an unrecognised
+ *  normalize value. Returns undefined when fewer than 2 valid symbols survive. */
+function normalizeOverlaySymbols(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const seen = new Set<string>();
+  const symbols: string[] = [];
+  for (const candidate of value) {
+    const symbol = normalizeTicker(candidate);
+    if (!symbol || seen.has(symbol)) continue;
+    seen.add(symbol);
+    symbols.push(symbol);
+  }
+  const truncated = symbols.slice(0, 6);
+  return truncated.length >= 2 ? truncated : undefined;
+}
+
+function normalizeMode(value: unknown): "pct" | "index100" {
+  return value === "index100" ? "index100" : "pct";
+}
+
+/** The window an overlay gets when neither the row nor the request names one. */
+const DEFAULT_OVERLAY_RANGE_DAYS = 252;
+
+/**
+ * A range that is absent stays absent (null means "follow the derived range");
+ * a range that is PRESENT must be a whole number of trading days within the
+ * servable window, or the whole write is rejected.
+ *
+ * This is the boundary the original bug walked straight through: an unknown
+ * "6M" was stored verbatim and every reader downstream quietly degraded it to
+ * a one-day intraday chart. Rejecting here means nothing downstream ever has
+ * to guess.
+ */
+function chartRange(value: unknown): number | null | "invalid" {
+  if (value === undefined || value === null) return null;
+  return parseRangeDays(value) ?? "invalid";
+}
+
+/**
+ * Validates a whole `charts` payload into storable rows. Exported for tests:
+ * the reject-on-write posture is the point of this change, so it needs
+ * coverage without standing up an HTTP server.
+ */
+export function parseTopicChartRows(
+  charts: unknown[],
+  makeId: () => string = () => newId("chart"),
+): { rows: TopicChartPreferenceRow[] } | { error: string } {
+  const rows: TopicChartPreferenceRow[] = [];
+  for (const [index, candidate] of charts.entries()) {
+    const item = candidate as Record<string, unknown>;
+    const range = chartRange(item?.range);
+    if (range === "invalid") return { error: `invalid range at index ${index}` };
+    const hidden = item?.hidden === true;
+    const sortOrder = typeof item?.sortOrder === "number" ? item.sortOrder : index;
+
+    if (item?.kind === "overlay") {
+      const overlay = (item as { overlay?: Record<string, unknown> }).overlay;
+      const symbols = normalizeOverlaySymbols(overlay?.symbols);
+      if (!symbols) return { error: `invalid overlay at index ${index}` };
+      const requested = chartRange(overlay?.range);
+      if (requested === "invalid") return { error: `invalid overlay range at index ${index}` };
+      rows.push({
+        id: makeId(),
+        kind: "overlay",
+        overlay: {
+          symbols,
+          range: requested ?? range ?? DEFAULT_OVERLAY_RANGE_DAYS,
+          normalize: normalizeMode(overlay?.normalize),
+        },
+        range,
+        hidden,
+        sortOrder,
+      });
+      continue;
+    }
+
+    const symbol = normalizeTicker(item?.symbol);
+    if (!symbol) return { error: `invalid symbol at index ${index}` };
+    rows.push({ id: makeId(), kind: "symbol", symbol, range, hidden, sortOrder });
+  }
+  return { rows };
+}
+
+async function handleReplaceTopicCharts(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  app: FinancialAgentApp,
+  topicId: string,
+): Promise<void> {
+  let body: { charts?: unknown };
+  try {
+    body = JSON.parse(await readBody(req));
+  } catch {
+    return jsonError(res, 400, "invalid json");
+  }
+  if (!Array.isArray(body.charts)) return jsonError(res, 400, "charts must be an array");
+
+  const parsed = parseTopicChartRows(body.charts);
+  if ("error" in parsed) return jsonError(res, 400, parsed.error);
+
+  app.eventStore.replaceTopicCharts(topicId, parsed.rows);
+  jsonOk(res, { success: true, charts: app.eventStore.listTopicCharts(topicId) });
+}
+
+// ── Research routes (spec §8) ──────────────────────────────────────────────
+//
+// A Research groups several Topics and compares them. Its id is also its
+// session id, so `POST /api/chat` with a research id talks to the controller
+// (see handleChat). Membership is always written as a WHOLE SET — the client
+// sends the list it wants, the store keeps each surviving member's digest and
+// seen marker so a membership edit never re-bills a model call.
+
+/** Members resolved to the same TopicSummary shape the Topic routes return,
+ *  in membership order. A member whose Topic was deleted is skipped rather
+ *  than returned as a hole. */
+function researchMembers(app: FinancialAgentApp, agentId: string, researchId: string) {
+  const topics = new Map(app.eventStore.listTopics(agentId).map((topic) => [topic.id, topic]));
+  return app.eventStore
+    .listResearchMembers(researchId)
+    .map((member) => topics.get(member.topicId))
+    .filter((topic): topic is NonNullable<typeof topic> => topic !== undefined);
+}
+
+/** §7.4: an unnamed Research is named after what it compares. */
+function defaultResearchName(app: FinancialAgentApp, agentId: string, topicIds: string[]): string {
+  const topics = new Map(app.eventStore.listTopics(agentId).map((topic) => [topic.id, topic]));
+  const labels = topicIds
+    .map((topicId) => topics.get(topicId))
+    .filter((topic): topic is NonNullable<typeof topic> => topic !== undefined)
+    .map((topic) => topic.leadSymbol ?? topic.name);
+  return labels.length ? labels.join(" · ") : "New Research";
+}
+
+async function handleCreateResearch(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  app: FinancialAgentApp,
+  agentId: string,
+): Promise<void> {
+  let body: { name?: string; topicIds?: unknown } = {};
+  const rawBody = await readBody(req);
+  if (rawBody) {
+    try {
+      body = JSON.parse(rawBody) as { name?: string; topicIds?: unknown };
+    } catch {
+      return jsonError(res, 400, "invalid json");
+    }
+  }
+  const topicIds = Array.isArray(body.topicIds)
+    ? body.topicIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+    : [];
+
+  const researchId = newId("research");
+  const name = body.name?.trim() || defaultResearchName(app, agentId, topicIds);
+  const research = app.eventStore.createResearch(agentId, researchId, name);
+  if (topicIds.length) app.eventStore.replaceResearchMembers(researchId, topicIds);
+
+  jsonOk(res, {
+    success: true,
+    research: { ...research, memberCount: topicIds.length },
+    members: researchMembers(app, agentId, researchId),
+  });
+}
+
+async function handleUpdateResearch(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  app: FinancialAgentApp,
+  agentId: string,
+  researchId: string,
+): Promise<void> {
+  let body: { name?: string };
+  try {
+    body = JSON.parse(await readBody(req)) as { name?: string };
+  } catch {
+    return jsonError(res, 400, "invalid json");
+  }
+  if (body.name === undefined) return jsonError(res, 400, "name is required");
+  const name = body.name.trim();
+  if (!name) return jsonError(res, 400, "name must not be empty");
+  if (!app.eventStore.renameResearch(agentId, researchId, name)) {
+    return jsonError(res, 404, "research not found");
+  }
+  jsonOk(res, { success: true, research: app.eventStore.getResearch(agentId, researchId) });
+}
+
+async function handleReplaceResearchMembers(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  app: FinancialAgentApp,
+  agentId: string,
+  researchId: string,
+): Promise<void> {
+  if (!app.eventStore.getResearch(agentId, researchId)) return jsonError(res, 404, "research not found");
+
+  let body: { topicIds?: unknown };
+  try {
+    body = JSON.parse(await readBody(req)) as { topicIds?: unknown };
+  } catch {
+    return jsonError(res, 400, "invalid json");
+  }
+  if (!Array.isArray(body.topicIds)) return jsonError(res, 400, "topicIds must be an array");
+
+  // Only Topics that actually belong to this agent, de-duplicated, order kept.
+  const known = new Set(app.eventStore.listTopics(agentId).map((topic) => topic.id));
+  const topicIds: string[] = [];
+  for (const candidate of body.topicIds) {
+    if (typeof candidate !== "string" || !known.has(candidate) || topicIds.includes(candidate)) continue;
+    topicIds.push(candidate);
+  }
+
+  app.eventStore.replaceResearchMembers(researchId, topicIds);
+  jsonOk(res, { success: true, members: researchMembers(app, agentId, researchId) });
+}
+
+async function handleStatic(pathname: string, res: http.ServerResponse): Promise<void> {
+  const safePath = pathname === "/" || pathname === "" ? "/index.html" : pathname;
+  const filePath = path.join(CLIENT_DIST, safePath);
   if (!path.resolve(filePath).startsWith(CLIENT_DIST)) {
     res.writeHead(403);
     res.end("Forbidden");
     return;
   }
-
   try {
     const content = await fs.readFile(filePath);
-    const mime = MIME_TYPES[ext] ?? "application/octet-stream";
-    res.writeHead(200, { "Content-Type": mime });
+    res.writeHead(200, { "Content-Type": MIME_TYPES[path.extname(safePath)] ?? "application/octet-stream" });
     res.end(content);
   } catch {
     try {
@@ -334,698 +582,211 @@ async function handleStatic(pathname: string, res: http.ServerResponse) {
   }
 }
 
-// GET /agents/:agentId/cex/account-snapshot?venue=binance&base=BTC&quote=USDT
-async function handleCexAccountSnapshot(sp: URLSearchParams, res: http.ServerResponse) {
-  const venue = (sp.get("venue") ?? "binance").toLowerCase();
-  const base = (sp.get("base") ?? "BTC").toUpperCase();
-  const quote = (sp.get("quote") ?? "USDT").toUpperCase();
-
-  try {
-    if (venue === "coinbase") {
-      const creds = getCoinbaseCreds(sp);
-      if (!creds.apiKeyName || !creds.apiKeySecret) {
-        return jsonOk(res, { snapshot: null, error: "Coinbase credentials not configured" });
-      }
-      const raw = await coinbaseFetch(creds, "GET", "/api/v3/brokerage/accounts") as {
-        accounts?: Array<{ currency?: string; available_balance?: { value?: string }; hold?: { value?: string } }>;
-      };
-      const accounts = raw.accounts ?? [];
-      const baseAcct = accounts.find((a) => a.currency === base);
-      const quoteAcct = accounts.find((a) => a.currency === (quote === "USDT" ? "USD" : quote));
-      return jsonOk(res, {
-        snapshot: {
-          baseAsset: base,
-          quoteAsset: quote,
-          baseAvailable: baseAcct?.available_balance?.value ?? "0",
-          quoteAvailable: quoteAcct?.available_balance?.value ?? "0",
-          feeBps: 10,
-        },
-      });
-    }
-
-    // Binance
-    const creds = getBinanceCreds(sp);
-    if (!creds.apiKey || !creds.apiSecret) {
-      return jsonOk(res, { snapshot: null, error: "Binance credentials not configured" });
-    }
-    const raw = await binanceFetch(creds, "GET", "/api/v3/account") as {
-      balances?: Array<{ asset?: string; free?: string; locked?: string }>;
-      makerCommission?: number;
-      takerCommission?: number;
-    };
-    const balances = raw.balances ?? [];
-    const baseAcct = balances.find((b) => b.asset === base);
-    const quoteAcct = balances.find((b) => b.asset === quote);
-    return jsonOk(res, {
-      snapshot: {
-        baseAsset: base,
-        quoteAsset: quote,
-        baseAvailable: baseAcct?.free ?? "0",
-        quoteAvailable: quoteAcct?.free ?? "0",
-        feeBps: Math.max(raw.makerCommission ?? 10, raw.takerCommission ?? 10),
-      },
-    });
-  } catch (err) {
-    return jsonOk(res, { snapshot: null, error: String(err) });
-  }
-}
-
-// GET /agents/:agentId/cex/market-snapshot?symbol=BTC&venue=binance&side=BUY&limit_price=...
-async function handleCexMarketSnapshot(sp: URLSearchParams, res: http.ServerResponse) {
-  const symbol = (sp.get("symbol") ?? "BTC").toUpperCase();
-  const binanceSymbol = symbol + "USDT";
-  const fetchedAtMs = Date.now();
-
-  try {
-    // All public Binance endpoints — no auth needed
-    const [bookRaw, statsRaw, depthRaw] = await Promise.all([
-      fetch(`${BINANCE_DATA_BASE}/api/v3/ticker/bookTicker?symbol=${binanceSymbol}`).then((r) => r.json()) as Promise<{
-        bidPrice?: string; bidQty?: string; askPrice?: string; askQty?: string;
-      }>,
-      fetch(`${BINANCE_DATA_BASE}/api/v3/ticker/24hr?symbol=${binanceSymbol}`).then((r) => r.json()) as Promise<{
-        lastPrice?: string; priceChangePercent?: string; highPrice?: string;
-        lowPrice?: string; volume?: string; quoteVolume?: string;
-      }>,
-      fetch(`${BINANCE_DATA_BASE}/api/v3/depth?symbol=${binanceSymbol}&limit=5`).then((r) => r.json()) as Promise<{
-        bids?: [string, string][]; asks?: [string, string][];
-      }>,
-    ]);
-
-    const bid = bookRaw.bidPrice ?? "";
-    const ask = bookRaw.askPrice ?? "";
-    const bidNum = parseFloat(bid);
-    const askNum = parseFloat(ask);
-    const spreadBps = bidNum > 0 && askNum > 0
-      ? Math.round(((askNum - bidNum) / bidNum) * 10000)
-      : undefined;
-
-    const limitPriceStr = sp.get("limit_price");
-    const side = sp.get("side") as "BUY" | "SELL" | null;
-    let estFillPrice: number | undefined;
-    let slippageBps: number | undefined;
-    if (limitPriceStr && side) {
-      const lp = parseFloat(limitPriceStr);
-      const ref = side === "BUY" ? askNum : bidNum;
-      if (ref > 0) {
-        estFillPrice = ref;
-        slippageBps = Math.round(Math.abs((lp - ref) / ref) * 10000);
-      }
-    }
-
-    return jsonOk(res, {
-      market_snapshot: {
-        symbol,
-        bid,
-        bid_qty: bookRaw.bidQty,
-        ask,
-        ask_qty: bookRaw.askQty,
-        spread_bps: spreadBps,
-        price_change_pct: statsRaw.priceChangePercent,
-        high_24h: statsRaw.highPrice,
-        low_24h: statsRaw.lowPrice,
-        volume_24h: statsRaw.volume,
-        quote_volume_24h: statsRaw.quoteVolume,
-        depth_bids: (depthRaw.bids ?? []).map(([price, qty]) => ({ price, qty })),
-        depth_asks: (depthRaw.asks ?? []).map(([price, qty]) => ({ price, qty })),
-        ...(estFillPrice !== undefined ? { est_fill_price: estFillPrice } : {}),
-        ...(slippageBps !== undefined ? { slippage_vs_limit_bps: slippageBps } : {}),
-        fetched_at_ms: fetchedAtMs,
-      },
-      symbol_verification: {
-        matches: true,
-        extracted_symbol: symbol,
-        user_text_asset_mentions: [symbol],
-      },
-    });
-  } catch (err) {
-    return jsonOk(res, {
-      market_snapshot: null,
-      symbol_verification: {
-        matches: false,
-        extracted_symbol: symbol,
-        user_text_asset_mentions: [],
-        reason: String(err),
-      },
-    });
-  }
-}
-
-// GET /agents/:agentId/cex/klines?symbol=BTCUSDT&interval=1m&limit=200
-// Public Binance historical candles — real OHLCV for the Strategy Floor scope.
-async function handleCexKlines(sp: URLSearchParams, res: http.ServerResponse) {
-  const symbol = (sp.get("symbol") ?? "BTCUSDT").toUpperCase();
-  const interval = sp.get("interval") ?? "1m";
-  const limit = Math.min(Math.max(Number(sp.get("limit") ?? "200") || 200, 1), 1000);
-  try {
-    const candles = await fetchCandles(symbol, interval, limit);
-    return jsonOk(res, { symbol, interval, candles, fetched_at_ms: Date.now() });
-  } catch (err) {
-    return jsonOk(res, { symbol, interval, candles: [], fetched_at_ms: Date.now(), error: String(err) });
-  }
-}
-
-// GET /agents/:agentId/cex/products?venue=binance
-async function handleCexProducts(sp: URLSearchParams, res: http.ServerResponse) {
-  const venue = (sp.get("venue") ?? "binance").toLowerCase();
-
-  try {
-    if (venue === "coinbase") {
-      // Coinbase public products endpoint
-      const raw = await fetch("https://api.coinbase.com/api/v3/brokerage/market/products?product_type=SPOT&limit=300")
-        .then((r) => r.json()) as { products?: Array<{ product_id?: string; base_currency_id?: string; quote_currency_id?: string }> };
-      const products = (raw.products ?? [])
-        .filter((p) => ["USD", "USDT", "USDC"].includes(p.quote_currency_id ?? ""))
-        .map((p) => ({
-          product_id: p.product_id ?? "",
-          base_asset: p.base_currency_id ?? "",
-          quote_asset: p.quote_currency_id ?? "",
-        }));
-      return jsonOk(res, { venue, products, fetched_at_ms: Date.now() });
-    }
-
-    // Binance public exchangeInfo
-    const raw = await fetch(`${BINANCE_DATA_BASE}/api/v3/exchangeInfo`)
-      .then((r) => r.json()) as {
-        symbols?: Array<{
-          symbol?: string; baseAsset?: string; quoteAsset?: string;
-          status?: string; isSpotTradingAllowed?: boolean;
-        }>;
-      };
-    const products = (raw.symbols ?? [])
-      .filter(
-        (s) =>
-          s.status === "TRADING" &&
-          s.isSpotTradingAllowed &&
-          ["USDT", "USDC", "USD"].includes(s.quoteAsset ?? ""),
-      )
-      .map((s) => ({
-        product_id: s.symbol ?? "",
-        base_asset: s.baseAsset ?? "",
-        quote_asset: s.quoteAsset ?? "",
-      }));
-    return jsonOk(res, { venue, products, fetched_at_ms: Date.now() });
-  } catch (err) {
-    return jsonOk(res, { venue, products: [], fetched_at_ms: Date.now(), error: String(err) });
-  }
-}
-
-// POST /agents/:agentId/cex-workflow/approval  or  /agents/:agentId/human-input/approval
-async function handleCexApproval(
+async function activateStrategy(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   app: FinancialAgentApp,
-) {
-  let body: {
+  id: string,
+): Promise<void> {
+  const body = JSON.parse(await readBody(req)) as {
     decision?: string;
-    parameters?: Record<string, unknown>;
-    approvalId?: string;
     threadId?: string;
-    confirmationLevel?: number;
+    approvalId?: string;
   };
-  try {
-    body = JSON.parse(await readBody(req));
-  } catch {
-    return jsonError(res, 400, "Invalid JSON body");
+  const { loadStrategy, saveStrategy } = await import("../trading/persistence/strategyStore.ts");
+  const strategy = await loadStrategy(id);
+  if (!strategy) return jsonError(res, 404, "not_found");
+  if (strategy.status !== "pending_approval") {
+    return jsonError(res, 409, `cannot activate from status '${strategy.status}'`);
   }
 
-  const approvalContext = findApprovalContext(app, body.threadId, body.approvalId);
+  const rejected = body.decision === "reject";
+  strategy.status = rejected ? "draft" : "active";
+  await saveStrategy(strategy);
+  // The monitor idles at a slow heartbeat when nothing is active; this is the
+  // moment that stops being true.
+  if (!rejected) {
+    const { wakeMonitor } = await import("../trading/strategyMonitor.ts");
+    wakeMonitor();
+  }
+  const approvalId = body.approvalId ?? id;
+  const approvalContext = findApprovalContext(app, body.threadId, approvalId);
   const approvalTaskId = approvalContext?.event.parent_event_id ?? undefined;
-
-  if (!body.approvalId) {
-    return jsonError(res, 400, "approvalId is required");
-  }
-  if (!approvalContext || !approvalTaskId) {
-    return jsonError(res, 404, "Approval not found or expired");
-  }
-
-  if (body.decision === "rejected") {
-    if (approvalContext && body.approvalId && approvalTaskId) {
-      approvalContext.state.record(
-        "trade",
-        "approval_resolved",
-        { approval_id: body.approvalId, decision: "rejected" },
-        { parent: approvalContext.event.event_id },
-      );
-      approvalContext.state.recordTaskResult("trade", approvalTaskId, {
-        task_id: approvalTaskId,
-        agent: "trade",
-        status: "failed",
-        summary: "Order rejected by user. No order was submitted.",
-        error: { code: "approval_rejected", message: "Order rejected by user. No order was submitted." },
-        generation_context: {
-          prompt: "The user rejected the trading approval. Tell the user no order was submitted.",
-          data: { rejected: true, approval_id: body.approvalId },
-        },
-      });
-    }
-    return jsonOk(res, { success: true, rejected: true });
-  }
-
-  // Kill-switch guard
-  const killActive = killSwitchStore.get("default") ?? false;
-  if (killActive) {
-    const summary = "Order failed: Kill switch is active — trading is disabled.";
-    recordApprovalTaskResult(approvalContext, approvalTaskId, body.approvalId, "failed", {
-      task_id: approvalTaskId ?? "unknown",
-      agent: "trade",
-      status: "failed",
-      summary,
-      error: { code: "order_failed", message: summary },
-      generation_context: {
-        prompt: "Order submission failed because the kill switch is active. Tell the user no order was submitted.",
-        data: { error: "Kill switch is active — trading is disabled." },
-      },
-    });
-    return jsonOk(res, { success: false, error: "Kill switch is active — trading is disabled." });
-  }
-
-  const p = body.parameters ?? {};
-  const exchange = String(p["exchange"] ?? "binance").toLowerCase();
-  const normalizedSymbol = normalizeOrderSymbol(String(p["symbol"] ?? p["base_asset"] ?? ""), p["quote"]);
-  const symbol = normalizedSymbol.symbol;
-  const quote = normalizedSymbol.quote;
-  const side = String(p["side"] ?? "").toUpperCase() as "BUY" | "SELL";
-  const orderType = String(p["order_type"] ?? p["type"] ?? "market").toLowerCase();
-  const orderConfigInner = firstOrderConfigInner(p["order_configuration"]);
-  const baseSize = asFiniteNumber(p["base_size"]) ?? asFiniteNumber(orderConfigInner["base_size"]);
-  const quoteSize =
-    asFiniteNumber(p["quote_size"]) ??
-    asFiniteNumber(p["quote_order_qty"]) ??
-    asFiniteNumber(orderConfigInner["quote_size"]) ??
-    asFiniteNumber(orderConfigInner["quote_order_qty"]);
-  const limitPrice =
-    asFiniteNumber(p["limit_price"]) ??
-    asFiniteNumber(p["price"]) ??
-    asFiniteNumber(orderConfigInner["limit_price"]) ??
-    asFiniteNumber(orderConfigInner["price"]) ??
-    asFiniteNumber(orderConfigInner["stop_price"]);
-
-  if (!symbol || !side) {
-    const summary = "Order failed: order parameters incomplete; symbol and side are required.";
-    recordApprovalTaskResult(approvalContext, approvalTaskId, body.approvalId, "failed", {
-      task_id: approvalTaskId ?? "unknown",
-      agent: "trade",
-      status: "failed",
-      summary,
-      error: { code: "order_failed", message: summary },
-      generation_context: {
-        prompt: "Order submission failed because required order parameters were missing. Tell the user no order was submitted.",
-        data: { exchange, symbol, side, error: "Order parameters incomplete: symbol and side are required." },
-      },
-    });
-    return jsonOk(res, { success: false, error: "Order parameters incomplete: symbol and side are required." });
-  }
-
-  try {
-    const orderInput: JsonObject = {
-      ...(p as JsonObject),
-      task: String(p["task"] ?? "Execute approved CEX order."),
-      exchange,
-      symbol,
-      quote,
-      side,
-      order_type: orderType,
-      ...(baseSize !== undefined ? { base_size: baseSize } : {}),
-      ...(quoteSize !== undefined ? { quote_size: quoteSize } : {}),
-      ...(limitPrice !== undefined ? { limit_price: limitPrice } : {}),
-      ...(body.approvalId ? { client_order_id: body.approvalId } : {}),
-    };
-    const toolContext: { sessionId: string; taskId?: string } = {
-      sessionId: body.threadId ?? approvalContext?.state.session_id ?? "default",
-    };
-    if (approvalTaskId) toolContext.taskId = approvalTaskId;
-    const output = await app.toolRegistry.call("cex_create_order", orderInput, toolContext);
-    const failed = isOrderFailure(output);
-
-    if (approvalContext && body.approvalId && approvalTaskId) {
-      approvalContext.state.record(
-        "trade",
-        "approval_resolved",
-        { approval_id: body.approvalId, decision: failed ? "failed" : "approved", summary: output.summary },
-        { parent: approvalContext.event.event_id },
-      );
-      approvalContext.state.recordTaskResult("trade", approvalTaskId, {
-        task_id: approvalTaskId,
-        agent: "trade",
-        status: failed ? "failed" : "ok",
-        summary: output.summary,
-        ...(output.generation_context ? { generation_context: output.generation_context } : {}),
-        ...(failed ? { error: output.error ?? { code: "order_failed", message: output.summary } } : {}),
-      });
-    }
-
-    return jsonOk(res, {
-      success: !failed,
-      ...(failed ? { error: output.summary } : {}),
-      order: responseOrderFromResult(output, orderInput),
-    });
-  } catch (err) {
-    const message = String(err);
-    if (approvalContext && body.approvalId && approvalTaskId) {
-      approvalContext.state.record(
-        "trade",
-        "approval_resolved",
-        { approval_id: body.approvalId, decision: "failed", summary: message },
-        { parent: approvalContext.event.event_id },
-      );
-      approvalContext.state.recordTaskResult("trade", approvalTaskId, {
-        task_id: approvalTaskId,
-        agent: "trade",
-        status: "failed",
-        summary: `Order failed: ${message}`,
-        error: { code: "order_failed", message },
-        generation_context: {
-          prompt: `Order submission failed. Error: ${message}`,
-          data: { exchange, symbol, side, error: message },
-        },
-      });
-    }
-    return jsonOk(res, { success: false, error: message });
-  }
-}
-
-// PUT /user/trading/kill-switch
-async function handleKillSwitch(req: http.IncomingMessage, res: http.ServerResponse) {
-  let body: { active?: boolean; reason?: string };
-  try {
-    body = JSON.parse(await readBody(req));
-  } catch {
-    return jsonError(res, 400, "Invalid JSON body");
-  }
-  const active = Boolean(body.active);
-  killSwitchStore.set("default", active);
-  return jsonOk(res, { success: true, kill_switch_active: active });
-}
-
-// GET /user/trading/preferences
-function handleGetTradingPreferences(res: http.ServerResponse) {
-  const prefs = tradingPrefsStore.get("default") ?? null;
-  const killActive = killSwitchStore.get("default") ?? false;
-  return jsonOk(res, {
-    success: true,
-    preferences: prefs ? { ...prefs, kill_switch_active: killActive } : { kill_switch_active: killActive },
+  const summary = rejected
+    ? `Strategy ${id} activation rejected. Strategy returned to draft.`
+    : `Strategy ${id} activated. The monitor may now evaluate and record matching paper/shadow phases.`;
+  recordApprovalTaskResult(approvalContext, approvalTaskId, approvalId, rejected ? "rejected" : "approved", {
+    task_id: approvalTaskId ?? "unknown",
+    agent: "trading_operations",
+    status: rejected ? "failed" : "ok",
+    summary,
+    ...(rejected ? { error: { code: "approval_rejected", message: summary } } : {}),
+    generation_context: {
+      prompt: rejected
+        ? "The user rejected strategy activation. Tell the user the strategy is back in draft."
+        : "The user approved strategy activation. Tell the user the strategy is active.",
+      data: { strategy_id: id, status: strategy.status, rejected },
+    },
   });
+  jsonOk(res, { success: true, status: strategy.status });
 }
 
-// PUT /user/trading/preferences
-async function handleSetTradingPreferences(req: http.IncomingMessage, res: http.ServerResponse) {
-  let patch: Record<string, unknown>;
-  try {
-    patch = JSON.parse(await readBody(req));
-  } catch {
-    return jsonError(res, 400, "Invalid JSON body");
-  }
-  const existing = tradingPrefsStore.get("default") ?? {};
-  tradingPrefsStore.set("default", { ...existing, ...patch });
-  return jsonOk(res, { success: true });
-}
-
-// GET /user/orders?limit=50&venue=binance&state=OPEN
-async function handleListOrders(sp: URLSearchParams, res: http.ServerResponse) {
-  const venue = (sp.get("venue") ?? "binance").toLowerCase();
-  const limit = parseInt(sp.get("limit") ?? "50");
-
-  try {
-    let orders: unknown[];
-    if (venue === "coinbase") {
-      const creds = getCoinbaseCreds(sp);
-      if (!creds.apiKeyName) return jsonOk(res, { success: true, orders: [] });
-      const raw = await coinbaseFetch(creds, "GET", "/api/v3/brokerage/orders/historical/batch", {
-        order_status: sp.get("state") ?? "OPEN",
-        limit: String(limit),
-      }) as { orders?: unknown[] };
-      orders = raw.orders ?? [];
-    } else {
-      const creds = getBinanceCreds(sp);
-      if (!creds.apiKey) return jsonOk(res, { success: true, orders: [] });
-      const raw = await binanceFetch(creds, "GET", "/api/v3/openOrders");
-      orders = Array.isArray(raw) ? raw : [];
-    }
-    return jsonOk(res, { success: true, orders });
-  } catch (err) {
-    return jsonOk(res, { success: true, orders: [], error: String(err) });
-  }
-}
-
-// GET /user/consent/:consentType?version=v1
-function handleGetConsent(consentType: string, version: string, res: http.ServerResponse) {
-  const key = `${consentType}:${version}`;
-  const stored = consentStore.get(key);
-  return jsonOk(res, {
-    success: true,
-    consent: stored ? { consent_type: consentType, version, accepted: true, acceptedAt: stored.acceptedAt } : null,
-  });
-}
-
-// POST /user/consent
-async function handleRecordConsent(req: http.IncomingMessage, res: http.ServerResponse) {
-  let body: { consent_type?: string; version?: string; accepted?: boolean };
-  try {
-    body = JSON.parse(await readBody(req));
-  } catch {
-    return jsonError(res, 400, "Invalid JSON body");
-  }
-  const consentType = body.consent_type ?? "";
-  const version = body.version ?? "v1";
-  if (consentType) {
-    consentStore.set(`${consentType}:${version}`, { version, acceptedAt: Date.now() });
-  }
-  return jsonOk(res, { success: true });
-}
-
-// GET /trading/exchanges
-function handleGetExchanges(res: http.ServerResponse) {
-  return jsonOk(res, { success: true, exchanges: SUPPORTED_EXCHANGES });
-}
-
-// ── Route dispatcher ───────────────────────────────────────────────────────────
 export function createHttpServer(app: FinancialAgentApp): http.Server {
   return http.createServer(async (req, res) => {
     setCors(req, res);
-
     if (req.method === "OPTIONS") {
       res.writeHead(204);
       res.end();
       return;
     }
 
-    const url = new URL(req.url ?? "/", `http://localhost`);
-    const { pathname } = url;
-    const sp = url.searchParams;
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const { pathname, searchParams } = url;
     const method = req.method ?? "GET";
 
     try {
-      // ── Chat (SSE) ────────────────────────────────────────────────────────
-      if (method === "POST" && pathname === "/api/chat") {
-        return await handleChat(req, res, app);
+      if (method === "POST" && pathname === "/api/chat") return await handleChat(req, res, app);
+
+      const historyMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/messages$/);
+      if (method === "GET" && historyMatch) {
+        return await handleChatHistory(res, app, decodeURIComponent(historyMatch[1]!), searchParams);
       }
 
-      // ── Charts ────────────────────────────────────────────────────────────
-      if ((method === "GET" || method === "HEAD") && pathname.startsWith("/charts/")) {
-        return await handleChart(pathname, res, method === "HEAD");
-      }
-
-      // ── Health ────────────────────────────────────────────────────────────
-      if (method === "GET" && pathname === "/health") {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ status: "ok" }));
-        return;
-      }
-
-      // ── Exchange registry ──────────────────────────────────────────────────
-      if (method === "GET" && pathname === "/trading/exchanges") {
-        return handleGetExchanges(res);
-      }
-
-      // ── CEX agent routes  /agents/:agentId/cex/* ──────────────────────────
-      const agentCexMatch = pathname.match(/^\/agents\/([^/]+)\/cex\/([^/?]+)/);
-      if (agentCexMatch) {
-        const sub = agentCexMatch[2];
-        if (method === "GET" && sub === "account-snapshot") return await handleCexAccountSnapshot(sp, res);
-        if (method === "GET" && sub === "market-snapshot")  return await handleCexMarketSnapshot(sp, res);
-        if (method === "GET" && sub === "klines")           return await handleCexKlines(sp, res);
-        if (method === "GET" && sub === "products")         return await handleCexProducts(sp, res);
-      }
-
-      // ── CEX / human-input approval  /agents/:agentId/cex-workflow/approval
-      //                                /agents/:agentId/human-input/approval
-      if (
-        method === "POST" &&
-        (pathname.match(/^\/agents\/[^/]+\/cex-workflow\/approval$/) ||
-         pathname.match(/^\/agents\/[^/]+\/human-input\/approval$/))
-      ) {
-        return await handleCexApproval(req, res, app);
-      }
-
-      // ── Kill switch ────────────────────────────────────────────────────────
-      if (method === "PUT" && pathname === "/user/trading/kill-switch") {
-        return await handleKillSwitch(req, res);
-      }
-
-      // ── Trading preferences ────────────────────────────────────────────────
-      if (pathname === "/user/trading/preferences") {
-        if (method === "GET")  return handleGetTradingPreferences(res);
-        if (method === "PUT")  return await handleSetTradingPreferences(req, res);
-      }
-
-      // ── Orders ────────────────────────────────────────────────────────────
-      if (method === "GET" && pathname === "/user/orders") {
-        return await handleListOrders(sp, res);
-      }
-
-      // ── Consent ───────────────────────────────────────────────────────────
-      const consentMatch = pathname.match(/^\/user\/consent\/([^/?]+)/);
-      if (consentMatch) {
+      const topicsMatch = pathname.match(/^\/api\/agents\/([^/]+)\/topics$/);
+      if (topicsMatch) {
+        const agentId = decodeURIComponent(topicsMatch[1]!);
         if (method === "GET") {
-          return handleGetConsent(consentMatch[1] ?? "", sp.get("version") ?? "v1", res);
+          jsonOk(res, { success: true, topics: app.eventStore.listTopics(agentId) });
+          // Backstop for digests a restart lost, AFTER the response is out so
+          // the sidebar never waits on a model call. Throttled inside, because
+          // the client repeats this poll every 30s per open tab.
+          void app.topicDigests.catchUp(agentId);
+          return;
+        }
+        if (method === "POST") return await handleCreateTopic(req, res, app, agentId);
+      }
+
+      const topicChartsMatch = pathname.match(/^\/api\/agents\/([^/]+)\/topics\/([^/]+)\/charts$/);
+      if (topicChartsMatch) {
+        const topicId = decodeURIComponent(topicChartsMatch[2]!);
+        if (method === "GET") {
+          return jsonOk(res, { success: true, charts: app.eventStore.listTopicCharts(topicId) });
+        }
+        if (method === "PUT") return await handleReplaceTopicCharts(req, res, app, topicId);
+      }
+
+      const topicMatch = pathname.match(/^\/api\/agents\/([^/]+)\/topics\/([^/]+)$/);
+      if (topicMatch) {
+        const agentId = decodeURIComponent(topicMatch[1]!);
+        const topicId = decodeURIComponent(topicMatch[2]!);
+        if (method === "PUT") return await handleUpdateTopic(req, res, app, agentId, topicId);
+        if (method === "DELETE") {
+          if (!app.eventStore.deleteTopic(agentId, topicId)) return jsonError(res, 404, "topic not found");
+          app.sessions.delete(topicId);
+          return jsonOk(res, { success: true, message: "deleted" });
         }
       }
-      if (method === "POST" && pathname === "/user/consent") {
-        return await handleRecordConsent(req, res);
+
+      const researchesMatch = pathname.match(/^\/api\/agents\/([^/]+)\/researches$/);
+      if (researchesMatch) {
+        const agentId = decodeURIComponent(researchesMatch[1]!);
+        if (method === "GET") return jsonOk(res, { success: true, researches: app.eventStore.listResearches(agentId) });
+        if (method === "POST") return await handleCreateResearch(req, res, app, agentId);
       }
 
-      // ── Active workflow status  GET /agents/:agentId/active-workflow ────────
-      const activeWfMatch = pathname.match(/^\/agents\/([^/]+)\/active-workflow$/);
-      if (activeWfMatch && method === "GET") {
-        const agentId = activeWfMatch[1] ?? "";
-        const wf = activeWorkflows.get(agentId);
+      // Matched before the bare /researches/:id route below, which would
+      // otherwise swallow "/members" as part of the id.
+      const researchMembersMatch = pathname.match(/^\/api\/agents\/([^/]+)\/researches\/([^/]+)\/members$/);
+      if (researchMembersMatch) {
+        const agentId = decodeURIComponent(researchMembersMatch[1]!);
+        const researchId = decodeURIComponent(researchMembersMatch[2]!);
+        if (method === "GET") {
+          if (!app.eventStore.getResearch(agentId, researchId)) return jsonError(res, 404, "research not found");
+          return jsonOk(res, { success: true, members: researchMembers(app, agentId, researchId) });
+        }
+        if (method === "PUT") return await handleReplaceResearchMembers(req, res, app, agentId, researchId);
+      }
+
+      const researchMatch = pathname.match(/^\/api\/agents\/([^/]+)\/researches\/([^/]+)$/);
+      if (researchMatch) {
+        const agentId = decodeURIComponent(researchMatch[1]!);
+        const researchId = decodeURIComponent(researchMatch[2]!);
+        if (method === "GET") {
+          const research = app.eventStore.getResearch(agentId, researchId);
+          if (!research) return jsonError(res, 404, "research not found");
+          return jsonOk(res, { success: true, research, members: researchMembers(app, agentId, researchId) });
+        }
+        if (method === "PUT") return await handleUpdateResearch(req, res, app, agentId, researchId);
+        if (method === "DELETE") {
+          if (!app.eventStore.deleteResearch(agentId, researchId)) return jsonError(res, 404, "research not found");
+          // Members are NOT deleted: a Topic outlives any Research it is in (§3).
+          app.sessions.delete(researchId);
+          return jsonOk(res, { success: true, message: "deleted" });
+        }
+      }
+
+      if (method === "GET" && pathname === "/health") return jsonOk(res, { status: "ok" });
+
+      const stockQuoteMatch = pathname.match(/^\/market\/stocks\/([^/?]+)$/);
+      if (method === "GET" && stockQuoteMatch) {
+        return await handleStockQuote(stockQuoteMatch[1]!, searchParams, res);
+      }
+
+      if (method === "GET" && pathname === "/link-preview") {
+        return await handleLinkPreview(searchParams, res);
+      }
+
+      const workflowMatch = pathname.match(/^\/agents\/([^/]+)\/active-workflow$/);
+      if (workflowMatch && method === "GET") {
+        const workflow = activeWorkflows.get(workflowMatch[1]!);
         return jsonOk(res, {
-          active: !!wf,
-          ...(wf ? { kind: wf.kind, startedAt: new Date(wf.startedAt).toISOString() } : {}),
+          active: Boolean(workflow),
+          ...(workflow ? { kind: workflow.kind, startedAt: new Date(workflow.startedAt).toISOString() } : {}),
         });
       }
 
-      // ── Reconciliation status  GET /user/orders/:clientOrderId/status ───────
-      const reconMatch = pathname.match(/^\/user\/orders\/([^/?]+)\/status$/);
-      if (reconMatch && method === "GET") {
-        const clientOrderId = decodeURIComponent(reconMatch[1] ?? "");
-        const order = reconciliationService.getOrder(clientOrderId);
-        if (!order) return jsonError(res, 404, "Order not found");
-        return jsonOk(res, { success: true, order: { clientOrderId: order.clientOrderId, exchangeOrderId: order.exchangeOrderId, state: order.state, fillQty: order.fillQty ?? null, fillPrice: order.fillPrice ?? null, updatedAtMs: order.updatedAtMs } });
-      }
-
-      // ── Paper account  GET /user/paper/balances  GET /user/paper/orders ─────
-      if (method === "GET" && pathname === "/user/paper/balances") {
-        const { getPaperBalances } = await import("../../mcp_tools/trading/paperVenue.ts");
-        const userId = sp.get("user_id") ?? "default";
-        return jsonOk(res, { success: true, balances: getPaperBalances(userId) });
-      }
-      if (method === "GET" && pathname === "/user/paper/orders") {
-        const { getPaperOrders } = await import("../../mcp_tools/trading/paperVenue.ts");
-        const userId = sp.get("user_id") ?? "default";
-        return jsonOk(res, { success: true, orders: getPaperOrders(userId) });
-      }
-      if (method === "POST" && pathname === "/user/paper/reset") {
-        const { resetPaperAccount } = await import("../../mcp_tools/trading/paperVenue.ts");
-        const body = JSON.parse(await readBody(req)) as { user_id?: string };
-        resetPaperAccount(body.user_id ?? "default");
-        return jsonOk(res, { success: true });
-      }
-
-      // ── Auto-trading strategies ───────────────────────────────────────────
       if (method === "GET" && pathname === "/user/strategies") {
         const { listStrategies } = await import("../trading/persistence/strategyStore.ts");
         return jsonOk(res, { success: true, strategies: await listStrategies() });
       }
-      // Frontend activation confirmation: pending_approval → active (or → draft on reject).
-      const stratActivate = pathname.match(/^\/user\/strategies\/([^/]+)\/activate$/);
-      if (method === "POST" && stratActivate) {
-        const id = stratActivate[1] ?? "";
-        const body = JSON.parse(await readBody(req)) as { decision?: string; threadId?: string; approvalId?: string };
-        const { loadStrategy, saveStrategy } = await import("../trading/persistence/strategyStore.ts");
-        const s = await loadStrategy(id);
-        if (!s) {
-          res.writeHead(404, { "Content-Type": "application/json" });
-          return res.end(JSON.stringify({ success: false, error: "not_found" }));
-        }
-        if (s.status !== "pending_approval") {
-          res.writeHead(409, { "Content-Type": "application/json" });
-          return res.end(JSON.stringify({ success: false, error: `cannot activate from status '${s.status}'` }));
-        }
-        const rejected = body.decision === "reject";
-        s.status = rejected ? "draft" : "active";
-        await saveStrategy(s);
-        const approvalId = body.approvalId ?? id;
-        const approvalContext = findApprovalContext(app, body.threadId, approvalId);
-        const approvalTaskId = approvalContext?.event.parent_event_id ?? undefined;
-        const summary = rejected
-          ? `Strategy ${id} activation rejected. Strategy returned to draft.`
-          : `Strategy ${id} activated. The monitor may now execute matching phases.`;
-        recordApprovalTaskResult(
-          approvalContext,
-          approvalTaskId,
-          approvalId,
-          rejected ? "rejected" : "approved",
-          {
-            task_id: approvalTaskId ?? "unknown",
-            agent: "trade",
-            status: rejected ? "failed" : "ok",
-            summary,
-            ...(rejected
-              ? { error: { code: "approval_rejected", message: summary } }
-              : {}),
-            generation_context: {
-              prompt: rejected
-                ? "The user rejected strategy activation. Tell the user the strategy is back in draft."
-                : "The user approved strategy activation. Tell the user the strategy is active.",
-              data: { strategy_id: id, status: s.status, rejected },
-            },
-          },
-        );
-        return jsonOk(res, { success: true, status: s.status });
+
+      const activateMatch = pathname.match(/^\/user\/strategies\/([^/]+)\/activate$/);
+      if (method === "POST" && activateMatch) {
+        return await activateStrategy(req, res, app, activateMatch[1]!);
       }
 
-      // Strategy detail: config + execution history.
-      const stratDetail = pathname.match(/^\/user\/strategies\/([^/]+)$/);
-      if (method === "GET" && stratDetail) {
-        const id = stratDetail[1] ?? "";
-        const { loadStrategy, listExecutions } = await import("../trading/persistence/strategyStore.ts");
-        const strategy = await loadStrategy(id);
-        if (!strategy) {
-          res.writeHead(404, { "Content-Type": "application/json" });
-          return res.end(JSON.stringify({ success: false, error: "not_found" }));
-        }
-        const executions = await listExecutions(id);
-        return jsonOk(res, { success: true, strategy, executions });
-      }
-
-      // Pause/resume/cancel.
-      const stratStatus = pathname.match(/^\/user\/strategies\/([^/]+)\/status$/);
-      if (method === "PUT" && stratStatus) {
-        const id = stratStatus[1] ?? "";
+      const statusMatch = pathname.match(/^\/user\/strategies\/([^/]+)\/status$/);
+      if (method === "PUT" && statusMatch) {
         const body = JSON.parse(await readBody(req)) as { op?: string };
         const { loadStrategy, saveStrategy, applyStrategyOp } = await import("../trading/persistence/strategyStore.ts");
-        const s = await loadStrategy(id);
-        if (!s) {
-          res.writeHead(404, { "Content-Type": "application/json" });
-          return res.end(JSON.stringify({ success: false, error: "not_found" }));
-        }
-        const result = applyStrategyOp(s, (body.op ?? "") as "pause" | "resume" | "cancel");
-        if (!result.ok) {
-          res.writeHead(409, { "Content-Type": "application/json" });
-          return res.end(JSON.stringify({ success: false, error: result.error }));
-        }
+        const strategy = await loadStrategy(statusMatch[1]!);
+        if (!strategy) return jsonError(res, 404, "not_found");
+        const result = applyStrategyOp(strategy, (body.op ?? "") as "pause" | "resume" | "cancel");
+        if (!result.ok) return jsonError(res, 409, result.error);
         await saveStrategy(result.strategy);
         return jsonOk(res, { success: true, status: result.strategy.status });
       }
 
-      // ── Stub endpoints (components call but are non-critical) ─────────────
+      const detailMatch = pathname.match(/^\/user\/strategies\/([^/]+)$/);
+      if (method === "GET" && detailMatch) {
+        const { loadStrategy, listExecutions } = await import("../trading/persistence/strategyStore.ts");
+        const strategy = await loadStrategy(detailMatch[1]!);
+        if (!strategy) return jsonError(res, 404, "not_found");
+        return jsonOk(res, {
+          success: true,
+          strategy,
+          executions: await listExecutions(detailMatch[1]!),
+        });
+      }
+
       if (method === "GET" && pathname === "/user/notifications") {
         return jsonOk(res, { success: true, notifications: [] });
       }
 
-      // ── Static / SPA fallback ──────────────────────────────────────────────
-      if (method === "GET") {
-        return await handleStatic(pathname, res);
-      }
-
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "Not found" }));
-    } catch (err) {
-      if (!res.headersSent) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: String(err) }));
-      }
+      if (method === "GET") return await handleStatic(pathname, res);
+      jsonError(res, 404, "Not found");
+    } catch (error) {
+      if (!res.headersSent) jsonError(res, 500, String(error));
     }
   });
 }

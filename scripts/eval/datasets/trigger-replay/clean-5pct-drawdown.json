@@ -1,4 +1,4 @@
-{ "id": "clean-5pct-drawdown", "symbol": "BTCUSDT", "expectedFire": true,
+{ "id": "clean-5pct-drawdown", "symbol": "AAPL", "expectedFire": true,
   "label": "clean 5% drawdown from window high, holds",
   "trigger": { "type": "rolling_change", "direction": "down", "pct": 5, "window_minutes": 10, "confirm_samples": 2 },
   "candles": [

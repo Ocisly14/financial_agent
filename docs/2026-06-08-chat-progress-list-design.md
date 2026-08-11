@@ -31,14 +31,14 @@ MVP 聊天现在只显示主 agent 的「最终答案 + 图表」,中间过程(�
 **展开列表**:每个子任务一行 =
 - 状态图标:`✓` 完成 / `⟳` 进行中 / `○` 等待 / `✗` 失败
 - 任务描述(主文字)
-- 一行灰色小字:`<工具名> · <结果摘要>`,例如 `technical_analysis · RSI 58, MACD bullish`
+- 一行灰色小字:`<工具名> · <结果摘要>`,例如 `stock_rsi · AAPL RSI(14) = 58`
 
 示例展开:
 ```
 ✓ Done · 3 steps ▴
-  ✓ Fetching market price       get_crypto_price · BTC $67,420 | 24h +3.2%
-  ✓ Running technical analysis  technical_analysis · RSI 58, MACD bullish
-  ✓ Generating 30-day chart     price_chart · chart ready
+  ✓ Fetching stock price        get_stock_price · AAPL $213.45 | 24h +1.2%
+  ✓ Running technical analysis  stock_rsi · AAPL RSI(14) = 58
+  ✓ Calculating SMA             stock_sma · AAPL SMA(20) = 210.4
 ```
 
 ## 3. 数据来源与聚合
@@ -56,7 +56,7 @@ MVP 聊天现在只显示主 agent 的「最终答案 + 图表」,中间过程(�
 - 药丸 count = 任务数;`已完成` = status 为 completed/error 的任务数。
 - 进行中药丸文字 = 最近一个 in_progress 任务的 `description`(没有则 `Done`)。
 
-> 注:`workflow_*` 帧不经过 `onStep`(streaming client 未映射),但 comprehensive-analysis 工作流的各子任务仍走 `dispatch`/`task_done`,照样出现在列表里。工作流级分组不在本设计范围。
+> 注:`workflow_*` 帧不经过 `onStep`(streaming client 未映射),但工作流子任务仍走 `dispatch`/`task_done`,照样出现在列表里。工作流级分组不在本设计范围。
 
 ## 4. 组件与改动面
 

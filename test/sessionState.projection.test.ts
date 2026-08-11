@@ -22,19 +22,19 @@ test("projectForPrompt with a compaction cache prepends summary + preserved data
   state.recordReply("turn 3 answer", true);
   state.setCompactionCache({
     summarizedThroughTurn: 2,
-    summaryText: "User has been asking about BTC and ETH on-chain flows.",
+    summaryText: "User has been asking about AAPL and MSFT market performance.",
     preservedData: [
-      { turn: 1, agent: "onchain_data", data: { inflow: 1200 } },
-      { turn: 2, agent: "technical", data: { rsi: 58 } },
+      { turn: 1, agent: "market_data", data: { price: 210 } },
+      { turn: 2, agent: "market_data", data: { rsi: 58 } },
     ],
   });
 
   const proj = state.projectForPrompt(2);
 
   assert.match(proj.conversationSoFar, /^\[EARLIER CONVERSATION SUMMARY\]/);
-  assert.match(proj.conversationSoFar, /User has been asking about BTC and ETH on-chain flows\./);
+  assert.match(proj.conversationSoFar, /User has been asking about AAPL and MSFT market performance\./);
   assert.match(proj.conversationSoFar, /\[DATA FROM EARLIER TASKS\]/);
-  assert.match(proj.conversationSoFar, /- turn 1 \(onchain_data\): \{"inflow":1200\}/);
-  assert.match(proj.conversationSoFar, /- turn 2 \(technical\): \{"rsi":58\}/);
+  assert.match(proj.conversationSoFar, /- turn 1 \(market_data\): \{"price":210\}/);
+  assert.match(proj.conversationSoFar, /- turn 2 \(market_data\): \{"rsi":58\}/);
   assert.match(proj.conversationSoFar, /\[RECENT CONVERSATION\]\nUser: turn 3 question\nYou: turn 3 answer/);
 });

@@ -79,16 +79,22 @@ const ChatBubbleAvatar: React.FC<ChatBubbleAvatarProps> = ({
 };
 
 // ChatBubbleMessage
-const chatBubbleMessageVariants = cva("p-2 md:p-4 mx-2", {
+//
+// The assistant no longer gets a bubble. Its turn is a research note — headings,
+// tables, thesis and risk cards, a live chart — and a bubble is chrome designed
+// for one or two lines of text. Wrapped around a document it is a frame that
+// says nothing and costs the answer its full reading width. Answers now sit
+// directly on the canvas; only the short, speaker-disambiguating user turn keeps
+// a bubble, and that one is a fill with no border and no shadow.
+const chatBubbleMessageVariants = cva("", {
     variants: {
         variant: {
-            received:
-                "bg-secondary text-secondary-foreground rounded-r-lg rounded-tl-lg",
-            sent: "md:bg-primary md:text-primary-foreground md:rounded-l-lg md:rounded-tr-lg",
+            received: "text-label-1",
+            sent: "rounded-lg bg-fill-2 px-3.5 py-2.5 text-label-1",
         },
         layout: {
             default: "",
-            ai: "border-t w-full rounded-none bg-transparent",
+            ai: "w-full",
         },
     },
     defaultVariants: {
@@ -141,7 +147,7 @@ const ChatBubbleTimestamp: React.FC<ChatBubbleTimestampProps> = ({
     className,
     ...props
 }) => (
-    <div className={cn("text-xs text-right select-none", className)} {...props}>
+    <div className={cn("fin-figure text-[11px] text-right text-muted-foreground/70 select-none", className)} {...props}>
         {timestamp}
     </div>
 );

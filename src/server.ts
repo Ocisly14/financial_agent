@@ -14,10 +14,9 @@ server.listen(PORT, () => {
   console.log(`Financial Agent ready at ${url}`);
   console.log(`  Chat UI:  ${url}/`);
   console.log(`  Health:   ${url}/health`);
-  console.log(`  Charts:   ${url}/charts/<filename>`);
   console.log(`  LLM:      ${process.env["LLM_PROVIDER"] ?? "mock"}`);
   startMonitor();
-  console.log("  Strategy monitor started (auto-trading)");
+  console.log("  Strategy monitor started (stock paper/shadow evaluation; idles when nothing is active)");
 });
 
 server.on("error", (err) => {

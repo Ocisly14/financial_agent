@@ -1,0 +1,97 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { SkillRegistry, splitAgentSections } from "../skill.ts";
+
+/** 建一个 skills 根目录，里面放一个名为 `name` 的技能，内容为 `content`。 */
+async function skillRoot(name: string, content: string): Promise<string> {
+  const root = await mkdtemp(path.join(tmpdir(), "skill-layer-"));
+  const dir = path.join(root, name);
+  await mkdir(dir);
+  await writeFile(path.join(dir, `${name}.md`), content, "utf8");
+  return root;
+}
+
+const TOPIC_SKILL = `---
+name: alpha
+description: A topic-layer skill.
+---
+Shared body.
+
+## for: market_data
+Fetch things.
+`;
+
+const RESEARCH_SKILL = `---
+name: beta
+description: A research-layer skill.
+layer: research
+---
+Shared body.
+
+## for: topic
+Please cite readings.
+`;
+
+test("layer defaults to topic when the frontmatter omits it", async () => {
+  const registry = new SkillRegistry();
+  await registry.loadFromDirectory(await skillRoot("alpha", TOPIC_SKILL));
+  assert.equal(registry.get("alpha")?.layer, "topic");
+});
+
+test("a research-layer skill parses its topic section and not agentSections", async () => {
+  const registry = new SkillRegistry();
+  await registry.loadFromDirectory(await skillRoot("beta", RESEARCH_SKILL));
+  const skill = registry.get("beta", "research");
+  assert.equal(skill?.layer, "research");
+  assert.equal(skill?.topicSection, "Please cite readings.");
+  assert.deepEqual(skill?.agentSections, {});
+});
+
+test("list and get default to the topic layer", async () => {
+  const registry = new SkillRegistry();
+  await registry.loadFromDirectory(await skillRoot("beta", RESEARCH_SKILL));
+  assert.deepEqual(registry.list(), []);
+  assert.equal(registry.get("beta"), undefined);
+  assert.equal(registry.list("research").length, 1);
+});
+
+test("a topic-layer skill may not carry a topic section", async () => {
+  const root = await skillRoot("alpha", TOPIC_SKILL.replace("## for: market_data", "## for: topic"));
+  const registry = new SkillRegistry();
+  await assert.rejects(() => registry.loadFromDirectory(root), /topic-layer skill.*'## for: topic'/);
+});
+
+test("a research-layer skill may not carry an agent section", async () => {
+  const root = await skillRoot("beta", RESEARCH_SKILL.replace("## for: topic", "## for: market_data"));
+  const registry = new SkillRegistry();
+  await assert.rejects(() => registry.loadFromDirectory(root), /research-layer skill.*'## for: market_data'/);
+});
+
+test("a research-layer skill may not declare tools or agents", async () => {
+  const root = await skillRoot("beta", RESEARCH_SKILL.replace("layer: research", "layer: research\ntools: [ask_topic]"));
+  const registry = new SkillRegistry();
+  await assert.rejects(() => registry.loadFromDirectory(root), /research-layer skill.*'tools'/);
+});
+
+test("a research-layer skill may not declare a workflow", async () => {
+  const root = await skillRoot("beta", RESEARCH_SKILL.replace("layer: research", "layer: research\nworkflow: probe"));
+  const registry = new SkillRegistry();
+  await assert.rejects(() => registry.loadFromDirectory(root), /research-layer skill.*'workflow'/);
+});
+
+test("an unknown layer is rejected at load time", async () => {
+  const root = await skillRoot("beta", RESEARCH_SKILL.replace("layer: research", "layer: workspace"));
+  const registry = new SkillRegistry();
+  await assert.rejects(() => registry.loadFromDirectory(root), /unknown layer 'workspace'/);
+});
+
+test("splitAgentSections separates the topic section from agent sections", () => {
+  const raw = "Body.\n\n## for: topic\nAsk politely.\n\n## for: market_data\nFetch.\n";
+  const split = splitAgentSections(raw, "test");
+  assert.equal(split.body.trim(), "Body.");
+  assert.equal(split.topicSection, "Ask politely.");
+  assert.equal(split.agentSections.market_data, "Fetch.");
+});

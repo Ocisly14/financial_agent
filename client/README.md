@@ -1,50 +1,25 @@
-# React + TypeScript + Vite
+# Financial Agent web client
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+The Financial Agent client is a React 19 and Vite 6 workspace for persistent Topics, multi-Topic Research, live stock charts, and paper strategy management.
 
-Currently, two official plugins are available:
+See the [project README](../README.md) for the complete setup, architecture, provider configuration, and current limitations.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react/README.md) uses [Babel](https://babeljs.io/) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+## Development
 
-## Expanding the ESLint configuration
+Configure the backend from the repository root first, then run:
 
-If you are developing a production application, we recommend updating the configuration to enable type aware lint rules:
-
-- Configure the top-level `parserOptions` property like this:
-
-```js
-export default tseslint.config({
-    languageOptions: {
-        // other options...
-        parserOptions: {
-            project: ["./tsconfig.node.json", "./tsconfig.app.json"],
-            tsconfigRootDir: import.meta.dirname,
-        },
-    },
-});
+```bash
+pnpm install
+pnpm dev
 ```
 
-- Replace `tseslint.configs.recommended` to `tseslint.configs.recommendedTypeChecked` or `tseslint.configs.strictTypeChecked`
-- Optionally add `...tseslint.configs.stylisticTypeChecked`
-- Install [eslint-plugin-react](https://github.com/jsx-eslint/eslint-plugin-react) and update the config:
+The client opens at [http://localhost:5173](http://localhost:5173). In development it sends API requests to `http://localhost:${SERVER_PORT}` by default. Set `SERVER_BASE_URL` in the root `.env` file to override that target.
 
-```js
-// eslint.config.js
-import react from "eslint-plugin-react";
+## Build
 
-export default tseslint.config({
-    // Set the react version
-    settings: { react: { version: "18.3" } },
-    plugins: {
-        // Add the react plugin
-        react,
-    },
-    rules: {
-        // other rules...
-        // Enable its recommended rules
-        ...react.configs.recommended.rules,
-        ...react.configs["jsx-runtime"].rules,
-    },
-});
+```bash
+pnpm build
+pnpm preview
 ```
+
+The production client is emitted to `client/dist/` and is served by the root Node server after it has been built.

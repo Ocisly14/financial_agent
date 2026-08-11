@@ -23,7 +23,101 @@
         --border: 220 13% 88%;
         --input: 220 13% 90%;
         --ring: 240 5.9% 10%;
-        --radius: 1rem;
+        /* 1rem read as a consumer chat app. Instruments have tighter corners —
+           this single token pulls every card, button, input and badge in with
+           it, and is the largest part of the "tech, not toy" pass. */
+        --radius: 0.625rem;
+        /* Graph-paper background noise for the app canvas and the chart workspace. */
+        --grid-line: 15 23 42;
+        --grid-alpha: 0.03;
+
+        /* ──────────────────────────────────────────────────────────────
+         * DESIGN LANGUAGE v1 — see docs/2026-07-30-visual-design-language.md
+         *
+         * Components pick a LEVEL from these ladders. They never invent a
+         * number. Before this existed the app carried 12 unrelated shadows
+         * and 60+ hand-rolled alpha values, which is why surfaces read as
+         * pasted on rather than lit.
+         * ────────────────────────────────────────────────────────────── */
+
+        /* Surfaces. Cool-biased (220°) to match --background above; a pure
+           neutral grey reads as inherited rather than chosen. */
+        --canvas:  #EFF1F5;
+        --surface: #F7F8FA;
+        --raised:  #FFFFFF;
+
+        /* Foreground, four steps. Everything text-coloured picks one. */
+        --label-1: rgba(11, 14, 20, 0.92);
+        --label-2: rgba(11, 14, 20, 0.60);
+        --label-3: rgba(11, 14, 20, 0.38);
+        --label-4: rgba(11, 14, 20, 0.22);
+
+        /* Fills, three steps — the only mechanism for interaction states. */
+        --fill-1: rgba(11, 14, 20, 0.05);
+        --fill-2: rgba(11, 14, 20, 0.08);
+        --fill-3: rgba(11, 14, 20, 0.12);
+
+        /* Separators, and the rim light every raised surface carries on its
+           top edge. One light source, from above. */
+        --sep:        rgba(11, 14, 20, 0.10);
+        --sep-strong: rgba(11, 14, 20, 0.18);
+        --rim:        rgba(255, 255, 255, 0.85);
+
+        /* The app's single accent. Interactive and selected — nothing else.
+           Kept as an RGB triplet so Tailwind's `/N` opacity modifier works;
+           --brand is the ready-to-use form for plain CSS. */
+        --brand-rgb: 10 108 216;
+        --brand:     rgb(var(--brand-rgb));
+        --brand-sub: rgb(var(--brand-rgb) / 0.10);
+
+        /* Semantic. Data only, never chrome. */
+        --up-rgb:   11 122 75;
+        --down-rgb: 194 43 74;
+        --hold-rgb: 168 114 12;
+        --up:   rgb(var(--up-rgb));
+        --down: rgb(var(--down-rgb));
+        --hold: rgb(var(--hold-rgb));
+
+        /* Categorical series ramp. Six slots, because the overlay chart caps
+           at six symbols (design §2) — past that the lines occlude each other
+           and the chart stops being readable, so a seventh slot would only
+           encourage an unreadable chart.
+
+           Ordered by how far apart adjacent hues are, not by the spectrum:
+           a two-line overlay is the common case, so slots 1 and 2 (blue vs.
+           orange) are the pair with the widest separation, and that pair also
+           survives the common red-green deficiencies. Re-picked per theme
+           rather than lightened — see the dark block below. */
+        --series-1: #2563EB;
+        --series-2: #C2410C;
+        --series-3: #0F766E;
+        --series-4: #7C3AED;
+        --series-5: #BE185D;
+        --series-6: #4D7C0F;
+
+        /* Elevation. Two-part: a tight contact shadow that pins the object
+           to the page, plus a wide ambient one. Single-layer shadows always
+           read cheap. Pair each with `inset 0 1px 0 var(--rim)`. */
+        --e1: 0 0.5px 1px rgba(11, 14, 20, 0.05), 0 1px 3px -1px rgba(11, 14, 20, 0.07);
+        --e2: 0 1px 2px rgba(11, 14, 20, 0.06), 0 8px 24px -8px rgba(11, 14, 20, 0.16);
+        --e3: 0 2px 4px rgba(11, 14, 20, 0.06), 0 28px 64px -16px rgba(11, 14, 20, 0.26);
+
+        /* Translucent material. The saturate() is the part that matters:
+           blur alone washes the backdrop grey and the material dies. Only
+           for layers with content genuinely continuing behind them. */
+        --material:    saturate(180%) blur(30px);
+        --material-bg: rgba(255, 255, 255, 0.72);
+
+        /* Radius scales with the size of the thing. Nested: inner = outer − padding. */
+        --r-xs:  5px;
+        --r-sm:  7px;
+        --r-md:  9px;
+        --r-lg:  12px;
+        --r-xl:  16px;
+        --r-2xl: 20px;
+
+        /* Motion: layers grow from their trigger. */
+        --ease-out-quick: cubic-bezier(0.2, 0.7, 0.3, 1);
         --sidebar-background: 220 15% 96%;
         --sidebar-foreground: 240 5.3% 26.1%;
         --sidebar-primary: 240 5.9% 10%;
@@ -62,10 +156,139 @@
         --sidebar-accent-foreground: 240 4.8% 95.9%;
         --sidebar-border: 240 3.7% 15.9%;
         --sidebar-ring: 217.2 91.2% 59.8%;
+        --grid-line: 255 255 255;
+        --grid-alpha: 0.022;
+
+        --canvas:  #070A11;
+        --surface: #0D111A;
+        --raised:  #151A25;
+
+        --label-1: rgba(251, 252, 253, 0.94);
+        --label-2: rgba(251, 252, 253, 0.58);
+        --label-3: rgba(251, 252, 253, 0.36);
+        --label-4: rgba(251, 252, 253, 0.20);
+
+        --fill-1: rgba(255, 255, 255, 0.05);
+        --fill-2: rgba(255, 255, 255, 0.09);
+        --fill-3: rgba(255, 255, 255, 0.14);
+
+        --sep:        rgba(255, 255, 255, 0.10);
+        --sep-strong: rgba(255, 255, 255, 0.18);
+        /* On a dark ground the rim light is a faint white, not a bright one. */
+        --rim:        rgba(255, 255, 255, 0.07);
+
+        --brand-rgb: 76 157 255;
+        --brand-sub: rgb(var(--brand-rgb) / 0.14);
+
+        /* Re-picked, not brightened: on #070A11 a plain lighter green goes
+           muddy, so up shifts toward teal and down toward pink. */
+        --up-rgb:   62 207 142;
+        --down-rgb: 255 107 133;
+        --hold-rgb: 229 169 60;
+
+        /* Series ramp, re-picked for the dark ground exactly as up/down were.
+           The light values are all mid-to-dark and would sit at roughly the
+           luminance of the canvas here — a line you have to hunt for is worse
+           than a line in the "wrong" hue, so each slot is re-chosen at a
+           luminance that reads against #070A11 while holding its hue identity,
+           so a chart looks like the same chart across a theme switch. */
+        --series-1: #6AA6FF;
+        --series-2: #FF9E5E;
+        --series-3: #45D6C0;
+        --series-4: #B69CFF;
+        --series-5: #FF7BA8;
+        --series-6: #A9D45A;
+
+        --e1: 0 0.5px 1px rgba(0, 0, 0, 0.40), 0 1px 3px -1px rgba(0, 0, 0, 0.50);
+        --e2: 0 1px 2px rgba(0, 0, 0, 0.50), 0 8px 24px -8px rgba(0, 0, 0, 0.70);
+        --e3: 0 2px 4px rgba(0, 0, 0, 0.50), 0 28px 64px -16px rgba(0, 0, 0, 0.85);
+
+        --material-bg: rgba(13, 17, 26, 0.72);
     }
 }
 
 @layer base {
+    /*
+     * TEARSHEET TYPOGRAPHY
+     *
+     * No webfont ships with this app, so figures earn their character from
+     * OpenType features rather than from a typeface: tabular figures so a
+     * column of prices lines up at the decimal, and a slashed zero — the
+     * classic terminal tell that separates 0 from O in a price. Applied to
+     * every marked figure, table number, and axis label.
+     */
+    .fin-figure {
+        font-family: theme("fontFamily.mono");
+        font-variant-numeric: tabular-nums slashed-zero;
+        font-feature-settings: "tnum" 1, "zero" 1, "ss01" 1, "cv01" 1;
+        letter-spacing: -0.01em;
+    }
+
+    /* Small caps for mark labels: wide tracking, optical size bump. */
+    .fin-label {
+        font-size: 9.5px;
+        line-height: 1;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.16em;
+        font-variant-numeric: tabular-nums;
+    }
+
+    /*
+     * Graph paper. A 32px rule grid at ~4% alpha plus a radial falloff, so the
+     * surface has the texture of chart paper without ever competing with what
+     * is drawn on it. Deliberately below the threshold where you would call it
+     * a pattern — you notice it only when it is removed.
+     */
+    .tech-grid {
+        background-image:
+            linear-gradient(to right, rgb(var(--grid-line) / var(--grid-alpha)) 1px, transparent 1px),
+            linear-gradient(to bottom, rgb(var(--grid-line) / var(--grid-alpha)) 1px, transparent 1px);
+        background-size: 32px 32px;
+        background-position: center center;
+    }
+
+    /* Softens the grid toward the edges so panels do not end on a hard ruling. */
+    .tech-grid-fade {
+        -webkit-mask-image: radial-gradient(ellipse 120% 90% at 50% 0%, #000 35%, transparent 100%);
+        mask-image: radial-gradient(ellipse 120% 90% at 50% 0%, #000 35%, transparent 100%);
+    }
+
+    /*
+     * Translucent material. Used in exactly three places — the sidebar over
+     * the canvas, the composer over the message stream, and the chart panel
+     * header with content scrolling beneath it. Anywhere else there is no
+     * backdrop to see through, and the blur is pure compositing cost.
+     */
+    .material {
+        background: var(--material-bg);
+        -webkit-backdrop-filter: var(--material);
+        backdrop-filter: var(--material);
+    }
+
+    @keyframes fin-rule-sweep {
+        from { transform: scaleX(0); }
+        to { transform: scaleX(1); }
+    }
+
+    /*
+     * A torn-off chart window arriving under the cursor. Short and centred on
+     * itself: the window is already where the user dropped it, so the motion
+     * says "this opened here", not "this travelled from somewhere".
+     */
+    @keyframes fin-window-open {
+        from { transform: scale(0.96); opacity: 0; }
+        to { transform: scale(1); opacity: 1; }
+    }
+
+    .fin-window-open {
+        animation: fin-window-open 120ms ease-out;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        .fin-window-open { animation: none; }
+    }
+
     * {
         @apply border-border;
     }

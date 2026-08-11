@@ -1,0 +1,112 @@
+{
+  "protocolVersion": 3,
+  "filings": [
+    {
+      "filing": {
+        "accession": "fixture-2025",
+        "form": "10-K",
+        "filedAt": "2026-02-01",
+        "reportDate": "2025-12-31",
+        "primaryDocumentUrl": "https://example.test/fixture.htm"
+      },
+      "tables": [
+        {
+          "sourceTableId": "fixture-2025:html-table:1",
+          "accession": "fixture-2025",
+          "form": "10-K",
+          "filedAt": "2026-02-01",
+          "reportDate": "2025-12-31",
+          "heading": "CONSOLIDATED STATEMENTS OF OPERATIONS",
+          "htmlOrder": 1,
+          "sourceAnchor": "https://example.test/fixture.htm#table=1",
+          "prescreen": {
+            "tier": "strong",
+            "presentationOverlap": 1,
+            "dimensionlessRatio": 1,
+            "periodSpan": 1,
+            "factCount": 1
+          },
+          "suggestedStatements": [
+            "income_statement"
+          ],
+          "columns": [
+            {
+              "index": 0,
+              "headerText": "",
+              "isLabelColumn": true
+            },
+            {
+              "index": 1,
+              "headerText": "2025",
+              "periodId": "FY2025",
+              "isLabelColumn": false
+            }
+          ],
+          "rows": [
+            {
+              "order": 1,
+              "labelText": "Revenue",
+              "indentLevel": 0,
+              "cells": [
+                {
+                  "columnIndex": 0,
+                  "text": "Revenue"
+                },
+                {
+                  "columnIndex": 1,
+                  "text": "100",
+                  "fact": {
+                    "contextId": "duration-2025",
+                    "periodId": "FY2025",
+                    "value": 100,
+                    "unit": {
+                      "kind": "currency",
+                      "code": "USD"
+                    },
+                    "decimals": -6,
+                    "dimensions": [],
+                    "sourceAnchor": "https://example.test/fixture.htm#revenue",
+                    "occurrenceId": "occ-fixture-revenue",
+                    "sourceTableId": "fixture-2025:html-table:1",
+                    "htmlOrder": 1,
+                    "nearestHeading": "CONSOLIDATED STATEMENTS OF OPERATIONS",
+                    "conceptQName": "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax",
+                    "conceptLabel": "Revenue"
+                  }
+                },
+                {
+                  "columnIndex": 2,
+                  "text": "12"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "calculationRelations": [
+        {
+          "roleUri": "role://fixture/income",
+          "parentConcept": "us-gaap:GrossProfit",
+          "children": [
+            {
+              "concept": "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax",
+              "weight": 1,
+              "order": 1
+            },
+            {
+              "concept": "us-gaap:CostOfGoodsAndServicesSold",
+              "weight": -1,
+              "order": 2
+            }
+          ]
+        }
+      ],
+      "negatedConcepts": [],
+      "diagnostics": [
+        "unmatched_context:2"
+      ],
+      "statements": []
+    }
+  ],
+  "diagnostics": []
+}
