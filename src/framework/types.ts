@@ -199,7 +199,11 @@ export type SSEEvent =
   | { type: "task_done"; task_id: string; status: TaskStatus; summary: string }
   | { type: "strategy_created"; strategy_id: string; status?: string; summary?: string }
   | { type: "artifact"; task_id: string; artifact: ArtifactRef }
-  | { type: "model_revision"; model_id: string; revision: number; lifecycle_stage: string;
+  /** `display` is the producing tool's say in whether this belongs on screen.
+   *  Defaults to `focus`; a tool sets `display: "silent"` in its output data
+   *  for revisions the user did not ask to watch. */
+  | { type: "model_revision"; display: "focus" | "silent";
+      model_id: string; revision: number; lifecycle_stage: string;
       changed_sections: string[]; changed_line_item_ids: string[]; changed_period_ids: string[];
       change_kinds: string[] }
   | { type: "approval_required"; approval_id: string; payload: JsonObject }

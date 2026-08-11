@@ -18,7 +18,13 @@ Output: a profit-source ledger — each source with its historical anchor: growt
 For every source and every driver row ask: does the economic structure that produced this history persist?
 
 - **"Unchanged" is a claim, not a default.** Keeping a ratio flat asserts its causes persist — say why. The anchors make the claim testable: a driver held flat against a five-year trend moving one direction is a contradiction you must address.
-- **"Changed" needs a nameable cause**: product cycle, capacity coming online, competition, policy, mix shift. Evidence comes from the breakdown trends you computed, filing insights (get_financial_model with insightId), and financial_search for management guidance and macro conditions.
+- **"Changed" needs a nameable cause**: product cycle, capacity coming online, competition, policy, mix shift. Evidence comes from the breakdown trends you computed and financial_search for management guidance and macro conditions.
+<!-- Filing insights are switched off (FILING_INSIGHTS_ENABLED unset), so an ingestion links an empty
+     set flagged filing_insights_disabled and `get_financial_model` with an insightId can only answer
+     filing_insight_not_found. Restore this clause verbatim when the flag goes back on:
+     "Evidence comes from the breakdown trends you computed, filing insights (get_financial_model with
+     insightId), and financial_search for management guidance and macro conditions." -->
+
 - **Macro enters as transmission, not mood.** A rate path reaches this model through named lines — financing cost, discount rate, demand for financed purchases. If you cannot name the receiving line, the macro observation does not belong in the model.
 - Write each conclusion as one sentence you will reuse verbatim as the assumption's rationale: *source X — changes/persists — because Y — evidence Z.*
 

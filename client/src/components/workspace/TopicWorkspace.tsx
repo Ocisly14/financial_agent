@@ -324,6 +324,7 @@ export function TopicWorkspace({
             onCompare={isResearch ? undefined : handleCompare}
             modelTabs={modelTabs}
             modelPane={modelPane}
+            modelFocusRequest={model.focusRequest}
         />
     ) : null;
 

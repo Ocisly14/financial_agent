@@ -247,6 +247,10 @@ export type ModelContextView = {
 
 /** The SSE frame projected in `src/infra/events/sseProjector.ts`. */
 export type ModelRevisionFrame = {
+    /** The producing tool's say in whether this belongs on screen. Defaults to
+     *  `focus` server-side; only ever acted on the first time a given model
+     *  appears, so a long build cannot repeatedly yank the view. */
+    display: "focus" | "silent";
   model_id: string;
   revision: number;
   lifecycle_stage: string;

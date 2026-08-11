@@ -68,6 +68,7 @@ export function ChartPane({
     onCompare,
     modelTabs = [],
     modelPane = null,
+    modelFocusRequest = null,
 }: {
     agentId: UUID;
     topicId: UUID;
@@ -87,6 +88,12 @@ export function ChartPane({
     /** Rendered content for whichever model tab is currently active. Passed
      *  whole rather than assembled here, for the same reason as `modelTabs`. */
     modelPane?: ReactNode;
+    /** The backend asking for a model to be brought on screen — raised once,
+     *  when a model first appears, unless its producing tool opted out. The
+     *  token makes a repeat request for the same model still register. This is
+     *  the model-side twin of `useTopicCharts`' focusRevision pull, so an agent
+     *  that builds something the user asked for shows it without being asked. */
+    modelFocusRequest?: { modelId: string; token: number } | null;
 }) {
     const { t } = useTranslation();
     const { tabs: chartTabs, activeKey: chartActiveKey, setActiveTab, addSymbol, closeTab, reorderTabs } = useTopicCharts(
@@ -122,6 +129,16 @@ export function ChartPane({
         selectedModelKey && modelTabs.some((tab) => chartTabKey(tab) === selectedModelKey)
             ? selectedModelKey
             : chartActiveKey;
+
+    // Keyed on the token, not the model id: the effect must fire again if the
+    // backend asks for the same model twice, and must NOT fire on unrelated
+    // re-renders in between.
+    const focusTokenRef = useRef(modelFocusRequest?.token ?? 0);
+    useEffect(() => {
+        if (!modelFocusRequest || modelFocusRequest.token === focusTokenRef.current) return;
+        focusTokenRef.current = modelFocusRequest.token;
+        setSelectedModelKey(`model:${modelFocusRequest.modelId}`);
+    }, [modelFocusRequest]);
 
     // The `×`. A model tab must not take the path that writes a hidden chart
     // preference (design note, Task 10) — the next `model_revision` frame

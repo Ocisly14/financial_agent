@@ -133,3 +133,31 @@ test("a tool result without model fields projects no model_revision frame", () =
 
   assert.deepEqual(projectEvent(event, state).filter((frame) => frame.type === "model_revision"), []);
 });
+
+test("a model revision defaults to focus, and a tool can opt out with silent", () => {
+  const frameFor = (display?: string) => {
+    const state = new SessionState(`session-display-${display ?? "default"}`, new Date().toISOString());
+    state.beginTurn("Build the model");
+    const event = state.record("financial_modeling", "tool_result", {
+      tool_use_id: "tu-d", task_id: "task-d", name: "create_financial_model", summary: "created",
+      generation_context: {
+        data: {
+          model_id: "model-1", revision: 1, lifecycle_stage: "draft",
+          ...(display === undefined ? {} : { display }),
+          revision_summary: { revision: 1, changedSections: [], warningCount: 0, changes: [{ kind: "model_created" }] },
+        },
+      },
+    }, { threadId: `session-display-${display ?? "default"}:financial_modeling:1` });
+    const frame = projectEvent(event, state).find((f) => f.type === "model_revision");
+    assert.ok(frame && frame.type === "model_revision");
+    return frame;
+  };
+
+  // Omitted means show it: a tool that built what the user asked for should not
+  // have to opt in to being seen.
+  assert.equal(frameFor().display, "focus");
+  assert.equal(frameFor("focus").display, "focus");
+  assert.equal(frameFor("silent").display, "silent");
+  // An unrecognised value must not silently suppress the artifact.
+  assert.equal(frameFor("nonsense").display, "focus");
+});

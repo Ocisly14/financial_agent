@@ -41,6 +41,18 @@ export function useFinancialModel(agentId: string, topicId: string) {
     // an unrelated model's frame earlier in the same window.
     const activeChangeOpenRef = useRef(false);
 
+    /** Which models have already had their one chance to pull focus. A DCF
+     *  build commits dozens of revisions; pulling focus on each would make the
+     *  workspace unusable while the agent works. So the backend's `display`
+     *  decision is honoured exactly once per model — the moment it first
+     *  appears — mirroring how a chart pulls focus on a fresh focusRevision
+     *  rather than on every redraw. */
+    const focusedModelsRef = useRef<Set<string>>(new Set());
+    /** Bumped to ask the workspace to switch to `modelId`. A monotonic token
+     *  rather than a bare id, so asking for the same model twice still reads
+     *  as a new request. */
+    const [focusRequest, setFocusRequest] = useState<{ modelId: string; token: number } | null>(null);
+
     const { data: models = [] } = useQuery<ModelView[]>({
         queryKey: ["financialModels", agentId, topicId],
         queryFn: async () => (await apiClient.getTopicModels(agentId, topicId)).models ?? [],
@@ -78,6 +90,17 @@ export function useFinancialModel(agentId: string, topicId: string) {
 
     const onRevisionFrame = useCallback((frame: ModelRevisionFrame) => {
         pendingRef.current.push(frame);
+
+        // First sighting of this model — the one moment its producer's
+        // `display` choice applies. Recorded even when the choice is "silent",
+        // so opting out of the first appearance does not just defer the
+        // interruption to the second revision.
+        if (!focusedModelsRef.current.has(frame.model_id)) {
+            focusedModelsRef.current.add(frame.model_id);
+            if (frame.display !== "silent") {
+                setFocusRequest((previous) => ({ modelId: frame.model_id, token: (previous?.token ?? 0) + 1 }));
+            }
+        }
 
         // A frame for any other model still needs to drive its own query
         // invalidation (handled below via `pendingRef`/`flush`, unconditionally),
@@ -152,6 +175,6 @@ export function useFinancialModel(agentId: string, topicId: string) {
 
     return {
         models, activeModelId: effectiveModelId, setActiveModelId,
-        context, workbook, sheets, change, isCellChanged, onRevisionFrame,
+        context, workbook, sheets, change, isCellChanged, onRevisionFrame, focusRequest,
     };
 }

@@ -66,7 +66,15 @@ function asObject(value: JsonValue | undefined): JsonObject | undefined {
  * `changed_sections` alone is not enough to tell the UI which sheet moved:
  * `ModelReadSection` covers the five DCF sections and the three source
  * statements, and has no WACC member at all. A WACC refresh therefore shows up
- * only as a change *kind*, which is why both travel on the frame. */
+ * only as a change *kind*, which is why both travel on the frame.
+ *
+ * `display` is how a tool — main agent or subagent alike — says whether its
+ * work is worth putting on screen. It defaults to `focus`, because a tool that
+ * just built something the user asked for should show it without having to ask.
+ * A tool opts out with `display: "silent"` when its revision is bookkeeping the
+ * user did not request and should not be interrupted for. The frontend only
+ * ever acts on this the FIRST time a given artifact appears; later revisions
+ * refresh in place, so a long build cannot repeatedly yank the view. */
 function modelRevisionFrames(payload: JsonObject): SSEEvent[] {
   const data = asObject(asObject(payload.generation_context)?.data);
   if (!data) return [];
@@ -103,6 +111,7 @@ function modelRevisionFrames(payload: JsonObject): SSEEvent[] {
 
   return [{
     type: "model_revision",
+    display: data.display === "silent" ? "silent" : "focus",
     model_id: modelId,
     revision,
     lifecycle_stage: typeof data.lifecycle_stage === "string" ? data.lifecycle_stage : "",

@@ -114,6 +114,7 @@ const workbook = (over: Partial<CurrentWorkbookView> = {}): CurrentWorkbookView 
 } as CurrentWorkbookView);
 
 const frame = (over: Partial<ModelRevisionFrame> = {}): ModelRevisionFrame => ({
+  display: "focus",
   model_id: "m1",
   revision: 2,
   lifecycle_stage: "operations_fcff",
