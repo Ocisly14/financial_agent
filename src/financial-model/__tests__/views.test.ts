@@ -34,6 +34,11 @@ function snapshot(mapped = false): FinancialModelSnapshot {
     provenance: { sourceType: "unified_statements", sourceRefs: ["unified.revenue.total"], asOfDate: "2025-01-01" },
   }] satisfies Fact[] : [];
   skeleton = installDefaultMetrics(skeleton, periods);
+  if (mapped) {
+    skeleton.lineItems = skeleton.lineItems.map((item) => item.id === "revenue.total"
+      ? { ...item, historical: "actual" as const }
+      : item);
+  }
   const output = evaluate({ periods, lineItems: skeleton.lineItems, facts: spineFacts, assumptions: [],
     formulas: skeleton.formulas, valuationConfig });
   return {
@@ -120,7 +125,7 @@ test("not-modeled cells remain distinct from modeled missing inputs", () => {
   const revenueRoot = view.sections.revenue.find((row) => row.lineItemId === "revenue")!;
   const revenueTotal = view.sections.revenue.find((row) => row.lineItemId === "revenue.total")!;
   assert.equal(revenueRoot.cells["FY2024"]?.status, "not_modeled");
-  assert.equal(revenueTotal.cells["FY2024"]?.status, "missing_input");
+  assert.equal(revenueTotal.cells["FY2024"]?.status, "not_modeled");
 });
 
 test("workbook slices validate selectors, preserve order, and do not mutate snapshots", () => {
@@ -133,6 +138,10 @@ test("workbook slices validate selectors, preserve order, and do not mutate snap
   assert.deepEqual(model, before);
   assert.throws(() => buildWorkbookSlice("m", 1, model, { lineItemIds: ["typo"] }),
     (error: unknown) => error instanceof FinancialModelError && error.code === "invalid_model_query");
+  assert.throws(() => buildWorkbookSlice("m", 1, model, { lineItemIds: ["fcff"], role: "revenue_total" }),
+    /fcff \(role fcff\)/);
+  assert.throws(() => buildWorkbookSlice("m", 1, model, { lineItemIds: ["fcff"], periodIds: ["FY2025"],
+    periodClass: "actual" }), /FY2025 \(forecast\)/);
 });
 
 test("selectors fully intersect exact cells, row filters, period filters, and preserve coordinate order", () => {
@@ -167,6 +176,10 @@ test("selectors fully intersect exact cells, row filters, period filters, and pr
 
 test("active formulas and assumptions appear once at row level while ASTs stay out of the workbook", () => {
   const model = snapshot(true);
+  model.lineItems = model.lineItems.map((item) => item.id === "fcff"
+    ? { ...item, historical: "formula" as const }
+    : item);
+  model.formulas.push({ lineItemId: "fcff", appliesTo: "historical", periodIds: ["FY2024"], source: "revenue.total" });
   model.assumptions.push({
     assumptionId: "wacc-1", lineItemId: "wacc", periods: ["FY2025"],
     payload: { kind: "values", values: [0.1], unit: { kind: "percent" } },
@@ -186,6 +199,11 @@ test("active formulas and assumptions appear once at row level while ASTs stay o
 
 test("cell projection distinguishes divide-by-zero and N/A and retains N/A assumption source", () => {
   const model = snapshot(true);
+  model.lineItems = model.lineItems.map((item) => item.id === "cash_available_for_bridge"
+    ? { ...item, historical: "assumption" as const }
+    : item.id === "margin.operating"
+      ? { ...item, historical: "formula" as const }
+      : item);
   model.assumptions.push({
     assumptionId: "bridge-na", lineItemId: "cash_available_for_bridge", periods: ["FY2024"],
     payload: { kind: "not_applicable" }, sourceType: "user", sourceRefs: ["input"],

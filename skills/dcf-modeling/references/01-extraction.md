@@ -14,7 +14,7 @@ Read the response like this:
 
 ## create_financial_model
 
-`{ symbol, ingestionRunId }` — creates the revisioned model: revision 0 is the value-free skeleton (period grid, canonical DCF rows, preset metrics, an empty WACC sheet anchored to today), revision 1 stages the filing-level source rows. The workbook has **no spine facts yet** — that is stages 2–3's job.
+`{ symbol, ingestionRunId }` — creates the revisioned model: revision 0 is a source-free skeleton (period grid, canonical DCF rows, and an empty WACC sheet anchored to today), revision 1 stages the filing-level source rows. It declares no historical or forecast source and seeds no DCF formula: a mapping, formula, or assumption declares a channel when it fills the row. The workbook has **no spine facts yet** — that is stages 2–3's job.
 
 - **One run, many models.** The ingestion run is reusable: calling create_financial_model on it again mints a fresh, independent model version of the same issuer (scenario variants, a clean re-do). Never re-extract just to get a second model.
 - **Version hygiene**: the mapping subagents resolve the model you name in run_dcf_subagent's `modelId`, so parallel versions are safe — but archive_financial_model the ones you abandon, and list_financial_models when resuming to find what exists.

@@ -141,6 +141,11 @@ const DIAGNOSTIC_CODES = [
   "divide_by_zero",
   "skipped_ttm",
   "not_applicable",
+  "history_review_required",
+  "unresolved_reconciliation",
+  "missing_formula_input",
+  "invalid_terminal_assumptions",
+  "incomplete_equity_bridge",
 ] as const;
 const FN_NAMES = [
   "SUM",
@@ -678,10 +683,12 @@ function normalizedAxis(value: unknown, path: string): number[] {
 }
 
 function normalizeDiagnostic(value: unknown, path: string): Diagnostic {
-  const object = exactObject(value, path, ["code", "refs"]);
+  const object = exactObject(value, path, ["code", "refs"], ["message", "stage"]);
   return {
     code: enumValue(object.code, `${path}.code`, DIAGNOSTIC_CODES),
     refs: stringArray(object.refs, `${path}.refs`),
+    ...(object.message === undefined ? {} : { message: nonemptyString(object.message, `${path}.message`) }),
+    ...(object.stage === undefined ? {} : { stage: enumValue(object.stage, `${path}.stage`, LIFECYCLE_STAGES) as LifecycleStage }),
   };
 }
 

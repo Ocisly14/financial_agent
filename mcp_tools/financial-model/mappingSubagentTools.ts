@@ -4,6 +4,7 @@ import type { JsonObject, JsonSchema, JsonValue, ToolExecutionResult } from "../
 import type { ModelStore } from "../../src/financial-model/store.ts";
 import type { FinancialModelSnapshot } from "../../src/financial-model/operations.ts";
 import type { RevisionChangeSummary } from "../../src/financial-model/service.ts";
+import { CANONICAL_MAPPING_IDS, REQUIRED_MAPPING_IDS } from "../../src/financial-model/skeleton.ts";
 import { buildConceptInventory } from "../../src/infra/xbrl/conceptInventory.ts";
 import { buildAxisCatalog, buildAxisBreakdown } from "../../src/infra/xbrl/dimensionInventory.ts";
 import type { SourceReviewStore } from "../../src/infra/xbrl/sourceReviewStore.ts";
@@ -138,14 +139,33 @@ export function createStatementUnificationTools(deps: MappingSubagentDeps): {
         if (cursor !== undefined && (typeof cursor !== "number" || !Number.isInteger(cursor) || cursor < 0)) {
           throw new Error("cursor must be a non-negative integer from a previous response's nextCursor");
         }
-        return { symbol: c.symbol, ...buildAxisBreakdown({ tables: c.tables, requestedPeriods: c.requestedPeriods,
+        const breakdown = buildAxisBreakdown({ tables: c.tables, requestedPeriods: c.requestedPeriods,
           axisQName: String(raw["axisQName"]), conceptQName: String(raw["conceptQName"]),
           ...(typeof raw["memberFilter"] === "string" ? { memberFilter: raw["memberFilter"] } : {}),
-          ...(cursor !== undefined ? { cursor } : {}) }) } as unknown as JsonValue;
+          ...(cursor !== undefined ? { cursor } : {}) });
+        // A zero result from a fuzzy member search is information.  A zero result from the exact
+        // axis/concept pair is instead a bad lookup, and should point the agent back to the catalog.
+        if (breakdown.members.length === 0 && raw["memberFilter"] === undefined) {
+          throw new Error(`no dimensional members for ${breakdown.axisQName}/${breakdown.conceptQName}; `
+            + "call list_dimension_axes and use one of its axis/concept pairs");
+        }
+        return { symbol: c.symbol, ...breakdown } as unknown as JsonValue;
     });
     tools.push(axesTool, breakdownTool);
   }
   return { tools, loaded: () => loaded };
+}
+
+/**
+ * The spine target vocabulary, as the mapping subagent needs to see it. It is handed over with the
+ * statements rather than through a tool of its own because the two are read together: a mapping
+ * decision is rows on one side, ids on the other, and an agent that has to ask twice will sometimes
+ * only ask once. Required ids come first because they are the ones it owes an answer for — mapped,
+ * or written up as a spine gap.
+ */
+function spineTargets(): { required: string[]; optional: string[] } {
+  const required = [...CANONICAL_MAPPING_IDS].filter((id) => REQUIRED_MAPPING_IDS.has(id));
+  return { required, optional: [...CANONICAL_MAPPING_IDS].filter((id) => !REQUIRED_MAPPING_IDS.has(id)) };
 }
 
 /** The spine_mapping subagent's initialization tool: the unified statements the previous stage stored. */
@@ -156,7 +176,9 @@ export function createSpineMappingTools(deps: MappingSubagentDeps): {
   let loaded: LoadedWorkingSet | undefined;
   const tool = subagentTool({
     name: "load_unified_statements", category: "non_trading",
-    description: "Load the unified multi-year statements statement_unification stored for one ticker.",
+    description: "Load the unified multi-year statements statement_unification stored for one ticker, "
+      + "including any disclosed dimension breakdown rows that may be selected as revenue detail rows, "
+      + "with the canonical spine target ids you map them onto — required ones separated from optional.",
     inputSchema: SYMBOL_INPUT,
   }, (raw) => {
       const { modelId, symbol } = resolveModel(deps, raw, SYMBOL_INPUT);
@@ -164,7 +186,9 @@ export function createSpineMappingTools(deps: MappingSubagentDeps): {
       if (!review?.unifiedStatements) throw new Error(`${symbol} has no unified statements; run statement_unification first`);
       loaded = { symbol, modelId };
       return { symbol, periods: review.unifiedStatements.periods,
-        rows: review.unifiedStatements.rows } as unknown as JsonValue;
+        rows: review.unifiedStatements.rows,
+        breakdownRows: review.unifiedStatements.breakdownRows ?? [],
+        spineTargets: spineTargets() } as unknown as JsonValue;
   });
   return { tools: [tool], loaded: () => loaded };
 }

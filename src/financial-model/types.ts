@@ -283,9 +283,15 @@ export type ResolvedValuationConfig = ValuationConfig & {
 };
 
 export type Diagnostic = {
-  code: "missing_input" | "divide_by_zero" | "skipped_ttm" | "not_applicable";
+  code: "missing_input" | "divide_by_zero" | "skipped_ttm" | "not_applicable"
+    | "history_review_required" | "unresolved_reconciliation" | "missing_formula_input"
+    | "invalid_terminal_assumptions" | "incomplete_equity_bridge";
   /** Cell keys or line-item ids responsible, for audit trace-back. */
   refs: string[];
+  /** Present for a lifecycle blocker that did not originate in one engine cell. */
+  message?: string;
+  /** Present when a lifecycle gate, rather than an individual engine cell, raised the diagnostic. */
+  stage?: LifecycleStage;
 };
 
 /** value === null means missing. It is never 0. */

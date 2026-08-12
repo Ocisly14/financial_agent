@@ -223,6 +223,19 @@ test("get memberFilter matches label case-insensitively and rowIds bypasses filt
   assert.deepEqual(bypassData.rows.map((r) => r.rowId).sort(), ["net_sales.prod.iphone", "total_assets"]);
 });
 
+test("exact unified-row lookups and statement names do not become empty successes", async () => {
+  const { financial, modelId, sourceReviewStore } = setup();
+  sourceReviewStore.save(modelId, review({ unifiedStatements: baseUnified() }));
+  const { list, get } = tools(financial);
+
+  const missing = await get.execute({ modelId, rowIds: ["not_a_row"] }, ctx);
+  assert.equal(missing.error?.code, "unified_row_not_found");
+  assert.match(missing.error?.message ?? "", /list_unified_statements/);
+
+  const invalidStatement = await list.execute({ modelId, statement: "income" }, ctx);
+  assert.equal(invalidStatement.error?.code, "invalid_tool_input");
+});
+
 test("get paginates at 40 with nextCursor", async () => {
   const { financial, modelId, sourceReviewStore } = setup();
   const LARGE_AXIS = "us-gaap:LargeAxis";

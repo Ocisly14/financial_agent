@@ -21,6 +21,7 @@ import { InMemoryFilingTableStore } from "../../../src/infra/xbrl/filingTableSto
 import type { FilingTable } from "../../../src/infra/xbrl/tableTypes.ts";
 import type { FilingTableFactOccurrence, XbrlDimension } from "../../../src/infra/xbrl/types.ts";
 import type { Period } from "../../../src/financial-model/types.ts";
+import { CANONICAL_MAPPING_IDS, REQUIRED_MAPPING_IDS } from "../../../src/financial-model/skeleton.ts";
 import { createSpineMappingTools, createStatementUnificationTools } from "../mappingSubagentTools.ts";
 
 const PERIODS: Period[] = [
@@ -112,6 +113,50 @@ test("a ticker with no extracted data names the step that has to run first", asy
     /run extract_filing_statements/);
 });
 
+/**
+ * The spine vocabulary reaches the subagent only through this payload. Before the tool-driven
+ * rewrite the agent was handed `[REQUIRED SPINE IDS]` and `[OPTIONAL SPINE IDS]` in its prompt; the
+ * rewrite moved the statements into this tool and left the ids behind, so the subagent was asked to
+ * cover targets whose names it had never been told — and the ids only reached it when the
+ * orchestrator happened to spell them out in the dispatch task. These two assertions are what let
+ * that task go back to describing intent.
+ */
+test("the spine loader hands over the target ids, required separated from optional", async () => {
+  const { sourceReviewStore, modelIds, deps } = setup(["TSLA"]);
+  sourceReviewStore.save(modelIds[0]!, review({ unifiedStatements: { periods: [], rows: [] } as never }));
+  const loader = createSpineMappingTools(deps);
+
+  const loaded = await data<{ spineTargets: { required: string[]; optional: string[] } }>(
+    byName(loader.tools, "load_unified_statements"), { symbol: "TSLA" });
+
+  assert.deepEqual([...REQUIRED_MAPPING_IDS].sort(), [...loaded.spineTargets.required].sort(),
+    "the required set the agent is judged against is the one it is shown");
+  assert.deepEqual([...CANONICAL_MAPPING_IDS].sort(),
+    [...loaded.spineTargets.required, ...loaded.spineTargets.optional].sort(),
+    "every mappable target is offered, and nothing that is not mappable");
+  assert.equal(loaded.spineTargets.required.some((id) => loaded.spineTargets.optional.includes(id)), false);
+});
+
+test("the spine loader exposes disclosed breakdown rows for revenue-detail selection", async () => {
+  const { sourceReviewStore, modelIds, deps } = setup(["TSLA"]);
+  sourceReviewStore.save(modelIds[0]!, review({ unifiedStatements: {
+    periods: PERIODS,
+    rows: [{ rowId: "net_sales", label: "Net sales", statement: "income_statement", unit: USD,
+      values: { FY2024: 100, FY2025: 110 } }],
+    breakdownRows: [{ rowId: "net_sales.product.products", parentRowId: "net_sales", axisQName: SEG,
+      memberQName: "x:ProductsMember", label: "Products", unit: USD, values: { FY2024: 60, FY2025: 66 },
+      rationale: "disclosed product split", asOfDate: "2026-01-30" }],
+  } as never }));
+  const loader = createSpineMappingTools(deps);
+
+  const loaded = await data<{ breakdownRows: Array<{ rowId: string; label: string }> }>(
+    byName(loader.tools, "load_unified_statements"), { symbol: "TSLA" });
+
+  assert.deepEqual(loaded.breakdownRows, [{ rowId: "net_sales.product.products", label: "Products", axisQName: SEG,
+    memberQName: "x:ProductsMember", unit: USD, values: { FY2024: 60, FY2025: 66 },
+    rationale: "disclosed product split", asOfDate: "2026-01-30", parentRowId: "net_sales" }]);
+});
+
 test("spine mapping refuses to load before unification has stored anything", async () => {
   const { sourceReviewStore, modelIds, deps } = setup(["TSLA"]);
   sourceReviewStore.save(modelIds[0]!, review());
@@ -155,6 +200,18 @@ test("get_axis_breakdown returns member series", async () => {
   const result = await data<{ members: unknown[] }>(byName(tools, "get_axis_breakdown"), { symbol: "TST",
     axisQName: SEG, conceptQName: REV });
   assert.equal(result.members.length, 2);
+});
+
+test("an unknown exact axis/concept pair fails with a catalog recovery path", async () => {
+  const { sourceReviewStore, modelIds, deps } = setup(["TST"]);
+  sourceReviewStore.save(modelIds[0]!, review());
+  const tableStore = new InMemoryFilingTableStore();
+  tableStore.saveTables("ing-1", [table({ accession: "acc-2025", filedAt: "2026-01-30", facts: [
+    dimFact(REV, "FY2025", 60e9, [dim("x:AMember", "Segment A")]),
+  ] })]);
+  const { tools } = createStatementUnificationTools({ ...deps, tableStore });
+  await assert.rejects(() => data(byName(tools, "get_axis_breakdown"), { symbol: "TST",
+    axisQName: "x:UnknownAxis", conceptQName: REV }), /list_dimension_axes/);
 });
 
 test("get_axis_breakdown passes memberFilter and cursor through and rejects a bad cursor", async () => {

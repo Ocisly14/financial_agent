@@ -26,7 +26,8 @@
 //     scripts/xbrl/e2e_test/dcf-agent-e2e.ts [SYMBOL] [--fresh]
 //
 // Env: E2E_SYMBOL, E2E_AGENT_OUTPUT_DIR, E2E_SESSION_ID, E2E_MAX_ROUNDS, E2E_ROUND_TIMEOUT_MIN,
-//      E2E_PROMPT (override the injected prompt), plus the usual LLM provider vars.
+//      E2E_PROMPT (override the injected prompt), E2E_MODEL_DB_PATH + E2E_RESUME_MODEL_ID for a
+//      clean-session continuation of an existing model, plus the usual LLM provider vars.
 // Needs a live LLM provider and network access to SEC/EDGAR.
 import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -42,6 +43,8 @@ const outputDirectory = resolve(process.env["E2E_AGENT_OUTPUT_DIR"]?.trim()
   || join("data", "e2e-test", "dcf-agent", symbol.toLowerCase()));
 const sessionId = process.env["E2E_SESSION_ID"]?.trim() || `e2e-dcf-agent-${symbol.toLowerCase()}`;
 const agentId = `e2e-dcf-agent-${symbol.toLowerCase()}`;
+const resumeModelId = process.env["E2E_RESUME_MODEL_ID"]?.trim() || undefined;
+const modelDatabasePath = resolve(process.env["E2E_MODEL_DB_PATH"]?.trim() || join(outputDirectory, "financial-models.sqlite"));
 // One dispatch is capped at the agent's own 30-step budget, which a from-scratch DCF outgrows: the
 // data foundation alone (extract → unify → spine) is several steps that each nest a whole subagent.
 // The agent pauses with a resume line instead of failing, so the round loop just dispatches its own
@@ -73,10 +76,14 @@ mkdirSync(join(outputDirectory, "model"), { recursive: true });
 // to happen before the app is constructed, and the app is therefore imported dynamically below.
 // Keeping them here (rather than in data/) means a run is self-contained and `--fresh` truly resets.
 process.env["SESSION_DB_PATH"] = join(outputDirectory, "sessions.sqlite");
-process.env["FINANCIAL_MODEL_DB_PATH"] = join(outputDirectory, "financial-models.sqlite");
+process.env["FINANCIAL_MODEL_DB_PATH"] = modelDatabasePath;
 
 const { createFinancialAgentApp, resolveLlmProvider } = await import("../../../src/agent/createApp.ts");
 const { getDefaultFinancialModelToolDeps } = await import("../../../mcp_tools/financial-model/financialModelTools.ts");
+// A snapshot's `cells` is a Map, which JSON.stringify writes as `{}` — the one field a reader most
+// needs from the dump would go missing silently. The codec's wire form is what the store persists,
+// so the artifact on disk says exactly what the database says.
+const { financialModelSnapshotCodec } = await import("../../../src/financial-model/snapshotCodec.ts");
 
 const providerName = resolveLlmProvider().constructor.name;
 if (providerName === "MockLlmProvider") {
@@ -91,7 +98,7 @@ const write = (name: string, value: unknown): void =>
 const append = (name: string, value: unknown): void =>
   appendFileSync(join(outputDirectory, name), `${JSON.stringify(value)}\n`, "utf8");
 
-write("run-config.json", { symbol, sessionId, agentId, outputDirectory, provider: providerName,
+write("run-config.json", { symbol, sessionId, agentId, outputDirectory, modelDatabasePath, resumeModelId, provider: providerName,
   maxRounds, roundTimeoutMs, fresh, initialPrompt, continuationPrompt, startedAt: new Date().toISOString() });
 
 console.log(`# DCF Agent end-to-end — ${symbol} via ${providerName} → ${outputDirectory}`);
@@ -161,7 +168,9 @@ const dispatcher = app.createDispatcher(sessionId, agentId);
 dispatcher.setUserInputAllowed(false);
 
 const findModel = (): ReturnType<typeof deps.modelStore.list>[number] | undefined =>
-  deps.modelStore.list({ ownerAgentId: agentId, symbol }).at(-1);
+  resumeModelId === undefined
+    ? deps.modelStore.list({ ownerAgentId: agentId, symbol }).at(-1)
+    : deps.modelStore.list({ ownerAgentId: agentId, symbol }).find((model) => model.modelId === resumeModelId);
 
 state.beginTurn(initialPrompt);
 
@@ -170,9 +179,13 @@ let lastResult: TaskResult | undefined;
 const rounds: Record<string, unknown>[] = [];
 
 for (let round = 1; round <= maxRounds; round++) {
-  const task = round === 1 ? initialPrompt : continuationPrompt;
+  const task = round === 1
+    ? (resumeModelId === undefined ? initialPrompt
+      : `Resume model ${resumeModelId} from its current revision. ${continuationPrompt}`)
+    : continuationPrompt;
   const request: TaskRequest = { agent: "financial_modeling", task, timeout_ms: roundTimeoutMs,
-    ...(threadId ? { thread: threadId } : {}) };
+    ...(threadId ? { thread: threadId } : {}),
+    ...(resumeModelId === undefined ? {} : { model_id: resumeModelId }) };
   console.log(`\n## round ${round}/${maxRounds}${threadId ? ` (thread ${threadId})` : " (new thread)"}`);
   const startedAt = Date.now();
   const [dispatched] = dispatcher.dispatchAsync([request]);
@@ -217,7 +230,7 @@ if (model) {
   const snapshot = revision.snapshot;
   write(join("model", "meta.json"), model);
   write(join("model", "revisions.json"), deps.modelStore.listRevisionHeaders(model.modelId));
-  write(join("model", "final-snapshot.json"), snapshot);
+  write(join("model", "final-snapshot.json"), JSON.parse(financialModelSnapshotCodec.encode(snapshot)));
   const sourceReview = deps.sourceReviewStore.get(model.modelId);
   if (sourceReview) write(join("model", "source-review.json"), sourceReview);
 

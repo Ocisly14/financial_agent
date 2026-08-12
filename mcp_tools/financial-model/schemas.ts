@@ -28,8 +28,10 @@ const assumption = object({ assumptionId: string(), lineItemId: string(), period
   sourceType: { type: "string", enum: ["user", "management_guidance", "company_disclosure", "consensus", "macro_research", "industry_research", "analyst_inference"] },
   sourceRefs: strings, asOfDate: string(), rationale: string() },
   ["assumptionId", "lineItemId", "periods", "payload", "sourceType", "sourceRefs", "asOfDate", "rationale"]);
+// periodIds is required here because validateFormula refuses a formula without it: leaving it
+// optional made the schema promise something the engine then rejected.
 const formula = object({ lineItemId: string(), appliesTo: { type: "string", enum: ["historical", "forecast"] }, source: string(), periodIds: strings },
-  ["lineItemId", "appliesTo", "source"]);
+  ["lineItemId", "appliesTo", "source", "periodIds"]);
 const categoryGroup = object({ parentLineItemId: string(), category: string(), periodIds: strings, members: array(groupMember), reviewDecisionId: string() },
   ["parentLineItemId", "category", "periodIds", "members", "reviewDecisionId"]);
 const sensitivity = object({ waccDeltas: array(number), terminalGrowthDeltas: array(number), exitMultipleDeltas: array(number) },

@@ -156,8 +156,11 @@ test("apply_financial_model_operations writes set_wacc_input end to end, and rej
   }, owner);
   assert.equal(result.error, undefined);
   assert.equal(result.generation_context?.data["revision"], 2);
-  const workbook = result.generation_context?.data["current_workbook"] as { waccSheet?: { rows: Array<{ rowId: string; value: number | null; provenance?: { rationale: string } }> } };
-  const row = workbook.waccSheet?.rows.find((entry) => entry.rowId === "risk_free_rate");
+  // A write answers with the overview, which carries the WACC sheet whole — twelve rows, and what
+  // the discount rate still needs is read off them without a second call.
+  const summary = result.generation_context?.data["model_overview"] as {
+    wacc_sheet?: { rows: Array<{ rowId: string; value: number | null; provenance?: { rationale: string } }> } };
+  const row = summary.wacc_sheet?.rows.find((entry) => entry.rowId === "risk_free_rate");
   assert.equal(row?.value, 0.04);
   assert.equal(row?.provenance?.rationale, "10y treasury yield");
 });

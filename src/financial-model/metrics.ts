@@ -114,11 +114,19 @@ export function installDefaultMetrics(skeleton: Skeleton, periods: readonly Peri
         entry.lineItemId === definition.id
         && entry.appliesTo === "historical"
         && entry.source === definition.source);
-      if (row?.historical !== "formula" || formula === undefined) {
+      if (!row) {
         throw new FinancialModelError(
           "invalid_formula",
           `missing registry-owned skeleton driver: ${definition.id}`,
         );
+      }
+      // This is an explicit registry-install action, not skeleton construction.  It therefore
+      // declares the formula channel only when the caller asks to install this metric library.
+      next.lineItems = next.lineItems.map((item) => item.id === definition.id
+        ? { ...item, historical: "formula" as const }
+        : item);
+      if (formula === undefined) {
+        next.formulas.push({ lineItemId: definition.id, appliesTo: "historical", periodIds: [...ids], source: definition.source });
       }
       continue;
     }

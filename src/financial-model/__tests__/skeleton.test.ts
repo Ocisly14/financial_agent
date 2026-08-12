@@ -80,7 +80,7 @@ test("creates every fixed role exactly once and repeated roles only where allowe
   assert.equal(skeleton.lineItems.some((item) => (item.role as string) === "terminal_metric"), false);
 });
 
-test("creates all canonical mapping targets with their documented units", () => {
+test("creates canonical rows with documented units but no predeclared sources", () => {
   const skeleton = createSkeleton({ currency: "USD", periods: PERIODS });
   for (const id of [
     "cost_of_revenue", "gross_profit", "research_and_development", "operating_expenses",
@@ -88,31 +88,24 @@ test("creates all canonical mapping targets with their documented units", () => 
     "operating_cash_flow", "reported_change_operating_assets_liabilities", "share_repurchases",
   ]) {
     assert.equal(byId(skeleton, id).role, "none");
-    // "actual": history rows receive mapped filing facts, and the cells must surface them.
-    assert.equal(byId(skeleton, id).historical, "actual");
+    assert.equal(byId(skeleton, id).historical, "none");
+    assert.equal(byId(skeleton, id).forecast, "none");
   }
   assert.deepEqual(byId(skeleton, "diluted_eps").unit, { kind: "per_share", code: "USD" });
   assert.deepEqual(byId(skeleton, "diluted_shares").unit, { kind: "shares" });
 });
 
-test("uses the documented DCF formulas and positive-outflow sign convention", () => {
+test("creates a semantic-only DCF skeleton with no default formulas", () => {
   const skeleton = createSkeleton({ currency: "USD", periods: PERIODS });
-  assertFormula(skeleton, "growth.revenue.total", "historical", "YOY(revenue.total)", ACTUAL_PERIOD_IDS);
-  assertFormula(skeleton, "revenue.total", "forecast",
-    "LAG(revenue.total, 1) * (1 + growth.revenue.total)", FORECAST_PERIOD_IDS);
-  assertFormula(skeleton, "nopat", "forecast", "operating_income * (1 - tax_rate)");
-  assertFormula(skeleton, "ebitda", "forecast", "operating_income + depreciation_amortization");
-  assertFormula(skeleton, "change_nwc", "forecast",
-    "operating_working_capital - LAG(operating_working_capital, 1)");
-  assertFormula(skeleton, "fcff", "forecast",
-    "nopat + depreciation_amortization - capital_expenditures - change_nwc");
+  assert.deepEqual(skeleton.formulas, []);
+  assert.ok(skeleton.lineItems.every((item) => item.historical === "none" && item.forecast === "none"));
 });
 
 test("keeps raw cash separate from bridge-available cash", () => {
   const skeleton = createSkeleton({ currency: "USD", periods: PERIODS });
   assert.equal(byId(skeleton, "cash_and_equivalents").role, "none");
   assert.equal(byId(skeleton, "cash_available_for_bridge").role, "cash_available_for_bridge");
-  assert.equal(byId(skeleton, "cash_available_for_bridge").historical, "actual");
+  assert.equal(byId(skeleton, "cash_available_for_bridge").historical, "none");
 });
 
 test("adds prepared statement rows in reserved hidden sections without mutating the base", () => {
@@ -124,7 +117,7 @@ test("adds prepared statement rows in reserved hidden sections without mutating 
   assert.equal(base.lineItems.some((item) => item.id.startsWith("source.")), false);
   assert.equal(byId(next, "source.income_statement.sales").section, "source_income_statement");
   assert.equal(byId(next, "source.balance_sheet.inventory").section, "source_balance_sheet");
-  assert.equal(byId(next, "source.balance_sheet.inventory").historical, "actual");
+  assert.equal(byId(next, "source.balance_sheet.inventory").historical, "none");
   assert.equal(byId(next, "source.balance_sheet.inventory").forecast, "none");
   invalidFormula(() => addSourceStatementRows(base, [{
     sourceLineItemId: "source.balance_sheet.bad",
@@ -140,12 +133,9 @@ test("adding a revenue stream creates its value and growth rows atomically", () 
   const next = addRevenueStream(base, { id: "services", label: "Services" });
   assert.equal(base.lineItems.some((item) => item.id === "revenue.services"), false);
   assert.equal(byId(next, "revenue.services").role, "revenue_stream");
-  assert.equal(byId(next, "growth.revenue.services").historical, "formula");
-  assert.equal(byId(next, "growth.revenue.services").forecast, "assumption");
-  assertFormula(next, "growth.revenue.services", "historical",
-    "YOY(revenue.services)", ACTUAL_PERIOD_IDS);
-  assertFormula(next, "revenue.services", "forecast",
-    "LAG(revenue.services, 1) * (1 + growth.revenue.services)", FORECAST_PERIOD_IDS);
+  assert.equal(byId(next, "revenue.services").historical, "none");
+  assert.equal(byId(next, "growth.revenue.services").forecast, "none");
+  assert.deepEqual(next.formulas, []);
   invalidFormula(() => addRevenueStream(next, { id: "services", label: "Duplicate" }));
   invalidFormula(() => addRevenueStream(base, { id: "Not-Semantic", label: "Bad" }));
 });
@@ -172,7 +162,7 @@ test("adds historical DCF detail rows under safe aggregate parents", () => {
   assert.equal(detail.role, "none");
   assert.deepEqual(detail.unit, byId(next, "operating_expenses").unit);
   assert.equal(detail.section, byId(next, "operating_expenses").section);
-  assert.equal(detail.historical, "actual");
+  assert.equal(detail.historical, "none");
   assert.equal(detail.forecast, "none");
   assert.equal(base.lineItems.some((item) => item.id === detail.id), false);
   invalidFormula(() => addDcfDetailLineItem(base, {
@@ -199,8 +189,8 @@ test("arbitrary Chinese and English category groups may overlap historical perio
       reviewDecisionId: "category-geography",
     },
   ]);
-  assertFormula(grouped, "revenue.total", "forecast",
-    "LAG(revenue.total, 1) * (1 + growth.revenue.total)", FORECAST_PERIOD_IDS);
+  assertFormula(grouped, "revenue.total", "historical",
+    "revenue.geography_us", ["FY2024", "FY2025"]);
 });
 
 test("a forecast category group compiles a signed parent formula for only its periods", () => {
@@ -216,8 +206,8 @@ test("a forecast category group compiles a signed parent formula for only its pe
   }]);
   assertFormula(grouped, "revenue.total", "forecast",
     "revenue.products + revenue.services - revenue.eliminations", ["FY2026", "FY2027"]);
-  assertFormula(grouped, "revenue.total", "forecast",
-    "LAG(revenue.total, 1) * (1 + growth.revenue.total)", ["FY2028", "FY2029", "FY2030"]);
+  assert.equal(grouped.formulas.filter((formula) => formula.lineItemId === "revenue.total"
+    && formula.appliesTo === "forecast").length, 1);
 });
 
 test("forecast category ambiguity, source rows, incompatible units, duplicates, and empty groups are rejected", () => {
@@ -258,4 +248,3 @@ test("forecast category ambiguity, source rows, incompatible units, duplicates, 
     members: [{ lineItemId: "revenue.products", treatment: "exclude" }], reviewDecisionId: "empty",
   }]));
 });
-

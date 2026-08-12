@@ -121,6 +121,7 @@ const INPUT_ROWS = new Set([
   "debt",
   "cash_and_equivalents",
   "short_term_investments",
+  "revenue.total",
   "nopat",
   "net_income",
 ]);

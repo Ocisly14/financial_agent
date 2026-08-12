@@ -10,9 +10,18 @@ import type {
 } from "./types.ts";
 import type { JsonObject } from "../framework/types.ts";
 
-export type DcfWorkbookSection = "history" | "metrics" | "revenue" | "operations" | "dcf";
-export type ModelReadSection = DcfWorkbookSection |
-  "source_income_statement" | "source_balance_sheet" | "source_cash_flow";
+export const DCF_WORKBOOK_SECTIONS = ["history", "metrics", "revenue", "operations", "dcf"] as const;
+/**
+ * Readable in the order a workbook is read. One runtime list rather than a type alone, because the
+ * names have to reach the agent: a section is chosen by a tool argument, and a schema that says only
+ * `string` leaves the caller guessing at names it can see everywhere else in its own output —
+ * `income_statement` and `balance_sheet` are the natural guesses, and both are wrong here.
+ */
+export const MODEL_READ_SECTIONS = [...DCF_WORKBOOK_SECTIONS,
+  "source_income_statement", "source_balance_sheet", "source_cash_flow"] as const;
+
+export type DcfWorkbookSection = typeof DCF_WORKBOOK_SECTIONS[number];
+export type ModelReadSection = typeof MODEL_READ_SECTIONS[number];
 
 export type RevisionChange =
   | { kind: "model_created" }
@@ -393,11 +402,44 @@ function validateSelector(snapshot: FinancialModelSnapshot, selector: ModelSelec
   if (selector.parentId !== undefined && !itemIds.has(selector.parentId)) {
     queryError(`unknown parent line item: ${selector.parentId}`);
   }
-  const sections = new Set<ModelReadSection>([
-    "history", "metrics", "revenue", "operations", "dcf",
-    "source_income_statement", "source_balance_sheet", "source_cash_flow",
-  ]);
-  if (selector.section !== undefined && !sections.has(selector.section)) queryError(`unknown section: ${String(selector.section)}`);
+  const sections = new Set<string>(MODEL_READ_SECTIONS);
+  if (selector.section !== undefined && !sections.has(selector.section)) {
+    queryError(`unknown section: ${String(selector.section)} (one of: ${MODEL_READ_SECTIONS.join(", ")})`);
+  }
+  // Exact row/cell names are promises, not exploratory filters.  A contradictory structural
+  // filter used to return an apparently successful empty slice, which leaves an agent unable to
+  // distinguish a typo from a row it should read from another scope.
+  // `cellRefs` deliberately compose as coordinates: callers can provide a handful of candidate
+  // cells and then narrow them with periods or a role.  Only named *rows* promise a row match.
+  const requestedIds = [...new Set(selector.lineItemIds ?? [])];
+  const requestedItems = requestedIds.map((id) => snapshot.lineItems.find((item) => item.id === id)!);
+  if (selector.section !== undefined) {
+    const mismatches = requestedItems.filter((item) => item.section !== selector.section)
+      .map((item) => `${item.id} (section ${item.section})`);
+    if (mismatches.length > 0) queryError(`requested row(s) are outside section ${selector.section}: ${mismatches.join(", ")}. `
+      + "Read their named section(s), or omit section when reading rows across sections.");
+  }
+  if (selector.parentId !== undefined) {
+    const mismatches = requestedItems.filter((item) => item.parentId !== selector.parentId)
+      .map((item) => `${item.id} (parent ${item.parentId ?? "none"})`);
+    if (mismatches.length > 0) queryError(`requested row(s) are not children of ${selector.parentId}: ${mismatches.join(", ")}. `
+      + "Read those rows without parentId, or use their actual parent.");
+  }
+  if (selector.role !== undefined) {
+    const mismatches = requestedItems.filter((item) => item.role !== selector.role)
+      .map((item) => `${item.id} (role ${item.role})`);
+    if (mismatches.length > 0) queryError(`requested row(s) do not have role ${selector.role}: ${mismatches.join(", ")}. `
+      + "Read those rows without role, or use their actual role.");
+  }
+  if (selector.periodClass !== undefined) {
+    const requestedPeriodIds = [...new Set(selector.periodIds ?? [])];
+    const mismatches = requestedPeriodIds.flatMap((id) => {
+      const period = snapshot.periods.find((candidate) => candidate.id === id)!;
+      return period.cls !== selector.periodClass ? [`${id} (${period.cls})`] : [];
+    });
+    if (mismatches.length > 0) queryError(`requested period(s) are outside periodClass ${selector.periodClass}: ${mismatches.join(", ")}. `
+      + "Use their actual period class, or omit periodClass.");
+  }
   const roles = new Set(snapshot.lineItems.map((item) => item.role));
   if (selector.role !== undefined && !roles.has(selector.role)) queryError(`unknown role: ${String(selector.role)}`);
   if (selector.periodClass !== undefined && !new Set(["actual", "ttm", "forecast"]).has(selector.periodClass)) {

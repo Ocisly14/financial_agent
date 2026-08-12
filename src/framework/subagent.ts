@@ -194,16 +194,61 @@ export function buildLoopToolSpecs(tools: ToolDefinition[]): LlmToolSpec[] {
  * [PROGRESS SO FAR] 之后在长。在 marker 处切开并打 cache 标记,provider 就能
  * 把静态前缀走缓存读,每步只为动态尾部付全价。marker 缺失时退化为整段发送。 */
 const PROGRESS_MARKER = "[PROGRESS SO FAR]";
-export function splitForPromptCache(system: string, prompt: string): LlmMessage[] {
+
+/**
+ * Below this, a third breakpoint is not worth its own cache write: providers bill a write above the
+ * read they save, and they round a cached prefix down to their own block size, so a short one can
+ * cost more than it returns.
+ */
+const MIN_ROLLING_CACHE_CHARS = 4000;
+
+/**
+ * How much of `progress` the previous step already sent, byte for byte. A provider matches a cached
+ * prefix by bytes, so this is the only honest place to cut — whatever the projection's shape, this
+ * finds however much of it happens to have held still.
+ */
+function commonPrefixLength(current: string, previous: string): number {
+  const limit = Math.min(current.length, previous.length);
+  let index = 0;
+  while (index < limit && current.charCodeAt(index) === previous.charCodeAt(index)) index += 1;
+  return index;
+}
+
+/**
+ * `previousProgress` is the progress region as it was rendered for the step before, and it earns a
+ * third breakpoint: the static prefix stops growing after step one, while the progress region holds
+ * everything the run has learned — tens of thousands of characters of playbook text among them —
+ * and re-sending all of it at full price every step is most of what a long dispatch costs.
+ */
+export function splitForPromptCache(system: string, prompt: string, previousProgress?: string): LlmMessage[] {
   const index = prompt.indexOf(PROGRESS_MARKER);
   if (index <= 0) {
     return [{ role: "system", content: system, cache: true }, { role: "user", content: prompt }];
   }
+  const head = { role: "system" as const, content: system, cache: true };
+  const staticPrefix = { role: "user" as const, content: prompt.slice(0, index), cache: true };
+  const progress = prompt.slice(index);
+
+  const shared = previousProgress === undefined ? 0 : commonPrefixLength(progress, previousProgress);
+  if (shared < MIN_ROLLING_CACHE_CHARS) {
+    return [head, staticPrefix, { role: "user", content: progress }];
+  }
+  // Nothing new since the last step — a retry on identical state. Cache the whole region rather than
+  // splitting it: an empty trailing block is not a text block a provider will accept.
+  if (shared >= progress.length) {
+    return [head, staticPrefix, { role: "user", content: progress, cache: true }];
+  }
   return [
-    { role: "system", content: system, cache: true },
-    { role: "user", content: prompt.slice(0, index), cache: true },
-    { role: "user", content: prompt.slice(index) },
+    head, staticPrefix,
+    { role: "user", content: progress.slice(0, shared), cache: true },
+    { role: "user", content: progress.slice(shared) },
   ];
+}
+
+/** The progress region of a rendered prompt, or undefined when it carries none. */
+export function progressRegion(prompt: string): string | undefined {
+  const index = prompt.indexOf(PROGRESS_MARKER);
+  return index <= 0 ? undefined : prompt.slice(index);
 }
 
 /** Map a native tool-call answer onto the loop's step shape. finish only counts
@@ -374,6 +419,10 @@ export class SubagentRuntime {
 
     const maxToolSteps = definition.maxToolSteps ?? DEFAULT_MAX_TOOL_STEPS;
     let exhausted = true;
+    /** Set only by the provider call below, which is the one failure that ends the loop outright. */
+    let llmFailure: { code: string; message: string } | undefined;
+    /** Last step's progress region, so this step can mark how much of it held still and cache it. */
+    let previousProgress: string | undefined;
     for (let step = 1; step <= maxToolSteps; step++) {
       // Loop context is read back from the log: the subagent sees its own prior
       // tool results (state) and decides whether to call another tool or finish.
@@ -393,9 +442,12 @@ export class SubagentRuntime {
 
       let completionText: string;
       let completionToolCalls: LlmToolCall[] | undefined;
+      // Recorded before the call, not after: a step that throws still told the next one what it sent,
+      // and a retry that re-renders the same progress should read it from cache rather than re-pay.
+      const progressSent = progressRegion(rendered.prompt);
       try {
         const completion = await this.modelRouter.generate(
-          splitForPromptCache(rendered.system, rendered.prompt),
+          splitForPromptCache(rendered.system, rendered.prompt, previousProgress),
           // Built from the live set, so a skill's grant reaches the model. This is
           // the one thing that can change the cached request prefix mid-run; an
           // invoke_skill therefore costs one cache miss, and only one.
@@ -405,8 +457,16 @@ export class SubagentRuntime {
         completionText = completion.text;
         completionToolCalls = completion.toolCalls;
         llmCalls++;
+        previousProgress = progressSent;
       } catch (error) {
-        log.error(`[${definition.name}] LLM call failed at step ${step}`, { error: error instanceof Error ? error.message : String(error) });
+        const message = error instanceof Error ? error.message : String(error);
+        log.error(`[${definition.name}] LLM call failed at step ${step}`, { error: message });
+        // Recorded, not just logged: this is what ended the run, and without it the result falls
+        // back to whichever tool error came first — which the agent may well have recovered from
+        // twenty steps ago. A caller reading "unknown section" when the provider actually refused
+        // the request diagnoses the wrong thing, and a run loop deciding whether to retry cannot
+        // tell a spent budget from a spent account.
+        llmFailure = { code: "llm_call_failed", message: `LLM call failed at step ${step}: ${message}` };
         break;
       }
 
@@ -562,11 +622,11 @@ export class SubagentRuntime {
     const result: TaskResult = {
       task_id: input.taskId,
       agent: definition.name,
-      status: !finished && !pausedForInput && firstToolError ? "failed" : "ok",
+      status: !finished && !pausedForInput && (llmFailure ?? firstToolError) ? "failed" : "ok",
       // No clean finish means no summary the agent stands behind. Say which it was —
       // a host that reports this upward must not pass "completed task" off as an account
       // of work that stopped mid-stride.
-      summary: pausedForInput ?? (finished ? finishSummary : (firstToolError?.message ?? (exhausted
+      summary: pausedForInput ?? (finished ? finishSummary : (llmFailure?.message ?? firstToolError?.message ?? (exhausted
         ? (definition.name === "financial_modeling"
           ? `Paused after ${maxToolSteps} tool steps; dispatch thread ${threadId} again to continue ${latestModel.model_id ?? input.request.model_id ?? "the model"} at revision ${latestModel.revision ?? "unknown"} (${latestModel.lifecycle_stage ?? "unknown stage"}).`
           : `${definition.name} stopped after ${maxToolSteps} tool steps without writing a finish summary.`)
@@ -575,8 +635,9 @@ export class SubagentRuntime {
       visualizations: outputs.flatMap((o) => o.visualizations ?? []),
       metrics: { ms: Date.now() - started, tool_calls: outputs.length + toolErrors.length, llm_calls: llmCalls },
     };
-    if (!finished && !pausedForInput && firstToolError) {
-      result.error = { code: firstToolError.code, message: firstToolError.message };
+    const cause = llmFailure ?? firstToolError;
+    if (!finished && !pausedForInput && cause) {
+      result.error = { code: cause.code, message: cause.message };
     }
 
     log.info(`[${definition.name}] done`, { ms: Date.now() - started, tool_calls: outputs.length, llm_calls: llmCalls });
@@ -728,6 +789,13 @@ const FINANCIAL_QUERY_TOOLS = new Set([
   "financial_search", "get_treasury_yield", "list_unified_statements", "get_unified_rows", "calculate_model_rows",
 ]);
 
+/** Narrow reads must compose, but an agent can still issue arbitrary selectors. Keep a useful working
+ * set rather than letting a long run grow its prompt without bound; the projection tells it if an
+ * older slice was evicted, so an intentional reread is never mistaken for a missing tool result. */
+const MAX_WORKBOOK_SLICES = 16;
+/** Approx. 30k tokens of structured workbook evidence, leaving room for playbooks, notes, and tool specs. */
+const MAX_WORKBOOK_SLICE_CONTEXT_CHARS = 120_000;
+
 /** 提取结果里唯一跨步必需的是 ingestionRunId 和覆盖率;诊断按 playbook 只在覆盖率
  *  短缺时才用来判断,所以留计数加一个样本,不把 309 条原样搬进上下文。 */
 function compactExtraction(raw: JsonObject): JsonObject {
@@ -745,6 +813,14 @@ function compactExtraction(raw: JsonObject): JsonObject {
 function projectFinancialModelData(outputs: ReturnType<SessionState["subagentToolOutputs"]>): JsonObject {
   const revisions: JsonValue[] = [];
   let active: JsonObject = {};
+  // A narrowed workbook read is evidence the agent explicitly asked for.  Unlike the overview,
+  // multiple sections are meant to be read together (for example revenue plus history before a
+  // forecast), so keep every distinct slice of the current revision instead of letting whichever
+  // parallel call finishes last erase the others.  A new revision invalidates the whole cache.
+  type CachedWorkbookSlice = { slice: JsonObject; sections: Set<string> };
+  const workbookSlices = new Map<string, CachedWorkbookSlice>();
+  let workbookSliceChars = 0;
+  let evictedWorkbookSlices = 0;
   const subagentResults: JsonValue[] = [];
   const skillReferences = new Map<string, JsonValue>();
   // 技能正文必须跨步存活:这份投影就是 agent 每一步的全部上下文,漏掉它等于
@@ -752,7 +828,10 @@ function projectFinancialModelData(outputs: ReturnType<SessionState["subagentToo
   const skillGuidance = new Map<string, JsonValue>();
   const queryResults: JsonValue[] = [];
   let extraction: JsonObject | undefined;
-  const otherResults: JsonValue[] = [];
+  // Unknown tools get one durable slot per tool name. A fixed "last N events" window previously
+  // forgot a successful tool after enough unrelated calls, which has the same repeat-loop failure
+  // mode as dropping a workbook slice.
+  const otherResults = new Map<string, JsonValue>();
   for (const output of outputs) {
     const data = output.generation_context?.data;
     if (data) {
@@ -775,10 +854,81 @@ function projectFinancialModelData(outputs: ReturnType<SessionState["subagentToo
         captured = true;
       }
       if (typeof data["model_id"] === "string") {
-        active = { model_id: data["model_id"], ...(typeof data["revision"] === "number" ? { revision: data["revision"] } : {}),
+        const modelId = data["model_id"];
+        const revision = typeof data["revision"] === "number" ? data["revision"] : undefined;
+        const currentModelId = typeof active["model_id"] === "string" ? active["model_id"] : undefined;
+        const currentRevision = typeof active["revision"] === "number" ? active["revision"] : undefined;
+        const changesModel = currentModelId !== undefined && currentModelId !== modelId;
+        const advancesRevision = revision !== undefined && (currentRevision === undefined || revision > currentRevision);
+        // Explicit historical reads must not make the current model context regress. They remain
+        // visible in the tool trace, but forecasts and mutations should be grounded in the latest
+        // revision the agent has already observed.
+        if (currentModelId === modelId && revision !== undefined && currentRevision !== undefined && revision < currentRevision) {
+          captured = true;
+          continue;
+        }
+        // A mutation carries model_change_context, so its prior slices remain available as explicitly
+        // revision-stamped history. A different model, or an unexplained revision advance, still
+        // invalidates the cache conservatively.
+        const hasChangeContext = data["model_change_context"] !== undefined;
+        if (changesModel || (advancesRevision && !hasChangeContext)) {
+          workbookSlices.clear();
+          workbookSliceChars = 0;
+          evictedWorkbookSlices = 0;
+        }
+        const retained = changesModel || advancesRevision ? {} : active;
+        const incomingSlices = [
+          ...(data["workbook_slice"] !== undefined ? [data["workbook_slice"]] : []),
+        ];
+        for (const rawSlice of incomingSlices) {
+          if (!rawSlice || typeof rawSlice !== "object" || Array.isArray(rawSlice)) continue;
+          const slice = rawSlice as JsonObject;
+          const key = JSON.stringify(slice);
+          // Refreshing an existing slice makes it most-recently used without duplicating it.
+          if (workbookSlices.has(key)) {
+            workbookSlices.delete(key);
+            workbookSliceChars -= key.length;
+          }
+          const rows = Array.isArray(slice["rows"]) ? slice["rows"] : [];
+          const sections = new Set(rows.flatMap((row) => row && typeof row === "object" && !Array.isArray(row)
+            && typeof (row as JsonObject)["section"] === "string" ? [(row as JsonObject)["section"] as string] : []));
+          // A source-statement row has no DCF section field.  Treat an unclassifiable slice as
+          // revision-bound, so it is still conservatively dropped on a normal revision advance.
+          if (sections.size === 0) sections.add("<unknown>");
+          // Once the agent reads a section at the current revision, that fresh slice supersedes an
+          // older one for the same section. Other older sections remain historical working memory.
+          if (revision !== undefined) {
+            for (const [cachedKey, cached] of workbookSlices) {
+              const cachedRevision = typeof cached.slice["revision"] === "number" ? cached.slice["revision"] : undefined;
+              if (cachedRevision !== revision && [...cached.sections].some((section) => sections.has(section))) {
+                workbookSlices.delete(cachedKey);
+                workbookSliceChars -= cachedKey.length;
+              }
+            }
+          }
+          workbookSlices.set(key, { slice, sections });
+          workbookSliceChars += key.length;
+          // Keep the newly requested slice even if it alone exceeds the budget: hiding the result
+          // the agent explicitly asked for recreates the repeat-loop we are preventing.
+          while (workbookSlices.size > MAX_WORKBOOK_SLICES
+            || (workbookSliceChars > MAX_WORKBOOK_SLICE_CONTEXT_CHARS && workbookSlices.size > 1)) {
+            const oldest = workbookSlices.keys().next().value!;
+            workbookSlices.delete(oldest);
+            workbookSliceChars -= oldest.length;
+            evictedWorkbookSlices += 1;
+          }
+        }
+        active = { ...retained, model_id: modelId, ...(revision !== undefined ? { revision } : {}),
           ...(typeof data["lifecycle_stage"] === "string" ? { lifecycle_stage: data["lifecycle_stage"] } : {}),
-          ...(data["current_workbook"] ? { current_workbook: data["current_workbook"] } : {}),
-          ...(data["workbook_slice"] ? { workbook_slice: data["workbook_slice"] } : {}),
+          // model_overview is what both the read and the write answer with. Narrow reads accumulate
+          // in workbook_slices for this revision; neither carries a whole workbook any more.
+          ...(data["model_overview"] ? { model_overview: data["model_overview"] } : {}),
+          ...(data["model_change_context"] ? { model_change_context: data["model_change_context"] } : {}),
+          ...(workbookSlices.size > 0 ? { workbook_slices: [...workbookSlices.values()].map((cached) => cached.slice) } : {}),
+          ...(workbookSlices.size > 0 ? { workbook_slices_context_chars: workbookSliceChars } : {}),
+          ...(evictedWorkbookSlices > 0 ? { workbook_slices_evicted: evictedWorkbookSlices } : {}),
+          ...(workbookSlices.size > 0 && [...workbookSlices.values()].some((cached) => cached.slice["revision"] !== revision)
+            ? { workbook_slices_notice: "Slices from an earlier revision are historical context only; reread that section before using current values." } : {}),
           ...(data["filing_insights"] !== undefined ? { filing_insights: data["filing_insights"] } : {}),
           ...(data["revision_history"] !== undefined ? { revision_history: data["revision_history"] } : {}) };
         captured = true;
@@ -788,13 +938,26 @@ function projectFinancialModelData(outputs: ReturnType<SessionState["subagentToo
     // 兜底。上面每一个分支都是白名单,而白名单漏掉一个工具的后果不是"少点信息",
     // 是那次调用在 agent 眼里从未发生——它会照着看得见的证据重跑,直到步数耗尽。
     // summary 本来就是为压缩而写的,足够它知道自己做过什么。
-    otherResults.push({ tool: output.name, summary: output.summary });
+    otherResults.set(output.name, { tool: output.name, summary: output.summary });
   }
-  return { revision_summaries: revisions, active_model_context: active, latest_subagent_results: subagentResults.slice(-2),
+  // Key order is a caching decision, not a reading one. A provider caches a request by byte prefix,
+  // so the first field that changes between two steps ends the cache — and everything after it is
+  // re-billed even if it is identical. `active_model_context` used to sit second: it is rewritten on
+  // every model read or write, which left a common prefix of 76 bytes out of 38k and put the tens of
+  // thousands of characters of never-changing playbook text behind it, paid for again every step.
+  //
+  // So: what never changes first, then what only ever grows at its own end, then what is rewritten
+  // or windowed. It reads better this way too — the freshest state ends up nearest the question.
+  return {
     skill_guidance: Object.fromEntries(skillGuidance),
-    skill_references: Object.fromEntries(skillReferences), query_results: queryResults,
+    skill_references: Object.fromEntries(skillReferences),
+    revision_summaries: revisions,
+    query_results: queryResults,
     ...(extraction ? { latest_extraction: extraction } : {}),
-    other_results: otherResults.slice(-8) };
+    active_model_context: active,
+    latest_subagent_results: subagentResults.slice(-2),
+    other_results: [...otherResults.values()],
+  };
 }
 
 export function projectFinancialModelProgress(

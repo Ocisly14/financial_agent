@@ -29,8 +29,8 @@ export function createSubagentRegistry(): SubagentRegistry {
     skills: ["dcf-modeling"],
     // A full DCF authored by this agent alone (no drafting subagents) runs ~20-30 steps: 5 for the
     // data foundation, then serial mutation batches (each revision change must be a solo step) for
-    // the forecast, WACC inputs, and stage advances. Progress is projected, not accumulated, so a
-    // higher cap does not grow the context; the resumable pause remains the runaway guard.
+    // the forecast, WACC inputs, and stage advances. Progress is a bounded, deduplicated projection,
+    // so a higher cap does not grow the context without limit; the resumable pause remains the runaway guard.
     maxToolSteps: 30,
     systemPrompt: financialModelingSubagentPrompt,
   });

@@ -16,7 +16,12 @@ export const DCF_PRIVATE_SUBAGENT_TOOL = "run_dcf_subagent";
 const SUBAGENT_INPUT_SCHEMA: JsonSchema = { type: "object", additionalProperties: false,
   required: ["subagent", "modelId", "task"], properties: {
     subagent: { type: "string", enum: ["statement_unification", "spine_mapping"] },
-    modelId: { type: "string" }, task: { type: "string" },
+    modelId: { type: "string" },
+    task: { type: "string", description: "What the work is for, in your own words: the ticker (required — "
+      + "the subagent loads its working set by it), the periods, what this issuer or the user needs "
+      + "respected, and on a re-run the shortfall to address. Not a list of concepts, rows, or spine "
+      + "target ids — the subagent loads those itself and is checked against the engine's requirements, "
+      + "and a task that enumerates them reads as the full scope of the job." },
   } };
 
 export function createDcfSubagentTool(deps: {

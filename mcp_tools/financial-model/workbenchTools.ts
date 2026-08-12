@@ -12,10 +12,12 @@ import { validate } from "./schemas.ts";
 export const WORKBENCH_TOOLS = ["list_unified_statements", "get_unified_rows", "calculate_model_rows"] as const;
 
 export const UNIFIED_ROWS_PAGE = 40;
+const STATEMENT_KINDS = ["income_statement", "balance_sheet", "cash_flow_statement"] as const;
 
 const LIST_INPUT_SCHEMA: JsonSchema = { type: "object", additionalProperties: false, required: ["modelId"], properties: {
   modelId: { type: "string" },
-  statement: { type: "string", description: "Narrow to one statement's rows: income_statement, balance_sheet, or cash_flow_statement." },
+  statement: { type: "string", enum: [...STATEMENT_KINDS],
+    description: "Narrow to one statement's rows: income_statement, balance_sheet, or cash_flow_statement." },
 } };
 
 const CALCULATE_INPUT_SCHEMA: JsonSchema = { type: "object", additionalProperties: false, required: ["modelId", "expectedRevision", "rows"], properties: {
@@ -30,7 +32,7 @@ const CALCULATE_INPUT_SCHEMA: JsonSchema = { type: "object", additionalPropertie
 const GET_INPUT_SCHEMA: JsonSchema = { type: "object", additionalProperties: false, required: ["modelId"], properties: {
   modelId: { type: "string" },
   rowIds: { type: "array", items: { type: "string" }, description: "Exact rowIds to fetch, bypassing every other filter." },
-  statement: { type: "string" },
+  statement: { type: "string", enum: [...STATEMENT_KINDS] },
   parentRowId: { type: "string", description: "Restrict to breakdown rows under this unified rowId." },
   axisQName: { type: "string" },
   memberFilter: { type: "string", description: "Case-insensitive substring match against label or memberQName." },
@@ -373,6 +375,10 @@ function getUnifiedRows(deps: FinancialModelToolDeps, input: JsonObject, context
   let filtered: Candidate[];
   if (rowIdsInput !== undefined && rowIdsInput.length > 0) {
     const wanted = new Set(rowIdsInput);
+    const available = new Set(all.map((candidate) => candidate.rowId));
+    const missing = [...wanted].filter((rowId) => !available.has(rowId));
+    if (missing.length > 0) return failure("unified_row_not_found", `unified row(s) not found: ${missing.join(", ")}. `
+      + "Call list_unified_statements to choose available row ids.");
     filtered = all.filter((c) => wanted.has(c.rowId));
   } else {
     const memberQNamesInput = Array.isArray(input["memberQNames"])
