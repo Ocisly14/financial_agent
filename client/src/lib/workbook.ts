@@ -104,9 +104,9 @@ export type SheetDescriptor = {
 };
 
 const SOURCE_LABELS: Record<SourceStatementKey, string> = {
-  income_statement: "利润表",
-  balance_sheet: "资产负债表",
-  cash_flow_statement: "现金流量表",
+  income_statement: "Income Statement",
+  balance_sheet: "Balance Sheet",
+  cash_flow_statement: "Cash Flow Statement",
 };
 
 /** The Key Financials block, in the order the reference workbook uses.
@@ -126,6 +126,54 @@ export const SUMMARY_ROWS: ReadonlyArray<{ lineItemId: string; indent: boolean }
   { lineItemId: "metric.net_margin", indent: true },
 ];
 
+/**
+ * The DCF sheet is a reading view over the whole model, not a sixth storage
+ * section.  A complete valuation crosses revenue, historical statements,
+ * operating drivers, the FCFF build, and the equity-bridge inputs.  Keep that
+ * presentation contract in one whitelist so a partially-built workbook shows
+ * only the rows it genuinely contains instead of fabricated blanks.
+ */
+const DCF_ROW_SPECS: ReadonlyArray<{ lineItemId: string; label?: string; group?: string; parentId?: string }> = [
+  { lineItemId: "revenue.product", label: "Product Revenue", group: "Revenue & Profitability" },
+  { lineItemId: "growth.revenue.product", label: "Growth", group: "Revenue & Profitability", parentId: "revenue.product" },
+  { lineItemId: "metric.custom.product_gross_margin", label: "Product Gross Margin", group: "Revenue & Profitability", parentId: "revenue.product" },
+  { lineItemId: "revenue.product.gross_profit", label: "Product Gross Profit", group: "Revenue & Profitability", parentId: "revenue.product" },
+  { lineItemId: "revenue.products", label: "Product Revenue", group: "Revenue & Profitability" },
+  { lineItemId: "revenue.service", label: "Service Revenue", group: "Revenue & Profitability" },
+  { lineItemId: "growth.revenue.service", label: "Growth", group: "Revenue & Profitability", parentId: "revenue.service" },
+  { lineItemId: "metric.custom.service_gross_margin", label: "Service Gross Margin", group: "Revenue & Profitability", parentId: "revenue.service" },
+  { lineItemId: "revenue.service.gross_profit", label: "Service Gross Profit", group: "Revenue & Profitability", parentId: "revenue.service" },
+  { lineItemId: "revenue.services", label: "Service Revenue", group: "Revenue & Profitability" },
+  { lineItemId: "revenue.total", label: "Total Revenue", group: "Revenue & Profitability" },
+  { lineItemId: "gross_profit", label: "Gross Profit", group: "Revenue & Profitability" },
+  { lineItemId: "operating_expenses", label: "Operating Expense", group: "Revenue & Profitability" },
+  { lineItemId: "metric.custom.opex_to_revenue", label: "Operating Expense / Revenue", group: "Revenue & Profitability", parentId: "operating_expenses" },
+  { lineItemId: "operating_income", label: "Operating Profit", group: "Revenue & Profitability" },
+  { lineItemId: "margin.operating", label: "Operating Margin", group: "Revenue & Profitability", parentId: "operating_income" },
+  { lineItemId: "depreciation_amortization", label: "Dep. & Amort. Expense", group: "Revenue & Profitability" },
+  { lineItemId: "ratio.da_to_revenue", label: "D&A / Revenue", group: "Revenue & Profitability", parentId: "depreciation_amortization" },
+  { lineItemId: "pretax_income", label: "Taxable Income", group: "Revenue & Profitability" },
+  { lineItemId: "income_tax_expense", label: "Tax Expense", group: "Revenue & Profitability" },
+  { lineItemId: "tax_rate", label: "Tax Rate", group: "Revenue & Profitability", parentId: "income_tax_expense" },
+  { lineItemId: "nopat", label: "NOPAT", group: "Revenue & Profitability" },
+  { lineItemId: "operating_working_capital", label: "NWC", group: "Working Capital" },
+  { lineItemId: "ratio.operating_nwc_to_revenue", label: "NWC / Revenue", group: "Working Capital", parentId: "operating_working_capital" },
+  { lineItemId: "capital_expenditures", label: "(-) Capex", group: "FCF Adjustments" },
+  { lineItemId: "ratio.capex_to_revenue", label: "Capex / Revenue", group: "FCF Adjustments", parentId: "capital_expenditures" },
+  { lineItemId: "change_nwc", label: "(-) Change in NWC", group: "FCF Adjustments" },
+  { lineItemId: "fcff", label: "Free Cash Flow", group: "Discounted Cash Flow" },
+  { lineItemId: "wacc", label: "WACC", group: "Terminal Assumptions" },
+  { lineItemId: "terminal_growth", label: "Terminal Growth", group: "Terminal Assumptions" },
+  { lineItemId: "exit_multiple", label: "Exit Multiple", group: "Terminal Assumptions" },
+  { lineItemId: "cash_available_for_bridge", label: "Cash Available for Bridge", group: "Equity Bridge Inputs" },
+  { lineItemId: "non_operating_investments", label: "Non-operating Investments", group: "Equity Bridge Inputs" },
+  { lineItemId: "debt", label: "Debt", group: "Equity Bridge Inputs" },
+  { lineItemId: "lease_liabilities", label: "Lease Liabilities", group: "Equity Bridge Inputs" },
+  { lineItemId: "preferred_equity", label: "Preferred Equity", group: "Equity Bridge Inputs" },
+  { lineItemId: "non_controlling_interests", label: "Non-controlling Interests", group: "Equity Bridge Inputs" },
+  { lineItemId: "diluted_shares", label: "Shares Outstanding", group: "Equity Bridge Inputs" },
+];
+
 const allRows = (workbook: CurrentWorkbookView): WorkbookRowView[] => [
   ...workbook.sections.history, ...workbook.sections.metrics,
   ...workbook.sections.revenue, ...workbook.sections.operations, ...workbook.sections.dcf,
@@ -139,6 +187,47 @@ export function buildSummaryRows(workbook: CurrentWorkbookView): WorkbookRowView
   return SUMMARY_ROWS
     .map((entry) => byId.get(entry.lineItemId))
     .filter((row): row is WorkbookRowView => row !== undefined);
+}
+
+export type DcfRows = {
+  rows: WorkbookRowView[];
+  /** Group labels keyed by the first row that begins each visible group. */
+  groupLabels: Record<string, string>;
+};
+
+/**
+ * Select the end-to-end valuation chain while retaining the original cells,
+ * formulas and provenance.  Source-section hierarchy is intentionally not
+ * carried over, but forecast-driver rows are attached directly below the
+ * operating line they drive so inputs and results can be read together.
+ */
+export function buildDcfRows(workbook: CurrentWorkbookView): DcfRows {
+  const byId = new Map(allRows(workbook).map((row) => [row.lineItemId, row]));
+  const used = new Set<string>();
+  const rows: WorkbookRowView[] = [];
+  const groupLabels: Record<string, string> = {};
+
+  for (const spec of DCF_ROW_SPECS) {
+    const source = byId.get(spec.lineItemId);
+    // Some models use the legacy plural product/service ids.  Do not show a
+    // duplicated economic row if a workbook happens to carry both spellings.
+    const economicRow = spec.lineItemId === "revenue.products" ? "revenue.product"
+      : spec.lineItemId === "revenue.services" ? "revenue.service" : spec.lineItemId;
+    if (!source || used.has(economicRow)) continue;
+    used.add(economicRow);
+    const presentationRow: WorkbookRowView = {
+      ...source,
+      label: spec.label ?? source.label,
+      parentId: spec.parentId,
+      order: rows.length,
+    };
+    rows.push(presentationRow);
+    if (spec.group && !Object.values(groupLabels).includes(spec.group)) {
+      groupLabels[presentationRow.lineItemId] = spec.group;
+    }
+  }
+
+  return { rows, groupLabels };
 }
 
 /** Which line items belong to a segment sheet, by category name. */
@@ -163,7 +252,7 @@ export function deriveSheets(workbook: CurrentWorkbookView): SheetDescriptor[] {
   // would light up the summary tab off an operations- or revenue-only workbook that
   // has not actually had its historicals committed yet.
   if (workbook.sections.history.length > 0 || workbook.sections.metrics.length > 0) {
-    sheets.push({ id: "summary", label: "摘要", group: "model", kind: "summary" });
+    sheets.push({ id: "summary", label: "Summary", group: "model", kind: "summary" });
   }
 
   const review = workbook.sourceStatementReview;
@@ -179,11 +268,11 @@ export function deriveSheets(workbook: CurrentWorkbookView): SheetDescriptor[] {
   }
 
   if (workbook.sections.revenue.length > 0) {
-    sheets.push({ id: "revenue", label: "收入", group: "model", kind: "revenue" });
+    sheets.push({ id: "revenue", label: "Revenue", group: "model", kind: "revenue" });
   }
   for (const category of segmentMembers(workbook).keys()) {
     sheets.push({
-      id: `segment:${category}`, label: `分部:${category}`,
+      id: `segment:${category}`, label: `Segment: ${category}`,
       group: "model", kind: "revenue", categoryName: category,
     });
   }

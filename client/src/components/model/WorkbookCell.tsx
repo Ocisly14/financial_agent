@@ -18,14 +18,22 @@ export function WorkbookCell({
     cell,
     unit,
     changed,
+    highlighted = false,
     onInspect,
+    onHover,
+    onLeave,
 }: {
     cell: WorkbookCellView;
     unit: Unit;
     changed: boolean;
+    /** True when the active formula reads this exact line-item / period cell. */
+    highlighted?: boolean;
     /** Passed the clicked button's own geometry so the caller can anchor the
      *  inspector popover next to it. */
     onInspect: (anchor: DOMRect) => void;
+    /** Hover opens the provenance inspector without pinning it. */
+    onHover?: (anchor: DOMRect) => void;
+    onLeave?: () => void;
 }) {
     const isAssumption = cell.source.kind === "assumption";
     const hasDiagnostics = cell.diagnostics.length > 0;
@@ -35,14 +43,18 @@ export function WorkbookCell({
             className={cn(
                 "relative whitespace-nowrap p-0 text-right tabular-nums",
                 changed && "animate-workbook-flash",
+                highlighted && "bg-amber-200/60 dark:bg-amber-500/20",
             )}
         >
             <button
                 type="button"
                 onClick={(event) => onInspect(event.currentTarget.getBoundingClientRect())}
+                onMouseEnter={(event) => onHover?.(event.currentTarget.getBoundingClientRect())}
+                onMouseLeave={onLeave}
                 className={cn(
                     "block w-full whitespace-nowrap px-3 py-1 text-right tabular-nums",
                     "cursor-pointer hover:bg-muted/50",
+                    highlighted && "bg-amber-100/60 dark:bg-amber-500/10",
                     "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring",
                     isAssumption && "text-blue-600 dark:text-blue-400",
                     cell.status === "not_modeled" && "text-muted-foreground/40",

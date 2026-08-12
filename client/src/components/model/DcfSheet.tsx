@@ -1,5 +1,5 @@
-import { formatCellValue } from "@/lib/workbook";
-import type { CurrentWorkbookView, SensitivityMatrix, TerminalMethodResult, Unit } from "@/types/financialModel";
+import { buildDcfRows, formatCellValue } from "@/lib/workbook";
+import type { CurrentWorkbookView, ExplicitPeriodValue, SensitivityMatrix, TerminalMethodResult, Unit } from "@/types/financialModel";
 import { WorkbookGrid } from "./WorkbookGrid";
 
 /** Fallback for a model too young to have a currency-typed row yet — keeps
@@ -11,7 +11,10 @@ const UNITLESS: Unit = { kind: "number" };
  *  the operations/DCF build is authoritative for it — no need to thread a
  *  currency through the valuation payload itself. */
 function currencyCodeFor(workbook: CurrentWorkbookView): string | undefined {
-    for (const row of [...workbook.sections.dcf, ...workbook.sections.operations]) {
+    for (const row of [
+        ...workbook.sections.history, ...workbook.sections.revenue,
+        ...workbook.sections.operations, ...workbook.sections.dcf,
+    ]) {
         if (row.unit.kind === "currency") return row.unit.code;
     }
     return undefined;
@@ -29,9 +32,12 @@ function valuationUnitsFor(currencyCode: string | undefined): { currency: Unit; 
     };
 }
 
-/** Operations and DCF stack on one sheet with the valuation block below —
- *  this is the reference workbook's own DCF tab: the EBIT→NOPAT→FCFF build is
- *  the top half, the discounting is the bottom. */
+/**
+ * The DCF tab is the model's audit trail from revenue through equity value.
+ * Its rows remain the real workbook rows (and therefore retain formulas and
+ * cell provenance); `buildDcfRows` only gives those cross-section rows the
+ * order a valuation reader expects.
+ */
 export function DcfSheet({
     workbook,
     isCellChanged,
@@ -42,6 +48,8 @@ export function DcfSheet({
     scrollToLineItemId?: string;
 }) {
     const currencyCode = currencyCodeFor(workbook);
+    const { rows, groupLabels } = buildDcfRows(workbook);
+    const anchorPeriod = [...workbook.periods].reverse().find((period) => period.cls === "actual" || period.cls === "ttm")?.label;
     return (
         <div className="flex h-full flex-col overflow-auto">
             {/* `shrink-0` so the build rows keep their natural height. As a bare
@@ -50,24 +58,150 @@ export function DcfSheet({
                 shortfall, leaving two visible rows of a twenty-row model. */}
             <div className="shrink-0">
                 <WorkbookGrid
-                    rows={[...workbook.sections.operations, ...workbook.sections.dcf]}
+                    rows={rows}
                     periods={workbook.periods}
                     isCellChanged={isCellChanged}
                     scrollToLineItemId={scrollToLineItemId}
+                    groupLabels={groupLabels}
                 />
             </div>
             {workbook.valuation && (
                 <div className="border-t p-3">
-                    <div className="mb-2 text-xs font-medium">估值结论</div>
+                    <div className="mb-2 text-xs font-medium">Valuation</div>
+                    <DiscountSchedule
+                        periods={workbook.valuation.explicitPeriods}
+                        terminalValue={workbook.valuation.perpetuityGrowth.terminalValue}
+                        currencyCode={currencyCode}
+                    />
                     <div className="grid gap-4 sm:grid-cols-2">
-                        <TerminalCard title="永续增长法" result={workbook.valuation.perpetuityGrowth} currencyCode={currencyCode} />
-                        <TerminalCard title="退出倍数法" result={workbook.valuation.exitMultiple} currencyCode={currencyCode} />
+                        <TerminalCard title="Perpetuity Growth" result={workbook.valuation.perpetuityGrowth} currencyCode={currencyCode} />
+                        <TerminalCard title="Exit Multiple" result={workbook.valuation.exitMultiple} currencyCode={currencyCode} />
                     </div>
-                    <Sensitivity title="WACC × 永续增长" matrix={workbook.valuation.waccByGrowth} currencyCode={currencyCode} />
-                    <Sensitivity title="WACC × 退出倍数" matrix={workbook.valuation.waccByMultiple} currencyCode={currencyCode} />
+                    <EquityBridge
+                        result={workbook.valuation.perpetuityGrowth}
+                        anchorPeriod={anchorPeriod}
+                        currencyCode={currencyCode}
+                    />
+                    <Sensitivity title="WACC × Perpetuity Growth" matrix={workbook.valuation.waccByGrowth} currencyCode={currencyCode} />
+                    <Sensitivity title="WACC × Exit Multiple" matrix={workbook.valuation.waccByMultiple} currencyCode={currencyCode} />
                 </div>
             )}
         </div>
+    );
+}
+
+function valueCell(value: number, unit: Unit) {
+    return formatCellValue({ value, status: "ok", source: { kind: "none" }, diagnostics: [], dependencies: [] }, unit);
+}
+
+function DiscountSchedule({
+    periods,
+    terminalValue,
+    currencyCode,
+}: {
+    periods: ExplicitPeriodValue[];
+    terminalValue: number;
+    currencyCode: string | undefined;
+}) {
+    if (periods.length === 0) return null;
+    const { currency } = valuationUnitsFor(currencyCode);
+    return (
+        <div className="mb-4 overflow-x-auto">
+            <div className="mb-1 text-xs font-medium">DCF Schedule</div>
+            <table className="min-w-full text-xs">
+                <thead>
+                    <tr className="border-b text-muted-foreground">
+                        <th className="px-2 py-1 text-left font-normal">Year</th>
+                        <th className="px-2 py-1 text-right font-normal">Free Cash Flow</th>
+                        <th className="px-2 py-1 text-right font-normal">WACC</th>
+                        <th className="px-2 py-1 text-right font-normal">Discount Factor</th>
+                        <th className="px-2 py-1 text-right font-normal">Terminal Value</th>
+                        <th className="px-2 py-1 text-right font-normal">DCF</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {periods.map((period) => (
+                        <tr key={period.periodId} className="border-b last:border-0">
+                            <th scope="row" className="px-2 py-1 text-left font-normal">{period.periodId}</th>
+                            <td className="px-2 py-1 text-right tabular-nums">{valueCell(period.fcff, currency)}</td>
+                            <td className="px-2 py-1 text-right tabular-nums">{valueCell(period.wacc, { kind: "percent" })}</td>
+                            <td className="px-2 py-1 text-right tabular-nums">{valueCell(period.discountFactor, { kind: "ratio" })}</td>
+                            <td className="px-2 py-1 text-right tabular-nums">
+                                {period === periods[periods.length - 1] ? valueCell(terminalValue, currency) : ""}
+                            </td>
+                            <td className="px-2 py-1 text-right tabular-nums">{valueCell(period.presentValue, currency)}</td>
+                        </tr>
+                    ))}
+                </tbody>
+            </table>
+        </div>
+    );
+}
+
+const BRIDGE_LABELS: Record<string, string> = {
+    cash_available_for_bridge: "Cash",
+    non_operating_investments: "Non-operating Investments",
+    debt: "Debt",
+    lease_liabilities: "Lease Liabilities",
+    preferred_equity: "Preferred Equity",
+    non_controlling_interests: "Non-controlling Interests",
+};
+
+function EquityBridge({
+    result,
+    anchorPeriod,
+    currencyCode,
+}: {
+    result: TerminalMethodResult;
+    anchorPeriod: string | undefined;
+    currencyCode: string | undefined;
+}) {
+    const units = valuationUnitsFor(currencyCode);
+    const titleSuffix = anchorPeriod ? ` (${anchorPeriod})` : "";
+    return (
+        <div className="mt-4 overflow-x-auto">
+            <div className="mb-1 text-xs font-medium">Equity Bridge{titleSuffix}</div>
+            <table className="min-w-[320px] text-xs">
+                <tbody>
+                    <BridgeLine label="Enterprise Value" value={result.enterpriseValue} unit={units.currency} />
+                    {result.bridge.map((adjustment) => (
+                        <BridgeLine
+                            key={adjustment.lineItemId}
+                            label={BRIDGE_LABELS[adjustment.lineItemId] ?? adjustment.lineItemId}
+                            value={adjustment.appliedAdjustment}
+                            unit={units.currency}
+                            muted={adjustment.status === "not_applicable"}
+                        />
+                    ))}
+                    <BridgeLine label="Equity" value={result.equityValue} unit={units.currency} strong />
+                    <BridgeLine label="Shares Outstanding" value={result.dilutedShares} unit={{ kind: "shares" }} />
+                    <BridgeLine label="Fair Value / Share" value={result.impliedValuePerShare} unit={units.perShare} strong />
+                </tbody>
+            </table>
+        </div>
+    );
+}
+
+function BridgeLine({
+    label,
+    value,
+    unit,
+    strong = false,
+    muted = false,
+}: {
+    label: string;
+    value: number;
+    unit: Unit;
+    strong?: boolean;
+    muted?: boolean;
+}) {
+    return (
+        <tr className={strong ? "border-t" : undefined}>
+            <th scope="row" className={`px-2 py-1 text-left font-normal ${muted ? "text-muted-foreground" : ""}`}>{label}</th>
+            <td className={`px-2 py-1 text-right tabular-nums ${strong ? "font-medium" : ""} ${muted ? "text-muted-foreground" : ""}`}>
+                {valueCell(value, unit)}
+            </td>
+        </tr>
     );
 }
 
@@ -85,7 +219,7 @@ function TerminalCard({
         <div className="flex justify-between gap-4">
             <span className="text-muted-foreground">{label}</span>
             <span className="tabular-nums">
-                {formatCellValue({ value, status: "ok", source: { kind: "none" }, diagnostics: [] }, unit)}
+                {formatCellValue({ value, status: "ok", source: { kind: "none" }, diagnostics: [], dependencies: [] }, unit)}
             </span>
         </div>
     );
@@ -98,11 +232,11 @@ function TerminalCard({
                 {currencyCode && <span className="ml-1 font-normal text-muted-foreground">({currencyCode})</span>}
             </div>
             <div className="space-y-1">
-                {line("终值", result.terminalValue, units.currency)}
-                {line("终值现值", result.terminalPresentValue, units.currency)}
-                {line("企业价值", result.enterpriseValue, units.currency)}
-                {line("股权价值", result.equityValue, units.currency)}
-                {line("每股价值", result.impliedValuePerShare, units.perShare)}
+                {line("Terminal value", result.terminalValue, units.currency)}
+                {line("PV of terminal value", result.terminalPresentValue, units.currency)}
+                {line("Enterprise value", result.enterpriseValue, units.currency)}
+                {line("Equity value", result.equityValue, units.currency)}
+                {line("Implied value / share", result.impliedValuePerShare, units.perShare)}
             </div>
         </div>
     );
@@ -144,7 +278,7 @@ function Sensitivity({
                                 return (
                                     <td key={columnIndex} className="px-2 py-1 text-right tabular-nums">
                                         {formatCellValue(
-                                            { value, status: value === null ? "missing_input" : "ok", source: { kind: "none" }, diagnostics: [] },
+                                            { value, status: value === null ? "missing_input" : "ok", source: { kind: "none" }, diagnostics: [], dependencies: [] },
                                             perShare,
                                         )}
                                     </td>

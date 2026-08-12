@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { buildRowTree, columnScaleLabel } from "@/lib/workbook";
 import type { Period, WorkbookRowView } from "@/types/financialModel";
@@ -25,7 +25,7 @@ const POPOVER_EST_HEIGHT = 260;
  *  are resolved against the ancestor's content, not its visible window, so
  *  CSS itself keeps the two glued together as the grid scrolls — no scroll
  *  listener needed. */
-function anchorFor(cellRect: DOMRect, container: HTMLElement): { top: number; left: number } {
+function anchorFor(cellRect: DOMRect, container: HTMLElement, preferAbove = false): { top: number; left: number } {
     const containerRect = container.getBoundingClientRect();
     const scrollLeft = container.scrollLeft;
     const scrollTop = container.scrollTop;
@@ -47,13 +47,17 @@ function anchorFor(cellRect: DOMRect, container: HTMLElement): { top: number; le
     if (left + POPOVER_WIDTH > visibleRight) left = cellRight - POPOVER_WIDTH;
     left = Math.max(visibleLeft + 4, Math.min(left, visibleRight - POPOVER_WIDTH - 4));
 
-    // Vertical: open below the cell by default; flip above when there is not
-    // enough room below in the visible viewport but there is more room above
-    // (the last-row case).
-    let top = cellBottom + 4;
+    // Vertical: formulas commonly have a driver immediately below their
+    // output. The caller asks us to open above in that case so the provenance
+    // card never covers the very input cells it has highlighted. Still flip
+    // when the preferred side has no usable room.
     const roomBelow = visibleBottom - cellBottom;
     const roomAbove = cellTop - visibleTop;
-    if (roomBelow < POPOVER_EST_HEIGHT && roomAbove > roomBelow) {
+    let openAbove = preferAbove;
+    if (openAbove && roomAbove < POPOVER_EST_HEIGHT && roomBelow > roomAbove) openAbove = false;
+    if (!openAbove && roomBelow < POPOVER_EST_HEIGHT && roomAbove > roomBelow) openAbove = true;
+    let top = cellBottom + 4;
+    if (openAbove) {
         top = cellTop - POPOVER_EST_HEIGHT - 4;
     }
     top = Math.max(visibleTop + 4, top);
@@ -72,16 +76,21 @@ export function WorkbookGrid({
     periods,
     isCellChanged,
     scrollToLineItemId,
+    groupLabels = {},
 }: {
     rows: WorkbookRowView[];
     periods: Period[];
     isCellChanged: (lineItemId: string, periodId: string) => boolean;
     /** When set, the row is scrolled into view — used by auto-locate. */
     scrollToLineItemId?: string;
+    /** Optional presentation-only group headings, keyed by their first row. */
+    groupLabels?: Readonly<Record<string, string>>;
 }) {
+    type InspectorTarget = { lineItemId: string; periodId: string; anchor: { top: number; left: number } };
     const [inspecting, setInspecting] = useState<
-        { lineItemId: string; periodId: string; anchor: { top: number; left: number } } | null
+        InspectorTarget | null
     >(null);
+    const [hovering, setHovering] = useState<InspectorTarget | null>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     // Guards the auto-locate effect against firing again on a re-render this
     // component causes itself (e.g. opening/closing the inspector): only a
@@ -91,8 +100,32 @@ export function WorkbookGrid({
     const lastScrolledRef = useRef<string | undefined>(undefined);
 
     const nodes = buildRowTree(rows);
+    const rowIndex = new Map(nodes.map(({ row }, index) => [row.lineItemId, index]));
     const firstForecastId = periods.find((period) => period.cls === "forecast")?.id;
-    const inspectedRow = inspecting && rows.find((row) => row.lineItemId === inspecting.lineItemId);
+    // A click is a durable fallback for review, not a modal state: hovering a
+    // different cell must still reveal and highlight that cell's own lineage.
+    // Once the pointer leaves, the pinned inspector resumes automatically.
+    const activeInspector = hovering ?? inspecting;
+    const inspectedRow = activeInspector && rows.find((row) => row.lineItemId === activeInspector.lineItemId);
+    const inspectedCell = inspectedRow && activeInspector ? inspectedRow.cells[activeInspector.periodId] : undefined;
+    const highlightedDependencies = new Set((inspectedCell?.dependencies ?? [])
+        .map((dependency) => `${dependency.lineItemId}@${dependency.periodId}`));
+
+    const targetFor = (lineItemId: string, periodId: string, anchorRect: DOMRect): InspectorTarget | null => {
+        const container = containerRef.current;
+        const cell = rows.find((row) => row.lineItemId === lineItemId)?.cells[periodId];
+        const currentIndex = rowIndex.get(lineItemId);
+        // A dependency below the active result is the row a downward popover
+        // would otherwise hide (e.g. an operating expense driver). Move the
+        // card to the other side before the viewport-boundary fallback runs.
+        const hasInputBelow = currentIndex !== undefined && (cell?.dependencies ?? []).some((dependency) =>
+            (rowIndex.get(dependency.lineItemId) ?? -1) > currentIndex);
+        return container ? {
+            lineItemId,
+            periodId,
+            anchor: anchorFor(anchorRect, container, hasInputBelow),
+        } : null;
+    };
 
     useEffect(() => {
         if (!scrollToLineItemId || lastScrolledRef.current === scrollToLineItemId) return;
@@ -105,7 +138,7 @@ export function WorkbookGrid({
     }, [scrollToLineItemId]);
 
     if (nodes.length === 0) {
-        return <div className="p-6 text-sm text-muted-foreground">这张表还没有内容。</div>;
+        return <div className="p-6 text-sm text-muted-foreground">This sheet has no rows yet.</div>;
     }
 
     return (
@@ -118,7 +151,7 @@ export function WorkbookGrid({
                 <thead>
                     <tr>
                         <th className="sticky left-0 top-0 z-20 w-[240px] min-w-[240px] border-b bg-background px-3 py-2 text-left font-medium">
-                            科目
+                            Line item
                         </th>
                         {periods.map((period) => (
                             <th
@@ -137,7 +170,24 @@ export function WorkbookGrid({
                 </thead>
                 <tbody>
                     {nodes.map(({ row, depth }) => (
-                        <tr key={row.lineItemId} data-line-item-id={row.lineItemId} className="hover:bg-muted/30">
+                        <Fragment key={row.lineItemId}>
+                            {groupLabels[row.lineItemId] && (
+                                <tr className="bg-muted/30">
+                                    <th
+                                        /* The section name belongs to the same frozen label column
+                                           as line items.  A colspan header scrolls sideways with the
+                                           year columns, which loses the active DCF block whenever a
+                                           reader moves to the outer forecast years. */
+                                        className="sticky left-0 top-[33px] z-[25] w-[240px] min-w-[240px] border-b bg-background px-3 py-1.5 text-left text-[11px] font-medium text-muted-foreground"
+                                    >
+                                        {groupLabels[row.lineItemId]}
+                                    </th>
+                                    {periods.map((period) => (
+                                        <td key={period.id} className="sticky top-[33px] z-[15] border-b bg-background" />
+                                    ))}
+                                </tr>
+                            )}
+                            <tr data-line-item-id={row.lineItemId} className="hover:bg-muted/30">
                             <th
                                 scope="row"
                                 className={cn(
@@ -160,29 +210,33 @@ export function WorkbookGrid({
                                         cell={cell}
                                         unit={row.unit}
                                         changed={isCellChanged(row.lineItemId, period.id)}
+                                        highlighted={highlightedDependencies.has(`${row.lineItemId}@${period.id}`)}
                                         onInspect={(anchorRect) => {
-                                            const container = containerRef.current;
-                                            if (!container) return;
-                                            setInspecting({
-                                                lineItemId: row.lineItemId,
-                                                periodId: period.id,
-                                                anchor: anchorFor(anchorRect, container),
-                                            });
+                                            const target = targetFor(row.lineItemId, period.id, anchorRect);
+                                            if (target) setInspecting(target);
                                         }}
+                                        onHover={(anchorRect) => {
+                                            const target = targetFor(row.lineItemId, period.id, anchorRect);
+                                            if (target) setHovering(target);
+                                        }}
+                                        onLeave={() => setHovering((current) =>
+                                            current?.lineItemId === row.lineItemId && current.periodId === period.id ? null : current)}
                                     />
                                 );
                             })}
-                        </tr>
+                            </tr>
+                        </Fragment>
                     ))}
                 </tbody>
             </table>
 
-            {inspecting && inspectedRow && (
+            {activeInspector && inspectedRow && (
                 <CellInspector
                     row={inspectedRow}
-                    periodId={inspecting.periodId}
-                    anchor={inspecting.anchor}
-                    onClose={() => setInspecting(null)}
+                    periodId={activeInspector.periodId}
+                    anchor={activeInspector.anchor}
+                    pinned={inspecting !== null}
+                    onClose={() => { setInspecting(null); setHovering(null); }}
                 />
             )}
         </div>

@@ -680,8 +680,9 @@ export function createHttpServer(app: FinancialAgentApp): http.Server {
 
       const financialModelMatch = pathname.match(/^\/api\/financial-models\/([^/]+)$/);
       if (financialModelMatch && method === "GET") {
+        const financialDeps = getDefaultFinancialModelToolDeps();
         const result = getModelContext(
-          { modelStore: getDefaultFinancialModelToolDeps().modelStore },
+          { modelStore: financialDeps.modelStore, sourceReviewStore: financialDeps.sourceReviewStore },
           decodeURIComponent(financialModelMatch[1]!),
         );
         if (result.status === 404) return jsonError(res, 404, result.body.error);

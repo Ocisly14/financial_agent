@@ -216,7 +216,7 @@ test("workbook rows and cells expose the keys the client mirrors", () => {
     "sources", "formulas", "assumptions", "cells",
   ], "WorkbookRowView");
   const cell = row.cells[PERIODS[0]!.id];
-  assertHasKeys(cell, ["value", "status", "source", "diagnostics"], "WorkbookCellView");
+  assertHasKeys(cell, ["value", "status", "source", "diagnostics", "dependencies"], "WorkbookCellView");
 });
 
 test("the wacc sheet exposes the keys the client mirrors", () => {

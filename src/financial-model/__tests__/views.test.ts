@@ -11,6 +11,7 @@ import {
   buildModelContextView, buildWorkbookSlice, buildWorkbookView, type RevisionChangeSummary,
 } from "../views.ts";
 import type { Fact, Period, ValuationConfig } from "../types.ts";
+import type { UnifiedStatementsArtifact } from "../../infra/xbrl/unifiedStatements.ts";
 
 const periods: Period[] = [
   { id: "FY2024", label: "FY2024", start: "2024-01-01", end: "2024-12-31", cls: "actual" },
@@ -86,6 +87,28 @@ test("mapping mode contains source sheets beside the complete DCF workbook", () 
   assert.deepEqual(Object.keys(revenue.cells), ["FY2024", "FY2025"]);
 });
 
+test("human workbook views prefer complete unified statements over prepared staging rows", () => {
+  const unified = {
+    periods: ["FY2024"],
+    rows: [{ rowId: "net_sales", statement: "income_statement", label: "Unified net sales", rationale: "fixture", values: { FY2024: 100 } }],
+    supplementalRows: [], excluded: [],
+    facts: [{
+      factId: "unified-income-FY2024", status: "staged", lineItemId: "unified.income_statement.net_sales", periodId: "FY2024",
+      value: 100, unit: { kind: "currency", code: "USD" },
+      provenance: { sourceType: "unified_statements", sourceRefs: ["unified.net_sales"], asOfDate: "2025-01-01" },
+    }],
+    restatements: [], rollupBreaks: [], findings: [], unresolvedFindings: [],
+  } satisfies UnifiedStatementsArtifact;
+
+  const view = buildWorkbookView("m", 0, snapshot(), { includeSourceStatements: true, unifiedStatements: unified });
+  assert.equal(view.mode, "statement_mapping");
+  const row = view.sourceStatementReview.sheets.income_statement[0]!;
+  assert.equal(row.sourceLineItemId, "unified.income_statement.net_sales");
+  assert.equal(row.label, "Unified net sales");
+  assert.equal(row.cells.FY2024?.value, 100);
+  assert.deepEqual(row.cells.FY2024?.source, { kind: "fact", factId: "unified-income-FY2024" });
+});
+
 test("model context accepts prepared-statement and fact-review revision summaries", () => {
   const fixture = contextFixture();
   fixture.headers[0]!.changeSummary = {
@@ -126,6 +149,25 @@ test("not-modeled cells remain distinct from modeled missing inputs", () => {
   const revenueTotal = view.sections.revenue.find((row) => row.lineItemId === "revenue.total")!;
   assert.equal(revenueRoot.cells["FY2024"]?.status, "not_modeled");
   assert.equal(revenueTotal.cells["FY2024"]?.status, "not_modeled");
+});
+
+test("formula cells expose exact dependency coordinates for period-aware UI highlighting", () => {
+  const model = snapshot(true);
+  model.lineItems = model.lineItems.map((item) => item.id === "fcff"
+    ? { ...item, forecast: "formula" as const }
+    : item);
+  const formula = {
+    lineItemId: "fcff", appliesTo: "forecast" as const, periodIds: ["FY2025"],
+    source: "revenue.total + LAG(revenue.total, 1)",
+  };
+  model.formulas.push(formula);
+  model.compiledFormulas.push({ ...formula, ast: parseFormula(formula.source) });
+
+  const fcff = buildWorkbookView("m", 1, model).sections.dcf.find((row) => row.lineItemId === "fcff")!;
+  assert.deepEqual(fcff.cells["FY2025"]?.dependencies, [
+    { lineItemId: "revenue.total", periodId: "FY2025" },
+    { lineItemId: "revenue.total", periodId: "FY2024" },
+  ]);
 });
 
 test("workbook slices validate selectors, preserve order, and do not mutate snapshots", () => {

@@ -91,6 +91,8 @@ interface ConversationPaneProps {
     stream: ReturnType<typeof useTopicStream>;
     input: string;
     onInputChange: (value: string) => void;
+    /** Used by local workspace replays; real conversations stay writable. */
+    readOnly?: boolean;
 }
 
 /**
@@ -99,7 +101,7 @@ interface ConversationPaneProps {
  * phase 2's Research view (several topics merged into one session) can reuse
  * this exact component with a different stream.
  */
-export function ConversationPane({ agentId, title, subtitle, stream, input, onInputChange }: ConversationPaneProps) {
+export function ConversationPane({ agentId, title, subtitle, stream, input, onInputChange, readOnly = false }: ConversationPaneProps) {
     const { scrollRef, isAtBottom, scrollToBottom, disableAutoScroll } = useAutoScroll();
 
     const {
@@ -114,7 +116,7 @@ export function ConversationPane({ agentId, title, subtitle, stream, input, onIn
 
     const handleSend = () => {
         const trimmed = input.trim();
-        if (!trimmed || isProcessing || isHistoryLoading) return;
+        if (readOnly || !trimmed || isProcessing || isHistoryLoading) return;
         onInputChange("");
         void sendMessage(input);
     };
@@ -244,6 +246,7 @@ export function ConversationPane({ agentId, title, subtitle, stream, input, onIn
                 input={input}
                 isProcessing={isProcessing}
                 isDisabled={isHistoryLoading}
+                readOnly={readOnly}
                 isAtBottom={isAtBottom}
                 onInputChange={onInputChange}
                 onSend={handleSend}

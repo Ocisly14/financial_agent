@@ -121,6 +121,24 @@ The six conventional driver rows (growth.revenue.total, margin.operating, tax_ra
 
 A two-level tree forecasts at the level where the story lives: give the leaves growth assumptions and make the parent stream their sum (same pattern, one level down) — or drive the parent and leave the leaves informational.
 
+**Segment economics — required companion to segment revenue**:
+
+If forecast revenue is split into material segments, first look for segment cost-of-revenue, gross-profit, margin, or management disclosure that supports a distinct economic view. Do not silently collapse different segment economics into a single consolidated operating-margin assumption. Build the bridge at the most evidenced level:
+
+```text
+1. set_formula gross_margin.<segment> historical: gross_profit.<segment> / revenue.<segment>
+2. set_assumption gross_margin.<segment> forecast, with the segment-specific causal rationale
+3. set_formula gross_profit.<segment> forecast:
+   revenue.<segment> * gross_margin.<segment>
+4. set_formula gross_profit forecast:
+   gross_profit.<segment_a> + gross_profit.<segment_b> + ...
+5. forecast attributable operating-expense rows per segment where disclosed; forecast shared expenses separately
+6. set_formula operating_income forecast:
+   gross_profit - operating_expenses
+```
+
+If the statements provide segment revenue but only consolidated costs, do **not** manufacture an allocation merely to fill the rows. Use a consolidated gross-margin or operating-margin chain only after recording: (a) the missing disclosure, (b) why a cost allocation would be unsupported, and (c) the historical and company-specific evidence behind the consolidated driver. The same discipline applies to shared R&D, corporate and platform costs: model them as a named shared pool unless the company discloses a defensible allocation.
+
 **Cost structure at the story's level**:
 
 ```text

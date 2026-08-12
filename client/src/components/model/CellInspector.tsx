@@ -10,6 +10,7 @@ export function CellInspector({
     periodId,
     anchor,
     onClose,
+    pinned = false,
 }: {
     row: WorkbookRowView;
     periodId: string;
@@ -19,7 +20,9 @@ export function CellInspector({
      *  and already clamps it to stay on screen and flips it off the cell's
      *  far edge when the near edge would run off the visible viewport. */
     anchor: { top: number; left: number };
-    onClose: () => void;
+    onClose?: () => void;
+    /** Hover inspectors are informational only; a click pins one for copying and review. */
+    pinned?: boolean;
 }) {
     const cell: WorkbookCellView | undefined = row.cells[periodId];
     if (!cell) return null;
@@ -31,11 +34,22 @@ export function CellInspector({
     const assumption = source.kind === "assumption"
         ? row.assumptions.find((item) => item.assumptionId === source.assumptionId)
         : undefined;
-    const formula = source.kind === "formula" ? row.formulas[source.definitionIndex] : undefined;
+    // `definitionIndex` is a snapshot-internal index. A workbook row contains
+    // only that row's formulas, so resolve coverage here instead of treating a
+    // global index as local and showing the wrong formula after unrelated rows
+    // have been authored.
+    const formula = source.kind === "formula"
+        ? row.formulas.find((candidate) => candidate.periodIds.includes(periodId))
+        : undefined;
+    const sourceLabel = source.kind === "fact" ? "Filing fact"
+        : source.kind === "formula" ? "Formula"
+        : source.kind === "assumption" ? "Assumption"
+        : source.kind === "calculated" ? "Engine calculation"
+        : "Not modeled";
 
     return (
         <div
-            className="absolute z-20 w-80 max-h-[70vh] overflow-y-auto rounded-md border bg-popover p-3 text-xs shadow-lg"
+            className={`absolute z-20 w-80 max-h-[70vh] overflow-y-auto rounded-md border bg-popover p-3 text-xs shadow-lg ${pinned ? "" : "pointer-events-none"}`}
             style={{ top: anchor.top, left: anchor.left }}
         >
             <div className="mb-2 flex items-start justify-between gap-2">
@@ -43,29 +57,36 @@ export function CellInspector({
                     <div className="font-medium">{row.label}</div>
                     <div className="text-muted-foreground">{periodId}</div>
                 </div>
-                <button type="button" onClick={onClose} aria-label="Close">
+                {pinned && onClose && <button type="button" onClick={onClose} aria-label="Close">
                     <X className="h-3.5 w-3.5 text-muted-foreground" />
-                </button>
+                </button>}
             </div>
 
             <dl className="space-y-1.5">
-                <Field label="值" value={formatCellValue(cell, row.unit)} />
-                <Field label="状态" value={cell.status} />
-                <Field label="来源" value={source.kind} />
+                <Field label="Value" value={formatCellValue(cell, row.unit)} />
+                <Field label="Status" value={cell.status} />
+                <Field label="Source" value={sourceLabel} />
                 {source.kind === "fact" && <Field label="Fact" value={source.factId} />}
-                {formula && <Field label="公式" value={formula.source} mono />}
+                {formula && <Field label="Formula" value={formula.source} mono />}
+                {formula && cell.dependencies.length > 0 && (
+                    <Field
+                        label="Inputs"
+                        value={cell.dependencies.map((dependency) => `${dependency.lineItemId} @ ${dependency.periodId}`).join(", ")}
+                        mono
+                    />
+                )}
                 {assumption && (
                     <>
                         {/* Provenance is flat on Assumption, not a nested object —
                             and the values are an array parallel to `periods`,
                             so the cell's own number has to be looked up by index. */}
-                        <Field label="依据" value={assumption.rationale} />
-                        <Field label="截至" value={assumption.asOfDate} />
-                        <Field label="引用" value={assumption.sourceRefs.join(", ")} />
+                        <Field label="Rationale" value={assumption.rationale} />
+                        <Field label="As of" value={assumption.asOfDate} />
+                        <Field label="References" value={assumption.sourceRefs.join(", ")} />
                     </>
                 )}
                 {cell.diagnostics.map((diagnostic, index) => (
-                    <Field key={index} label="诊断" value={`${diagnostic.code}: ${diagnostic.refs.join(", ")}`} />
+                    <Field key={index} label="Diagnostic" value={`${diagnostic.code}: ${diagnostic.refs.join(", ")}`} />
                 ))}
             </dl>
         </div>

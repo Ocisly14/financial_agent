@@ -52,6 +52,7 @@ export function TopicWorkspace({
     members,
     activeTopic,
     research,
+    demo,
 }: {
     agentId: UUID;
     /** Phase 1 always passes one. Research passes N — possibly zero. */
@@ -60,6 +61,8 @@ export function TopicWorkspace({
      *  where the session is the Research's own. */
     activeTopic?: TopicSummary;
     research?: ResearchSummary;
+    /** Local replay data: production workspaces leave this undefined. */
+    demo?: { rail: { topics: TopicSummary[]; researches: ResearchSummary[] }; initialSheetId?: string };
 }) {
     const { t } = useTranslation();
     const navigate = useNavigate();
@@ -92,7 +95,7 @@ export function TopicWorkspace({
     const model = useFinancialModel(agentId, chartTopicId ?? sessionId);
     // Which sheet is on screen, and whether the user has steered it away from
     // auto-locate (Task 11 §7.3) themselves during the turn in progress.
-    const [activeSheetId, setActiveSheetId] = useState<string | undefined>(undefined);
+    const [activeSheetId, setActiveSheetId] = useState<string | undefined>(() => demo?.initialSheetId);
     const [userPickedThisTurn, setUserPickedThisTurn] = useState(false);
 
     const stream = useResearchStream(agentId, sessionId, { onModelRevision: model.onRevisionFrame });
@@ -321,10 +324,11 @@ export function TopicWorkspace({
             topicId={chartTopicId}
             messages={chartMessages}
             streamingText={chartStreamingText}
-            onCompare={isResearch ? undefined : handleCompare}
+            onCompare={isResearch || demo ? undefined : handleCompare}
             modelTabs={modelTabs}
             modelPane={modelPane}
             modelFocusRequest={model.focusRequest}
+            readOnly={demo !== undefined}
         />
     ) : null;
 
@@ -358,6 +362,7 @@ export function TopicWorkspace({
             stream={stream}
             input={input}
             onInputChange={setInput}
+            readOnly={demo !== undefined}
         />
     );
 
@@ -384,25 +389,31 @@ export function TopicWorkspace({
                     <Sheet open={railSheetOpen} onOpenChange={setRailSheetOpen}>
                         <SheetContent side="left" className="w-[240px] p-0 sm:max-w-[240px]">
                             <SheetTitle className="sr-only">{t("topics.title")}</SheetTitle>
-                            <TopicRail
-                                agentId={agentId}
-                                activeTopicId={isResearch ? undefined : activeTopic?.id}
-                                activeResearchId={research?.id}
-                                collapsed={false}
-                                onCollapsedChange={() => setRailSheetOpen(false)}
-                            />
+                            <div className={demo ? "pointer-events-none h-full" : "h-full"}>
+                                <TopicRail
+                                    agentId={agentId}
+                                    activeTopicId={isResearch ? undefined : activeTopic?.id}
+                                    activeResearchId={research?.id}
+                                    collapsed={false}
+                                    onCollapsedChange={() => setRailSheetOpen(false)}
+                                    demoData={demo?.rail}
+                                />
+                            </div>
                         </SheetContent>
                     </Sheet>
                 </>
             ) : (
                 <div ref={containerRef} className="flex min-h-0 flex-1 overflow-hidden">
-                    <TopicRail
-                        agentId={agentId}
-                        activeTopicId={isResearch ? undefined : activeTopic?.id}
-                        activeResearchId={research?.id}
-                        collapsed={railCollapsed}
-                        onCollapsedChange={setRailCollapsed}
-                    />
+                    <div className={demo ? "pointer-events-none h-full" : "h-full"}>
+                        <TopicRail
+                            agentId={agentId}
+                            activeTopicId={isResearch ? undefined : activeTopic?.id}
+                            activeResearchId={research?.id}
+                            collapsed={railCollapsed}
+                            onCollapsedChange={setRailCollapsed}
+                            demoData={demo?.rail}
+                        />
+                    </div>
                     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
                         {!showChart && memberBand}
                         <div className="flex min-h-0 flex-1 overflow-hidden">

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  buildRowTree, buildSummaryRows, columnScaleLabel, deriveSheets,
+  buildDcfRows, buildRowTree, buildSummaryRows, columnScaleLabel, deriveSheets,
   formatCellValue, isCellChanged, sheetsTouchedBy,
 } from "../workbook.ts";
 import type {
@@ -15,6 +15,7 @@ const cell = (over: Partial<WorkbookCellView> = {}): WorkbookCellView => ({
   status: "ok",
   source: { kind: "none" },
   diagnostics: [],
+  dependencies: [],
   ...over,
 });
 
@@ -181,7 +182,7 @@ test("each category group becomes its own segment sheet alongside the revenue fa
   }));
 
   assert.deepEqual(sheets.map((sheet) => sheet.id), ["revenue", "segment:Product line"]);
-  assert.equal(sheets[1]?.label, "分部:Product line");
+  assert.equal(sheets[1]?.label, "Segment: Product line");
 });
 
 test("the summary sheet picks whitelisted rows across four sections in Excel order", () => {
@@ -201,6 +202,74 @@ test("the summary sheet picks whitelisted rows across four sections in Excel ord
   assert.deepEqual(rows.map((r) => r.lineItemId), [
     "revenue.total", "gross_profit", "metric.gross_margin",
     "ebitda", "operating_income", "net_income", "metric.net_margin",
+  ]);
+});
+
+test("the DCF sheet gathers its auditable valuation chain across sections", () => {
+  const selected = buildDcfRows(workbook({
+    sections: {
+      history: [
+        row("gross_profit", { section: "history" }),
+        row("operating_expenses", { section: "history" }),
+        row("pretax_income", { section: "history" }),
+      ],
+      metrics: [],
+      revenue: [
+        row("revenue.total", { section: "revenue", parentId: "revenue" }),
+        row("revenue.product", { section: "revenue", parentId: "revenue.total" }),
+        row("revenue.service", { section: "revenue", parentId: "revenue.total" }),
+      ],
+      operations: [
+        row("operating_income"), row("operating_working_capital"),
+        row("capital_expenditures"), row("change_nwc"),
+      ],
+      dcf: [
+        row("fcff"), row("wacc"), row("terminal_growth"), row("debt"), row("diluted_shares"),
+      ],
+    },
+  }));
+
+  assert.deepEqual(selected.rows.map((entry) => [entry.lineItemId, entry.label, entry.parentId]), [
+    ["revenue.product", "Product Revenue", undefined],
+    ["revenue.service", "Service Revenue", undefined],
+    ["revenue.total", "Total Revenue", undefined],
+    ["gross_profit", "Gross Profit", undefined],
+    ["operating_expenses", "Operating Expense", undefined],
+    ["operating_income", "Operating Profit", undefined],
+    ["pretax_income", "Taxable Income", undefined],
+    ["operating_working_capital", "NWC", undefined],
+    ["capital_expenditures", "(-) Capex", undefined],
+    ["change_nwc", "(-) Change in NWC", undefined],
+    ["fcff", "Free Cash Flow", undefined],
+    ["wacc", "WACC", undefined],
+    ["terminal_growth", "Terminal Growth", undefined],
+    ["debt", "Debt", undefined],
+    ["diluted_shares", "Shares Outstanding", undefined],
+  ]);
+  assert.deepEqual(selected.groupLabels, {
+    "revenue.product": "Revenue & Profitability",
+    "operating_working_capital": "Working Capital",
+    "capital_expenditures": "FCF Adjustments",
+    fcff: "Discounted Cash Flow",
+    wacc: "Terminal Assumptions",
+    debt: "Equity Bridge Inputs",
+  });
+});
+
+test("DCF driver rows sit directly beneath the line item they forecast", () => {
+  const selected = buildDcfRows(workbook({
+    sections: {
+      history: [], metrics: [row("margin.operating", { section: "metrics" })], operations: [row("operating_income")], dcf: [],
+      revenue: [
+        row("revenue.product", { section: "revenue" }),
+        row("growth.revenue.product", { section: "revenue" }),
+      ],
+    },
+  }));
+
+  assert.deepEqual(buildRowTree(selected.rows).map((entry) => [entry.row.label, entry.depth]), [
+    ["Product Revenue", 0], ["Growth", 1],
+    ["Operating Profit", 0], ["Operating Margin", 1],
   ]);
 });
 

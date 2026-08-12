@@ -69,6 +69,7 @@ export function ChartPane({
     modelTabs = [],
     modelPane = null,
     modelFocusRequest = null,
+    readOnly = false,
 }: {
     agentId: UUID;
     topicId: UUID;
@@ -94,6 +95,8 @@ export function ChartPane({
      *  the model-side twin of `useTopicCharts`' focusRevision pull, so an agent
      *  that builds something the user asked for shows it without being asked. */
     modelFocusRequest?: { modelId: string; token: number } | null;
+    /** Local replay mode: preserve viewing but prohibit chart preference writes. */
+    readOnly?: boolean;
 }) {
     const { t } = useTranslation();
     const { tabs: chartTabs, activeKey: chartActiveKey, setActiveTab, addSymbol, closeTab, reorderTabs } = useTopicCharts(
@@ -257,10 +260,11 @@ export function ChartPane({
                         onClose={handleCloseTab}
                         onReorder={reorderTabs}
                         onAdd={addSymbol}
-                        onDetach={narrow ? undefined : handleDetach}
+                        onDetach={narrow || readOnly ? undefined : handleDetach}
                         agentId={onCompare ? agentId : undefined}
                         currentTopicId={onCompare ? topicId : undefined}
                         onCompare={onCompare}
+                        readOnly={readOnly}
                     />
                 </div>
             </header>

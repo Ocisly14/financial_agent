@@ -17,6 +17,7 @@ Output: a profit-source ledger — each source with its historical anchor: growt
 
 For every source and every driver row ask: does the economic structure that produced this history persist?
 
+- **Start from the company, then test the world around it.** Historical stream economics are the forecast anchor. From there, reason forward about the industry's likely demand, technology, supply, competitive and regulatory direction, then the issuer's product roadmap, strategic priorities, capacity, distribution and execution. Translate each conclusion into the named company line it changes. A generic sector growth rate, peer forecast or historical average is a reference check; it never substitutes for this issuer-specific causal chain.
 - **"Unchanged" is a claim, not a default.** Keeping a ratio flat asserts its causes persist — say why. The anchors make the claim testable: a driver held flat against a five-year trend moving one direction is a contradiction you must address.
 - **"Changed" needs a nameable cause**: product cycle, capacity coming online, competition, policy, mix shift. Evidence comes from the breakdown trends you computed and financial_search for management guidance and macro conditions.
 <!-- Filing insights are switched off (FILING_INSIGHTS_ENABLED unset), so an ingestion links an empty
@@ -25,13 +26,14 @@ For every source and every driver row ask: does the economic structure that prod
      "Evidence comes from the breakdown trends you computed, filing insights (get_financial_model with
      insightId), and financial_search for management guidance and macro conditions." -->
 
-- **Macro enters as transmission, not mood.** A rate path reaches this model through named lines — financing cost, discount rate, demand for financed purchases. If you cannot name the receiving line, the macro observation does not belong in the model.
+- **Macro enters as transmission, not mood.** A rate path reaches this model through named lines — financing cost, discount rate, demand for financed purchases. If you cannot name the receiving line, the macro observation does not belong in the model. The same rule applies to an industry narrative: name the company-specific product, stream, margin or reinvestment mechanism before using it in an assumption.
 - Write each conclusion as one sentence you will reuse verbatim as the assumption's rationale: *source X — changes/persists — because Y — evidence Z.*
 
 ## Move 3 — translate the judgments into the chain
 
 The chain's shape follows the heterogeneity of your judgments, not habit:
 
+- **Segment revenue requires a segment economics decision.** When revenue is forecast by segment, do not jump straight from consolidated revenue to a single operating margin by default. For every material segment, seek the disclosed or defensible segment gross-margin / cost-of-revenue evidence, forecast its gross margin, calculate `segment gross profit = segment revenue × segment gross margin`, and make consolidated gross profit their sum. Forecast operating expenses at the level where their economics live — segment-specific costs where they are attributable, plus a separately modelled shared-cost pool where they are not — then calculate operating profit from that bridge. A consolidated margin shortcut is permitted only when the issuer does not disclose enough cost structure to allocate defensibly; record that limitation and why a segment allocation would be invented rather than evidenced.
 - **One shared story** → author the margin-driven chain explicitly: historical anchor formulas, forecast amount formulas, then the six driver assumptions (growth.revenue.total, margin.operating, tax_rate, ratio.da_to_revenue, ratio.capex_to_revenue, ratio.operating_nwc_to_revenue). Nothing is a default chain; the formulas are your Move-2 judgment and must be traceable.
 - **Different stories per source** (a shrinking segment beside an exploding one) → give each revenue stream its own historical growth formula and forecast formula such as `LAG(stream,1) * (1 + growth.revenue.<stream>)`, then make revenue.total the sum of streams; drive costs at whatever level your story actually lives at. Use fades (YEAR_INDEX) for stories that are neither "changes now" nor "never changes".
 - A two-level stream tree forecasts at the level where the story lives: leaves with assumptions and the parent as their sum, or the parent driven with leaves informational.

@@ -47,6 +47,8 @@ export type WorkbookCellView = {
   status: WorkbookCellStatus;
   source: WorkbookCellSource;
   diagnostics: Diagnostic[];
+  /** Exact cells read by this formula at this period; empty for facts and assumptions. */
+  dependencies: Array<{ lineItemId: string; periodId: string }>;
 };
 
 export type AssumptionPayload =
@@ -152,6 +154,16 @@ export type ExplicitPeriodValue = {
   presentValue: number;
 };
 
+export type BridgeAdjustment = {
+  lineItemId: string;
+  role: string;
+  sign: 1 | -1;
+  status: "numeric" | "not_applicable";
+  value: number | null;
+  appliedAdjustment: number;
+  refs: string[];
+};
+
 // Field names verified against src/financial-model/valuation.ts: the terminal
 // present value is `terminalPresentValue` and the per-share number is
 // `impliedValuePerShare`. Do not rename them to something that reads better.
@@ -162,6 +174,7 @@ export type TerminalMethodResult = {
   terminalPresentValue: number;
   terminalValuePercentOfEnterpriseValue: number;
   enterpriseValue: number;
+  bridge: BridgeAdjustment[];
   equityValue: number;
   dilutedShares: number;
   impliedValuePerShare: number;

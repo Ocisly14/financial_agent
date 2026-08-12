@@ -27,7 +27,7 @@ export function SummarySheet({
                     scrollToLineItemId={scrollToLineItemId}
                 />
             </Section>
-            <Section title="历史报表科目">
+            <Section title="Historical line items">
                 <WorkbookGrid
                     rows={workbook.sections.history}
                     periods={workbook.periods}
@@ -35,7 +35,7 @@ export function SummarySheet({
                     scrollToLineItemId={scrollToLineItemId}
                 />
             </Section>
-            <Section title="全部指标">
+            <Section title="All metrics">
                 <WorkbookGrid
                     rows={workbook.sections.metrics}
                     periods={workbook.periods}

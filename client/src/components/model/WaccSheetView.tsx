@@ -14,7 +14,7 @@ export function WaccSheetView({ workbook }: { workbook: CurrentWorkbookView }) {
 
     return (
         <div className="h-full overflow-auto">
-            <div className="border-b px-3 py-2 text-xs text-muted-foreground">截至 {sheet.asOfDate}</div>
+            <div className="border-b px-3 py-2 text-xs text-muted-foreground">As of {sheet.asOfDate}</div>
             <table className="w-full text-xs">
                 <tbody>
                     {sheet.rows.map((row) => (
@@ -45,7 +45,7 @@ function WaccRow({ row, expanded, onToggle }: { row: WaccSheetRow; expanded: boo
                     blocked && "text-muted-foreground",
                 )}>
                     {formatCellValue(
-                        { value: row.value, status: blocked ? "missing_input" : "ok", source: { kind: "none" }, diagnostics: [] },
+                        { value: row.value, status: blocked ? "missing_input" : "ok", source: { kind: "none" }, diagnostics: [], dependencies: [] },
                         row.unit,
                     )}
                 </td>
@@ -65,7 +65,7 @@ function WaccRow({ row, expanded, onToggle }: { row: WaccSheetRow; expanded: boo
                                 </div>
                             </>
                         )}
-                        {blocked && <div className="text-amber-600">缺少输入：{row.missingInputs.join("、")}</div>}
+                        {blocked && <div className="text-amber-600">Missing inputs: {row.missingInputs.join(", ")}</div>}
                     </td>
                 </tr>
             )}

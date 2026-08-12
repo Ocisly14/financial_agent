@@ -3,9 +3,13 @@ import type { FinancialModelSnapshot } from "../financial-model/operations.ts";
 import { FinancialModelService, type RevisionChangeSummary } from "../financial-model/service.ts";
 import type { ModelStore, ModelView } from "../financial-model/store.ts";
 import type { ModelContextView } from "../financial-model/views.ts";
+import type { SourceReviewStore } from "../infra/xbrl/sourceReviewStore.ts";
 
 export type FinancialModelReadDeps = {
   modelStore: ModelStore<FinancialModelSnapshot, RevisionChangeSummary>;
+  /** Owns the full statement_unification artifact, which is intentionally
+   * outside the compact, revisioned DCF snapshot. */
+  sourceReviewStore?: SourceReviewStore;
 };
 
 /** The service takes a session id only to stamp `creatingSessionId` on writes.
@@ -42,7 +46,14 @@ export function getModelContext(
     // which reads this view into a prompt budget, and wrong for a human, who
     // wants to check a DCF row against the filing it came from precisely when
     // the model is finished.
-    return { status: 200, body: service.getModel(modelId, { includeSourceStatements: true }) as ModelContextView };
+    const unifiedStatements = deps.sourceReviewStore?.get(modelId)?.unifiedStatements;
+    return {
+      status: 200,
+      body: service.getModel(modelId, {
+        includeSourceStatements: true,
+        ...(unifiedStatements ? { unifiedStatements } : {}),
+      }) as ModelContextView,
+    };
   } catch (error) {
     if (error instanceof FinancialModelError && error.code === "financial_model_not_found") {
       return { status: 404, body: { success: false, error: `model not found: ${modelId}` } };

@@ -9,6 +9,7 @@ const Topic = lazy(() => import("./routes/topic"));
 const Research = lazy(() => import("./routes/research"));
 const Strategies = lazy(() => import("./routes/strategies"));
 const StrategyDetail = lazy(() => import("./routes/strategy-detail"));
+const DcfDemo = lazy(() => import("./routes/dcf-demo"));
 import { Toaster as SonnerToaster } from "sonner";
 import { ThemeProvider, useTheme } from "./contexts/ThemeContext";
 import { cn } from "./lib/utils";
@@ -66,6 +67,7 @@ function AppShell() {
                                 <Route path="research/:agentId/:researchId" element={<Research />} />
                                 <Route path="strategies/:agentId" element={<Strategies />} />
                                 <Route path="strategies/:agentId/:strategyId" element={<StrategyDetail />} />
+                                <Route path="dcf-demo" element={<DcfDemo />} />
                             </Routes>
                         </Suspense>
                     </div>

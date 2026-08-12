@@ -44,12 +44,12 @@ export function SourceStatementSheet({
                 <div className="flex items-center gap-2 border-b bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
                     <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
                     <span>
-                        {failed.length} 项勾稽未通过：
+                        {failed.length} reconciliation check(s) failed:
                         {failed.slice(0, 3).map((result) =>
                             // `identity` exists only on the accounting_identity arm;
                             // a category reconciliation is labelled by its category.
                             `${result.kind === "accounting_identity" ? result.identity : result.category}@${result.periodId}`,
-                        ).join("、")}
+                        ).join(", ")}
                         {failed.length > 3 && " …"}
                     </span>
                 </div>

@@ -48,6 +48,8 @@ interface TopicRailProps {
     activeResearchId?: UUID | undefined;
     collapsed: boolean;
     onCollapsedChange: (next: boolean) => void;
+    /** Fixed data for a local, non-polling workspace replay. */
+    demoData?: { topics: TopicSummary[]; researches: ResearchSummary[] };
 }
 
 /**
@@ -70,6 +72,7 @@ export function TopicRail({
     activeResearchId,
     collapsed,
     onCollapsedChange,
+    demoData,
 }: TopicRailProps) {
     const { t } = useTranslation();
     const { toast } = useToast();
@@ -98,18 +101,19 @@ export function TopicRail({
         queryFn: () => apiClient.getTopics(agentId),
         refetchInterval: 30000,
         staleTime: 15000,
+        enabled: demoData === undefined,
     });
 
     // Clone before sorting — never mutate the React Query cache in place.
     const topics = useMemo(() => {
-        const list = [...(data?.topics ?? [])];
+        const list = [...(demoData?.topics ?? data?.topics ?? [])];
         list.sort((a: TopicSummary, b: TopicSummary) => {
             const aTime = a.lastMessage?.createdAt ?? a.createdAt;
             const bTime = b.lastMessage?.createdAt ?? b.createdAt;
             return bTime - aTime;
         });
         return list;
-    }, [data]);
+    }, [data, demoData]);
 
     const groups = useMemo(() => groupTopics(topics, grouping), [topics, grouping]);
 
@@ -125,12 +129,13 @@ export function TopicRail({
         queryFn: () => apiClient.getResearches(agentId),
         refetchInterval: 30000,
         staleTime: 15000,
+        enabled: demoData === undefined,
     });
     const researches: ResearchSummary[] = useMemo(() => {
-        const list = [...(researchData?.researches ?? [])];
+        const list = [...(demoData?.researches ?? researchData?.researches ?? [])];
         list.sort((a, b) => b.updatedAt - a.updatedAt);
         return list;
-    }, [researchData]);
+    }, [researchData, demoData]);
 
     const refetchTopics = () => {
         queryClient.invalidateQueries({ queryKey: ["topics", agentId] });

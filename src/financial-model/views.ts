@@ -1,14 +1,16 @@
-import { cellKey, type CellKey } from "./dsl/graph.ts";
+import { cellKey, dependenciesOf, splitCellKey, type CellKey, type GraphContext } from "./dsl/graph.ts";
 import { FinancialModelError } from "./errors.ts";
 import type { FinancialModelSnapshot, ModelSelector } from "./operations.ts";
 import type { ModelView, Revision, RevisionHeader } from "./store.ts";
 import type { ValuationOutput } from "./valuation.ts";
+import { buildGrid } from "./periodGrid.ts";
 import { WACC_SHEET_ROW_IDS, type WaccSheet, type WaccSheetAnyRowId, type WaccSheetRowId } from "./waccSheet.ts";
 import type {
   Assumption, CellSource, DcfCategoryGroup, Diagnostic, LifecycleStage, LineItemRole, Period,
   ReconciliationResult, Unit, ValuationConfig,
 } from "./types.ts";
 import type { JsonObject } from "../framework/types.ts";
+import type { UnifiedStatementsArtifact } from "../infra/xbrl/unifiedStatements.ts";
 
 export const DCF_WORKBOOK_SECTIONS = ["history", "metrics", "revenue", "operations", "dcf"] as const;
 /**
@@ -62,7 +64,14 @@ export type WorkbookCellSource =
   | { kind: "formula"; definitionIndex: number }
   | { kind: "calculated"; output: string }
   | { kind: "none" };
-export type WorkbookCellView = { value: number | null; status: WorkbookCellStatus; source: WorkbookCellSource; diagnostics: Diagnostic[] };
+/** Exact workbook coordinates a formula reads for this period.  Keeping these
+ * as coordinates — rather than only IDs parsed again by the UI — preserves
+ * LAG/YOY/window semantics for cell-inspector highlighting. */
+export type WorkbookCellDependency = { lineItemId: string; periodId: string };
+export type WorkbookCellView = {
+  value: number | null; status: WorkbookCellStatus; source: WorkbookCellSource;
+  diagnostics: Diagnostic[]; dependencies: WorkbookCellDependency[];
+};
 
 export type WorkbookRowView = {
   lineItemId: string; label: string; parentId?: string; section: DcfWorkbookSection;
@@ -118,7 +127,13 @@ export type HistoricalDcfCompletenessView = {
   }>;
 };
 
-export type WorkbookViewOptions = { includeSourceStatements?: boolean };
+export type WorkbookViewOptions = {
+  includeSourceStatements?: boolean;
+  /** The human-facing HTTP read supplies this external artifact so the three
+   * source tabs show statement_unification's reconciled, multi-year rows.
+   * Agent reads intentionally omit it to keep their workbook context small. */
+  unifiedStatements?: UnifiedStatementsArtifact;
+};
 
 const DCF_SECTIONS: readonly DcfWorkbookSection[] = ["history", "metrics", "revenue", "operations", "dcf"];
 const PUBLIC_WACC_ROW_IDS: ReadonlySet<string> = new Set(WACC_SHEET_ROW_IDS);
@@ -177,7 +192,7 @@ export function buildWorkbookView(
   return {
     ...base,
     mode: "statement_mapping",
-    sourceStatementReview: buildSourceReview(snapshot),
+    sourceStatementReview: buildSourceReview(snapshot, options.unifiedStatements),
   };
 }
 
@@ -318,7 +333,11 @@ function buildSourceRow(snapshot: FinancialModelSnapshot, id: string, periods = 
   return { sourceLineItemId: id, label: item.label, unit: structuredClone(item.unit), cells: buildCells(snapshot, id, periods) };
 }
 
-function buildSourceReview(snapshot: FinancialModelSnapshot): SourceStatementReviewView {
+function buildSourceReview(
+  snapshot: FinancialModelSnapshot,
+  unifiedStatements?: UnifiedStatementsArtifact,
+): SourceStatementReviewView {
+  if (unifiedStatements) return buildUnifiedSourceReview(snapshot, unifiedStatements);
   const sheet = (section: string) => orderedItems(snapshot)
     .filter((row) => row.section === section)
     .map((row) => buildSourceRow(snapshot, row.id, snapshot.periods));
@@ -332,24 +351,95 @@ function buildSourceReview(snapshot: FinancialModelSnapshot): SourceStatementRev
   };
 }
 
+/**
+ * statement_unification preserves the issuer's full face-statement structure
+ * outside the DCF snapshot.  The browser should read those unified rows — not
+ * the smaller, pre-unification staging list — once they exist.  Each value is
+ * still tied to its materialized unified fact, so the regular cell-inspector
+ * provenance continues to work without giving the UI a second data model.
+ */
+function buildUnifiedSourceReview(
+  snapshot: FinancialModelSnapshot,
+  unified: UnifiedStatementsArtifact,
+): SourceStatementReviewView {
+  const availablePeriods = new Set(unified.periods);
+  const selectedPeriodIds = snapshot.periods
+    .filter((period) => period.cls !== "forecast" && availablePeriods.has(period.id))
+    .map((period) => period.id);
+  const factByCell = new Map<string, FinancialModelSnapshot["facts"][number]>();
+  for (const fact of unified.facts) {
+    if (fact.lineItemId !== undefined) factByCell.set(cellKey(fact.lineItemId, fact.periodId), fact);
+  }
+  const sheets: SourceStatementReviewView["sheets"] = {
+    income_statement: [], balance_sheet: [], cash_flow_statement: [],
+  };
+
+  for (const row of unified.rows) {
+    const sourceLineItemId = `unified.${row.statement}.${row.rowId}`;
+    const unit = unified.facts.find((fact) => fact.lineItemId === sourceLineItemId)?.unit ?? { kind: "number" as const };
+    sheets[row.statement].push({
+      sourceLineItemId,
+      label: row.label,
+      unit: structuredClone(unit),
+      cells: Object.fromEntries(selectedPeriodIds.map((periodId) => {
+        const value = row.values[periodId] ?? null;
+        const fact = factByCell.get(cellKey(sourceLineItemId, periodId));
+        return [periodId, {
+          value,
+          status: value === null ? "not_applicable" as const : "ok" as const,
+          source: fact ? { kind: "fact" as const, factId: fact.factId } : { kind: "none" as const },
+          diagnostics: [],
+          dependencies: [],
+        }];
+      })),
+    });
+  }
+  return { selectedPeriodIds, sheets, reconciliations: structuredClone(snapshot.reconciliationResults) };
+}
+
 function buildCells(snapshot: FinancialModelSnapshot, lineItemId: string, periods: readonly Period[]): Record<string, WorkbookCellView> {
   const item = snapshot.lineItems.find((row) => row.id === lineItemId)!;
+  const items = new Map(snapshot.lineItems.map((candidate) => [candidate.id, candidate]));
+  const graph: GraphContext = {
+    grid: buildGrid(snapshot.periods), valuationAnchorPeriodId: snapshot.valuationConfig.anchorPeriodId,
+    rankOf: (id) => items.get(id)?.order ?? Number.MAX_SAFE_INTEGER,
+  };
   const cells: Record<string, WorkbookCellView> = {};
   for (const period of periods) {
     const source = period.cls === "forecast" ? item.forecast : item.historical;
     const key = cellKey(lineItemId, period.id);
     const cell = snapshot.cells.get(key);
     if (source === "none") {
-      cells[period.id] = { value: null, status: "not_modeled", source: { kind: "none" }, diagnostics: [] };
+      cells[period.id] = { value: null, status: "not_modeled", source: { kind: "none" }, diagnostics: [], dependencies: [] };
       continue;
     }
     const diagnostics = structuredClone(cell?.diagnostics ?? [{ code: "missing_input" as const, refs: [key] }]);
     cells[period.id] = {
       value: cell?.value ?? null, status: cellStatus(cell?.value ?? null, diagnostics),
       source: cellSource(snapshot, lineItemId, period.id, source), diagnostics,
+      dependencies: formulaDependencies(snapshot, lineItemId, period.id, source, graph),
     };
   }
   return cells;
+}
+
+function formulaDependencies(
+  snapshot: FinancialModelSnapshot,
+  lineItemId: string,
+  periodId: string,
+  source: CellSource,
+  graph: GraphContext,
+): WorkbookCellDependency[] {
+  if (source !== "formula") return [];
+  const formula = snapshot.compiledFormulas.find((candidate) =>
+    candidate.lineItemId === lineItemId
+    && coverage(snapshot, candidate.appliesTo, candidate.periodIds).includes(periodId));
+  if (!formula) return [];
+  return [...new Set(dependenciesOf(formula.ast, lineItemId, periodId, graph))]
+    .map(splitCellKey)
+    .map(({ lineItemId: dependencyId, periodId: dependencyPeriodId }) => ({
+      lineItemId: dependencyId, periodId: dependencyPeriodId,
+    }));
 }
 
 function cellSource(snapshot: FinancialModelSnapshot, lineItemId: string, periodId: string, source: CellSource): WorkbookCellSource {

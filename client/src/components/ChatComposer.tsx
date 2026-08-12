@@ -13,6 +13,8 @@ interface ChatComposerProps {
     input: string;
     isProcessing: boolean;
     isDisabled?: boolean;
+    /** A replay keeps the standard composer visible but cannot dispatch. */
+    readOnly?: boolean;
     isAtBottom: boolean;
     onInputChange: (value: string) => void;
     onSend: () => void;
@@ -25,6 +27,7 @@ export function ChatComposer({
     input,
     isProcessing,
     isDisabled = false,
+    readOnly = false,
     isAtBottom,
     onInputChange,
     onSend,
@@ -104,7 +107,7 @@ export function ChatComposer({
                             <form
                                 onSubmit={(e) => {
                                     e.preventDefault();
-                                    if (isDisabled) return;
+                                    if (isDisabled || readOnly) return;
                                     onSend();
                                 }}
                                 className={cn(
@@ -123,13 +126,16 @@ export function ChatComposer({
                                     value={input}
                                     onChange={(e) => onInputChange(e.target.value)}
                                     placeholder={t("chat.inputPlaceholder")}
+                                    disabled={isDisabled || readOnly}
                                     className="min-h-10 resize-none rounded-md bg-transparent border-0 py-1 pl-2 pr-0.5 mt-2 shadow-none focus-visible:ring-0"
                                 />
                                 <div className="flex items-center p-1.5 pt-0">
-                                    <AudioRecorder
-                                        agentId={agentId}
-                                        onChange={(newInput) => onInputChange(newInput)}
-                                    />
+                                    {!readOnly && (
+                                        <AudioRecorder
+                                            agentId={agentId}
+                                            onChange={(newInput) => onInputChange(newInput)}
+                                        />
+                                    )}
                                     <div className="ml-auto flex items-center gap-1.5">
                                         {isProcessing ? (
                                             <Tooltip>
@@ -153,7 +159,7 @@ export function ChatComposer({
                                             <Button
                                                 type="submit"
                                                 size="sm"
-                                                disabled={!input.trim() || isDisabled}
+                                                disabled={!input.trim() || isDisabled || readOnly}
                                                 className="gap-0.5 h-[30px]"
                                             >
                                                 {t("common.sendMessage")}

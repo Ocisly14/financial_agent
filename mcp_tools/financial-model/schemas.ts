@@ -47,7 +47,10 @@ const operationVariants: JsonSchema[] = [
   object({ kind: { type: "string", enum: ["set_line_item_source"] }, lineItemId: string(), range: { type: "string", enum: ["historical", "forecast"] },
     source: { type: "string", enum: ["actual", "assumption", "formula", "none"] } }, ["kind", "lineItemId", "range", "source"]),
   object({ kind: { type: "string", enum: ["add_line_item"] }, lineItem: object({ id: string(), label: string(),
-    parentId: { type: "string", enum: ["revenue", "cost_of_revenue", "operating_expenses", "total_current_assets", "total_current_liabilities", "operating_working_capital", "custom_metrics"] }, unit: unitSchema },
+    // Parent eligibility is semantic, not a fixed enum: a committed revenue stream may safely own
+    // its disclosed economics (for example Product Revenue → Product Gross Profit). The engine
+    // validates the supplied id against the skeleton, so do not make the tool schema narrower.
+    parentId: string("A permitted DCF parent, including an existing revenue stream or custom_metrics"), unit: unitSchema },
   ["id", "label", "parentId"]) }, ["kind", "lineItem"]),
   object({ kind: { type: "string", enum: ["add_metric"] }, metric: object({ registryId: { type: "string", enum: ["cagr"] },
     targetLineItemId: string(), lookbackPeriods: number }, ["registryId", "targetLineItemId", "lookbackPeriods"]) }, ["kind", "metric"]),

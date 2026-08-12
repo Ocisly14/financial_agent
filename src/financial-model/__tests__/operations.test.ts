@@ -191,6 +191,18 @@ test("add_line_item creates a revenue row and companion driver atomically", () =
   assert.equal(next.formulas.some((formula) => formula.lineItemId === "revenue.services"), false);
 });
 
+test("a committed revenue stream can own its gross-profit detail", () => {
+  const base = snapshot({ disclosures: true });
+  const next = applyModelOperations(base, [{
+    kind: "add_line_item",
+    lineItem: { parentId: "revenue.products", id: "gross_profit", label: "Products gross profit" },
+  } as unknown as ModelOperation]);
+
+  const detail = next.lineItems.find((item) => item.id === "revenue.products.gross_profit");
+  assert.equal(detail?.parentId, "revenue.products");
+  assert.deepEqual(detail?.unit, { kind: "currency", code: "USD" });
+});
+
 test("add_metric derives a registered CAGR definition", () => {
   const next = applyModelOperations(snapshot(), [{
     kind: "add_metric", metric: { registryId: "cagr", targetLineItemId: "revenue.total", lookbackPeriods: 4 },

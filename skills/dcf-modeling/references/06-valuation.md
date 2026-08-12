@@ -8,6 +8,8 @@ The terminal value asserts the company has reached steady state forever. Treat i
 
 - **terminal_growth**: hard ceiling — long-run nominal GDP growth; nothing outgrows the economy forever. Below that, justify the number from your final-year trajectory: the explicit years should glide into it, not cliff (check `YOY(fcff)` in the last forecast years).
 - **exit_multiple**: read off a comparable set — the section below is how. The engine computes both methods side by side, so also read your multiple against what your own growth assumption implies (the terminal value it produces, over final-year ebitda). A large gap between the two is a claim about what changes after the horizon — make it deliberately, or shrink it.
+- **method coherence**: perpetuity growth and the exit multiple must describe compatible terminal economics. If they produce materially different enterprise or per-share values, identify the long-run growth, return, margin, or multiple claim causing the divergence. Keep them as separately labelled scenarios; never average them or alter an input merely to make either result match the market price.
+- **company before convention**: GDP ceilings, peer multiples and market norms only test the terminal case. The central terminal claim comes from the issuer's own final-year mix, competitive position, reinvestment needs, margins and durable strategy after the explicit forecast; explain why those economics can or cannot persist.
 - Set both with set_assumption (they are dcf-section assumption rows), each with rationale.
 
 ## exit_multiple — read it off comparables, not off this issuer
@@ -36,7 +38,9 @@ What each one costs you: mid_year shifts discount periods by half a year (and YE
 
 The lifecycle stage is a reading the engine derives after every mutation, never something you advance: committed history reads as history_committed, forecast revenue.total cells as revenue_forecast, a closed forecast fcff chain as operations_fcff, and the moment the wacc row, your terminal assumptions, and the three valuationConfig judgments all exist the valuation computes and the model reads as valued. If the stage is lower than you expect, some input is missing — read the workbook (a null fcff cell names its broken input; the WACC sheet names its missing rows; a null in valuationConfig names the judgment still owed) and fill the named thing.
 
-The equity bridge demands a numeric value at the anchor for every bridge row (cash available, non-operating investments, debt, leases, preferred, NCI). A row the issuer simply lacks must be handled explicitly, not left null: construct it from mapped rows where honest (`set_formula` historical: `cash_available_for_bridge = cash_and_equivalents + short_term_investments`) and zero the truly absent ones (`set_formula` source `0`, rationale saying the issuer reports none). The host derives the formula source from the write. `incomplete_equity_bridge` names exactly which row is missing.
+The equity bridge demands a numeric value at the anchor for every bridge row (cash available, non-operating investments, debt, leases, preferred, NCI). A row the issuer simply lacks must be handled explicitly, not left null: construct it from mapped rows where honest (`set_formula` historical: `cash_available_for_bridge = cash_and_equivalents + short_term_investments`) and zero only a genuinely absent obligation (`set_formula` source `0`, rationale citing that absence). The host derives the formula source from the write. `incomplete_equity_bridge` names exactly which row is missing.
+
+**Lease treatment is a classification decision.** Read the filing's lease note before writing `lease_liabilities`. If operating lease expense remains in operating costs and the FCFF chain has not been normalized to add it back, subtracting the operating-lease liability in the bridge would double count it. Finance-lease debt, however, must be included in debt or the lease bridge row unless it is already included in the committed debt amount. Record which treatment applies and why; never use zero merely because the face balance sheet aggregates lease liabilities into another caption.
 
 The valuation output carries: enterprise value, the terminal value and its share of EV (a terminal share above ~80% means your explicit years barely matter — say so), the equity bridge line by line, per-share value against diluted shares, and the sensitivity grid over your deltas.
 
@@ -48,7 +52,9 @@ Put the forecast on trial against your own Move-2 sentences (toolbox §4 has the
 - margin drift over the forecast vs every "persists" claim;
 - terminal-year reinvestment (capex/D&A ≈ 1 in steady state) and growth-vs-ROIC×reinvestment consistency;
 - final-year fcff growth vs terminal_growth continuity.
+- perpetuity-growth versus exit-multiple result: a material gap is an explicit scenario distinction, not noise to average away;
+- implied per-share value versus the anchor-date market price already present in the WACC sheet: investigate a material difference through forecast, WACC, terminal and bridge inputs, but do not reverse-engineer assumptions to close it.
 
 ## The verdict
 
-Report: intrinsic value and per-share value; the market context if you have it; the terminal share of EV; the **three load-bearing assumptions** with their Move-2 rationales (read the sensitivity grid to find which axis moves the answer most — that is what the valuation is really exposed to); the model_id and revision. A DCF without its assumptions is not a result — the number is the least interesting line of the report.
+Report: intrinsic value and per-share value; the market context if you have it; the terminal share of EV; whether the two terminal methods are coherent or deliberately separate; the **three load-bearing assumptions** with their Move-2 rationales (read the sensitivity grid to find which axis moves the answer most — that is what the valuation is really exposed to); the model_id and revision. A DCF without its assumptions is not a result — the number is the least interesting line of the report.

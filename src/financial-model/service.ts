@@ -40,6 +40,7 @@ import type {
 import { calculateValuation, validateValuationConfig } from "./valuation.ts";
 import { applyComputedWaccInputs, createWaccSheet, recalculateWaccSheet, type WaccSheetComputedInput } from "./waccSheet.ts";
 import type { JsonObject } from "../framework/types.ts";
+import type { UnifiedStatementsArtifact } from "../infra/xbrl/unifiedStatements.ts";
 import {
   buildModelContextView,
   buildWorkbookSlice,
@@ -102,6 +103,9 @@ export type ViewOptions = {
    *  a slice — it widens the full context view, so it is deliberately excluded
    *  from the `targeted` test below. */
   includeSourceStatements?: boolean;
+  /** Used by the human HTTP read to render statement_unification's complete
+   * face statements; ordinary agent reads remain snapshot-only. */
+  unifiedStatements?: UnifiedStatementsArtifact;
 };
 
 const SECTION_ORDER: readonly ModelReadSection[] = MODEL_READ_SECTIONS;
@@ -387,7 +391,10 @@ export class FinancialModelService {
       meta,
       this.store.listRevisionHeaders(modelId),
       current,
-      { includeSourceStatements: options.includeSourceStatements ?? false },
+      {
+        includeSourceStatements: options.includeSourceStatements ?? false,
+        ...(options.unifiedStatements ? { unifiedStatements: options.unifiedStatements } : {}),
+      },
     );
   }
 
