@@ -9,14 +9,19 @@
 //   step2-unified-statements.json  — { decision, artifact } (rows, values, facts, restatements, roll-up breaks)
 import { resolveLlmProvider } from "../../../src/agent/createApp.ts";
 import { runStatementUnificationAgent } from "../../../src/agent/financial-modeling/statementUnificationAgent.ts";
-import { DcfSubagentRegistry } from "../../../src/agent/financial-modeling/subagents.ts";
+import { subagentTool } from "../../../mcp_tools/financial-model/mappingSubagentTools.ts";
+import { McpToolRegistry } from "../../../mcp_tools/toolRegistry.ts";
+import { SkillRegistry } from "../../../src/framework/skill.ts";
+import { SessionState } from "../../../src/framework/sessionState.ts";
+import { SubagentRuntime } from "../../../src/framework/subagent.ts";
+import { createSubagentRegistry } from "../../../src/agent/subagents/registerSubagents.ts";
+import type { JsonObject, JsonValue } from "../../../src/framework/types.ts";
 import type { Period } from "../../../src/financial-model/types.ts";
 import { ModelRouter } from "../../../src/infra/llm/provider.ts";
 import { buildConceptInventory } from "../../../src/infra/xbrl/conceptInventory.ts";
 import type { ArelleExtractionResponse } from "../../../src/infra/xbrl/types.ts";
 import type { ResolvedFinancialModelSource } from "../../../src/infra/xbrl/preparedStatementProvider.ts";
 import { buildAxisBreakdown, buildAxisCatalog } from "../../../src/infra/xbrl/dimensionInventory.ts";
-import type { LoopTool } from "../../../mcp_tools/financial-model/mappingSubagentTools.ts";
 import { fileLoader, outputDirectory, readStep, symbol, writeStep } from "./common.ts";
 
 const source = readStep<ResolvedFinancialModelSource>("step1-source.json");
@@ -31,36 +36,41 @@ console.log(`\nConcept inventory: ${inventory.length} rows (${inventoryPath})`);
 
 // E2E_MAX_RUNS=1 spends exactly one LLM call and ships whatever it produced, findings and all —
 // the way to read what the agent actually decided instead of what it converged to after retries.
-const maxRuns = Number(process.env["E2E_MAX_RUNS"] ?? 3);
-console.log(`Unification runs allowed: ${maxRuns}`);
 
 // Same dimension tools production wires through the table store, here fed from step1's extraction
 // (FilingExtraction carries every table), so this run exercises the exploration loop for real.
 const tables = extraction.filings.flatMap((filing) => filing.tables ?? []);
 console.log(`Dimension exploration over ${tables.length} table(s)`);
-const tools = fileLoader("load_concept_inventory", { symbol, requestedPeriods: requestedPeriods.map((p) => p.id) });
-const dimensionTool = (name: string, execute: LoopTool["execute"]): void => {
-  tools.set(name, { name, category: "non_trading", description: name,
-    inputSchema: { type: "object", properties: {}, additionalProperties: true },
-    execute: (input) => { console.log(`  [explore] ${name}(${JSON.stringify(input)})`); return execute(input); } });
+const readTools = fileLoader("load_concept_inventory", { symbol, requestedPeriods: requestedPeriods.map((p) => p.id) });
+const dimensionTool = (name: string, body: (input: JsonObject) => JsonValue): void => {
+  readTools.push(subagentTool({ name, category: "non_trading", description: name,
+    inputSchema: { type: "object", properties: {}, additionalProperties: true } },
+    (input) => { console.log(`  [explore] ${name}(${JSON.stringify(input)})`); return body(input); }));
 };
 dimensionTool("list_dimension_axes", () =>
-  ({ symbol, axes: buildAxisCatalog({ tables, requestedPeriods }) }) as never);
+  ({ symbol, axes: buildAxisCatalog({ tables, requestedPeriods }) }) as JsonValue);
 dimensionTool("get_axis_breakdown", (input) =>
   ({ symbol, ...buildAxisBreakdown({ tables, requestedPeriods,
     axisQName: String(input["axisQName"]), conceptQName: String(input["conceptQName"]),
     ...(typeof input["memberFilter"] === "string" ? { memberFilter: input["memberFilter"] } : {}),
-    ...(typeof input["cursor"] === "number" ? { cursor: input["cursor"] } : {}) }) }) as never);
+    ...(typeof input["cursor"] === "number" ? { cursor: input["cursor"] } : {}) }) }) as JsonValue);
+
+// The same runtime production uses; the agent decides its own sequence from its skill.
+const skills = new SkillRegistry();
+await skills.loadFromDirectory("skills");
+const subagents = createSubagentRegistry();
+const state = new SessionState("e2e-unify", new Date().toISOString());
+state.beginTurn("step2");
 
 const run = await runStatementUnificationAgent({
-  modelRouter: new ModelRouter(resolveLlmProvider()),
-  systemPrompt: new DcfSubagentRegistry().get("statement_unification").prompt,
+  subagentRuntime: new SubagentRuntime(new ModelRouter(resolveLlmProvider()), new McpToolRegistry(), skills),
+  definition: subagents.get("statement_unification"),
+  state, sessionId: "e2e-unify", agentId: "e2e-agent",
   task: `Unify ${symbol}'s extracted filings into multi-year statements.`,
-  tools,
+  readTools,
   filings: extraction.filings,
   requestedPeriods,
   tables,
-  maxRuns,
 });
 const unified = run.artifact;
 

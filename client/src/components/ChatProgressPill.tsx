@@ -1,13 +1,26 @@
 import { useEffect, useState } from "react";
-import { Loader2, CheckCircle, Circle, XCircle, ChevronDown, ChevronRight, Database, Newspaper, ChartNoAxesCombined } from "lucide-react";
+import { Loader2, CheckCircle, Circle, XCircle, ChevronDown, ChevronRight, Database, Newspaper, ChartNoAxesCombined, Calculator } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { threadGroups } from "@/lib/progressThreads";
 
-export type ProgressAgent = "market_data" | "market_research" | "trading_operations";
+export type ProgressAgent = "market_data" | "market_research" | "trading_operations" | "financial_modeling";
+
+const PROGRESS_AGENTS = ["market_data", "market_research", "trading_operations", "financial_modeling"] as const;
+
+/** The dispatch frame's `agent` is a bare string; only these get their own
+ *  group in the pill, the rest fall into "Other". */
+export function isProgressAgent(agent: string | undefined): agent is ProgressAgent {
+    return PROGRESS_AGENTS.includes(agent as ProgressAgent);
+}
 
 export interface ProgressTask {
     taskId: string;
     description: string;
     agent?: ProgressAgent;
+    /** The subagent conversation this task is a round of. Several tasks sharing
+     *  one id are one continuing piece of work, not unrelated siblings. Absent
+     *  on history recorded before threads existed. */
+    threadId?: string;
     tool?: string;
     status: "in_progress" | "completed" | "error";
     summary?: string;
@@ -42,10 +55,15 @@ const agentMeta: Record<ProgressAgent, { label: string; icon: typeof Database; i
         icon: ChartNoAxesCombined,
         iconClassName: "text-amber-600 dark:text-amber-300",
     },
+    financial_modeling: {
+        label: "DCF modeling agent",
+        icon: Calculator,
+        iconClassName: "text-emerald-600 dark:text-emerald-300",
+    },
 };
 
 function uniqueAgents(tasks: ProgressTask[]) {
-    return (["market_data", "market_research", "trading_operations"] as const).filter((agent) => tasks.some((task) => task.agent === agent));
+    return PROGRESS_AGENTS.filter((agent) => tasks.some((task) => task.agent === agent));
 }
 
 function taskGroups(tasks: ProgressTask[], agents: ProgressAgent[]): Array<ProgressAgent | "uncategorized"> {
@@ -154,11 +172,37 @@ export function ChatProgressPill({ tasks, isComplete }: { tasks: ProgressTask[];
                     </div>
 
                     <div className="space-y-1">
-                        {selectedTasks.map((t) => (
-                            <div key={t.taskId} className="flex items-start gap-2 py-1">
-                                <span className="mt-0.5 flex-shrink-0">{statusIcon(t.status)}</span>
-                                <div className="min-w-0">
-                                    <div className="text-foreground/90">{t.description || t.taskId}</div>
+                        {threadGroups(selectedTasks).map((group) => (
+                            <div
+                                key={group.key}
+                                // The rule is the grouping: it says "these rounds
+                                // are one conversation" without spending a line
+                                // on a header when there is only one.
+                                className={cn(group.badge && "border-l border-sep pl-2")}
+                            >
+                                {group.badge && (
+                                    <div className="pb-0.5 pt-1 text-[10px] font-medium tabular-nums text-muted-foreground/70">
+                                        {group.badge}
+                                    </div>
+                                )}
+                                <div className="space-y-1">
+                                    {group.tasks.map((t) => (
+                                        <div key={t.taskId} className="flex items-start gap-2 py-1">
+                                            <span className="mt-0.5 flex-shrink-0">{statusIcon(t.status)}</span>
+                                            <div className="min-w-0">
+                                                <div className="text-foreground/90">{t.description || t.taskId}</div>
+                                                {/* The task names the row; the tool and the
+                                                    result are detail under it. Kept on one
+                                                    truncating line so a long tool argument
+                                                    can't push the next task off the list. */}
+                                                {(t.tool || t.summary) && (
+                                                    <div className="truncate text-[11px] text-muted-foreground">
+                                                        {[t.tool, t.summary].filter(Boolean).join(" · ")}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    ))}
                                 </div>
                             </div>
                         ))}

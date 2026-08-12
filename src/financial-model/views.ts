@@ -1,18 +1,29 @@
-import { cellKey, type CellKey } from "./dsl/graph.ts";
+import { cellKey, dependenciesOf, splitCellKey, type CellKey, type GraphContext } from "./dsl/graph.ts";
 import { FinancialModelError } from "./errors.ts";
 import type { FinancialModelSnapshot, ModelSelector } from "./operations.ts";
 import type { ModelView, Revision, RevisionHeader } from "./store.ts";
 import type { ValuationOutput } from "./valuation.ts";
+import { buildGrid } from "./periodGrid.ts";
 import { WACC_SHEET_ROW_IDS, type WaccSheet, type WaccSheetAnyRowId, type WaccSheetRowId } from "./waccSheet.ts";
 import type {
   Assumption, CellSource, DcfCategoryGroup, Diagnostic, LifecycleStage, LineItemRole, Period,
   ReconciliationResult, Unit, ValuationConfig,
 } from "./types.ts";
 import type { JsonObject } from "../framework/types.ts";
+import type { UnifiedStatementsArtifact } from "../infra/xbrl/unifiedStatements.ts";
 
-export type DcfWorkbookSection = "history" | "metrics" | "revenue" | "operations" | "dcf";
-export type ModelReadSection = DcfWorkbookSection |
-  "source_income_statement" | "source_balance_sheet" | "source_cash_flow";
+export const DCF_WORKBOOK_SECTIONS = ["history", "metrics", "revenue", "operations", "dcf"] as const;
+/**
+ * Readable in the order a workbook is read. One runtime list rather than a type alone, because the
+ * names have to reach the agent: a section is chosen by a tool argument, and a schema that says only
+ * `string` leaves the caller guessing at names it can see everywhere else in its own output —
+ * `income_statement` and `balance_sheet` are the natural guesses, and both are wrong here.
+ */
+export const MODEL_READ_SECTIONS = [...DCF_WORKBOOK_SECTIONS,
+  "source_income_statement", "source_balance_sheet", "source_cash_flow"] as const;
+
+export type DcfWorkbookSection = typeof DCF_WORKBOOK_SECTIONS[number];
+export type ModelReadSection = typeof MODEL_READ_SECTIONS[number];
 
 export type RevisionChange =
   | { kind: "model_created" }
@@ -53,7 +64,14 @@ export type WorkbookCellSource =
   | { kind: "formula"; definitionIndex: number }
   | { kind: "calculated"; output: string }
   | { kind: "none" };
-export type WorkbookCellView = { value: number | null; status: WorkbookCellStatus; source: WorkbookCellSource; diagnostics: Diagnostic[] };
+/** Exact workbook coordinates a formula reads for this period.  Keeping these
+ * as coordinates — rather than only IDs parsed again by the UI — preserves
+ * LAG/YOY/window semantics for cell-inspector highlighting. */
+export type WorkbookCellDependency = { lineItemId: string; periodId: string };
+export type WorkbookCellView = {
+  value: number | null; status: WorkbookCellStatus; source: WorkbookCellSource;
+  diagnostics: Diagnostic[]; dependencies: WorkbookCellDependency[];
+};
 
 export type WorkbookRowView = {
   lineItemId: string; label: string; parentId?: string; section: DcfWorkbookSection;
@@ -109,7 +127,13 @@ export type HistoricalDcfCompletenessView = {
   }>;
 };
 
-export type WorkbookViewOptions = { includeSourceStatements?: boolean };
+export type WorkbookViewOptions = {
+  includeSourceStatements?: boolean;
+  /** The human-facing HTTP read supplies this external artifact so the three
+   * source tabs show statement_unification's reconciled, multi-year rows.
+   * Agent reads intentionally omit it to keep their workbook context small. */
+  unifiedStatements?: UnifiedStatementsArtifact;
+};
 
 const DCF_SECTIONS: readonly DcfWorkbookSection[] = ["history", "metrics", "revenue", "operations", "dcf"];
 const PUBLIC_WACC_ROW_IDS: ReadonlySet<string> = new Set(WACC_SHEET_ROW_IDS);
@@ -168,7 +192,7 @@ export function buildWorkbookView(
   return {
     ...base,
     mode: "statement_mapping",
-    sourceStatementReview: buildSourceReview(snapshot),
+    sourceStatementReview: buildSourceReview(snapshot, options.unifiedStatements),
   };
 }
 
@@ -221,6 +245,12 @@ export function buildModelContextView(
   meta: ModelView,
   headers: RevisionHeader<RevisionChangeSummary>[],
   current: Revision<FinancialModelSnapshot, RevisionChangeSummary>,
+  /** Forwarded to the workbook builder. The only caller that passes anything is
+   *  the HTTP read path, which asks for the source statements unconditionally:
+   *  a reader wants the three as-filed statements available at any lifecycle
+   *  stage, not only while the spine is still unmapped. The agent's own reads
+   *  leave this empty and keep the narrower, cheaper view. */
+  options: WorkbookViewOptions = {},
 ): ModelContextView {
   if (headers.length === 0 || current.modelId !== meta.modelId || current.revision !== meta.currentRevision) {
     queryError("model context current revision is inconsistent");
@@ -251,7 +281,7 @@ export function buildModelContextView(
   return {
     model: structuredClone(meta),
     revisionHistory: headers.slice(0, -1).map(toRevisionSummary),
-    currentWorkbook: buildWorkbookView(current.modelId, current.revision, current.snapshot),
+    currentWorkbook: buildWorkbookView(current.modelId, current.revision, current.snapshot, options),
   };
 }
 
@@ -303,7 +333,11 @@ function buildSourceRow(snapshot: FinancialModelSnapshot, id: string, periods = 
   return { sourceLineItemId: id, label: item.label, unit: structuredClone(item.unit), cells: buildCells(snapshot, id, periods) };
 }
 
-function buildSourceReview(snapshot: FinancialModelSnapshot): SourceStatementReviewView {
+function buildSourceReview(
+  snapshot: FinancialModelSnapshot,
+  unifiedStatements?: UnifiedStatementsArtifact,
+): SourceStatementReviewView {
+  if (unifiedStatements) return buildUnifiedSourceReview(snapshot, unifiedStatements);
   const sheet = (section: string) => orderedItems(snapshot)
     .filter((row) => row.section === section)
     .map((row) => buildSourceRow(snapshot, row.id, snapshot.periods));
@@ -317,24 +351,95 @@ function buildSourceReview(snapshot: FinancialModelSnapshot): SourceStatementRev
   };
 }
 
+/**
+ * statement_unification preserves the issuer's full face-statement structure
+ * outside the DCF snapshot.  The browser should read those unified rows — not
+ * the smaller, pre-unification staging list — once they exist.  Each value is
+ * still tied to its materialized unified fact, so the regular cell-inspector
+ * provenance continues to work without giving the UI a second data model.
+ */
+function buildUnifiedSourceReview(
+  snapshot: FinancialModelSnapshot,
+  unified: UnifiedStatementsArtifact,
+): SourceStatementReviewView {
+  const availablePeriods = new Set(unified.periods);
+  const selectedPeriodIds = snapshot.periods
+    .filter((period) => period.cls !== "forecast" && availablePeriods.has(period.id))
+    .map((period) => period.id);
+  const factByCell = new Map<string, FinancialModelSnapshot["facts"][number]>();
+  for (const fact of unified.facts) {
+    if (fact.lineItemId !== undefined) factByCell.set(cellKey(fact.lineItemId, fact.periodId), fact);
+  }
+  const sheets: SourceStatementReviewView["sheets"] = {
+    income_statement: [], balance_sheet: [], cash_flow_statement: [],
+  };
+
+  for (const row of unified.rows) {
+    const sourceLineItemId = `unified.${row.statement}.${row.rowId}`;
+    const unit = unified.facts.find((fact) => fact.lineItemId === sourceLineItemId)?.unit ?? { kind: "number" as const };
+    sheets[row.statement].push({
+      sourceLineItemId,
+      label: row.label,
+      unit: structuredClone(unit),
+      cells: Object.fromEntries(selectedPeriodIds.map((periodId) => {
+        const value = row.values[periodId] ?? null;
+        const fact = factByCell.get(cellKey(sourceLineItemId, periodId));
+        return [periodId, {
+          value,
+          status: value === null ? "not_applicable" as const : "ok" as const,
+          source: fact ? { kind: "fact" as const, factId: fact.factId } : { kind: "none" as const },
+          diagnostics: [],
+          dependencies: [],
+        }];
+      })),
+    });
+  }
+  return { selectedPeriodIds, sheets, reconciliations: structuredClone(snapshot.reconciliationResults) };
+}
+
 function buildCells(snapshot: FinancialModelSnapshot, lineItemId: string, periods: readonly Period[]): Record<string, WorkbookCellView> {
   const item = snapshot.lineItems.find((row) => row.id === lineItemId)!;
+  const items = new Map(snapshot.lineItems.map((candidate) => [candidate.id, candidate]));
+  const graph: GraphContext = {
+    grid: buildGrid(snapshot.periods), valuationAnchorPeriodId: snapshot.valuationConfig.anchorPeriodId,
+    rankOf: (id) => items.get(id)?.order ?? Number.MAX_SAFE_INTEGER,
+  };
   const cells: Record<string, WorkbookCellView> = {};
   for (const period of periods) {
     const source = period.cls === "forecast" ? item.forecast : item.historical;
     const key = cellKey(lineItemId, period.id);
     const cell = snapshot.cells.get(key);
     if (source === "none") {
-      cells[period.id] = { value: null, status: "not_modeled", source: { kind: "none" }, diagnostics: [] };
+      cells[period.id] = { value: null, status: "not_modeled", source: { kind: "none" }, diagnostics: [], dependencies: [] };
       continue;
     }
     const diagnostics = structuredClone(cell?.diagnostics ?? [{ code: "missing_input" as const, refs: [key] }]);
     cells[period.id] = {
       value: cell?.value ?? null, status: cellStatus(cell?.value ?? null, diagnostics),
       source: cellSource(snapshot, lineItemId, period.id, source), diagnostics,
+      dependencies: formulaDependencies(snapshot, lineItemId, period.id, source, graph),
     };
   }
   return cells;
+}
+
+function formulaDependencies(
+  snapshot: FinancialModelSnapshot,
+  lineItemId: string,
+  periodId: string,
+  source: CellSource,
+  graph: GraphContext,
+): WorkbookCellDependency[] {
+  if (source !== "formula") return [];
+  const formula = snapshot.compiledFormulas.find((candidate) =>
+    candidate.lineItemId === lineItemId
+    && coverage(snapshot, candidate.appliesTo, candidate.periodIds).includes(periodId));
+  if (!formula) return [];
+  return [...new Set(dependenciesOf(formula.ast, lineItemId, periodId, graph))]
+    .map(splitCellKey)
+    .map(({ lineItemId: dependencyId, periodId: dependencyPeriodId }) => ({
+      lineItemId: dependencyId, periodId: dependencyPeriodId,
+    }));
 }
 
 function cellSource(snapshot: FinancialModelSnapshot, lineItemId: string, periodId: string, source: CellSource): WorkbookCellSource {
@@ -387,11 +492,44 @@ function validateSelector(snapshot: FinancialModelSnapshot, selector: ModelSelec
   if (selector.parentId !== undefined && !itemIds.has(selector.parentId)) {
     queryError(`unknown parent line item: ${selector.parentId}`);
   }
-  const sections = new Set<ModelReadSection>([
-    "history", "metrics", "revenue", "operations", "dcf",
-    "source_income_statement", "source_balance_sheet", "source_cash_flow",
-  ]);
-  if (selector.section !== undefined && !sections.has(selector.section)) queryError(`unknown section: ${String(selector.section)}`);
+  const sections = new Set<string>(MODEL_READ_SECTIONS);
+  if (selector.section !== undefined && !sections.has(selector.section)) {
+    queryError(`unknown section: ${String(selector.section)} (one of: ${MODEL_READ_SECTIONS.join(", ")})`);
+  }
+  // Exact row/cell names are promises, not exploratory filters.  A contradictory structural
+  // filter used to return an apparently successful empty slice, which leaves an agent unable to
+  // distinguish a typo from a row it should read from another scope.
+  // `cellRefs` deliberately compose as coordinates: callers can provide a handful of candidate
+  // cells and then narrow them with periods or a role.  Only named *rows* promise a row match.
+  const requestedIds = [...new Set(selector.lineItemIds ?? [])];
+  const requestedItems = requestedIds.map((id) => snapshot.lineItems.find((item) => item.id === id)!);
+  if (selector.section !== undefined) {
+    const mismatches = requestedItems.filter((item) => item.section !== selector.section)
+      .map((item) => `${item.id} (section ${item.section})`);
+    if (mismatches.length > 0) queryError(`requested row(s) are outside section ${selector.section}: ${mismatches.join(", ")}. `
+      + "Read their named section(s), or omit section when reading rows across sections.");
+  }
+  if (selector.parentId !== undefined) {
+    const mismatches = requestedItems.filter((item) => item.parentId !== selector.parentId)
+      .map((item) => `${item.id} (parent ${item.parentId ?? "none"})`);
+    if (mismatches.length > 0) queryError(`requested row(s) are not children of ${selector.parentId}: ${mismatches.join(", ")}. `
+      + "Read those rows without parentId, or use their actual parent.");
+  }
+  if (selector.role !== undefined) {
+    const mismatches = requestedItems.filter((item) => item.role !== selector.role)
+      .map((item) => `${item.id} (role ${item.role})`);
+    if (mismatches.length > 0) queryError(`requested row(s) do not have role ${selector.role}: ${mismatches.join(", ")}. `
+      + "Read those rows without role, or use their actual role.");
+  }
+  if (selector.periodClass !== undefined) {
+    const requestedPeriodIds = [...new Set(selector.periodIds ?? [])];
+    const mismatches = requestedPeriodIds.flatMap((id) => {
+      const period = snapshot.periods.find((candidate) => candidate.id === id)!;
+      return period.cls !== selector.periodClass ? [`${id} (${period.cls})`] : [];
+    });
+    if (mismatches.length > 0) queryError(`requested period(s) are outside periodClass ${selector.periodClass}: ${mismatches.join(", ")}. `
+      + "Use their actual period class, or omit periodClass.");
+  }
   const roles = new Set(snapshot.lineItems.map((item) => item.role));
   if (selector.role !== undefined && !roles.has(selector.role)) queryError(`unknown role: ${String(selector.role)}`);
   if (selector.periodClass !== undefined && !new Set(["actual", "ttm", "forecast"]).has(selector.periodClass)) {

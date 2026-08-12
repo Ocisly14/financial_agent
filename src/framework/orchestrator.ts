@@ -3,7 +3,7 @@ import type { SkillRegistry } from "./skill.ts";
 import type { Dispatcher } from "./dispatcher.ts";
 import type { SubagentRegistry } from "./subagent.ts";
 import type { ModelRouter } from "../infra/llm/provider.ts";
-import type { SessionRegistry, SessionState } from "./sessionState.ts";
+import type { LiveThread, SessionRegistry, SessionState } from "./sessionState.ts";
 import { maybeCompact } from "./contextCompaction.ts";
 import type { McpToolRegistry } from "../../mcp_tools/toolRegistry.ts";
 import type { PromptTemplate } from "./prompt.ts";
@@ -170,6 +170,20 @@ export type OrchestratorResult = {
 /** Tools the orchestrator can call directly (by name). */
 const ORCHESTRATOR_DIRECT_TOOLS = new Set<string>(["read_skill_reference", "run_skill_script", "ask_user"]);
 
+/** How many subagent threads to show the orchestrator. Older ones are almost
+ *  never what it wants to continue, and each line costs context. */
+const MAX_LISTED_THREADS = 8;
+
+/** The subagent conversations this topic has, most recently active last. */
+function formatThreads(threads: LiveThread[]): string {
+  if (threads.length === 0) return "(none yet — any dispatch you write now opens a new thread)";
+  return threads.slice(-MAX_LISTED_THREADS).map((t) => {
+    const rounds = `${t.rounds} round${t.rounds === 1 ? "" : "s"}`;
+    const summary = t.last_summary ? ` — last result: ${t.last_summary.slice(0, 300)}` : "";
+    return `- ${t.thread_id} (${t.agent}, ${rounds}, status=${t.status}) last task: ${t.last_task}${summary}`;
+  }).join("\n");
+}
+
 function normalizeToolError(output: { summary: string; error?: { code: string; message: string } }): { code: string; message: string } | undefined {
   if (output.error) return output.error;
   const summary = output.summary.trim();
@@ -217,6 +231,9 @@ export class OrchestratorRuntime {
     await maybeCompact(state, this.modelRouter, turn);
 
     const dispatcher = this.dispatcherFactory(input.sessionId, input.agentId);
+    // The same rule the orchestrator applies to its own ask_user below, pushed
+    // down to the subagents it dispatches: no human on this stream, no asking.
+    dispatcher.setUserInputAllowed(input.allowUserInput !== false);
     const validAgents = new Set(this.subagents.list().map((agent) => agent.name));
     const validSkills = new Set(this.skills.list().map((skill) => skill.name));
 
@@ -236,6 +253,7 @@ export class OrchestratorRuntime {
         currentDate: new Date().toISOString().slice(0, 10),
         userMessage: input.userMessage,
         history,
+        threads: formatThreads(state.liveThreads()),
         subagents: formatList(this.subagents.list().map((a) => ({ name: a.name, description: a.description }))),
         skills: formatList(this.skills.list().map((s) => ({ name: s.name, description: s.description }))),
         tools: formatList(this.tools.list()
@@ -302,6 +320,7 @@ export class OrchestratorRuntime {
       const tasks: TaskRequest[] = (stepObj.dispatch ?? [])
         .filter((t) => t && typeof t.task === "string" && t.task.trim() && validAgents.has(t.agent as AgentKind))
         .map((t) => ({ agent: t.agent as AgentKind, task: t.task.trim(),
+          ...(typeof t.thread === "string" && t.thread.trim() ? { thread: t.thread.trim() } : {}),
           ...(typeof t.model_id === "string" && t.model_id.trim() ? { model_id: t.model_id.trim() } : {}) }));
 
       const toolCalls = (stepObj.tool_calls ?? []).filter((call) => directTools.has(call.name));
@@ -329,6 +348,15 @@ export class OrchestratorRuntime {
           finalReply = status || "Please answer the questions below.";
           break;
         }
+        // A dispatched subagent may have asked the user itself (only
+        // financial_modeling can). It records the request on the main channel
+        // and pauses; the turn has to end here or the card never renders.
+        // `status` was already recorded as this step's progress line, so the
+        // final reply must be its own sentence rather than a repeat.
+        if (tasks.length > 0 && state.userInputRequestForTurn(turn)?.status === "pending") {
+          finalReply = "Please answer the questions below to continue.";
+          break;
+        }
         continue;
       }
 
@@ -336,16 +364,13 @@ export class OrchestratorRuntime {
       if (stepObj.skill && validSkills.has(stepObj.skill)) {
         if (status) state.recordReply(status, false);
         state.record("orchestrator", "skill_invoke", { skill: stepObj.skill });
-        // Sections + allowance must be installed before invoke() runs: a code-backed
-        // workflow can dispatch from inside invoke(), so installing them after would
-        // let that dispatch bypass the skill's declared agents/tools entirely.
+        // Sections + granted tools must be installed before invoke() runs: a
+        // code-backed workflow can dispatch from inside invoke(), and a dispatch
+        // that happened before the install would run without the skill's grant.
         const invoked = this.skills.get(stepObj.skill);
         if (invoked) {
           dispatcher.setSkillSections(invoked.agentSections);
-          dispatcher.setSkillAllowance({
-            ...(invoked.agents ? { agents: invoked.agents } : {}),
-            ...(invoked.tools ? { tools: invoked.tools } : {}),
-          });
+          dispatcher.setSkillTools(invoked.tools);
         }
         skillResult = await this.skills.invoke(stepObj.skill, {
           sessionId: input.sessionId,

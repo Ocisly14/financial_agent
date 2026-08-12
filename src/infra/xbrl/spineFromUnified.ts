@@ -6,8 +6,6 @@ export type SpineDecision = {
   detailRows: Array<{ parentTargetId: string; rowId: string; rationale: string }>;
   excluded: Array<{ rowId: string; reason: string }>;
   spineGaps: Array<{ targetId: string; reason: string }>;
-  /** The agent's prose account of the mapping. Not consumed here; reported to the DCF orchestrator. */
-  notes?: string;
 };
 
 /**
@@ -24,8 +22,6 @@ export type SpinePatch = {
   deleteExcludedRowIds?: string[];
   upsertSpineGaps?: SpineDecision["spineGaps"];
   deleteSpineGapTargetIds?: string[];
-  /** Replaces the notes wholesale: a corrected decision needs a corrected account of itself. */
-  notes?: string;
 };
 
 function patchList<T>(base: readonly T[], upserts: readonly T[] | undefined,
@@ -45,7 +41,6 @@ export function applySpinePatch(base: SpineDecision, patch: SpinePatch): SpineDe
     detailRows: patchList(base.detailRows, patch.upsertDetailRows, patch.deleteDetailRowIds, (d) => d.rowId),
     excluded: patchList(base.excluded, patch.upsertExcluded, patch.deleteExcludedRowIds, (e) => e.rowId),
     spineGaps: patchList(base.spineGaps, patch.upsertSpineGaps, patch.deleteSpineGapTargetIds, (g) => g.targetId),
-    ...(patch.notes === undefined ? (base.notes === undefined ? {} : { notes: base.notes }) : { notes: patch.notes }),
   };
 }
 

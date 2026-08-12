@@ -3,15 +3,20 @@ import { useTranslation } from "react-i18next";
 import type { TopicSummary } from "@/types/core";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/ThemeToggle";
-import { ModeChip, useTradingMode } from "@/components/workspace/ModeChip";
 import { useLanguage } from "@/contexts/LanguageContext";
-import { cn } from "@/lib/utils";
 
 /**
  * The one strip that runs across every topic. Only real signals live here —
  * see spec §8. No market clock, no P&L, no account equity: there is no data
  * source behind any of them, and a fake one becomes a promise that has to be
  * torn out in phase 2.
+ *
+ * The connection dot and the trading-mode chip used to sit on the right. Both
+ * are gone: they read "LIVE" for unrelated reasons — one meant the event stream
+ * was attached, the other meant real money — and two chips that share a word
+ * while meaning different things is worse than neither. The trading mode still
+ * has a home on the strategies pages, where it is about something the reader
+ * is already looking at.
  *
  * `topic` is optional so the bar can render during the brief window before
  * the active topic has resolved (e.g. list still loading).
@@ -29,17 +34,14 @@ import { cn } from "@/lib/utils";
 export function StatusBar({
     topic,
     research,
-    isConnected,
     onOpenRail,
 }: {
     topic: TopicSummary | undefined;
     research?: { name: string; memberCount: number } | undefined;
-    isConnected: boolean;
     onOpenRail?: () => void;
 }) {
     const { t } = useTranslation();
     const { language, setLanguage } = useLanguage();
-    const mode = useTradingMode();
 
     return (
         <div className="flex h-9 shrink-0 items-center justify-between gap-3 border-b border-sep bg-surface px-3">
@@ -79,16 +81,6 @@ export function StatusBar({
             </div>
 
             <div className="flex shrink-0 items-center gap-3">
-                <span className="fin-label inline-flex items-center gap-1.5 text-label-3">
-                    <span
-                        className={cn("size-1.5 shrink-0 rounded-full", isConnected ? "bg-up" : "bg-down")}
-                        aria-hidden="true"
-                    />
-                    {isConnected ? t("workspace.statusBar.live") : t("workspace.statusBar.disconnected")}
-                </span>
-
-                <ModeChip mode={mode} />
-
                 <ThemeToggle className="size-[26px] rounded-[5px] text-label-2 hover:bg-fill-1" />
 
                 <Button

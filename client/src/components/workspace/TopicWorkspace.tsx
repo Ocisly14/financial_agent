@@ -9,11 +9,14 @@ import type { ContentWithUser } from "@/components/chat/types";
 import { apiClient } from "@/lib/api";
 import { useResearchStream } from "@/hooks/useResearchStream";
 import { useTopicCharts } from "@/hooks/useTopicCharts";
+import { useFinancialModel } from "@/hooks/useFinancialModel";
 import { useSplitLayout } from "@/hooks/useSplitLayout";
 import { useIsNarrow } from "@/hooks/useIsNarrow";
 import { useToast } from "@/hooks/use-toast";
+import type { ModelChartTab } from "@/lib/topicCharts";
 import { StrategyApprovalDialog } from "@/components/Dialog/StrategyApprovalDialog";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
+import { ModelPane } from "@/components/model/ModelPane";
 import { ChartPane } from "./ChartPane";
 import { ConversationPane } from "./ConversationPane";
 import { MemberRow, type MemberChip } from "./MemberRow";
@@ -49,6 +52,7 @@ export function TopicWorkspace({
     members,
     activeTopic,
     research,
+    demo,
 }: {
     agentId: UUID;
     /** Phase 1 always passes one. Research passes N — possibly zero. */
@@ -57,6 +61,8 @@ export function TopicWorkspace({
      *  where the session is the Research's own. */
     activeTopic?: TopicSummary;
     research?: ResearchSummary;
+    /** Local replay data: production workspaces leave this undefined. */
+    demo?: { rail: { topics: TopicSummary[]; researches: ResearchSummary[] }; initialSheetId?: string };
 }) {
     const { t } = useTranslation();
     const navigate = useNavigate();
@@ -82,10 +88,50 @@ export function TopicWorkspace({
     const focusedMember = members.find((member) => member.id === focusedMemberId) ?? members[0] ?? activeTopic;
     const chartTopicId = focusedMember?.id;
 
-    const stream = useResearchStream(agentId, sessionId);
+    // Scoped the same way chart tabs are (`chartTopicId ?? sessionId`): a
+    // model belongs to a topic — `GET /api/agents/:agentId/topics/:topicId/models`
+    // — not to a Research session, so it follows the focused member exactly
+    // like `useTopicCharts` does below.
+    const model = useFinancialModel(agentId, chartTopicId ?? sessionId);
+    // Which sheet is on screen, and whether the user has steered it away from
+    // auto-locate (Task 11 §7.3) themselves during the turn in progress.
+    const [activeSheetId, setActiveSheetId] = useState<string | undefined>(() => demo?.initialSheetId);
+    const [userPickedThisTurn, setUserPickedThisTurn] = useState(false);
+
+    const stream = useResearchStream(agentId, sessionId, { onModelRevision: model.onRevisionFrame });
     // Called unconditionally: in narrow mode the result goes unused, but a
     // hook that only sometimes runs is not a hook.
     const { containerRef, ratio, setRatio } = useSplitLayout(railWidth);
+
+    // Task 11 §7.3: auto-locate may only steer the sheet while a turn is in
+    // flight AND the user hasn't picked a tab themselves during that turn.
+    // The latch has to reset on the *rising edge* of isProcessing — not on
+    // every render where it happens to be true — or "this turn" would never
+    // become a real boundary; it would just be "processing", permanently
+    // re-opening or never resetting depending on timing.
+    const wasProcessingRef = useRef(false);
+    useEffect(() => {
+        if (stream.isProcessing && !wasProcessingRef.current) setUserPickedThisTurn(false);
+        wasProcessingRef.current = stream.isProcessing;
+    }, [stream.isProcessing]);
+
+    // The model's own reported change, but only when it belongs to the model
+    // actually on screen: `model.change` can lag behind `model.activeModelId`
+    // for one render after the user switches models with no new frame yet to
+    // replace it, and reading it unguarded here would auto-navigate off a
+    // stale batch built for a model nobody is looking at (same hazard
+    // `useFinancialModel`'s own `isCellChanged` already guards against).
+    const activeModelChange =
+        model.change && model.change.modelId === model.activeModelId ? model.change : undefined;
+
+    useEffect(() => {
+        if (!stream.isProcessing || userPickedThisTurn) return;
+        const target = activeModelChange?.sheetIds[0];
+        // The list is already in strip order (sheetsTouchedBy preserves it), so
+        // the first entry is the leftmost changed sheet — a stable choice
+        // rather than whichever frame happened to arrive last.
+        if (target && target !== activeSheetId) setActiveSheetId(target);
+    }, [activeModelChange, stream.isProcessing, userPickedThisTurn, activeSheetId]);
 
     // In a Research the conversation belongs to the controller, so the charts
     // cannot be derived from it — they belong to the focused member and are
@@ -107,7 +153,17 @@ export function TopicWorkspace({
     // ChartPane owns the tab state; this read is only to decide whether the
     // column exists at all. Both calls share the same query cache.
     const { tabs } = useTopicCharts(agentId, chartTopicId ?? sessionId, chartMessages, chartStreamingText);
-    const hasCharts = Boolean(chartTopicId) && tabs.length > 0;
+
+    // Model tabs are not a preference (see ModelChartTab's doc comment in
+    // lib/topicCharts.ts) — they come straight from the backend's own model
+    // list, folded in here rather than into `tabs` above.
+    const modelTabs = useMemo<ModelChartTab[]>(
+        () => model.models.map((entry) => ({ kind: "model" as const, modelId: entry.modelId, symbol: entry.symbol })),
+        [model.models],
+    );
+    // A topic with a model but no charted symbol yet still needs the column —
+    // that model IS the content the column exists to show.
+    const hasCharts = Boolean(chartTopicId) && (tabs.length > 0 || modelTabs.length > 0);
     const showChart = hasCharts && (narrow || ratio > 0);
 
     // Spec §7.3, row 1 says a single member gets no member row — but that rule
@@ -235,13 +291,44 @@ export function TopicWorkspace({
             ? members.map((member) => member.name).join(" · ")
             : members[0]?.name ?? research?.name ?? activeTopic?.name ?? "";
 
+    // Auto-locate (Task 11) is the only source of a scroll target: a manual
+    // sheet pick passes `undefined`, since WorkbookGrid's own guard fires
+    // once per new id and must not fight a scroll position the user already
+    // chose for themselves.
+    const autoLocating = stream.isProcessing && !userPickedThisTurn;
+    // `lineItems` is a Map (insertion order == arrival order), so the first
+    // key is the earliest-arriving changed line item in the open batch — the
+    // same "stable, not last-frame-wins" choice `sheetIds[0]` makes above.
+    const scrollToLineItemId = autoLocating
+        ? [...(activeModelChange?.lineItems.keys() ?? [])][0]
+        : undefined;
+
+    const modelPane = model.context ? (
+        <ModelPane
+            context={model.context}
+            sheets={model.sheets}
+            activeSheetId={activeSheetId}
+            onSelectSheet={(sheetId) => {
+                setActiveSheetId(sheetId);
+                setUserPickedThisTurn(true);
+            }}
+            markedSheetIds={activeModelChange?.sheetIds ?? []}
+            isCellChanged={model.isCellChanged}
+            scrollToLineItemId={scrollToLineItemId}
+        />
+    ) : null;
+
     const chartPane = chartTopicId ? (
         <ChartPane
             agentId={agentId}
             topicId={chartTopicId}
             messages={chartMessages}
             streamingText={chartStreamingText}
-            onCompare={isResearch ? undefined : handleCompare}
+            onCompare={isResearch || demo ? undefined : handleCompare}
+            modelTabs={modelTabs}
+            modelPane={modelPane}
+            modelFocusRequest={model.focusRequest}
+            readOnly={demo !== undefined}
         />
     ) : null;
 
@@ -275,6 +362,7 @@ export function TopicWorkspace({
             stream={stream}
             input={input}
             onInputChange={setInput}
+            readOnly={demo !== undefined}
         />
     );
 
@@ -283,7 +371,6 @@ export function TopicWorkspace({
             <StatusBar
                 topic={activeTopic}
                 research={research ? { name: research.name, memberCount: members.length } : undefined}
-                isConnected={stream.isConnected}
                 onOpenRail={narrow ? () => setRailSheetOpen(true) : undefined}
             />
 
@@ -302,25 +389,31 @@ export function TopicWorkspace({
                     <Sheet open={railSheetOpen} onOpenChange={setRailSheetOpen}>
                         <SheetContent side="left" className="w-[240px] p-0 sm:max-w-[240px]">
                             <SheetTitle className="sr-only">{t("topics.title")}</SheetTitle>
-                            <TopicRail
-                                agentId={agentId}
-                                activeTopicId={isResearch ? undefined : activeTopic?.id}
-                                activeResearchId={research?.id}
-                                collapsed={false}
-                                onCollapsedChange={() => setRailSheetOpen(false)}
-                            />
+                            <div className={demo ? "pointer-events-none h-full" : "h-full"}>
+                                <TopicRail
+                                    agentId={agentId}
+                                    activeTopicId={isResearch ? undefined : activeTopic?.id}
+                                    activeResearchId={research?.id}
+                                    collapsed={false}
+                                    onCollapsedChange={() => setRailSheetOpen(false)}
+                                    demoData={demo?.rail}
+                                />
+                            </div>
                         </SheetContent>
                     </Sheet>
                 </>
             ) : (
                 <div ref={containerRef} className="flex min-h-0 flex-1 overflow-hidden">
-                    <TopicRail
-                        agentId={agentId}
-                        activeTopicId={isResearch ? undefined : activeTopic?.id}
-                        activeResearchId={research?.id}
-                        collapsed={railCollapsed}
-                        onCollapsedChange={setRailCollapsed}
-                    />
+                    <div className={demo ? "pointer-events-none h-full" : "h-full"}>
+                        <TopicRail
+                            agentId={agentId}
+                            activeTopicId={isResearch ? undefined : activeTopic?.id}
+                            activeResearchId={research?.id}
+                            collapsed={railCollapsed}
+                            onCollapsedChange={setRailCollapsed}
+                            demoData={demo?.rail}
+                        />
+                    </div>
                     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
                         {!showChart && memberBand}
                         <div className="flex min-h-0 flex-1 overflow-hidden">

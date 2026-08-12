@@ -3,7 +3,6 @@ import { parseFormula } from "./dsl/parser.ts";
 import { ENGINE_VERSION, evaluate } from "./engine.ts";
 import { FinancialModelError } from "./errors.ts";
 import { resolveActiveFacts, stageFacts as stageFactCandidates } from "./factLifecycle.ts";
-import { installDefaultMetrics } from "./metrics.ts";
 import {
   applyModelOperations,
   type FinancialModelSnapshot,
@@ -41,11 +40,13 @@ import type {
 import { calculateValuation, validateValuationConfig } from "./valuation.ts";
 import { applyComputedWaccInputs, createWaccSheet, recalculateWaccSheet, type WaccSheetComputedInput } from "./waccSheet.ts";
 import type { JsonObject } from "../framework/types.ts";
+import type { UnifiedStatementsArtifact } from "../infra/xbrl/unifiedStatements.ts";
 import {
   buildModelContextView,
   buildWorkbookSlice,
   buildWorkbookView,
   hasCommittedSpine,
+  MODEL_READ_SECTIONS,
   type CurrentWorkbookView,
   type HistoricalDcfCompletenessView,
   type ModelContextView,
@@ -97,18 +98,17 @@ export type ViewOptions = {
   selector?: ModelQuery["selector"];
   includeLineage?: boolean;
   reopenSources?: boolean;
+  /** Attach the three as-filed statements to the context view regardless of
+   *  lifecycle stage. Unlike the options above this does NOT narrow the read to
+   *  a slice — it widens the full context view, so it is deliberately excluded
+   *  from the `targeted` test below. */
+  includeSourceStatements?: boolean;
+  /** Used by the human HTTP read to render statement_unification's complete
+   * face statements; ordinary agent reads remain snapshot-only. */
+  unifiedStatements?: UnifiedStatementsArtifact;
 };
 
-const SECTION_ORDER: readonly ModelReadSection[] = [
-  "history",
-  "metrics",
-  "revenue",
-  "operations",
-  "dcf",
-  "source_income_statement",
-  "source_balance_sheet",
-  "source_cash_flow",
-];
+const SECTION_ORDER: readonly ModelReadSection[] = MODEL_READ_SECTIONS;
 
 export class FinancialModelService {
   private readonly store: ModelStore<FinancialModelSnapshot, RevisionChangeSummary>;
@@ -129,7 +129,6 @@ export class FinancialModelService {
     }
     let skeleton = createSkeleton({ currency: input.reportingCurrency, periods: grid.all });
     skeleton = addSourceStatementRows(skeleton, input.preparedStatementRows);
-    skeleton = installDefaultMetrics(skeleton, input.periods);
     const snapshot: FinancialModelSnapshot = {
       filingInsightSetId: null,
       lifecycleStage: "draft",
@@ -392,6 +391,10 @@ export class FinancialModelService {
       meta,
       this.store.listRevisionHeaders(modelId),
       current,
+      {
+        includeSourceStatements: options.includeSourceStatements ?? false,
+        ...(options.unifiedStatements ? { unifiedStatements: options.unifiedStatements } : {}),
+      },
     );
   }
 
@@ -476,6 +479,8 @@ function recalculate(snapshot: FinancialModelSnapshot): FinancialModelSnapshot {
   validateRoleCardinality(next.lineItems);
   next.valuationConfig = validateValuationConfig(next.valuationConfig);
   const activeFacts = resolveActiveFacts(next.facts, next.lineItems, next.periods);
+  const waccAssumptions = materializedWaccAssumptions(next);
+  reconcileSourceDeclarations(next, activeFacts, waccAssumptions);
   next.compiledFormulas = next.formulas.map((formula) => ({
     ...structuredClone(formula),
     ast: parseFormula(formula.source),
@@ -484,11 +489,11 @@ function recalculate(snapshot: FinancialModelSnapshot): FinancialModelSnapshot {
     periods: next.periods,
     lineItems: next.lineItems,
     facts: activeFacts,
-    // The wacc row is "calculated", not assumption-sourced (see skeleton.ts), so its value never
+    // The wacc row is dynamically marked "calculated" when its sheet resolves, so its value never
     // comes from next.assumptions; it is materialized here, straight off the WACC sheet, into the
     // same seeding path the engine already uses for assumptions. Not persisted onto next.assumptions
     // itself — the sheet stays the one stored record of the discount rate.
-    assumptions: [...next.assumptions, ...materializedWaccAssumptions(next)],
+    assumptions: [...next.assumptions, ...waccAssumptions],
     formulas: next.formulas,
     valuationConfig: next.valuationConfig,
   });
@@ -509,35 +514,121 @@ function recalculate(snapshot: FinancialModelSnapshot): FinancialModelSnapshot {
 }
 
 /**
+ * The one authority for a row's source declaration.  Skeleton creation intentionally leaves both
+ * ranges as `none`; after each fill/mutation this function derives them from the channel that
+ * actually supplied values.  A committed fact wins over an earlier provisional formula or
+ * assumption in the same range, because it is the issuer data the computation was standing in for.
+ */
+function reconcileSourceDeclarations(
+  snapshot: FinancialModelSnapshot,
+  activeFacts: readonly Fact[],
+  calculatedAssumptions: readonly Assumption[],
+): void {
+  type Range = "historical" | "forecast";
+  const rangeOfPeriodId = new Map(snapshot.periods.map((period) => [
+    period.id,
+    period.cls === "forecast" ? "forecast" as const : "historical" as const,
+  ]));
+  const actual = new Map<Range, Set<string>>([
+    ["historical", new Set<string>()], ["forecast", new Set<string>()],
+  ]);
+  for (const fact of activeFacts) {
+    if (fact.lineItemId === undefined) continue;
+    const range = rangeOfPeriodId.get(fact.periodId);
+    if (range) actual.get(range)!.add(fact.lineItemId);
+  }
+
+  // Facts replace provisional values for their whole source range.  The public operation API has
+  // the same one-source-per-range rule; doing it here also covers facts committed by the mapping
+  // pipeline, which bypasses operations.
+  for (const range of ["historical", "forecast"] as const) {
+    const factBacked = actual.get(range)!;
+    if (factBacked.size === 0) continue;
+    snapshot.formulas = snapshot.formulas.filter((formula) =>
+      formula.appliesTo !== range || !factBacked.has(formula.lineItemId));
+    const periodIds = new Set(snapshot.periods
+      .filter((period) => (period.cls === "forecast" ? "forecast" : "historical") === range)
+      .map((period) => period.id));
+    snapshot.assumptions = snapshot.assumptions.filter((assumption) =>
+      !factBacked.has(assumption.lineItemId)
+      || !assumption.periods.some((periodId) => periodIds.has(periodId)));
+  }
+
+  const formulas = new Map<Range, Set<string>>([
+    ["historical", new Set<string>()], ["forecast", new Set<string>()],
+  ]);
+  for (const formula of snapshot.formulas) formulas.get(formula.appliesTo)!.add(formula.lineItemId);
+  const assumptions = new Map<Range, Set<string>>([
+    ["historical", new Set<string>()], ["forecast", new Set<string>()],
+  ]);
+  for (const assumption of snapshot.assumptions) {
+    if (assumption.payload.kind === "not_applicable") continue;
+    for (const periodId of assumption.periods) {
+      const range = rangeOfPeriodId.get(periodId);
+      if (range) assumptions.get(range)!.add(assumption.lineItemId);
+    }
+  }
+
+  const waccCalculated = calculatedAssumptions.some((assumption) => assumption.lineItemId === "wacc");
+  snapshot.lineItems = snapshot.lineItems.map((item) => {
+    const source = (range: Range) => {
+      if (item.id === "wacc" && range === "forecast" && waccCalculated) return "calculated" as const;
+      if (actual.get(range)!.has(item.id)) return "actual" as const;
+      if (formulas.get(range)!.has(item.id)) return "formula" as const;
+      if (assumptions.get(range)!.has(item.id)) return "assumption" as const;
+      return "none" as const;
+    };
+    return { ...item, historical: source("historical"), forecast: source("forecast") };
+  });
+}
+
+/**
  * Lifecycle 是事实的读数,不是门:引擎在每次重算后按模型的实际状态推导 stage,
  * 估值一旦可算立即计算,算不出就保持 null——缺什么,表格和 WACC 表自己会显示。
  */
 function deriveLifecycle(next: FinancialModelSnapshot): void {
   if (next.lifecycleStage === "archived") return;
-  const passes = (gate: () => void): boolean => {
+  const blockerCodes = new Set<Diagnostic["code"]>([
+    "history_review_required",
+    "unresolved_reconciliation",
+    "missing_formula_input",
+    "invalid_terminal_assumptions",
+    "incomplete_equity_bridge",
+  ]);
+  const passes = (blockedStage: LifecycleStage, gate: () => void): boolean => {
     try {
       gate();
       return true;
-    } catch {
+    } catch (error) {
+      if (error instanceof FinancialModelError && blockerCodes.has(error.code as Diagnostic["code"])) {
+        const details = error.details;
+        const refs = [details?.refs, details?.missing, details?.ruleIds]
+          .flatMap((value) => Array.isArray(value) ? value : [])
+          .filter((value): value is string => typeof value === "string");
+        next.diagnostics = sortDiagnostics([...next.diagnostics, {
+          code: error.code as Diagnostic["code"], refs, message: error.message, stage: blockedStage,
+        }]);
+      }
       return false;
     }
   };
   let stage: LifecycleStage = "draft";
   next.valuation = null;
-  if (passes(() => historyGate(next))) {
+  if (passes("history_committed", () => historyGate(next))) {
     stage = "history_committed";
-    if (passes(() => requireRoleCells(next, "revenue_total", "forecast"))) {
+    if (passes("revenue_forecast", () => requireRoleCells(next, "revenue_total", "forecast"))) {
       stage = "revenue_forecast";
-      if (passes(() => requireRoleCells(next, "fcff", "forecast"))) {
+      if (passes("operations_fcff", () => requireRoleCells(next, "fcff", "forecast"))) {
         stage = "operations_fcff";
-        if (passes(() => requireWaccResolved(next)) && passes(() => {
-          next.valuation = calculateValuation({
-            periods: next.periods,
-            lineItems: next.lineItems,
-            cells: next.cells,
-            valuationConfig: next.valuationConfig,
-          });
-        })) {
+        if (passes("valued", () => requireWaccResolved(next))
+          && passes("valued", () => {
+            next.valuation = calculateValuation({
+              periods: next.periods,
+              lineItems: next.lineItems,
+              cells: next.cells,
+              valuationConfig: next.valuationConfig,
+            });
+          })) {
           stage = "valued";
         }
       }
@@ -552,7 +643,7 @@ const OWC_LIABILITY_COMPONENTS = [
 ] as const;
 
 /**
- * The skeleton declares operating_working_capital historical:"formula" but cannot know the identity
+ * The skeleton does not declare a source for operating_working_capital, because it cannot know the identity
  * until the mapping has decided which components this issuer actually reports — a declared spine gap
  * must drop out of the sum rather than null-poisoning the whole identity. Installed (and refreshed)
  * on every history review, over exactly the components carrying committed facts.
@@ -683,7 +774,13 @@ function historyGate(snapshot: FinancialModelSnapshot): void {
   }
 }
 
-const REQUIRED_HISTORY_LINE_ITEMS = [
+/**
+ * What `historyGate` demands before a model leaves `draft`. Exported so the spine's own required
+ * mapping set can be checked against it. Source declarations remain empty in the skeleton and are
+ * inferred from the value channel that filled each row; a required item can therefore be supplied
+ * either by a mapped filing fact or by a formula the agent deliberately installs.
+ */
+export const REQUIRED_HISTORY_LINE_ITEMS = [
   "revenue.total", "cost_of_revenue", "gross_profit", "operating_expenses", "operating_income",
   "depreciation_amortization", "ebitda", "pretax_income", "income_tax_expense", "net_income",
   "nopat", "capital_expenditures", "operating_working_capital", "change_nwc", "fcff",

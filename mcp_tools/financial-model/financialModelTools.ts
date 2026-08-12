@@ -4,6 +4,7 @@ import type { JsonObject, JsonSchema, JsonValue, ToolExecutionResult } from "../
 import { FinancialModelError } from "../../src/financial-model/errors.ts";
 import type { FinancialModelSnapshot, ModelOperation, ModelQuery } from "../../src/financial-model/operations.ts";
 import { FinancialModelService, type RevisionChangeSummary } from "../../src/financial-model/service.ts";
+import { MODEL_READ_SECTIONS, type CurrentWorkbookView, type HistoricalDcfCompletenessView, type ModelContextView } from "../../src/financial-model/views.ts";
 import { financialModelSnapshotCodec } from "../../src/financial-model/snapshotCodec.ts";
 import { SqliteModelStore, type ModelFilter, type ModelStore } from "../../src/financial-model/store.ts";
 import { SqliteFilingInsightStore, type FilingInsightStore } from "../../src/infra/filing-insights/store.ts";
@@ -72,10 +73,32 @@ export function createFinancialModelTools(injected?: FinancialModelToolDeps): Re
       ...(operationsInputSchema.properties as unknown as Record<string, JsonObject>),
     }, operationsInputSchema.required ?? [], async (input, context) => mutate(deps, input, context,
       (service, id, revision) => service.applyOperations(id, revision, parseOperations(input)))),
-    tool("get_financial_model", "Read current model context, a section/cell slice, lineage, a prior revision, or filing-insight evidence.", {
-      modelId: { type: "string" }, revision: { type: "number" }, section: { type: "string" }, selector: { type: "object" },
-      includeLineage: { type: "boolean" }, reopenSources: { type: "boolean" }, insightId: { type: "string" },
-    }, ["modelId"], async (input, context) => getModel(deps, input, context)),
+    tool("get_financial_model",
+      "Read the model. With modelId alone: an overview — lifecycle, per-section fill counts, what the "
+      + "required history still lacks, diagnostics grouped by code. Narrow with `section` for one "
+      + "section's rows, or `selector` for named rows and cells. Also reads a prior revision, lineage, "
+      + "or one filing insight.", {
+        modelId: { type: "string" }, revision: { type: "number" },
+        section: { type: "string", enum: [...MODEL_READ_SECTIONS],
+          description: "One section's rows, with values. `source_*` are the as-filed statements. "
+            + "Do not combine it with named rows from another section; the error names their section." },
+        selector: { type: "object", additionalProperties: false, description:
+          "Narrow to named rows or cells. Combined filters intersect; omit to select the whole section. "
+            + "When a section excludes a named row, the response identifies that row's actual section.",
+          properties: {
+            lineItemIds: { type: "array", items: { type: "string" }, description: "Exact line item ids, e.g. [\"revenue.total\", \"fcff\"]." },
+            periodIds: { type: "array", items: { type: "string" }, description: "Exact period ids, e.g. [\"FY2024\", \"FY2025\"]." },
+            cellRefs: { type: "array", description: "Individual cells, when whole rows are more than you need.",
+              items: { type: "object", additionalProperties: false, required: ["lineItemId", "periodId"],
+                properties: { lineItemId: { type: "string" }, periodId: { type: "string" } } } },
+            parentId: { type: "string", description: "Restrict to the children of one line item." },
+            section: { type: "string", enum: [...MODEL_READ_SECTIONS] },
+            role: { type: "string", description: "Restrict to line items carrying one engine role, e.g. \"fcff\"." },
+            periodClass: { type: "string", enum: ["actual", "ttm", "forecast"] },
+          } },
+        includeLineage: { type: "boolean", description: "Attach how each cell was derived. Costly — ask for it on a narrowed read." },
+        reopenSources: { type: "boolean" }, insightId: { type: "string" },
+      }, ["modelId"], async (input, context) => getModel(deps, input, context)),
     tool("list_financial_models", "List financial models owned by the current Agent.", {
       symbol: { type: "string" }, lifecycleStage: { type: "string" }, includeArchived: { type: "boolean" },
     }, [], async (input, context) => listModels(deps, input, context)),
@@ -119,11 +142,19 @@ async function createModel(deps: FinancialModelToolDeps, input: JsonObject, cont
       ...(ingestion.presentationExtracts ? { presentationExtracts: ingestion.presentationExtracts } : {}),
       dimensionalDisclosures: prepared.dimensionalDisclosures,
       coverage: prepared.coverage, filings: prepared.filings });
-    const currentWorkbook = enrichWorkbook(imported.currentWorkbook, deps.sourceReviewStore.get(modelId));
-    return success(`Created ${symbol} financial model ${modelId} at revision ${imported.revision}. Run statement_unification, then spine_mapping, to populate the spine.`,
+    // The workbook is deliberately NOT returned here. At this revision it is the raw filing rows,
+    // unmapped — hundreds of lines the agent can form no judgment about, and whose only consumer is
+    // statement_unification, which reads them from the store rather than from this response. Returning
+    // it cost ~430k characters that then rode along in every later step's context, for nothing.
+    // Coverage is what this stage is actually judged on; `get_financial_model` with a section serves
+    // anyone who does want to look.
+    return success(`Created ${symbol} financial model ${modelId} at revision ${imported.revision} with `
+      + `${prepared.rows.length} source row(s) staged. Run statement_unification, then spine_mapping, to populate the spine. `
+      + `The workbook is not included at this revision — read it with get_financial_model (pass a section) if you need it.`,
       { model_id: modelId, revision: imported.revision,
         lifecycle_stage: imported.status, revision_summary: imported.revisionSummary, filing_insights: filingInsights ?? null,
-        statement_coverage: prepared.coverage, current_workbook: currentWorkbook, warnings: imported.warnings });
+        statement_coverage: prepared.coverage, staged_row_count: prepared.rows.length,
+        warning_summary: summarizeDiagnostics(imported.warnings) });
   } catch (error) {
     if (error instanceof FinancialModelError) return toolError(error);
     return failure("financial_model_creation_failed", error instanceof Error ? error.message : String(error), { model_id: modelId, retryable: true });
@@ -136,7 +167,8 @@ async function mutate(deps: FinancialModelToolDeps, input: JsonObject, context: 
   try {
     const id = requireString(input, "modelId"); requireOwner(deps, id, context.agentId);
     const service = new FinancialModelService(deps.modelStore, context.sessionId);
-    const reviewResult = action(service, id, requireInteger(input, "expectedRevision"));
+    const expectedRevision = requireInteger(input, "expectedRevision");
+    const reviewResult = action(service, id, expectedRevision);
     let result = reviewResult;
     // Committing facts is what makes WACC terms derivable, so the engine works them out here rather
     // than waiting to be asked, and lands them as their own revision. The agent reads where the wacc
@@ -150,15 +182,45 @@ async function mutate(deps: FinancialModelToolDeps, input: JsonObject, context: 
       else waccRefreshSkipped = outcome.reason;
     }
     const refreshed = result !== reviewResult && result.revision !== reviewResult.revision;
-    const insights = insightContext(deps, result.currentWorkbook.filingInsightSetId ?? null);
-    return success(`Updated financial model ${id} to revision ${result.revision}.${waccSummary(result.currentWorkbook.waccSheet)}`,
-      { model_id: id, revision: result.revision,
-        lifecycle_stage: result.status, revision_summary: reviewResult.revisionSummary, filing_insights: insights,
-        current_workbook: enrichWorkbook(result.currentWorkbook, deps.sourceReviewStore.get(id)),
+    // The same overview a read answers with, not the workbook. The agent just wrote this model; what
+    // it does not know is where the write left it, and `revision_summary` below names the sections
+    // that moved — it narrows to one of those with get_financial_model when it wants the values.
+    // Echoing the whole workbook was both dearer and less use: on an AAPL run it cost ~71k tokens a
+    // write and still did not say why the model was stuck, because the shortfall was not in it.
+    const view = new FinancialModelService(deps.modelStore, context.sessionId).getModel(id);
+    if (!("currentWorkbook" in view)) throw new Error("untargeted read expected");
+    const summary = overview(view, service.historicalCompleteness(id),
+      insightContext(deps, view.currentWorkbook.filingInsightSetId), deps.sourceReviewStore.get(id));
+    // Keep the agent's explicitly-read slices as revision-stamped working memory.  A mutation
+    // returns this compact delta rather than echoing a workbook; the agent decides whether its next
+    // task needs a fresh read of a changed section's values.
+    const changedRows = modelChangeRows(view.currentWorkbook, reviewResult.revisionSummary.changes);
+    // `warnings` used to ride along here as well, but a commit's warnings ARE the snapshot's
+    // diagnostics — the same array the overview groups by code — so the response carried the same
+    // 503 `missing_input` entries twice, once counted and once spelled out. The count lives on
+    // revision_summary.warningCount; the grouping is in model_overview.diagnostics_by_code.
+    return success(`Updated financial model ${id} to revision ${result.revision}`
+      + `${waccSummary(result.currentWorkbook.waccSheet)}${shortfallPhrase(summary)}.`,
+      { ...summary,
+        revision_summary: reviewResult.revisionSummary,
+        model_change_context: { revision: result.revision,
+          changed_sections: reviewResult.revisionSummary.changedSections,
+          changed_rows: changedRows },
         ...(refreshed ? { wacc_refresh_summary: result.revisionSummary } : {}),
-        ...(waccRefreshSkipped !== undefined ? { wacc_refresh_skipped: waccRefreshSkipped } : {}),
-        warnings: [...reviewResult.warnings, ...(refreshed ? result.warnings : [])] });
+        ...(waccRefreshSkipped !== undefined ? { wacc_refresh_skipped: waccRefreshSkipped } : {}) });
   } catch (error) { return toolError(error); }
+}
+
+function modelChangeRows(workbook: CurrentWorkbookView, changes: RevisionChangeSummary["changes"]): JsonValue[] {
+  const changedIds = new Set<string>();
+  for (const change of changes) {
+    if ("lineItemId" in change) changedIds.add(change.lineItemId);
+    if ("parentLineItemId" in change) changedIds.add(change.parentLineItemId);
+  }
+  return Object.values(workbook.sections).flat().filter((row) => "lineItemId" in row && changedIds.has(row.lineItemId))
+    .map((row) => ({ line_item_id: row.lineItemId, section: row.section, sources: row.sources,
+      formulas: row.formulas.map((formula) => ({ applies_to: formula.appliesTo, period_ids: formula.periodIds, source: formula.source })),
+      assumption_ids: row.assumptions.map((assumption) => assumption.assumptionId) })) as unknown as JsonValue[];
 }
 
 /** Maps the seven `WaccParameterName` terms `deriveWaccParameters` already knows how to compute onto
@@ -246,12 +308,12 @@ async function getModel(deps: FinancialModelToolDeps, input: JsonObject, context
       ...(input["selector"] && typeof input["selector"] === "object" ? { selector: input["selector"] as ModelQuery["selector"] } : {}),
       includeLineage: input["includeLineage"] === true, reopenSources: input["reopenSources"] === true });
     if ("currentWorkbook" in view) {
-      // The full read carries the WACC sheet as part of current_workbook.waccSheet — the agent sees
-      // where the model stands, and what the discount rate still needs, without a separate call.
-      return success(`Loaded financial model ${id} revision ${view.currentWorkbook.revision}.`,
-        { model_id: id, revision: view.currentWorkbook.revision,
-          revision_history: view.revisionHistory, filing_insights: insightContext(deps, view.currentWorkbook.filingInsightSetId),
-          current_workbook: enrichWorkbook(view.currentWorkbook, deps.sourceReviewStore.get(id)) });
+      // The overview carries the WACC sheet whole — twelve rows, and what the discount rate still
+      // needs is a decision the agent makes from where it already is.
+      const summary = overview(view, service.historicalCompleteness(id),
+        insightContext(deps, view.currentWorkbook.filingInsightSetId), deps.sourceReviewStore.get(id));
+      return success(`Loaded financial model ${id} revision ${view.currentWorkbook.revision} `
+        + `(${view.currentWorkbook.lifecycleStage})${shortfallPhrase(summary)}.`, summary);
     }
     return success(`Loaded financial model ${id} revision ${view.revision}.`, { model_id: id, revision: view.revision,
       filing_insights: insightContext(deps, stored.snapshot.filingInsightSetId ?? null), workbook_slice: view });
@@ -274,18 +336,137 @@ function requireOwner(deps: FinancialModelToolDeps, id: string, agentId: string)
   if (!model || model.ownerAgentId !== agentId) throw new FinancialModelError("financial_model_not_found", `model not found: ${id}`);
 }
 function insightContext(deps: FinancialModelToolDeps, id: string | null): FilingInsightContextView | null { return id ? deps.insightStore.getContext(id) ?? null : null; }
-function enrichWorkbook<T extends JsonValue>(workbook: T, source: ReturnType<SourceReviewStore["get"]>): JsonValue {
-  if (!source || typeof workbook !== "object" || workbook === null || Array.isArray(workbook)) return workbook;
-  if ((workbook as JsonObject)["mode"] !== "statement_mapping") return workbook;
-  return { ...(workbook as JsonObject), source_statement_summary: {
+/**
+ * The orienting read: what the model is, what is filled, and what is still owed — at a size the
+ * agent can afford to take more than once.
+ *
+ * The full context view runs to ~68k tokens, three quarters of which is bulk that answers no
+ * question on its own: 773 diagnostics that all say `missing_input` and name a cell, and 50
+ * reconciliation results of which the interesting ones are the failures. An agent that reads that
+ * to find out where it stands pays for the whole workbook and carries it for the rest of the run —
+ * and one that reads it five times in a row, as happened on an AAPL run, carries it five times.
+ *
+ * So this is the default, and `section` or `selector` narrows from here. It follows the shape
+ * list_unified_statements already set for the unified rows: orient first, then pull what you named.
+ */
+function overview(view: ModelContextView, completeness: HistoricalDcfCompletenessView,
+  insights: FilingInsightContextView | null, source: ReturnType<SourceReviewStore["get"]>): JsonObject {
+  const workbook = view.currentWorkbook;
+  const sourceSummary = workbook.mode === "statement_mapping" ? sourceStatementSummary(source) : undefined;
+  const filled = (row: { cells: Record<string, { value: number | null }> }): number =>
+    Object.values(row.cells).filter((cell) => cell.value !== null && cell.value !== undefined).length;
+
+  const sections = Object.fromEntries(Object.entries(workbook.sections).map(([name, rows]) => {
+    const cells = rows.reduce((sum, row) => sum + Object.keys(row.cells).length, 0);
+    const withValues = rows.reduce((sum, row) => sum + filled(row), 0);
+    return [name, { rows: rows.length, cells_filled: withValues, cells_empty: cells - withValues }];
+  }));
+
+  // Named, not counted: this is the list that decides whether the model can leave `draft`, and an
+  // agent that cannot see it goes looking for the answer at the wrong end of the workbook.
+  //
+  // Completeness is measured over the selected historical periods, so before any are selected it
+  // has nothing to measure and reports no gaps. That reads as "complete" and is the opposite of
+  // true — the gate refuses an empty selection outright — so the empty case is stated, not counted.
+  const selected = completeness.selectedHistoricalPeriodIds;
+  const missing = completeness.categories.flatMap((category) => category.periods
+    .filter((period) => period.status === "missing").map((period) => `${category.lineItemId}@${period.periodId}`));
+  const requiredHistory = selected.length === 0
+    ? { complete: false, missing: [] as string[],
+        blocked_by: "no historical periods are selected yet — commit spine facts before the history can be judged" }
+    : { complete: missing.length === 0, missing };
+
+  const byCode = new Map<string, string[]>();
+  for (const diagnostic of workbook.diagnostics) {
+    const refs = byCode.get(diagnostic.code) ?? [];
+    refs.push(...diagnostic.refs);
+    byCode.set(diagnostic.code, refs);
+  }
+  const diagnostics = [...byCode].map(([code, refs]) => ({ code, count: refs.length, refs: refs.slice(0, 12),
+    ...(refs.length > 12 ? { more: refs.length - 12 } : {}) }));
+
+  const reconciliations = workbook.reconciliationResults;
+  const failed = reconciliations.filter((result) => result.status === "failed");
+
+  // model_id / revision / lifecycle_stage / revision_history / filing_insights stay at the top
+  // level: projectFinancialModelData reads those by name to build the agent's active model context.
+  // Everything this function adds rides in one key, so that projection needs to learn one name
+  // rather than grow a list it can silently fall behind.
+  return {
+    model_id: workbook.modelId, revision: workbook.revision, lifecycle_stage: workbook.lifecycleStage,
+    revision_history: view.revisionHistory.slice(-5), filing_insights: insights,
+    model_overview: {
+      symbol: view.model.symbol,
+      periods: workbook.periods.map((period) => ({ id: period.id, cls: period.cls })),
+      sections,
+      // Nothing else decides `draft`, and naming the cells costs less than the search for them.
+      required_history: requiredHistory,
+      diagnostics_by_code: diagnostics,
+      lifecycle_blockers: workbook.diagnostics
+        .filter((diagnostic) => diagnostic.stage !== undefined)
+        .map((diagnostic) => ({ stage: diagnostic.stage, code: diagnostic.code,
+          message: diagnostic.message, refs: diagnostic.refs })),
+      reconciliations: { total: reconciliations.length,
+        by_status: [...reconciliations.reduce((counts, result) => counts.set(result.status, (counts.get(result.status) ?? 0) + 1),
+          new Map<string, number>())].map(([status, count]) => ({ status, count })),
+        failed },
+      wacc_sheet: workbook.waccSheet, valuation: workbook.valuation, valuation_config: workbook.valuationConfig,
+      ...(sourceSummary ? { source_statement_summary: sourceSummary } : {}),
+      read_more: "Narrow with `section` for one section's rows, or `selector` "
+        + "(lineItemIds / periodIds / cellRefs / role / periodClass) for specific rows and cells.",
+    },
+  } as unknown as JsonObject;
+}
+
+/** Where the model still falls short of leaving `draft`, as a clause for the summary line. */
+function shortfallPhrase(summary: JsonObject): string {
+  const overview = summary["model_overview"] as {
+    required_history: { complete: boolean; missing: string[]; blocked_by?: string };
+    lifecycle_blockers: Array<{ message?: string }>;
+  };
+  const required = overview.required_history;
+  if (required.complete) {
+    const blocker = overview.lifecycle_blockers[0];
+    return blocker?.message ? `; ${blocker.message}` : "";
+  }
+  if (required.blocked_by !== undefined) return `; ${required.blocked_by}`;
+  return `; required history still missing ${required.missing.length} cell(s)`;
+}
+
+/**
+ * What the extraction produced, for a model whose spine is not committed yet. None of it can be
+ * read back off a section — the filings and their coverage are facts about the import, not rows —
+ * so it travels with the overview for as long as the workbook is still in mapping mode.
+ */
+function sourceStatementSummary(source: ReturnType<SourceReviewStore["get"]>): JsonObject | undefined {
+  if (!source) return undefined;
+  return {
     filings: source.filings,
     coverage: source.coverage,
     selected_tables: source.curations,
     normalized_row_count: Object.values(source.statementViews).reduce((sum, view) => sum + view.candidate.rows.length, 0),
     staged_fact_count: source.facts.length,
     source_conflict_count: source.verification?.columnConflicts.length ?? 0,
-  } };
+  } as unknown as JsonObject;
 }
+/**
+ * Diagnostics carry a `refs` list per entry, so a freshly staged import runs to tens of thousands of
+ * characters of cell keys. What the agent can act on at that point is the shape — which kinds, how
+ * many, an example of each — not the enumeration. It reads the individual refs from the workbook when
+ * a specific number turns out to be wrong.
+ */
+function summarizeDiagnostics(warnings: { code: string; refs: string[] }[]): JsonObject {
+  const byCode = new Map<string, { count: number; example?: string }>();
+  for (const warning of warnings) {
+    const entry = byCode.get(warning.code) ?? { count: 0 };
+    entry.count += 1;
+    if (entry.example === undefined && warning.refs[0] !== undefined) entry.example = warning.refs[0];
+    byCode.set(warning.code, entry);
+  }
+  return { total: warnings.length,
+    by_code: Object.fromEntries([...byCode].map(([code, entry]) => [code, entry as unknown as JsonValue])) };
+}
+
 function success(summary: string, data: JsonObject): ToolExecutionResult { return { summary, generation_context: { data } }; }
 export function failure(code: string, message: string, data: JsonObject = {}): ToolExecutionResult { return { summary: message, error: { code, message }, generation_context: { data: { ...data, error: code } } }; }
 export function toolError(error: unknown): ToolExecutionResult {

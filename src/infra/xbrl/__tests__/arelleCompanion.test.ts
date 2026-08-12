@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { ARELLE_COMPANION_SCRIPT as SCRIPT } from "../arelleAdapter.ts";
 
-const SCRIPT = fileURLToPath(new URL("../../../../scripts/xbrl/arelle_companion.py", import.meta.url));
 const FIXTURE = fileURLToPath(new URL("../../../../scripts/xbrl/fixtures/minimal-response.json", import.meta.url));
 const REQUEST = JSON.stringify({
   protocolVersion: 3,

@@ -153,7 +153,7 @@ test("set_formula replaces explicit coverage without disturbing other periods", 
     && formula.source === "revenue.total * 0.2"
     && JSON.stringify(formula.periodIds) === JSON.stringify(["FY2026"])), true);
   assert.equal(next.formulas.some((formula) => formula.lineItemId === "operating_income"
-    && JSON.stringify(formula.periodIds) === JSON.stringify(["FY2027"])), true);
+    && JSON.stringify(formula.periodIds) === JSON.stringify(["FY2027"])), false);
 });
 
 test("replace_fact retains predecessor, replacement, and paired decisions", () => {
@@ -188,7 +188,19 @@ test("add_line_item creates a revenue row and companion driver atomically", () =
   }]);
   assert.equal(next.lineItems.some((item) => item.id === "revenue.services" && item.role === "revenue_stream"), true);
   assert.equal(next.lineItems.some((item) => item.id === "growth.revenue.services"), true);
-  assert.equal(next.formulas.some((formula) => formula.lineItemId === "revenue.services"), true);
+  assert.equal(next.formulas.some((formula) => formula.lineItemId === "revenue.services"), false);
+});
+
+test("a committed revenue stream can own its gross-profit detail", () => {
+  const base = snapshot({ disclosures: true });
+  const next = applyModelOperations(base, [{
+    kind: "add_line_item",
+    lineItem: { parentId: "revenue.products", id: "gross_profit", label: "Products gross profit" },
+  } as unknown as ModelOperation]);
+
+  const detail = next.lineItems.find((item) => item.id === "revenue.products.gross_profit");
+  assert.equal(detail?.parentId, "revenue.products");
+  assert.deepEqual(detail?.unit, { kind: "currency", code: "USD" });
 });
 
 test("add_metric derives a registered CAGR definition", () => {

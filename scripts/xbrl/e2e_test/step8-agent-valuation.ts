@@ -1,6 +1,6 @@
 // Step 8 — the REAL agent, end to end: the financial_modeling subagent runs its production loop
-// (real system prompt, the dcf-valuation skill's guidance injected exactly as the dispatcher does,
-// the full tool registry, the 30-step budget with mutation seriality) against a committed model.
+// (real system prompt, its own registered skill roster which it invokes for itself, the full tool
+// registry, the 30-step budget with mutation seriality) against a committed model.
 // The script builds the foundation and then makes NO modeling choices: forecast structure, WACC
 // inputs, and terminal assumptions are all the agent's own; the lifecycle stage derives itself.
 //
@@ -11,7 +11,8 @@ import { createSubagentRegistry } from "../../../src/agent/subagents/registerSub
 import { SubagentRuntime } from "../../../src/framework/subagent.ts";
 import { SessionState } from "../../../src/framework/sessionState.ts";
 import { SkillRegistry } from "../../../src/framework/skill.ts";
-import { createReadSkillReferenceTool } from "../../../src/framework/skillTools.ts";
+import { assertSubagentSkills } from "../../../src/framework/skill.ts";
+import { createInvokeSkillTool, createReadSkillReferenceTool } from "../../../src/framework/skillTools.ts";
 import { McpToolRegistry } from "../../../mcp_tools/toolRegistry.ts";
 import { createFinancialModelTools, type FinancialModelToolDeps } from "../../../mcp_tools/financial-model/financialModelTools.ts";
 import { createWorkbenchTools } from "../../../mcp_tools/financial-model/workbenchTools.ts";
@@ -111,22 +112,25 @@ sourceReviewStore.save(modelId, { ingestionRunId: "e2e", coverage: { requestedPe
 const deps = { modelStore, insightStore: new InMemoryFilingInsightStore(),
   sourceReviewStore, ingestionStore: sourceReviewStore } as FinancialModelToolDeps;
 
-// ---- the REAL tool registry and the REAL skill guidance ----
+// ---- the REAL tool registry and the REAL skill roster ----
+// No guidance is spliced into the task here: the agent owns dcf-modeling and calls
+// invoke_skill for itself, exactly as it does in production.
 const skills = new SkillRegistry();
 await skills.loadFromDirectory("skills");
-const skill = skills.get("dcf-valuation")!;
-const guidance = skill.agentSections.financial_modeling!;
+const subagents = createSubagentRegistry();
+assertSubagentSkills(subagents.list(), skills);
 
 const tools = new McpToolRegistry();
 for (const tool of createFinancialModelTools(deps)) tools.register(tool);
 for (const tool of createWorkbenchTools(deps)) tools.register(tool);
 tools.register(createTreasuryYieldTool());
 tools.register(createFinancialSearchTool());
+tools.register(createInvokeSkillTool(skills));
 tools.register(createReadSkillReferenceTool(skills));
 
-const definition = { ...createSubagentRegistry().get("financial_modeling"),
+const definition = { ...subagents.get("financial_modeling"),
   defaultTools: tools.list().map((tool) => tool.name), maxToolSteps: MAX_TOOL_STEPS };
-const runtime = new SubagentRuntime(new ModelRouter(resolveLlmProvider()), tools);
+const runtime = new SubagentRuntime(new ModelRouter(resolveLlmProvider()), tools, skills);
 const state = new SessionState("e2e-session", new Date().toISOString());
 state.beginTurn("step8");
 
@@ -138,7 +142,7 @@ const baseTask = resuming
   + `forecast (your judgment on unified vs per-segment growth), complete the WACC sheet and the `
   + `terminal assumptions, and finish when the model reads as valued. model_id ${modelId}.`;
 
-const task = `${baseTask}\n\n[SKILL GUIDANCE]\n${guidance}`;
+const task = baseTask;
 const dispatch = state.recordDispatch("financial_modeling", task);
 await runtime.run(definition, { sessionId: "e2e-session", agentId: AGENT_ID, taskId: dispatch.event_id,
   request: { agent: "financial_modeling", task, model_id: modelId },
@@ -164,9 +168,9 @@ console.log(`\n## Agent's custom analysis rows (${customRows.length})`);
 for (const row of customRows) console.log(`  ${row.id} — ${(row.description ?? "").slice(0, 110)}`);
 console.log(`\nWACC: ${waccRow?.value === null || waccRow?.value === undefined ? "unresolved" : (waccRow.value * 100).toFixed(2) + "%"}`);
 if (snapshot.lifecycleStage === "valued" && valuation) {
-  const gordon = valuation["gordonGrowth"] as Record<string, number>;
+  const perpetuity = valuation["perpetuityGrowth"] as Record<string, number>;
   const exit = valuation["exitMultiple"] as Record<string, number>;
-  console.log(`Gordon: $${gordon["impliedValuePerShare"]?.toFixed(2)} /sh | Exit: $${exit["impliedValuePerShare"]?.toFixed(2)} /sh`);
+  console.log(`Perpetuity: $${perpetuity["impliedValuePerShare"]?.toFixed(2)} /sh | Exit: $${exit["impliedValuePerShare"]?.toFixed(2)} /sh`);
   console.log(`\n**PASS** — the agent reached valued on its own judgment in one dispatch.`);
 } else {
   console.log(`\n**INCOMPLETE** — lifecycle ${snapshot.lifecycleStage}; see summary above.`);

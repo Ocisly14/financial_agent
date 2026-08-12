@@ -71,15 +71,25 @@ export class SqliteSourceReviewStore implements SourceReviewStore, FilingIngesti
       ingestion_run_id TEXT PRIMARY KEY, owner_agent_id TEXT NOT NULL, symbol TEXT NOT NULL, artifact_json TEXT NOT NULL, created_at TEXT NOT NULL
     );`); }
   static open(path: string): SqliteSourceReviewStore { mkdirSync(dirname(path), { recursive: true }); return new SqliteSourceReviewStore(new DatabaseSync(path)); }
+  // Upsert, not insert: a review is written once when the model is created and again by each
+  // mapping subagent that attaches its artifact to it, so the second write is the normal path,
+  // not a conflict. `created_at` keeps the first write's time — it names when the review began.
   save(id: string, artifact: SourceReviewArtifact): void {
-    this.db.prepare("INSERT INTO financial_model_source_reviews VALUES (?, ?, ?)").run(id, JSON.stringify(artifact), new Date().toISOString());
+    this.db.prepare(`INSERT INTO financial_model_source_reviews VALUES (?, ?, ?)
+      ON CONFLICT(model_id) DO UPDATE SET artifact_json=excluded.artifact_json`)
+      .run(id, JSON.stringify(artifact), new Date().toISOString());
   }
   get(id: string): SourceReviewArtifact | undefined {
     const row = this.db.prepare("SELECT artifact_json FROM financial_model_source_reviews WHERE model_id=?").get(id) as { artifact_json: string } | undefined;
     return row ? JSON.parse(row.artifact_json) as SourceReviewArtifact : undefined;
   }
+  // Upsert for a narrower reason: statement_extraction writes the `ready` ingestion inside the same
+  // try block that then builds its response, so a throw after that write is saved again as `failed`
+  // under the same run id. Insert-only would raise a UNIQUE error there and bury the real failure.
   saveIngestion(artifact: FilingIngestionArtifact): void {
-    this.db.prepare("INSERT INTO financial_model_filing_ingestions VALUES (?, ?, ?, ?, ?)")
+    this.db.prepare(`INSERT INTO financial_model_filing_ingestions VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(ingestion_run_id) DO UPDATE SET owner_agent_id=excluded.owner_agent_id,
+        symbol=excluded.symbol, artifact_json=excluded.artifact_json`)
       .run(artifact.ingestionRunId, artifact.ownerAgentId, artifact.symbol, JSON.stringify(artifact), new Date().toISOString());
   }
   getIngestion(id: string): FilingIngestionArtifact | undefined {

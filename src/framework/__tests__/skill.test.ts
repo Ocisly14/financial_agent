@@ -21,7 +21,6 @@ test("frontmatter arrays are parsed as arrays, not as their string form", async 
       "---",
       "name: demo",
       "description: a demo skill",
-      "agents: [market_data, market_research]",
       "tools:",
       "  - get_stock_price",
       "  - stock_rsi",
@@ -34,7 +33,6 @@ test("frontmatter arrays are parsed as arrays, not as their string form", async 
   await registry.loadFromDirectory(root);
   const skill = registry.get("demo")!;
 
-  assert.deepEqual(skill.agents, ["market_data", "market_research"]);
   assert.deepEqual(skill.tools, ["get_stock_price", "stock_rsi"]);
   assert.equal(skill.body.trim(), "body text");
   assert.equal(skill.dir, path.join(root, "demo"));
@@ -66,20 +64,21 @@ test("a missing skills directory is a legal empty state", async () => {
   assert.deepEqual(registry.list(), []);
 });
 
-test("an unknown agent name in frontmatter fails at load time", async () => {
+test("the removed 'agents:' field fails at load time instead of being ignored", async () => {
   const root = await skillDir({
     "demo/demo.md": [
       "---",
       "name: demo",
       "description: a demo skill",
-      "agents: [market_data, not_an_agent]",
+      "agents: [market_data]",
       "---",
       "body",
     ].join("\n"),
   });
 
+  // Ignoring it would leave the author believing a whitelist is still in force.
   const registry = new SkillRegistry();
-  await assert.rejects(() => registry.loadFromDirectory(root), /not_an_agent/);
+  await assert.rejects(() => registry.loadFromDirectory(root), /declares 'agents', which no longer exists/);
 });
 
 test("a missing description fails at load time rather than loading silently", async () => {

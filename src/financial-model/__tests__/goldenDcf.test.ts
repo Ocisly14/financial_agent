@@ -73,10 +73,10 @@ const FORECAST_EXPECTED = {
 const VALUATION_EXPECTED = {
   discountFactors: [1.1, 1.21, 1.331],
   explicitPresentValue: 55.145454545455,
-  gordonTerminalValue: 360.002657142857,
-  gordonEnterpriseValue: 325.620779221,
-  gordonEquityValue: 307.620779221,
-  gordonPerShare: 30.7620779221,
+  perpetuityTerminalValue: 360.002657142857,
+  perpetuityEnterpriseValue: 325.620779221,
+  perpetuityEquityValue: 307.620779221,
+  perpetuityPerShare: 30.7620779221,
   exitTerminalValue: 319.44,
   exitEnterpriseValue: 295.145454545,
   exitEquityValue: 277.145454545,
@@ -216,15 +216,15 @@ test("golden service workflow maps statements once and produces a deterministic 
   assert.deepEqual(valuation.explicitPeriods.map((period) => period.wacc), [0.10, 0.10, 0.10]);
   assert.deepEqual(valuation.explicitPeriods.map((period) => period.discountFactor), VALUATION_EXPECTED.discountFactors);
   assertClose(valuation.explicitPeriods.reduce((sum, period) => sum + period.presentValue, 0), VALUATION_EXPECTED.explicitPresentValue);
-  assertClose(valuation.gordonGrowth.terminalValue, VALUATION_EXPECTED.gordonTerminalValue);
-  assertClose(valuation.gordonGrowth.enterpriseValue, VALUATION_EXPECTED.gordonEnterpriseValue);
-  assertClose(valuation.gordonGrowth.equityValue, VALUATION_EXPECTED.gordonEquityValue);
-  assertClose(valuation.gordonGrowth.impliedValuePerShare, VALUATION_EXPECTED.gordonPerShare);
+  assertClose(valuation.perpetuityGrowth.terminalValue, VALUATION_EXPECTED.perpetuityTerminalValue);
+  assertClose(valuation.perpetuityGrowth.enterpriseValue, VALUATION_EXPECTED.perpetuityEnterpriseValue);
+  assertClose(valuation.perpetuityGrowth.equityValue, VALUATION_EXPECTED.perpetuityEquityValue);
+  assertClose(valuation.perpetuityGrowth.impliedValuePerShare, VALUATION_EXPECTED.perpetuityPerShare);
   assertClose(valuation.exitMultiple.terminalValue, VALUATION_EXPECTED.exitTerminalValue);
   assertClose(valuation.exitMultiple.enterpriseValue, VALUATION_EXPECTED.exitEnterpriseValue);
   assertClose(valuation.exitMultiple.equityValue, VALUATION_EXPECTED.exitEquityValue);
   assertClose(valuation.exitMultiple.impliedValuePerShare, VALUATION_EXPECTED.exitPerShare);
-  assert.equal(valuation.gordonGrowth.method, "gordon_growth");
+  assert.equal(valuation.perpetuityGrowth.method, "perpetuity_growth");
   assert.equal(valuation.exitMultiple.method, "exit_multiple");
   assertSensitivityMatrix(valuation.waccByGrowth, "growth");
   assertSensitivityMatrix(valuation.waccByMultiple, "multiple");
@@ -232,7 +232,7 @@ test("golden service workflow maps statements once and produces a deterministic 
     assert.ok(period.refs.length >= 2, `${period.periodId} must retain FCFF and WACC lineage`);
     assert.ok(period.refs.every((ref) => !ref.startsWith("source.")));
   }
-  for (const method of [valuation.gordonGrowth, valuation.exitMultiple]) {
+  for (const method of [valuation.perpetuityGrowth, valuation.exitMultiple]) {
     assert.ok(method.refs.length > 0);
     assert.ok(method.refs.every((ref) => !ref.startsWith("source.")));
     assert.ok(method.bridge.every((adjustment) => adjustment.refs.length === 1));

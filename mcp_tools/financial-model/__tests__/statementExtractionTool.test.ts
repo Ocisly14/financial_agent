@@ -5,6 +5,7 @@ import type { RevisionChangeSummary } from "../../../src/financial-model/service
 import { financialModelSnapshotCodec } from "../../../src/financial-model/snapshotCodec.ts";
 import { InMemoryModelStore } from "../../../src/financial-model/store.ts";
 import { InMemoryFilingInsightStore } from "../../../src/infra/filing-insights/store.ts";
+import { ArelleAdapterError } from "../../../src/infra/xbrl/arelleAdapter.ts";
 import { InMemoryFilingTableStore } from "../../../src/infra/xbrl/filingTableStore.ts";
 import { InMemorySourceReviewStore } from "../../../src/infra/xbrl/sourceReviewStore.ts";
 import type { PreparedStatementProvider } from "../../../src/infra/xbrl/preparedStatementProvider.ts";
@@ -33,15 +34,29 @@ function provider(tables = TABLES): PreparedStatementProvider {
 /** The router must never be reached: extraction is deterministic apart from the insight pass. */
 const forbiddenRouter = { generate: async () => { throw new Error("statement extraction must not call a model"); } } as unknown as ModelRouter;
 
-function fixture(tables = TABLES) {
+function fixture(tables = TABLES, override?: PreparedStatementProvider) {
   const store = new InMemorySourceReviewStore();
+  const insightStore = new InMemoryFilingInsightStore();
   const financial: FinancialModelToolDeps = {
     modelStore: new InMemoryModelStore<FinancialModelSnapshot, RevisionChangeSummary>(financialModelSnapshotCodec),
-    insightStore: new InMemoryFilingInsightStore(), sourceReviewStore: store, ingestionStore: store,
+    insightStore, sourceReviewStore: store, ingestionStore: store,
   };
-  const tool = createStatementExtractionTool({ modelRouter: forbiddenRouter, financial, provider: provider(tables),
+  const tool = createStatementExtractionTool({ modelRouter: forbiddenRouter, financial, provider: override ?? provider(tables),
     tableStore: new InMemoryFilingTableStore(), generateInsights: async () => [] });
-  return { tool, store };
+  return { tool, store, insightStore };
+}
+
+/** The same fixture with no explicit generator, so the env flag decides. */
+function unflaggedFixture() {
+  const store = new InMemorySourceReviewStore();
+  const insightStore = new InMemoryFilingInsightStore();
+  const financial: FinancialModelToolDeps = {
+    modelStore: new InMemoryModelStore<FinancialModelSnapshot, RevisionChangeSummary>(financialModelSnapshotCodec),
+    insightStore, sourceReviewStore: store, ingestionStore: store,
+  };
+  const tool = createStatementExtractionTool({ modelRouter: forbiddenRouter, financial, provider: provider(),
+    tableStore: new InMemoryFilingTableStore() });
+  return { tool, insightStore };
 }
 
 const context = { agentId: "agent-1", sessionId: "session-1" } as never;
@@ -66,6 +81,46 @@ test("a symbol whose filings yield no facts fails the run instead of returning a
   const { tool } = fixture([]);
   const result = await tool.execute({ symbol: "aapl" }, context);
   assert.equal(result.error?.code, "incomplete_financial_statements");
+});
+
+test("filing insights are off unless FILING_INSIGHTS_ENABLED opts in", async () => {
+  const previous = process.env["FILING_INSIGHTS_ENABLED"];
+  delete process.env["FILING_INSIGHTS_ENABLED"];
+  try {
+    const { tool, insightStore } = unflaggedFixture();
+    const result = await tool.execute({ symbol: "aapl" }, context);
+
+    assert.equal(result.error, undefined);
+    const { extraction } = result.generation_context!.data as { extraction: { filingInsightSetId: string } };
+    // The set is still created and still linked, so create_financial_model is unaffected.
+    assert.deepEqual(insightStore.getContext(extraction.filingInsightSetId)?.coverage.failureCodes, ["filing_insights_disabled"]);
+  } finally {
+    if (previous === undefined) delete process.env["FILING_INSIGHTS_ENABLED"];
+    else process.env["FILING_INSIGHTS_ENABLED"] = previous;
+  }
+});
+
+// The summary is all the agent reads. Left bare, "Invalid adapter JSON" looks transient and the
+// agent re-calls the tool until its step budget is gone.
+test("a non-retryable adapter failure tells the agent in the summary to stop calling the tool", async () => {
+  const { tool } = fixture(TABLES, { ...provider(),
+    extract: async () => { throw new ArelleAdapterError("xbrl_protocol_error", "Invalid adapter JSON: SyntaxError"); } });
+  const result = await tool.execute({ symbol: "aapl" }, context);
+
+  assert.equal(result.error?.code, "xbrl_protocol_error");
+  assert.ok(result.summary.includes("Invalid adapter JSON"), result.summary);
+  assert.match(result.summary, /do not retry/i);
+  assert.equal((result.generation_context!.data as { extraction: { retryable: boolean } }).extraction.retryable, false);
+});
+
+test("a retryable adapter failure leaves the retry decision to the agent", async () => {
+  const { tool } = fixture(TABLES, { ...provider(),
+    extract: async () => { throw new ArelleAdapterError("xbrl_timeout", "Arelle adapter exceeded 120000ms"); } });
+  const result = await tool.execute({ symbol: "aapl" }, context);
+
+  assert.equal(result.error?.code, "xbrl_timeout");
+  assert.doesNotMatch(result.summary, /do not retry/i);
+  assert.equal((result.generation_context!.data as { extraction: { retryable: boolean } }).extraction.retryable, true);
 });
 
 test("history years outside 3..10 are rejected before Arelle is invoked", async () => {

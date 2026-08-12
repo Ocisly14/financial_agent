@@ -2,8 +2,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Dispatcher } from "../framework/dispatcher.ts";
 import { OrchestratorRuntime } from "../framework/orchestrator.ts";
-import { SkillRegistry } from "../framework/skill.ts";
-import { createReadSkillReferenceTool, createRunSkillScriptTool } from "../framework/skillTools.ts";
+import { assertSubagentSkills, SkillRegistry } from "../framework/skill.ts";
+import { createInvokeSkillTool, createReadSkillReferenceTool, createRunSkillScriptTool } from "../framework/skillTools.ts";
 import { SubagentRuntime } from "../framework/subagent.ts";
 import { MockLlmProvider, ModelRouter, type LlmProvider } from "../infra/llm/provider.ts";
 import { AnthropicProvider } from "../infra/llm/anthropicProvider.ts";
@@ -34,14 +34,18 @@ export async function createFinancialAgentApp() {
   // Both need the router, which registerAllTools has no handle on: extraction for its small-model
   // insight pass, the subagent tool for the subagents themselves.
   toolRegistry.register(createStatementExtractionTool({ modelRouter, financial: financialModelDeps }));
-  toolRegistry.register(createDcfSubagentTool({ modelRouter, financial: financialModelDeps }));
   const subagents = createSubagentRegistry();
-  const subagentRuntime = new SubagentRuntime(modelRouter, toolRegistry);
   const skills = new SkillRegistry();
   await skills.loadFromDirectory(resolveSkillsPath());
+  assertSubagentSkills(subagents.list(), skills);
+  const subagentRuntime = new SubagentRuntime(modelRouter, toolRegistry, skills);
 
+  toolRegistry.register(createInvokeSkillTool(skills));
   toolRegistry.register(createReadSkillReferenceTool(skills));
   toolRegistry.register(createRunSkillScriptTool(skills));
+  // Registered after the runtime exists: run_dcf_subagent hands work to it. The registry is looked up
+  // by name at call time, so registering into it after construction is fine.
+  toolRegistry.register(createDcfSubagentTool({ subagentRuntime, subagents, sessions, financial: financialModelDeps }));
 
   const dispatcherFactory = (sessionId: string, agentId: string) =>
     new Dispatcher(sessionId, subagents, subagentRuntime, toolRegistry, sessions.getExisting(sessionId), agentId);

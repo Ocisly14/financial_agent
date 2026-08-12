@@ -1,9 +1,13 @@
 import type { LlmMessage, LlmToolCall, LlmToolSpec, ModelClass, ModelRouter } from "../infra/llm/provider.ts";
 import { PromptRenderer, type PromptTemplate } from "./prompt.ts";
-import type { AgentKind, JsonObject, JsonSchema, JsonValue, TaskRequest, TaskResult, ToolDefinition } from "./types.ts";
+import type { AgentKind, JsonObject, JsonSchema, JsonValue, TaskRequest, TaskResult, ToolDefinition, UserInputRequest } from "./types.ts";
 import type { McpToolRegistry } from "../../mcp_tools/toolRegistry.ts";
 import { newId } from "./ids.ts";
 import type { SessionState } from "./sessionState.ts";
+import type { SkillRegistry } from "./skill.ts";
+import { INVOKE_SKILL } from "./skillTools.ts";
+import { assertToolAllowedForAgent } from "./toolAccess.ts";
+import { maybeCompactThread } from "./contextCompaction.ts";
 import { createLogger } from "../infra/logger/logger.ts";
 
 const log = createLogger("subagent");
@@ -17,6 +21,12 @@ export type SubagentDefinition = {
   description: string;
   modelClass: ModelClass;
   defaultTools: string[];
+  /**
+   * agent 层技能的名字。归属声明在这里而不是技能的 frontmatter 里，理由和
+   * defaultTools 一样：一个 agent 能用什么，应该在注册表一处看全，而不是散到
+   * skills/ 目录里反查谁认领了它。
+   */
+  skills?: string[];
   systemPrompt: PromptTemplate;
   maxToolSteps?: number;
 };
@@ -184,16 +194,61 @@ export function buildLoopToolSpecs(tools: ToolDefinition[]): LlmToolSpec[] {
  * [PROGRESS SO FAR] 之后在长。在 marker 处切开并打 cache 标记,provider 就能
  * 把静态前缀走缓存读,每步只为动态尾部付全价。marker 缺失时退化为整段发送。 */
 const PROGRESS_MARKER = "[PROGRESS SO FAR]";
-export function splitForPromptCache(system: string, prompt: string): LlmMessage[] {
+
+/**
+ * Below this, a third breakpoint is not worth its own cache write: providers bill a write above the
+ * read they save, and they round a cached prefix down to their own block size, so a short one can
+ * cost more than it returns.
+ */
+const MIN_ROLLING_CACHE_CHARS = 4000;
+
+/**
+ * How much of `progress` the previous step already sent, byte for byte. A provider matches a cached
+ * prefix by bytes, so this is the only honest place to cut — whatever the projection's shape, this
+ * finds however much of it happens to have held still.
+ */
+function commonPrefixLength(current: string, previous: string): number {
+  const limit = Math.min(current.length, previous.length);
+  let index = 0;
+  while (index < limit && current.charCodeAt(index) === previous.charCodeAt(index)) index += 1;
+  return index;
+}
+
+/**
+ * `previousProgress` is the progress region as it was rendered for the step before, and it earns a
+ * third breakpoint: the static prefix stops growing after step one, while the progress region holds
+ * everything the run has learned — tens of thousands of characters of playbook text among them —
+ * and re-sending all of it at full price every step is most of what a long dispatch costs.
+ */
+export function splitForPromptCache(system: string, prompt: string, previousProgress?: string): LlmMessage[] {
   const index = prompt.indexOf(PROGRESS_MARKER);
   if (index <= 0) {
     return [{ role: "system", content: system, cache: true }, { role: "user", content: prompt }];
   }
+  const head = { role: "system" as const, content: system, cache: true };
+  const staticPrefix = { role: "user" as const, content: prompt.slice(0, index), cache: true };
+  const progress = prompt.slice(index);
+
+  const shared = previousProgress === undefined ? 0 : commonPrefixLength(progress, previousProgress);
+  if (shared < MIN_ROLLING_CACHE_CHARS) {
+    return [head, staticPrefix, { role: "user", content: progress }];
+  }
+  // Nothing new since the last step — a retry on identical state. Cache the whole region rather than
+  // splitting it: an empty trailing block is not a text block a provider will accept.
+  if (shared >= progress.length) {
+    return [head, staticPrefix, { role: "user", content: progress, cache: true }];
+  }
   return [
-    { role: "system", content: system, cache: true },
-    { role: "user", content: prompt.slice(0, index), cache: true },
-    { role: "user", content: prompt.slice(index) },
+    head, staticPrefix,
+    { role: "user", content: progress.slice(0, shared), cache: true },
+    { role: "user", content: progress.slice(shared) },
   ];
+}
+
+/** The progress region of a rendered prompt, or undefined when it carries none. */
+export function progressRegion(prompt: string): string | undefined {
+  const index = prompt.indexOf(PROGRESS_MARKER);
+  return index <= 0 ? undefined : prompt.slice(index);
 }
 
 /** Map a native tool-call answer onto the loop's step shape. finish only counts
@@ -231,43 +286,132 @@ function normalizeToolError(output: { summary: string; error?: { code: string; m
 export type RunSubagentInput = {
   sessionId: string;
   agentId: string;
+  /** The dispatch this run answers — where its task_result is written. */
   taskId: string;
   request: TaskRequest;
   allowedTools: ToolDefinition[];
+  /**
+   * Tools scoped to this run, resolved before the shared registry. The DCF mapping agents need it:
+   * their tools close over the model they were pinned to and the decision they have submitted so
+   * far, so they cannot live in a process-wide registry two concurrent runs would share.
+   */
+  toolRegistry?: McpToolRegistry;
   state: SessionState;       // the session event log — subagent records its internal trace here
-  parentEventId: string;     // the dispatch event this task hangs off (parent for sidechain events)
+  /**
+   * The conversation this run belongs to. Every event the agent writes is
+   * stamped with it, and [PROGRESS SO FAR] is projected from it — so a second
+   * dispatch naming the same thread comes back to its own notes and tool
+   * results instead of re-deriving them from the model alone.
+   *
+   * A thread outlives any one dispatch: `taskId` says which round this is,
+   * `threadId` says which conversation the rounds belong to.
+   */
+  threadId: string;
 };
 
 export class SubagentRuntime {
   private readonly renderer = new PromptRenderer();
   private readonly modelRouter: ModelRouter;
   private readonly toolRegistry: McpToolRegistry;
+  private readonly skills: SkillRegistry | undefined;
 
   constructor(
     modelRouter: ModelRouter,
     toolRegistry: McpToolRegistry,
+    /** Absent in harnesses that prompt without skills; the roster then renders as "(none)". */
+    skills?: SkillRegistry,
   ) {
     this.modelRouter = modelRouter;
     this.toolRegistry = toolRegistry;
+    this.skills = skills;
+  }
+
+  /** The agent's own skill roster, rendered for its prompt. Names come from the
+   *  subagent registry, descriptions from the skill files. */
+  private renderSkillRoster(definition: SubagentDefinition): string {
+    const names = definition.skills ?? [];
+    if (names.length === 0 || !this.skills) return "(none)";
+    const lines = names.flatMap((name) => {
+      const skill = this.skills!.get(name, "agent");
+      return skill ? [`- ${skill.name}: ${skill.description}`] : [];
+    });
+    return lines.length ? lines.join("\n") : "(none)";
+  }
+
+  /**
+   * Fold the tools an invoked skill declares into the live set, so the agent can
+   * call them from its next step. A name that is unregistered, or that the
+   * category gate refuses for this agent, is skipped with a warning rather than
+   * failing the task: a skill over-declaring one tool should not cost a DCF its
+   * whole round.
+   */
+  private grantSkillTools(definition: SubagentDefinition, granted: unknown, allowed: Map<string, ToolDefinition>): void {
+    if (!Array.isArray(granted)) return;
+    for (const name of granted) {
+      if (typeof name !== "string" || allowed.has(name)) continue;
+      const tool = this.toolRegistry.get(name);
+      if (!tool) {
+        log.warn(`[${definition.name}] skill grants unregistered tool: ${name}`);
+        continue;
+      }
+      try {
+        assertToolAllowedForAgent(definition.name, name, tool.category);
+      } catch (error) {
+        log.warn(`[${definition.name}] skill grant refused by category gate: ${name}`,
+          { error: error instanceof Error ? error.message : String(error) });
+        continue;
+      }
+      const { execute: _execute, ...spec } = tool;
+      allowed.set(name, spec);
+      log.info(`[${definition.name}] skill granted tool: ${name}`);
+    }
   }
 
   /**
    * Run the subagent's tool-calling loop and WRITE its own task_result to the
-   * session event log. Returns nothing — the subagent interacts only with state.
-   * Internal tool_use/tool_result are recorded as sidechain events. (Timeout /
+   * session event log. The result is also RETURNED, for the hosts that drive an
+   * agent directly rather than through the dispatcher: the DCF mapping agents
+   * report to their caller through the summary the agent wrote at finish, and
+   * reading it back out of the log by taskId would be the same value at more
+   * cost. Callers that only care about the log may ignore it.
+   * Internal tool_use/tool_result go on the agent's own thread. (Timeout /
    * subagent-throw is handled by the dispatcher, which writes the failure result.)
    */
-  async run(definition: SubagentDefinition, input: RunSubagentInput): Promise<void> {
+  async run(definition: SubagentDefinition, input: RunSubagentInput): Promise<TaskResult | undefined> {
     const started = Date.now();
-    const { state, parentEventId } = input;
+    const { state, threadId } = input;
+    // Live, not a snapshot: invoke_skill folds the skill's declared tools in here
+    // and the next step's specs are built from it.
     const allowed = new Map(input.allowedTools.map((tool) => [tool.name, tool]));
+    const skillRoster = this.renderSkillRoster(definition);
     let finishSummary = "";
     let llmCalls = 0;
     let awaitingApproval = false;
     let pendingApprovalId: string | undefined;
     let recoveredRevisionConflict = false;
+    let pendingUserInput: UserInputRequest | undefined;
 
-    log.info(`[${definition.name}] start task`, { task: input.request.task, taskId: input.taskId });
+    log.info(`[${definition.name}] start task`, { task: input.request.task, taskId: input.taskId, threadId });
+
+    // A thread the agent has already worked in: mark the seam. Without it the
+    // notes read as one run whose step counter inexplicably restarts, and work
+    // it already finished looks like work still to do.
+    const priorRounds = state.subagentNotes({ thread: threadId }).length > 0;
+    if (priorRounds) {
+      const answered = state.threadPausedOnQuestion(threadId, input.taskId);
+      state.record(definition.name, "subagent_note", { task_id: input.taskId, step: 0,
+        note: answered
+          ? "[resumed] The user has answered the question above — their decision is in the task text. "
+            + "Everything before this line is your own work from before the question; do not redo it and do not ask again. Step numbering restarts here."
+          : `[new round] The orchestrator dispatched a follow-up task in this same thread: "${input.request.task}". `
+            + "Everything before this line is your own earlier work here; do not redo it. Step numbering restarts here." },
+      { threadId, parent: input.taskId });
+    }
+
+    // A thread that has run for many rounds can out-grow the prompt on its own.
+    // Fold its older rounds before rendering, so continuity costs bounded
+    // context rather than unbounded.
+    await maybeCompactThread(state, this.modelRouter, definition.name, threadId, input.taskId);
 
     if (definition.name === "financial_modeling" && input.request.model_id && allowed.has("get_financial_model")) {
       await this.runToolCall(definition, input, { tool: "get_financial_model", input: { modelId: input.request.model_id } }, allowed);
@@ -275,33 +419,54 @@ export class SubagentRuntime {
 
     const maxToolSteps = definition.maxToolSteps ?? DEFAULT_MAX_TOOL_STEPS;
     let exhausted = true;
+    /** Set only by the provider call below, which is the one failure that ends the loop outright. */
+    let llmFailure: { code: string; message: string } | undefined;
+    /** Last step's progress region, so this step can mark how much of it held still and cache it. */
+    let previousProgress: string | undefined;
     for (let step = 1; step <= maxToolSteps; step++) {
       // Loop context is read back from the log: the subagent sees its own prior
       // tool results (state) and decides whether to call another tool or finish.
       const rendered = this.renderer.render(definition.systemPrompt, {
         task: input.request.task,
+        skills: skillRoster,
         modelContext: input.request.model_id
           ? `Resume model ${input.request.model_id}; refresh it before any mutation.`
           : "No existing model handle was supplied.",
         progress: `(you are at step ${step} of your ${maxToolSteps}-step budget)\n` + (definition.name === "financial_modeling"
-          ? projectFinancialModelProgress(state.subagentToolOutputs(parentEventId), state.subagentToolErrors(parentEventId),
-            state.subagentNotes(parentEventId))
-          : state.subagentProgress(parentEventId)),
+          // Thread scope, not task scope: continuing a thread means the agent
+          // comes back to everything it has done here, not just this round.
+          ? projectFinancialModelProgress(state.subagentToolOutputs({ thread: threadId }), state.subagentToolErrors({ thread: threadId }),
+            state.subagentNotes({ thread: threadId }))
+          : state.subagentProgress({ thread: threadId })),
       });
 
       let completionText: string;
       let completionToolCalls: LlmToolCall[] | undefined;
+      // Recorded before the call, not after: a step that throws still told the next one what it sent,
+      // and a retry that re-renders the same progress should read it from cache rather than re-pay.
+      const progressSent = progressRegion(rendered.prompt);
       try {
         const completion = await this.modelRouter.generate(
-          splitForPromptCache(rendered.system, rendered.prompt),
+          splitForPromptCache(rendered.system, rendered.prompt, previousProgress),
+          // Built from the live set, so a skill's grant reaches the model. This is
+          // the one thing that can change the cached request prefix mid-run; an
+          // invoke_skill therefore costs one cache miss, and only one.
           { modelClass: definition.modelClass, temperature: 0.1, metadata: { mode: "subagent", agent: definition.name },
-            tools: buildLoopToolSpecs(input.allowedTools) },
+            tools: buildLoopToolSpecs([...allowed.values()]) },
         );
         completionText = completion.text;
         completionToolCalls = completion.toolCalls;
         llmCalls++;
+        previousProgress = progressSent;
       } catch (error) {
-        log.error(`[${definition.name}] LLM call failed at step ${step}`, { error: error instanceof Error ? error.message : String(error) });
+        const message = error instanceof Error ? error.message : String(error);
+        log.error(`[${definition.name}] LLM call failed at step ${step}`, { error: message });
+        // Recorded, not just logged: this is what ended the run, and without it the result falls
+        // back to whichever tool error came first — which the agent may well have recovered from
+        // twenty steps ago. A caller reading "unknown section" when the provider actually refused
+        // the request diagnoses the wrong thing, and a run loop deciding whether to retry cannot
+        // tell a spent budget from a spent account.
+        llmFailure = { code: "llm_call_failed", message: `LLM call failed at step ${step}: ${message}` };
         break;
       }
 
@@ -318,8 +483,8 @@ export class SubagentRuntime {
       if (completionToolCalls?.length && completionText.trim() !== "") {
         const note = completionText.trim().slice(0, 500);
         log.info(`[${definition.name}] step ${step} note`, { note });
-        state.record(definition.name, "subagent_note", { task_id: parentEventId, step, note },
-          { isSidechain: true, parent: parentEventId });
+        state.record(definition.name, "subagent_note", { task_id: input.taskId, step, note },
+          { threadId, parent: input.taskId });
       }
       if (stepObj.action === "finish") {
         // tool_choice 是 auto:模型可能只输出思考文本而不调任何工具。这不是收工——
@@ -327,10 +492,10 @@ export class SubagentRuntime {
         const proseOnly = !completionToolCalls?.length && extractJsonObject(completionText) === null && completionText.trim() !== "";
         if (proseOnly) {
           log.info(`[${definition.name}] prose-only reply at step ${step}; nudging to act`, {});
-          state.record(definition.name, "tool_result", { task_id: parentEventId, name: `${definition.name}_runtime`, step,
+          state.record(definition.name, "tool_result", { task_id: input.taskId, name: `${definition.name}_runtime`, step,
             error: { code: "no_action_taken",
               message: `You replied with text but called no tool. Your note (kept for you): "${completionText.trim().slice(0, 600)}". Now act on it: call the tools it implies, or call finish with your summary.` } },
-          { isSidechain: true, parent: parentEventId });
+          { threadId, parent: input.taskId });
           continue;
         }
         // 解析兜底会把残缺输出当成 finish:空文本,或想调工具但 JSON 没写对
@@ -340,12 +505,12 @@ export class SubagentRuntime {
         if (stepObj.summary === "" || attemptedToolCall) {
           log.warn(`[${definition.name}] unparseable completion at step ${step}; retrying instead of finishing`,
             { attempted_tool_call: attemptedToolCall });
-          state.record(definition.name, "tool_result", { task_id: parentEventId, name: `${definition.name}_runtime`, step,
+          state.record(definition.name, "tool_result", { task_id: input.taskId, name: `${definition.name}_runtime`, step,
             error: { code: "unparseable_step",
               message: attemptedToolCall
                 ? "Your last reply looked like a tool call but was not valid JSON (likely unbalanced braces — check that every object is fully closed). Re-send it as strict JSON; if the batch is long, split it into smaller operation batches across steps."
                 : "Your last reply was empty or finished without a summary. Call one of the provided tools, or call finish with a non-empty summary." } },
-          { isSidechain: true, parent: parentEventId });
+          { threadId, parent: input.taskId });
           continue;
         }
         exhausted = false;
@@ -356,11 +521,22 @@ export class SubagentRuntime {
 
       log.info(`[${definition.name}] step ${step} — calling tools`, { tools: stepObj.calls.map((c) => c.tool) });
 
+      // ask_user ends the turn. Anything sharing its step would run, produce a
+      // result nobody reads (the loop stops), and be replayed on the resuming
+      // dispatch — so refuse the step and let the model re-issue the ask alone.
+      if (stepObj.calls.some((call) => call.tool === "ask_user") && stepObj.calls.length > 1) {
+        state.record(definition.name, "tool_result", { task_id: input.taskId, name: `${definition.name}_runtime`, step,
+          error: { code: "user_input_must_be_solo",
+            message: "ask_user ends your turn, so it must be the only call in its step. Re-issue it alone, or do the other work first and ask afterwards." } },
+        { threadId, parent: input.taskId });
+        continue;
+      }
+
       if (definition.name === "financial_modeling" && violatesFinancialMutationSeriality(stepObj.calls)) {
-        state.record(definition.name, "tool_result", { task_id: parentEventId, name: "financial_modeling_runtime", step,
+        state.record(definition.name, "tool_result", { task_id: input.taskId, name: "financial_modeling_runtime", step,
           error: { code: "financial_mutation_serialization_required",
             message: "A revision mutation must be the only call in its step. Combine dependent changes into one ordered operations batch, then inspect the result in a later step." } },
-        { isSidechain: true, parent: parentEventId });
+        { threadId, parent: input.taskId });
         continue;
       }
 
@@ -370,13 +546,27 @@ export class SubagentRuntime {
       if (definition.name === "financial_modeling" && allowed.has("get_financial_model")) {
         const stepConflict = toolResults.some((result) => result.errorCode === "revision_conflict");
         const modelId = stepConflict
-          ? latestFinancialModelState(state.subagentToolOutputs(parentEventId)).model_id ?? input.request.model_id
+          ? latestFinancialModelState(state.subagentToolOutputs({ thread: threadId })).model_id ?? input.request.model_id
           : undefined;
         if (modelId) {
           const refresh = await this.runToolCall(definition, input, { tool: "get_financial_model", input: { modelId } }, allowed);
           recoveredRevisionConflict = refresh.errorCode === undefined;
         }
       }
+      // A question is turn-ending: record it on the main channel so the client
+      // renders the card, then stop. The answer does not come back into this
+      // run — the user's reply starts a new turn, and the orchestrator resumes
+      // this work by dispatching this thread again, per the summary below.
+      pendingUserInput = toolResults.find((result) => result.userInputRequest)?.userInputRequest;
+      if (pendingUserInput) {
+        exhausted = false;
+        log.info(`[${definition.name}] paused for user input`, { request_id: pendingUserInput.request_id, threadId });
+        // The question goes on the main thread so the user sees it, tagged with
+        // the thread it came from so the answer can be routed straight back.
+        state.recordUserInputRequest(pendingUserInput, definition.name, threadId);
+        break;
+      }
+
       awaitingApproval = awaitingApproval || toolResults.some((result) => result.awaitingApproval);
       pendingApprovalId = toolResults.find((result) => result.approvalId)?.approvalId ?? pendingApprovalId;
       if (awaitingApproval) {
@@ -387,51 +577,67 @@ export class SubagentRuntime {
     }
 
     if (awaitingApproval) {
-      const resolved = await waitForTaskResult(state, parentEventId, APPROVAL_WAIT_MS);
+      const resolved = await waitForTaskResult(state, input.taskId, APPROVAL_WAIT_MS);
       if (!resolved) {
         if (pendingApprovalId) {
           state.record(
             definition.name,
             "approval_resolved",
-            { approval_id: pendingApprovalId, decision: "timeout" },
-            { parent: parentEventId },
+            { approval_id: pendingApprovalId, decision: "timeout", from_thread: threadId },
+            { parent: input.taskId },
           );
         }
-        state.recordTaskResult(definition.name, parentEventId, {
-          task_id: parentEventId,
+        state.recordTaskResult(definition.name, input.taskId, {
+          task_id: input.taskId,
           agent: definition.name,
           status: "timeout",
           summary: "Timed out waiting for user approval. The strategy was not activated.",
           error: { code: "approval_timeout", message: "Timed out waiting for user approval. The strategy was not activated." },
         });
       }
-      return;
+      return state.task(input.taskId)?.result;
     }
 
     // Assemble the task_result from the tool outputs read back from the log.
-    const outputs = state.subagentToolOutputs(parentEventId);
-    const toolErrors = state.subagentToolErrors(parentEventId);
+    // TASK scope, not thread: this round reports the work it did. Widening it
+    // to the thread would re-attach every earlier round's artifacts to every
+    // later result.
+    const outputs = state.subagentToolOutputs({ task: input.taskId });
+    const toolErrors = state.subagentToolErrors({ task: input.taskId });
     const generationContexts = outputs.map((o) => o.generation_context).filter((c): c is NonNullable<typeof c> => Boolean(c));
     // 运行时自愈类错误(串行纠正、重试提示)不算任务失败;而 agent 干净收工时,
     // 中途已被它克服的工具报错也不该盖过 finish 总结。
-    const RUNTIME_NUDGE_CODES = new Set(["financial_mutation_serialization_required", "unparseable_step", "no_action_taken"]);
+    const RUNTIME_NUDGE_CODES = new Set(["financial_mutation_serialization_required", "unparseable_step", "no_action_taken",
+      "user_input_must_be_solo"]);
     const firstToolError = toolErrors.find((error) => !RUNTIME_NUDGE_CODES.has(error.code)
       && !(recoveredRevisionConflict && error.code === "revision_conflict"));
     const finished = finishSummary !== "";
-    const latestModel = latestFinancialModelState(outputs);
+    // Thread scope: this describes where the WORK stands, and the model handle
+    // may well have been established in an earlier round of this thread.
+    const latestModel = latestFinancialModelState(state.subagentToolOutputs({ thread: threadId }));
+    const pausedForInput = pendingUserInput
+      ? `Paused on ${pendingUserInput.questions.length} question${pendingUserInput.questions.length === 1 ? "" : "s"} for the user`
+        + `; dispatch thread ${threadId} again with their answer and I pick up where I stopped.`
+      : undefined;
     const result: TaskResult = {
-      task_id: parentEventId,
+      task_id: input.taskId,
       agent: definition.name,
-      status: !finished && firstToolError ? "failed" : "ok",
-      summary: finished ? finishSummary : (firstToolError?.message ?? (exhausted && definition.name === "financial_modeling"
-        ? `Paused after ${maxToolSteps} tool steps; resume ${latestModel.model_id ?? input.request.model_id ?? "the model"} at revision ${latestModel.revision ?? "unknown"} (${latestModel.lifecycle_stage ?? "unknown stage"}).`
-        : `${definition.name} completed task.`)),
+      status: !finished && !pausedForInput && (llmFailure ?? firstToolError) ? "failed" : "ok",
+      // No clean finish means no summary the agent stands behind. Say which it was —
+      // a host that reports this upward must not pass "completed task" off as an account
+      // of work that stopped mid-stride.
+      summary: pausedForInput ?? (finished ? finishSummary : (llmFailure?.message ?? firstToolError?.message ?? (exhausted
+        ? (definition.name === "financial_modeling"
+          ? `Paused after ${maxToolSteps} tool steps; dispatch thread ${threadId} again to continue ${latestModel.model_id ?? input.request.model_id ?? "the model"} at revision ${latestModel.revision ?? "unknown"} (${latestModel.lifecycle_stage ?? "unknown stage"}).`
+          : `${definition.name} stopped after ${maxToolSteps} tool steps without writing a finish summary.`)
+        : `${definition.name} completed task.`))),
       artifacts: outputs.flatMap((o) => o.artifacts ?? []),
       visualizations: outputs.flatMap((o) => o.visualizations ?? []),
       metrics: { ms: Date.now() - started, tool_calls: outputs.length + toolErrors.length, llm_calls: llmCalls },
     };
-    if (!finished && firstToolError) {
-      result.error = { code: firstToolError.code, message: firstToolError.message };
+    const cause = llmFailure ?? firstToolError;
+    if (!finished && !pausedForInput && cause) {
+      result.error = { code: cause.code, message: cause.message };
     }
 
     log.info(`[${definition.name}] done`, { ms: Date.now() - started, tool_calls: outputs.length, llm_calls: llmCalls });
@@ -443,7 +649,8 @@ export class SubagentRuntime {
           tool_outputs: outputs.map((o) => ({ tool: o.name, summary: o.summary, data: o.generation_context?.data ?? {} })) } };
       if (prompts.length > 0) result.generation_context.prompt = prompts.join("\n\n");
     }
-    state.recordTaskResult(definition.name, parentEventId, result);
+    state.recordTaskResult(definition.name, input.taskId, result);
+    return result;
   }
 
   /** Execute one tool call and record its tool_use/tool_result (and any approval)
@@ -454,8 +661,8 @@ export class SubagentRuntime {
     call: ToolCall,
     allowed: Map<string, ToolDefinition>,
     step?: number,
-  ): Promise<{ awaitingApproval: boolean; approvalId?: string; errorCode?: string }> {
-    const { state, parentEventId } = input;
+  ): Promise<{ awaitingApproval: boolean; approvalId?: string; errorCode?: string; userInputRequest?: UserInputRequest }> {
+    const { state, threadId } = input;
     const tool = allowed.get(call.tool);
     if (!tool) {
       log.warn(`[${definition.name}] invalid tool requested: ${call.tool}`);
@@ -463,10 +670,30 @@ export class SubagentRuntime {
       state.record(
         definition.name,
         "tool_result",
-        { task_id: parentEventId, name: call.tool, error: { code: "invalid_tool", message: `"${call.tool}" is not an allowed tool — choose from the allowed list or finish.` } },
-        { isSidechain: true, parent: parentEventId },
+        { task_id: input.taskId, name: call.tool, error: { code: "invalid_tool", message: `"${call.tool}" is not an allowed tool — choose from the allowed list or finish.` } },
+        { threadId, parent: input.taskId },
       );
       return { awaitingApproval: false, errorCode: "invalid_tool" };
+    }
+
+    // Ownership lives here rather than in the tool: `execute` is a pure
+    // (input) => result and does not know who called it. A name outside this
+    // agent's roster never reaches the registry, so no other agent's guidance
+    // can enter this context.
+    if (tool.name === INVOKE_SKILL) {
+      const requested = typeof call.input["skill"] === "string" ? call.input["skill"] : "";
+      const roster = definition.skills ?? [];
+      if (!roster.includes(requested)) {
+        const message = `"${requested}" is not one of your skills — choose from: ${roster.join(", ") || "(none)"}.`;
+        log.warn(`[${definition.name}] skill outside roster: ${requested}`);
+        state.record(
+          definition.name,
+          "tool_result",
+          { task_id: input.taskId, name: tool.name, error: { code: "skill_not_allowed", message } },
+          { threadId, parent: input.taskId },
+        );
+        return { awaitingApproval: false, errorCode: "skill_not_allowed" };
+      }
     }
 
     const callInput: JsonObject = { ...call.input };
@@ -474,15 +701,18 @@ export class SubagentRuntime {
     const useEv = state.record(
       definition.name,
       "tool_use",
-      { tool_use_id: toolUseId, task_id: parentEventId, name: tool.name, input: callInput },
-      { isSidechain: true, parent: parentEventId },
+      { tool_use_id: toolUseId, task_id: input.taskId, name: tool.name, input: callInput },
+      { threadId, parent: input.taskId },
     );
 
     log.info(`[${definition.name}] tool call: ${tool.name}`, { input: call.input });
 
     let output: Awaited<ReturnType<McpToolRegistry["call"]>>;
     try {
-      output = await this.toolRegistry.call(tool.name, callInput, {
+      // Run-scoped first, shared second, so a run only has to register what is peculiar to it and
+      // still reaches `invoke_skill` and the rest from the process registry.
+      const registry = input.toolRegistry?.get(tool.name) ? input.toolRegistry : this.toolRegistry;
+      output = await registry.call(tool.name, callInput, {
         sessionId: input.sessionId,
         agentId: input.agentId,
         taskId: input.taskId,
@@ -492,8 +722,8 @@ export class SubagentRuntime {
       state.record(
         definition.name,
         "tool_result",
-        { tool_use_id: toolUseId, task_id: parentEventId, name: tool.name, error: { code: "tool_error", message: error instanceof Error ? error.message : String(error) } },
-        { isSidechain: true, parent: useEv.event_id },
+        { tool_use_id: toolUseId, task_id: input.taskId, name: tool.name, error: { code: "tool_error", message: error instanceof Error ? error.message : String(error) } },
+        { threadId, parent: useEv.event_id },
       );
       return { awaitingApproval: false, errorCode: "tool_error" };
     }
@@ -501,25 +731,37 @@ export class SubagentRuntime {
     log.info(`[${definition.name}] tool result: ${tool.name}`, { summary: output.summary });
 
     const normalizedError = normalizeToolError(output);
-    const toolResultPayload: JsonObject = { tool_use_id: toolUseId, task_id: parentEventId, name: tool.name, summary: output.summary,
+    const toolResultPayload: JsonObject = { tool_use_id: toolUseId, task_id: input.taskId, name: tool.name, summary: output.summary,
       ...(step === undefined ? {} : { step }) };
     if (output.generation_context) toolResultPayload.generation_context = output.generation_context as unknown as JsonObject;
     if (normalizedError) toolResultPayload.error = normalizedError;
     if (output.artifacts?.length) toolResultPayload.artifacts = output.artifacts as unknown as JsonObject[string];
     if (output.visualizations?.length) toolResultPayload.visualizations = output.visualizations;
-    state.record(definition.name, "tool_result", toolResultPayload, { isSidechain: true, parent: useEv.event_id });
+    state.record(definition.name, "tool_result", toolResultPayload, { threadId, parent: useEv.event_id });
+
+    if (tool.name === INVOKE_SKILL && !normalizedError) {
+      this.grantSkillTools(definition, output.generation_context?.data?.["tools"], allowed);
+    }
 
     if (output.approval) {
       log.info(`[${definition.name}] approval required`, { approval_id: output.approval.approval_id });
       // Approval state lives in the log: approval_required with no matching
       // approval_resolved (within TTL) is pending. No separate store.
+      //
+      // Like a question, this goes on the MAIN thread — it has to reach the
+      // user — and carries the thread it came from rather than being buried in
+      // the agent's own trace where nobody would see it.
       state.record(
         definition.name,
         "approval_required",
-        { approval_id: output.approval.approval_id, payload: output.approval.payload },
-        { parent: parentEventId },
+        { approval_id: output.approval.approval_id, payload: output.approval.payload, from_thread: threadId },
+        { parent: input.taskId },
       );
       return { awaitingApproval: true, approvalId: output.approval.approval_id };
+    }
+
+    if (output.user_input_request) {
+      return { awaitingApproval: false, userInputRequest: output.user_input_request };
     }
 
     return normalizedError ? { awaitingApproval: false, errorCode: normalizedError.code } : { awaitingApproval: false };
@@ -547,36 +789,178 @@ const FINANCIAL_QUERY_TOOLS = new Set([
   "financial_search", "get_treasury_yield", "list_unified_statements", "get_unified_rows", "calculate_model_rows",
 ]);
 
+/** Narrow reads must compose, but an agent can still issue arbitrary selectors. Keep a useful working
+ * set rather than letting a long run grow its prompt without bound; the projection tells it if an
+ * older slice was evicted, so an intentional reread is never mistaken for a missing tool result. */
+const MAX_WORKBOOK_SLICES = 16;
+/** Approx. 30k tokens of structured workbook evidence, leaving room for playbooks, notes, and tool specs. */
+const MAX_WORKBOOK_SLICE_CONTEXT_CHARS = 120_000;
+
+/** 提取结果里唯一跨步必需的是 ingestionRunId 和覆盖率;诊断按 playbook 只在覆盖率
+ *  短缺时才用来判断,所以留计数加一个样本,不把 309 条原样搬进上下文。 */
+function compactExtraction(raw: JsonObject): JsonObject {
+  const diagnostics = Array.isArray(raw["diagnostics"]) ? raw["diagnostics"] : [];
+  return {
+    ...(raw["ingestionRunId"] !== undefined ? { ingestionRunId: raw["ingestionRunId"] } : {}),
+    ...(raw["statementCoverage"] !== undefined ? { statementCoverage: raw["statementCoverage"] } : {}),
+    ...(raw["filingInsightSetId"] !== undefined ? { filingInsightSetId: raw["filingInsightSetId"] } : {}),
+    ...(raw["status"] !== undefined ? { status: raw["status"] } : {}),
+    diagnostic_count: diagnostics.length,
+    ...(diagnostics.length ? { diagnostic_sample: diagnostics.slice(0, 5) as JsonValue } : {}),
+  };
+}
+
 function projectFinancialModelData(outputs: ReturnType<SessionState["subagentToolOutputs"]>): JsonObject {
   const revisions: JsonValue[] = [];
   let active: JsonObject = {};
+  // A narrowed workbook read is evidence the agent explicitly asked for.  Unlike the overview,
+  // multiple sections are meant to be read together (for example revenue plus history before a
+  // forecast), so keep every distinct slice of the current revision instead of letting whichever
+  // parallel call finishes last erase the others.  A new revision invalidates the whole cache.
+  type CachedWorkbookSlice = { slice: JsonObject; sections: Set<string> };
+  const workbookSlices = new Map<string, CachedWorkbookSlice>();
+  let workbookSliceChars = 0;
+  let evictedWorkbookSlices = 0;
   const subagentResults: JsonValue[] = [];
   const skillReferences = new Map<string, JsonValue>();
+  // 技能正文必须跨步存活:这份投影就是 agent 每一步的全部上下文,漏掉它等于
+  // invoke 完下一步方法论就没了。
+  const skillGuidance = new Map<string, JsonValue>();
   const queryResults: JsonValue[] = [];
+  let extraction: JsonObject | undefined;
+  // Unknown tools get one durable slot per tool name. A fixed "last N events" window previously
+  // forgot a successful tool after enough unrelated calls, which has the same repeat-loop failure
+  // mode as dropping a workbook slice.
+  const otherResults = new Map<string, JsonValue>();
   for (const output of outputs) {
     const data = output.generation_context?.data;
-    if (!data) continue;
-    if (output.name === "read_skill_reference" && typeof data["content"] === "string") {
-      skillReferences.set(`${data["skill"]}/${data["path"]}`, data["content"]);
-      continue;
+    if (data) {
+      if (output.name === "read_skill_reference" && typeof data["content"] === "string") {
+        skillReferences.set(`${data["skill"]}/${data["path"]}`, data["content"]);
+        continue;
+      }
+      if (output.name === INVOKE_SKILL && typeof data["content"] === "string") {
+        skillGuidance.set(String(data["skill"]), data["content"]);
+        continue;
+      }
+      let captured = false;
+      if (data["revision_summary"] && typeof data["revision_summary"] === "object") { revisions.push(data["revision_summary"]); captured = true; }
+      if (output.name === "run_dcf_subagent") { subagentResults.push(data); captured = true; }
+      if (FINANCIAL_QUERY_TOOLS.has(output.name)) { queryResults.push({ tool: output.name, data }); captured = true; }
+      // 提取结果单独一格,后一次覆盖前一次:agent 需要的是 ingestionRunId 和覆盖率,
+      // 不是 309 条诊断乘以重试次数。没有这一格,提取就等于没发生过,agent 会一直重跑。
+      if (data["extraction"] && typeof data["extraction"] === "object") {
+        extraction = compactExtraction(data["extraction"] as JsonObject);
+        captured = true;
+      }
+      if (typeof data["model_id"] === "string") {
+        const modelId = data["model_id"];
+        const revision = typeof data["revision"] === "number" ? data["revision"] : undefined;
+        const currentModelId = typeof active["model_id"] === "string" ? active["model_id"] : undefined;
+        const currentRevision = typeof active["revision"] === "number" ? active["revision"] : undefined;
+        const changesModel = currentModelId !== undefined && currentModelId !== modelId;
+        const advancesRevision = revision !== undefined && (currentRevision === undefined || revision > currentRevision);
+        // Explicit historical reads must not make the current model context regress. They remain
+        // visible in the tool trace, but forecasts and mutations should be grounded in the latest
+        // revision the agent has already observed.
+        if (currentModelId === modelId && revision !== undefined && currentRevision !== undefined && revision < currentRevision) {
+          captured = true;
+          continue;
+        }
+        // A mutation carries model_change_context, so its prior slices remain available as explicitly
+        // revision-stamped history. A different model, or an unexplained revision advance, still
+        // invalidates the cache conservatively.
+        const hasChangeContext = data["model_change_context"] !== undefined;
+        if (changesModel || (advancesRevision && !hasChangeContext)) {
+          workbookSlices.clear();
+          workbookSliceChars = 0;
+          evictedWorkbookSlices = 0;
+        }
+        const retained = changesModel || advancesRevision ? {} : active;
+        const incomingSlices = [
+          ...(data["workbook_slice"] !== undefined ? [data["workbook_slice"]] : []),
+        ];
+        for (const rawSlice of incomingSlices) {
+          if (!rawSlice || typeof rawSlice !== "object" || Array.isArray(rawSlice)) continue;
+          const slice = rawSlice as JsonObject;
+          const key = JSON.stringify(slice);
+          // Refreshing an existing slice makes it most-recently used without duplicating it.
+          if (workbookSlices.has(key)) {
+            workbookSlices.delete(key);
+            workbookSliceChars -= key.length;
+          }
+          const rows = Array.isArray(slice["rows"]) ? slice["rows"] : [];
+          const sections = new Set(rows.flatMap((row) => row && typeof row === "object" && !Array.isArray(row)
+            && typeof (row as JsonObject)["section"] === "string" ? [(row as JsonObject)["section"] as string] : []));
+          // A source-statement row has no DCF section field.  Treat an unclassifiable slice as
+          // revision-bound, so it is still conservatively dropped on a normal revision advance.
+          if (sections.size === 0) sections.add("<unknown>");
+          // Once the agent reads a section at the current revision, that fresh slice supersedes an
+          // older one for the same section. Other older sections remain historical working memory.
+          if (revision !== undefined) {
+            for (const [cachedKey, cached] of workbookSlices) {
+              const cachedRevision = typeof cached.slice["revision"] === "number" ? cached.slice["revision"] : undefined;
+              if (cachedRevision !== revision && [...cached.sections].some((section) => sections.has(section))) {
+                workbookSlices.delete(cachedKey);
+                workbookSliceChars -= cachedKey.length;
+              }
+            }
+          }
+          workbookSlices.set(key, { slice, sections });
+          workbookSliceChars += key.length;
+          // Keep the newly requested slice even if it alone exceeds the budget: hiding the result
+          // the agent explicitly asked for recreates the repeat-loop we are preventing.
+          while (workbookSlices.size > MAX_WORKBOOK_SLICES
+            || (workbookSliceChars > MAX_WORKBOOK_SLICE_CONTEXT_CHARS && workbookSlices.size > 1)) {
+            const oldest = workbookSlices.keys().next().value!;
+            workbookSlices.delete(oldest);
+            workbookSliceChars -= oldest.length;
+            evictedWorkbookSlices += 1;
+          }
+        }
+        active = { ...retained, model_id: modelId, ...(revision !== undefined ? { revision } : {}),
+          ...(typeof data["lifecycle_stage"] === "string" ? { lifecycle_stage: data["lifecycle_stage"] } : {}),
+          // model_overview is what both the read and the write answer with. Narrow reads accumulate
+          // in workbook_slices for this revision; neither carries a whole workbook any more.
+          ...(data["model_overview"] ? { model_overview: data["model_overview"] } : {}),
+          ...(data["model_change_context"] ? { model_change_context: data["model_change_context"] } : {}),
+          ...(workbookSlices.size > 0 ? { workbook_slices: [...workbookSlices.values()].map((cached) => cached.slice) } : {}),
+          ...(workbookSlices.size > 0 ? { workbook_slices_context_chars: workbookSliceChars } : {}),
+          ...(evictedWorkbookSlices > 0 ? { workbook_slices_evicted: evictedWorkbookSlices } : {}),
+          ...(workbookSlices.size > 0 && [...workbookSlices.values()].some((cached) => cached.slice["revision"] !== revision)
+            ? { workbook_slices_notice: "Slices from an earlier revision are historical context only; reread that section before using current values." } : {}),
+          ...(data["filing_insights"] !== undefined ? { filing_insights: data["filing_insights"] } : {}),
+          ...(data["revision_history"] !== undefined ? { revision_history: data["revision_history"] } : {}) };
+        captured = true;
+      }
+      if (captured) continue;
     }
-    if (data["revision_summary"] && typeof data["revision_summary"] === "object") revisions.push(data["revision_summary"]);
-    if (output.name === "run_dcf_subagent") subagentResults.push(data);
-    if (FINANCIAL_QUERY_TOOLS.has(output.name)) queryResults.push({ tool: output.name, data });
-    if (typeof data["model_id"] === "string") {
-      active = { model_id: data["model_id"], ...(typeof data["revision"] === "number" ? { revision: data["revision"] } : {}),
-        ...(typeof data["lifecycle_stage"] === "string" ? { lifecycle_stage: data["lifecycle_stage"] } : {}),
-        ...(data["current_workbook"] ? { current_workbook: data["current_workbook"] } : {}),
-        ...(data["workbook_slice"] ? { workbook_slice: data["workbook_slice"] } : {}),
-        ...(data["filing_insights"] !== undefined ? { filing_insights: data["filing_insights"] } : {}),
-        ...(data["revision_history"] !== undefined ? { revision_history: data["revision_history"] } : {}) };
-    }
+    // 兜底。上面每一个分支都是白名单,而白名单漏掉一个工具的后果不是"少点信息",
+    // 是那次调用在 agent 眼里从未发生——它会照着看得见的证据重跑,直到步数耗尽。
+    // summary 本来就是为压缩而写的,足够它知道自己做过什么。
+    otherResults.set(output.name, { tool: output.name, summary: output.summary });
   }
-  return { revision_summaries: revisions, active_model_context: active, latest_subagent_results: subagentResults.slice(-2),
-    skill_references: Object.fromEntries(skillReferences), query_results: queryResults };
+  // Key order is a caching decision, not a reading one. A provider caches a request by byte prefix,
+  // so the first field that changes between two steps ends the cache — and everything after it is
+  // re-billed even if it is identical. `active_model_context` used to sit second: it is rewritten on
+  // every model read or write, which left a common prefix of 76 bytes out of 38k and put the tens of
+  // thousands of characters of never-changing playbook text behind it, paid for again every step.
+  //
+  // So: what never changes first, then what only ever grows at its own end, then what is rewritten
+  // or windowed. It reads better this way too — the freshest state ends up nearest the question.
+  return {
+    skill_guidance: Object.fromEntries(skillGuidance),
+    skill_references: Object.fromEntries(skillReferences),
+    revision_summaries: revisions,
+    query_results: queryResults,
+    ...(extraction ? { latest_extraction: extraction } : {}),
+    active_model_context: active,
+    latest_subagent_results: subagentResults.slice(-2),
+    other_results: [...otherResults.values()],
+  };
 }
 
-function projectFinancialModelProgress(
+export function projectFinancialModelProgress(
   outputs: ReturnType<SessionState["subagentToolOutputs"]>,
   errors: ReturnType<SessionState["subagentToolErrors"]>,
   notes: { step: number; note: string }[],

@@ -54,15 +54,24 @@ export function createStatementExtractionTool(deps: {
         const message = error instanceof Error ? error.message : String(error);
         return { summary: message, error: { code: "invalid_tool_input", message } };
       }
+      // Off by default: the insight pass costs a SMALL call per filing chunk, and the only place
+      // wired to read what it produces is the forecast step's "name the cause" evidence.
+      const generateInsights = deps.generateInsights
+        ?? (process.env["FILING_INSIGHTS_ENABLED"] === "1" ? createSmallModelInsightGenerator(deps.modelRouter) : undefined);
       const result = await runStatementExtraction({ provider, ingestionStore: deps.financial.ingestionStore,
-        insightStore: deps.financial.insightStore,
-        generateInsights: deps.generateInsights ?? createSmallModelInsightGenerator(deps.modelRouter),
+        insightStore: deps.financial.insightStore, ...(generateInsights ? { generateInsights } : {}),
         tableStore: filingTableStore() }, context.agentId, request);
 
       if (result.status === "failed") {
-        return { summary: result.error?.message ?? "Filing extraction failed.",
+        // The summary is the only part the agent reads, so a failure that will answer identically
+        // on every call has to say so here — otherwise "Invalid adapter JSON" reads as transient
+        // and the agent burns its whole step budget re-calling this tool.
+        const retryable = result.error?.retryable ?? true;
+        return { summary: `${result.error?.message ?? "Filing extraction failed."}`
+            + (retryable ? "" : " This is a configuration or protocol failure, not a transient one:"
+              + " do not retry, report it to the operator and stop."),
           generation_context: { data: { extraction: { ingestionRunId: result.ingestionRunId, status: result.status,
-            diagnostics: result.diagnostics } as unknown as JsonObject } },
+            retryable, diagnostics: result.diagnostics } as unknown as JsonObject } },
           error: { code: result.error!.code, message: result.error!.message } };
       }
       // Statistics, not the data: the tables live in the store, and the mapping subagents read them

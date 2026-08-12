@@ -1,10 +1,12 @@
 import { newId } from "./ids.ts";
+import { isAgentKind } from "./types.ts";
 import type {
   AgentKind,
   ArtifactRef,
   GenerationContext,
   JsonObject,
   TaskResult,
+  UserInputAskedBy,
   UserInputRequest,
   UserInputRequestView,
   UserInputResponse,
@@ -31,7 +33,7 @@ import type { CompactionCache, EventStore } from "./eventStore.ts";
  * transport; the two are not the same concern.
  */
 
-export type Source = "user" | "orchestrator" | "market_data" | "market_research" | "trading_operations" | "financial_modeling" | "skill";
+export type Source = "user" | "orchestrator" | AgentKind | "skill";
 
 export interface SessionEvent {
   event_id: string;
@@ -40,9 +42,35 @@ export interface SessionEvent {
   timestamp: string; // ISO UTC
   source: Source;
   kind: string;
-  is_sidechain: boolean; // subagent-internal events; excluded from the orchestrator's context projection
+  /**
+   * Which agent loop's conversation this event belongs to.
+   *
+   * The main conversation — what the user is talking to — has the session_id
+   * itself as its thread id. A subagent thread is `<session_id>:<agent>:<n>`,
+   * so the id says which conversation it hangs off, whose it is, and which of
+   * that agent's threads it is, without a lookup.
+   *
+   * This replaced an `is_sidechain` boolean, which answered "is this inside
+   * some subagent?" without saying which one. Everything that used to read
+   * that flag now compares against a thread id instead.
+   */
+  thread_id: string;
   turn: number; // which user turn this belongs to
   payload: JsonObject;
+}
+
+const THREAD_SEPARATOR = ":";
+
+/** Neither a session id (`room_<uuid>`) nor an agent name contains a colon, so
+ *  a three-way split is unambiguous. */
+export function parseThreadId(threadId: string): { session_id: string; agent: AgentKind; n: number } | undefined {
+  const parts = threadId.split(THREAD_SEPARATOR);
+  if (parts.length !== 3) return undefined;
+  const [sessionId, agent, rawN] = parts as [string, string, string];
+  if (!isAgentKind(agent)) return undefined;
+  const n = Number(rawN);
+  if (!Number.isInteger(n) || n < 1) return undefined;
+  return { session_id: sessionId, agent, n };
 }
 
 const APPROVAL_TTL_MS = 15 * 60_000;
@@ -55,6 +83,10 @@ const KINDS: Record<Source, ReadonlySet<string>> = {
   market_research: new Set(["task_result", "tool_use", "tool_result", "subagent_note"]),
   trading_operations: new Set(["task_result", "tool_use", "tool_result", "approval_required", "approval_resolved", "subagent_note"]),
   financial_modeling: new Set(["task_result", "tool_use", "tool_result", "subagent_note"]),
+  // The DCF mapping agents report to financial_modeling rather than to the orchestrator, but they
+  // write the same events — which is what makes their progress visible while they run.
+  statement_unification: new Set(["task_result", "tool_use", "tool_result", "subagent_note"]),
+  spine_mapping: new Set(["task_result", "tool_use", "tool_result", "subagent_note"]),
   skill: new Set(["skill_invoke", "workflow_started", "workflow_step", "workflow_done"]),
 };
 
@@ -66,6 +98,29 @@ export interface DerivedTask {
   result?: TaskResult;
 }
 
+/**
+ * Which slice of a subagent's trace to read. Every projection takes one, so
+ * the choice is visible at each call site rather than baked into a method name.
+ *
+ *  - `{ thread }` — every round of that conversation. The agent's own prompt is
+ *    built from this: continuing a thread means coming back to your own work.
+ *  - `{ task }` — one dispatch. A task_result is assembled from this: a round
+ *    reports what it did, not what the whole thread has ever produced.
+ */
+export type TraceScope = { thread: string } | { task: string };
+
+/** A subagent conversation the orchestrator can address. Derived from the
+ *  dispatch/task_result pairs on the main thread. */
+export interface LiveThread {
+  thread_id: string;
+  agent: AgentKind;
+  rounds: number;
+  last_turn: number;
+  last_task: string;
+  status: DerivedTask["status"];
+  last_summary?: string;
+}
+
 export interface DerivedWorkflow {
   workflow_id: string;
   skill: string;
@@ -73,6 +128,33 @@ export interface DerivedWorkflow {
   status: "running" | "ok" | "failed";
   steps: { step_id: string; title: string; status: string }[];
   summary?: string;
+}
+
+/**
+ * Fold one `user_input_required` event into its view: the request, who asked,
+ * and the append-only status the first later user turn decides (it either
+ * answers this exact request or skips it by moving on).
+ *
+ * A free function over a plain event list because the HTTP history assembler
+ * (`src/server/chatHistory.ts`) folds the same event from a bare array without
+ * a SessionState — it used to carry its own copy of this logic, and the two
+ * drifting apart would mean a card that reads differently live and on reload.
+ *
+ * `asked_by` defaults to `orchestrator`: events recorded before the field
+ * existed are all the Topic agent's own questions.
+ */
+export function foldUserInputRequest(event: SessionEvent, events: readonly SessionEvent[]): UserInputRequestView {
+  const request = event.payload.request as unknown as UserInputRequest;
+  const asked_by = (event.payload.asked_by as UserInputAskedBy | undefined) ?? "orchestrator";
+  const nextUserMessage = events.find(
+    (candidate) => candidate.kind === "user_message" && candidate.turn > event.turn,
+  );
+  if (!nextUserMessage) return { ...request, asked_by, status: "pending" };
+  const response = nextUserMessage.payload.input_response as unknown as UserInputResponse | undefined;
+  if (nextUserMessage.payload.response_to === request.request_id && response) {
+    return { ...request, asked_by, status: "answered", answers: response.answers };
+  }
+  return { ...request, asked_by, status: "skipped" };
 }
 
 export class SessionState {
@@ -85,6 +167,13 @@ export class SessionState {
   private turn = 0;
   private promptTokensIn?: number;
   private compaction?: CompactionCache;
+  /**
+   * Highest thread number handed out per agent. Deliberately NOT derived from
+   * the in-memory log on demand: `compactEvents` drops old events, so counting
+   * them would let the numbering wrap around and reuse a live thread's id.
+   * Seeded from the full durable log in `restore()`.
+   */
+  private readonly threadCounters = new Map<AgentKind, number>();
 
   constructor(sessionId: string, startedAt: string, store?: EventStore) {
     this.session_id = sessionId;
@@ -98,14 +187,47 @@ export class SessionState {
     return () => this.listeners.delete(listener);
   }
 
+  // ── threads ──────────────────────────────────────────────────────────
+  /** The main conversation's thread — the one the user is in. */
+  get mainThread(): string {
+    return this.session_id;
+  }
+
+  /**
+   * Mint the next thread for this agent. Called synchronously from
+   * `Dispatcher.recordDispatch`, which is why two tasks dispatched to the same
+   * agent in one orchestrator step get distinct numbers: `Promise.all` over a
+   * `.map` runs each task's synchronous prefix to completion before starting
+   * the next, and this method never awaits.
+   */
+  openThread(agent: AgentKind): string {
+    const n = (this.threadCounters.get(agent) ?? 0) + 1;
+    this.threadCounters.set(agent, n);
+    return `${this.session_id}${THREAD_SEPARATOR}${agent}${THREAD_SEPARATOR}${n}`;
+  }
+
+  /**
+   * The agent a thread belongs to, or undefined if this session never opened
+   * it. Answered from the counter map rather than by scanning the log, so it
+   * stays correct after compaction has dropped the opening dispatch out of
+   * memory.
+   */
+  threadOwner(threadId: string): AgentKind | undefined {
+    const parsed = parseThreadId(threadId);
+    if (!parsed || parsed.session_id !== this.session_id) return undefined;
+    if (parsed.n > (this.threadCounters.get(parsed.agent) ?? 0)) return undefined;
+    return parsed.agent;
+  }
+
   // ── single write entry ───────────────────────────────────────────────
-  /** Append one event. Stamps id/timestamp; defaults parent to the last event
-   *  and turn to the current turn. Validates (source, kind) fail-fast. */
+  /** Append one event. Stamps id/timestamp; defaults parent to the last event,
+   *  turn to the current turn, and thread to the main conversation. Validates
+   *  (source, kind) fail-fast. */
   record(
     source: Source,
     kind: string,
     payload: JsonObject,
-    opts: { parent?: string | null; isSidechain?: boolean; turn?: number } = {},
+    opts: { parent?: string | null; threadId?: string; turn?: number } = {},
   ): SessionEvent {
     if (!KINDS[source]?.has(kind)) {
       throw new Error(`invalid event (source=${source}, kind=${kind})`);
@@ -117,7 +239,7 @@ export class SessionState {
       timestamp: new Date().toISOString(),
       source,
       kind,
-      is_sidechain: opts.isSidechain ?? false,
+      thread_id: opts.threadId ?? this.mainThread,
       turn: opts.turn ?? this.turn,
       payload,
     };
@@ -173,12 +295,30 @@ export class SessionState {
     await this.store.saveCompaction(this.session_id, this.compaction);
   }
 
-  /** Remove all events with `turn <= throughTurn` from the in-memory log.
-   *  Safe to call after compact() has folded those turns into the
-   *  compaction cache — the EventStore retains the full history. */
+  /**
+   * Remove events with `turn <= throughTurn` from the in-memory log. Safe to
+   * call after compact() has folded those turns into the compaction cache —
+   * the EventStore retains the full history.
+   *
+   * Events belonging to a subagent thread that is still being dispatched to
+   * survive: dropping them would make the next round of a long-running thread
+   * come back to an amnesiac agent. They cost the orchestrator nothing to keep
+   * — its own projection never looks at another thread — and the size of any
+   * one thread is bounded separately, by the thread-level cap in
+   * contextCompaction.
+   */
   compactEvents(throughTurn: number): void {
+    const liveThreads = new Set<string>();
+    for (const e of this.events) {
+      if (e.kind === "dispatch" && e.turn > throughTurn && typeof e.payload.child_thread_id === "string") {
+        liveThreads.add(e.payload.child_thread_id);
+      }
+    }
     for (let i = this.events.length - 1; i >= 0; i--) {
-      if (this.events[i]!.turn <= throughTurn) this.events.splice(i, 1);
+      const e = this.events[i]!;
+      if (e.turn > throughTurn) continue;
+      if (e.thread_id !== this.mainThread && liveThreads.has(e.thread_id)) continue;
+      this.events.splice(i, 1);
     }
   }
 
@@ -186,8 +326,15 @@ export class SessionState {
     return this.record("orchestrator", "reply", { content, final });
   }
 
-  recordDispatch(agent: AgentKind, task: string): SessionEvent {
-    return this.record("orchestrator", "dispatch", { agent, task });
+  /**
+   * The orchestrator handing work to a subagent. This event lives on the MAIN
+   * thread — the orchestrator wrote it and reads it back — and points at the
+   * child thread the work runs in. That pointer is the seam between the two
+   * conversations, and it is how the orchestrator learns the id of a thread it
+   * just opened.
+   */
+  recordDispatch(agent: AgentKind, task: string, childThreadId: string): SessionEvent {
+    return this.record("orchestrator", "dispatch", { agent, task, child_thread_id: childThreadId });
   }
 
   recordTaskResult(agent: AgentKind, dispatchEventId: string, result: TaskResult): SessionEvent {
@@ -236,6 +383,37 @@ export class SessionState {
     return out;
   }
 
+  /**
+   * The subagent conversations this topic has, most recently active last —
+   * what the orchestrator picks from when it wants to continue work rather
+   * than start over.
+   *
+   * Dispatches written before threads existed have no `child_thread_id` and are
+   * skipped. That is correct: those runs were one-shot, and there is no trace
+   * to come back to.
+   */
+  liveThreads(): LiveThread[] {
+    const byThread = new Map<string, LiveThread>();
+    for (const e of this.events) {
+      if (e.kind !== "dispatch") continue;
+      const threadId = e.payload.child_thread_id;
+      if (typeof threadId !== "string") continue;
+      const derived = this.task(e.event_id);
+      const entry: LiveThread = {
+        thread_id: threadId,
+        agent: e.payload.agent as AgentKind,
+        rounds: (byThread.get(threadId)?.rounds ?? 0) + 1,
+        last_turn: e.turn,
+        last_task: e.payload.task as string,
+        status: derived?.status ?? "running",
+      };
+      if (derived?.result?.summary) entry.last_summary = derived.result.summary;
+      byThread.delete(threadId); // re-insert so Map order tracks recency
+      byThread.set(threadId, entry);
+    }
+    return [...byThread.values()];
+  }
+
   /** All task results for a turn, in dispatch order. Replaces collecting the
    *  dispatcher's return values. */
   turnResults(turn: number): TaskResult[] {
@@ -248,15 +426,37 @@ export class SessionState {
     return out;
   }
 
-  /** Render a subagent task's tool calls so far (its sidechain tool_result events)
-   *  into [PROGRESS SO FAR] text. This is the subagent's loop context — it reads
-   *  its own results back from the log to decide whether to call more tools.
-   *  The actual structured `generation_context.data` is injected (not the tool's
-   *  hand-written summary) so the decision is grounded in real values. */
-  subagentProgress(dispatchEventId: string): string {
+  /**
+   * The events of a subagent trace, in order, narrowed to a scope.
+   *
+   * Everything below `[PROGRESS SO FAR]` in the thread is replayed from here,
+   * and anything on the main thread is excluded — a question a subagent raised
+   * to the user is recorded on the main thread on purpose, and must not read
+   * back as one of the agent's own tool results.
+   */
+  private *trace(scope: TraceScope): Generator<SessionEvent> {
+    const all = this.events.filter((e) =>
+      e.thread_id !== this.mainThread
+      && ("thread" in scope ? e.thread_id === scope.thread : e.payload.task_id === scope.task));
+    // A thread summary is a barrier: the rounds before it have been folded into
+    // it, so replaying them too would defeat the fold.
+    let barrier = -1;
+    for (let i = all.length - 1; i >= 0; i--) {
+      const e = all[i]!;
+      if (e.kind === "subagent_note" && e.payload.thread_summary === true) { barrier = i; break; }
+    }
+    yield* barrier === -1 ? all : all.slice(barrier);
+  }
+
+  /** Render a subagent's work so far into [PROGRESS SO FAR] text. This is its
+   *  loop context — it reads its own results back from the log to decide
+   *  whether to call more tools. The structured `generation_context.data` is
+   *  injected (not the tool's hand-written summary) so the decision is grounded
+   *  in real values. Scope this to the THREAD: the point of a thread is that
+   *  the agent comes back to what it already did. */
+  subagentProgress(scope: TraceScope): string {
     const lines: string[] = [];
-    for (const e of this.events) {
-      if (!e.is_sidechain || e.payload.task_id !== dispatchEventId) continue;
+    for (const e of this.trace(scope)) {
       // 每步的 note 与工具结果按时间交错:模型上一步"打算做什么"的一行字
       // 跨步存活,是它自己的连续性记忆。
       if (e.kind === "subagent_note") {
@@ -278,12 +478,13 @@ export class SessionState {
     return lines.length ? lines.join("\n") : "(no tools called yet)";
   }
 
-  /** Successful tool outputs for a subagent task, read from the log, used to
-   *  assemble the task_result's generation_context. */
-  subagentToolOutputs(dispatchEventId: string): { name: string; summary: string; generation_context?: GenerationContext; artifacts?: ArtifactRef[]; visualizations?: JsonObject[] }[] {
+  /** Successful tool outputs, read from the log. Scope this to the TASK when
+   *  assembling a task_result — a round reports the work it did, not every
+   *  artifact the thread has ever produced. */
+  subagentToolOutputs(scope: TraceScope): { name: string; summary: string; generation_context?: GenerationContext; artifacts?: ArtifactRef[]; visualizations?: JsonObject[] }[] {
     const out: { name: string; summary: string; generation_context?: GenerationContext; artifacts?: ArtifactRef[]; visualizations?: JsonObject[] }[] = [];
-    for (const e of this.events) {
-      if (!e.is_sidechain || e.kind !== "tool_result" || e.payload.task_id !== dispatchEventId || e.payload.error) continue;
+    for (const e of this.trace(scope)) {
+      if (e.kind !== "tool_result" || e.payload.error) continue;
       const item: { name: string; summary: string; generation_context?: GenerationContext; artifacts?: ArtifactRef[]; visualizations?: JsonObject[] } = {
         name: (e.payload.name as string) ?? "tool",
         summary: e.payload.summary as string,
@@ -296,13 +497,13 @@ export class SessionState {
     return out;
   }
 
-  /** Every per-step note the subagent wrote for this task, in order, with the
-   * step it was written at — the step numbers are what let the model see its
-   * own repetition ("I have said 'check once' for ten steps straight"). */
-  subagentNotes(dispatchEventId: string): { step: number; note: string }[] {
+  /** Every per-step note the subagent wrote, in order, with the step it was
+   * written at — the step numbers are what let the model see its own repetition
+   * ("I have said 'check once' for ten steps straight"). */
+  subagentNotes(scope: TraceScope): { step: number; note: string }[] {
     const notes: { step: number; note: string }[] = [];
-    for (const e of this.events) {
-      if (!e.is_sidechain || e.kind !== "subagent_note" || e.payload.task_id !== dispatchEventId) continue;
+    for (const e of this.trace(scope)) {
+      if (e.kind !== "subagent_note") continue;
       if (typeof e.payload.note === "string") {
         notes.push({ step: typeof e.payload.step === "number" ? e.payload.step : 0, note: e.payload.note });
       }
@@ -310,10 +511,10 @@ export class SessionState {
     return notes;
   }
 
-  subagentToolErrors(dispatchEventId: string): { name: string; code: string; message: string; summary?: string; step?: number }[] {
+  subagentToolErrors(scope: TraceScope): { name: string; code: string; message: string; summary?: string; step?: number }[] {
     const out: { name: string; code: string; message: string; summary?: string; step?: number }[] = [];
-    for (const e of this.events) {
-      if (!e.is_sidechain || e.kind !== "tool_result" || e.payload.task_id !== dispatchEventId) continue;
+    for (const e of this.trace(scope)) {
+      if (e.kind !== "tool_result") continue;
       const err = e.payload.error as { code?: string; message?: string } | undefined;
       if (!err) continue;
       const item: { name: string; code: string; message: string; summary?: string; step?: number } = {
@@ -343,10 +544,49 @@ export class SessionState {
     return { approval_id: approvalId, payload: req.payload.payload as JsonObject };
   }
 
-  recordUserInputRequest(request: UserInputRequest): SessionEvent {
+  /**
+   * `askedBy` names the actor behind the question — the Topic agent by default,
+   * but also the financial_modeling subagent below it or the Research
+   * controller above it. It is a payload field, not the event's `source`,
+   * because the controller records through this same orchestrator channel.
+   *
+   * A question is one of the two ways a subagent deliberately speaks past its
+   * own thread: it has to reach the user, so the event goes on the MAIN thread
+   * (that is what puts the card in front of them). `fromThread` records where
+   * it came from, so the answer can be routed back by dispatching that thread
+   * again. Nothing has to be guessed from the agent name or the model handle.
+   */
+  recordUserInputRequest(
+    request: UserInputRequest,
+    askedBy: UserInputAskedBy = "orchestrator",
+    fromThread?: string,
+  ): SessionEvent {
     return this.record("orchestrator", "user_input_required", {
       request: request as unknown as JsonObject,
+      asked_by: askedBy,
+      ...(fromThread ? { from_thread: fromThread } : {}),
     });
+  }
+
+  /**
+   * Whether this thread's previous round ended by asking the user something,
+   * rather than by finishing work. The seam note a resuming run writes says
+   * different things in the two cases — "your question was answered, do not ask
+   * again" versus "here is more work in the same thread" — and getting it wrong
+   * is how an agent ends up re-asking a question the user already answered.
+   *
+   * `currentTaskId` is this round's dispatch, which is already in the log by the
+   * time the run starts and would otherwise be the first thing found.
+   */
+  threadPausedOnQuestion(threadId: string, currentTaskId: string): boolean {
+    const cutoff = this.events.findIndex((e) => e.event_id === currentTaskId);
+    const before = cutoff === -1 ? this.events : this.events.slice(0, cutoff);
+    for (let i = before.length - 1; i >= 0; i--) {
+      const e = before[i]!;
+      if (e.kind === "user_input_required" && e.payload.from_thread === threadId) return true;
+      if (e.kind === "dispatch" && e.payload.child_thread_id === threadId) return false;
+    }
+    return false;
   }
 
   /** The request plus its append-only derived state. The first later user turn
@@ -364,7 +604,7 @@ export class SessionState {
   pendingUserInput(requestId: string): UserInputRequest | undefined {
     const view = this.userInputRequest(requestId);
     if (!view || view.status !== "pending") return undefined;
-    const { status: _status, answers: _answers, ...request } = view;
+    const { status: _status, answers: _answers, asked_by: _askedBy, ...request } = view;
     return request;
   }
 
@@ -374,16 +614,7 @@ export class SessionState {
   }
 
   private userInputViewForEvent(event: SessionEvent): UserInputRequestView {
-    const request = event.payload.request as unknown as UserInputRequest;
-    const nextUserMessage = this.events.find(
-      (candidate) => candidate.kind === "user_message" && candidate.turn > event.turn,
-    );
-    if (!nextUserMessage) return { ...request, status: "pending" };
-    const response = nextUserMessage.payload.input_response as unknown as UserInputResponse | undefined;
-    if (nextUserMessage.payload.response_to === request.request_id && response) {
-      return { ...request, status: "answered", answers: response.answers };
-    }
-    return { ...request, status: "skipped" };
+    return foldUserInputRequest(event, this.events);
   }
 
   /** Fold workflow_* events into a progress view. Replaces the old workflows store. */
@@ -418,19 +649,20 @@ export class SessionState {
    * Build the orchestrator's context for the given turn from the log alone:
    *  - conversationSoFar: prior turns' user_message + final replies
    *  - currentTurnProgress: this turn's dispatches, task_results, and status replies
-   * Sidechain (subagent-internal) events are excluded. Artifacts are numbered
+   * Only the main thread is read: a subagent's own loop is its business, and
+   * the orchestrator sees it as one task_result line. Artifacts are numbered
    * globally across the turn so the final answer can embed {{artifact:N}};
    * `artifacts` lists them in that order for the caller (server `final` event).
    */
   projectForPrompt(turn: number): { conversationSoFar: string; currentTurnProgress: string; artifacts: ArtifactRef[] } {
-    const visible = this.events.filter((e) => !e.is_sidechain);
+    const visible = this.events.filter((e) => e.thread_id === this.mainThread);
 
     const priorArtifacts: ArtifactRef[] = [];
     const priorLines: string[] = [];
     for (const e of visible.filter((e) => e.turn < turn)) {
       if (e.kind === "user_message") priorLines.push(`User: ${e.payload.content as string}`);
       else if (e.kind === "reply" && e.payload.final === true) priorLines.push(`You: ${e.payload.content as string}`);
-      else if (e.kind === "dispatch") priorLines.push(`[dispatch → ${e.payload.agent}] ${e.payload.task as string}`);
+      else if (e.kind === "dispatch") priorLines.push(this.formatDispatchLine(e));
       else if (e.kind === "approval_required" && this.isApprovalPendingEvent(e)) priorLines.push(this.formatApprovalRequiredLine(e));
       else if (e.kind === "task_result") priorLines.push(this.formatTaskResultLine(e, priorArtifacts));
     }
@@ -439,7 +671,7 @@ export class SessionState {
     const progressLines: string[] = [];
     for (const e of visible.filter((e) => e.turn === turn)) {
       if (e.kind === "reply") progressLines.push(`You: ${e.payload.content as string}`);
-      else if (e.kind === "dispatch") progressLines.push(`[dispatch → ${e.payload.agent}] ${e.payload.task as string}`);
+      else if (e.kind === "dispatch") progressLines.push(this.formatDispatchLine(e));
       else if (e.kind === "skill_invoke") progressLines.push(`[skill ${e.payload.skill as string}]`);
       // The orchestrator's own errors — a malformed step, a protocol violation —
       // are the one class of failure it can actually correct, but only if it can
@@ -456,7 +688,7 @@ export class SessionState {
       else if (e.kind === "approval_required" && this.isApprovalPendingEvent(e)) progressLines.push(this.formatApprovalRequiredLine(e));
       else if (e.kind === "user_input_required") progressLines.push(this.formatUserInputRequiredLine(e));
       else if (e.kind === "task_result") progressLines.push(this.formatTaskResultLine(e, artifacts));
-      else if (e.kind === "tool_result" && !e.is_sidechain) {
+      else if (e.kind === "tool_result") {
         const name = e.payload.name as string;
         const err = e.payload.error as { message?: string } | undefined;
         if (err) {
@@ -497,6 +729,14 @@ export class SessionState {
       "[RECENT CONVERSATION]",
       priorLines.length ? priorLines.join("\n") : "(no recent conversation)",
     ].join("\n");
+  }
+
+  /** Echoes the thread the work went into, so the orchestrator learns the id of
+   *  a thread it just opened and can name it on a later turn. */
+  private formatDispatchLine(e: SessionEvent): string {
+    const threadId = e.payload.child_thread_id;
+    const thread = typeof threadId === "string" ? ` thread=${threadId}` : "";
+    return `[dispatch → ${e.payload.agent}${thread}] ${e.payload.task as string}`;
   }
 
   private formatTaskResultLine(e: SessionEvent, artifacts: ArtifactRef[]): string {
@@ -569,6 +809,16 @@ export class SessionState {
     const state = new SessionState(sessionId, startedAt, store);
     state.events.push(...events);
     state.turn = events.reduce((max, e) => Math.max(max, e.turn), 0);
+    // Seed the thread counters from the FULL durable log, not from whatever is
+    // still in memory — this is the one place that sees every thread the
+    // session ever opened, so it is the only place the numbering can be made
+    // safe against reuse.
+    for (const e of events) {
+      const parsed = parseThreadId(e.thread_id);
+      if (!parsed || parsed.session_id !== sessionId) continue;
+      const seen = state.threadCounters.get(parsed.agent) ?? 0;
+      if (parsed.n > seen) state.threadCounters.set(parsed.agent, parsed.n);
+    }
     if (compaction) state.compaction = compaction;
     return state;
   }

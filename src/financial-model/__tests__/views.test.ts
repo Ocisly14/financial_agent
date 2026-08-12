@@ -11,6 +11,7 @@ import {
   buildModelContextView, buildWorkbookSlice, buildWorkbookView, type RevisionChangeSummary,
 } from "../views.ts";
 import type { Fact, Period, ValuationConfig } from "../types.ts";
+import type { UnifiedStatementsArtifact } from "../../infra/xbrl/unifiedStatements.ts";
 
 const periods: Period[] = [
   { id: "FY2024", label: "FY2024", start: "2024-01-01", end: "2024-12-31", cls: "actual" },
@@ -34,6 +35,11 @@ function snapshot(mapped = false): FinancialModelSnapshot {
     provenance: { sourceType: "unified_statements", sourceRefs: ["unified.revenue.total"], asOfDate: "2025-01-01" },
   }] satisfies Fact[] : [];
   skeleton = installDefaultMetrics(skeleton, periods);
+  if (mapped) {
+    skeleton.lineItems = skeleton.lineItems.map((item) => item.id === "revenue.total"
+      ? { ...item, historical: "actual" as const }
+      : item);
+  }
   const output = evaluate({ periods, lineItems: skeleton.lineItems, facts: spineFacts, assumptions: [],
     formulas: skeleton.formulas, valuationConfig });
   return {
@@ -81,6 +87,28 @@ test("mapping mode contains source sheets beside the complete DCF workbook", () 
   assert.deepEqual(Object.keys(revenue.cells), ["FY2024", "FY2025"]);
 });
 
+test("human workbook views prefer complete unified statements over prepared staging rows", () => {
+  const unified = {
+    periods: ["FY2024"],
+    rows: [{ rowId: "net_sales", statement: "income_statement", label: "Unified net sales", rationale: "fixture", values: { FY2024: 100 } }],
+    supplementalRows: [], excluded: [],
+    facts: [{
+      factId: "unified-income-FY2024", status: "staged", lineItemId: "unified.income_statement.net_sales", periodId: "FY2024",
+      value: 100, unit: { kind: "currency", code: "USD" },
+      provenance: { sourceType: "unified_statements", sourceRefs: ["unified.net_sales"], asOfDate: "2025-01-01" },
+    }],
+    restatements: [], rollupBreaks: [], findings: [], unresolvedFindings: [],
+  } satisfies UnifiedStatementsArtifact;
+
+  const view = buildWorkbookView("m", 0, snapshot(), { includeSourceStatements: true, unifiedStatements: unified });
+  assert.equal(view.mode, "statement_mapping");
+  const row = view.sourceStatementReview.sheets.income_statement[0]!;
+  assert.equal(row.sourceLineItemId, "unified.income_statement.net_sales");
+  assert.equal(row.label, "Unified net sales");
+  assert.equal(row.cells.FY2024?.value, 100);
+  assert.deepEqual(row.cells.FY2024?.source, { kind: "fact", factId: "unified-income-FY2024" });
+});
+
 test("model context accepts prepared-statement and fact-review revision summaries", () => {
   const fixture = contextFixture();
   fixture.headers[0]!.changeSummary = {
@@ -120,7 +148,26 @@ test("not-modeled cells remain distinct from modeled missing inputs", () => {
   const revenueRoot = view.sections.revenue.find((row) => row.lineItemId === "revenue")!;
   const revenueTotal = view.sections.revenue.find((row) => row.lineItemId === "revenue.total")!;
   assert.equal(revenueRoot.cells["FY2024"]?.status, "not_modeled");
-  assert.equal(revenueTotal.cells["FY2024"]?.status, "missing_input");
+  assert.equal(revenueTotal.cells["FY2024"]?.status, "not_modeled");
+});
+
+test("formula cells expose exact dependency coordinates for period-aware UI highlighting", () => {
+  const model = snapshot(true);
+  model.lineItems = model.lineItems.map((item) => item.id === "fcff"
+    ? { ...item, forecast: "formula" as const }
+    : item);
+  const formula = {
+    lineItemId: "fcff", appliesTo: "forecast" as const, periodIds: ["FY2025"],
+    source: "revenue.total + LAG(revenue.total, 1)",
+  };
+  model.formulas.push(formula);
+  model.compiledFormulas.push({ ...formula, ast: parseFormula(formula.source) });
+
+  const fcff = buildWorkbookView("m", 1, model).sections.dcf.find((row) => row.lineItemId === "fcff")!;
+  assert.deepEqual(fcff.cells["FY2025"]?.dependencies, [
+    { lineItemId: "revenue.total", periodId: "FY2025" },
+    { lineItemId: "revenue.total", periodId: "FY2024" },
+  ]);
 });
 
 test("workbook slices validate selectors, preserve order, and do not mutate snapshots", () => {
@@ -133,6 +180,10 @@ test("workbook slices validate selectors, preserve order, and do not mutate snap
   assert.deepEqual(model, before);
   assert.throws(() => buildWorkbookSlice("m", 1, model, { lineItemIds: ["typo"] }),
     (error: unknown) => error instanceof FinancialModelError && error.code === "invalid_model_query");
+  assert.throws(() => buildWorkbookSlice("m", 1, model, { lineItemIds: ["fcff"], role: "revenue_total" }),
+    /fcff \(role fcff\)/);
+  assert.throws(() => buildWorkbookSlice("m", 1, model, { lineItemIds: ["fcff"], periodIds: ["FY2025"],
+    periodClass: "actual" }), /FY2025 \(forecast\)/);
 });
 
 test("selectors fully intersect exact cells, row filters, period filters, and preserve coordinate order", () => {
@@ -167,6 +218,10 @@ test("selectors fully intersect exact cells, row filters, period filters, and pr
 
 test("active formulas and assumptions appear once at row level while ASTs stay out of the workbook", () => {
   const model = snapshot(true);
+  model.lineItems = model.lineItems.map((item) => item.id === "fcff"
+    ? { ...item, historical: "formula" as const }
+    : item);
+  model.formulas.push({ lineItemId: "fcff", appliesTo: "historical", periodIds: ["FY2024"], source: "revenue.total" });
   model.assumptions.push({
     assumptionId: "wacc-1", lineItemId: "wacc", periods: ["FY2025"],
     payload: { kind: "values", values: [0.1], unit: { kind: "percent" } },
@@ -186,6 +241,11 @@ test("active formulas and assumptions appear once at row level while ASTs stay o
 
 test("cell projection distinguishes divide-by-zero and N/A and retains N/A assumption source", () => {
   const model = snapshot(true);
+  model.lineItems = model.lineItems.map((item) => item.id === "cash_available_for_bridge"
+    ? { ...item, historical: "assumption" as const }
+    : item.id === "margin.operating"
+      ? { ...item, historical: "formula" as const }
+      : item);
   model.assumptions.push({
     assumptionId: "bridge-na", lineItemId: "cash_available_for_bridge", periods: ["FY2024"],
     payload: { kind: "not_applicable" }, sourceType: "user", sourceRefs: ["input"],

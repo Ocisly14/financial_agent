@@ -1,6 +1,5 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import type { Period } from "../../src/financial-model/types.ts";
 import { createArelleProcessRunner } from "../../src/infra/xbrl/arelleAdapter.ts";
 import { mergeCuratedTables } from "../../src/infra/xbrl/mergeCuratedTables.ts";
@@ -18,9 +17,8 @@ import { verifyPresentedStatement } from "../../src/infra/xbrl/verifyPresentedSt
 //   node --env-file=.env --experimental-strip-types --experimental-sqlite \
 //     scripts/xbrl/compare-statement-extraction.ts
 
-const companion = fileURLToPath(new URL("./arelle_companion.py", import.meta.url));
+// Only the interpreter is a local choice; the adapter resolves the companion script itself.
 const command = process.env["ARELLE_ADAPTER_COMMAND"]?.trim() || "python3";
-const args = process.env["ARELLE_ADAPTER_ARGS"] ? (JSON.parse(process.env["ARELLE_ADAPTER_ARGS"]!) as string[]) : [companion];
 const symbol = (process.env["SMOKE_SYMBOL"]?.trim() || "TSLA").toUpperCase();
 const filingsJson = process.env["COMPARE_FILINGS"];
 if (!filingsJson) throw new Error("COMPARE_FILINGS must be a JSON array of {accession, form, filedAt, reportDate, primaryDocumentUrl}");
@@ -30,7 +28,7 @@ const requestedPeriods: Period[] = years.map((year) => ({
   id: `FY${year}`, label: `FY${year}`, start: `${year}-01-01`, end: `${year}-12-31`, cls: "actual",
 }));
 
-const runner = createArelleProcessRunner({ command, args, timeoutMs: 600_000 });
+const runner = createArelleProcessRunner({ command, timeoutMs: 600_000 });
 const extraction = await runner({ protocolVersion: 3, filings, periods: requestedPeriods });
 
 const outputDirectory = resolve(join("data", "smoke", "xbrl"));

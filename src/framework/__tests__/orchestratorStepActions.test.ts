@@ -191,6 +191,8 @@ test("ask_user records a request and ends the turn without another model step", 
 
   const state = h.sessions.getExisting("s");
   assert.equal(state.userInputRequest("input_test")?.status, "pending");
+  // The card names its asker; this one is the Topic agent's own question.
+  assert.equal(state.userInputRequest("input_test")?.asked_by, "orchestrator");
   const final = [...state.allEvents()].reverse().find((event) => event.kind === "reply" && event.payload.final === true);
   assert.equal(final?.payload.content, "Choose what fits.");
   assert.equal(h.toolCalls.filter((call) => call.name === "ask_user").length, 1);

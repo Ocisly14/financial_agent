@@ -54,11 +54,6 @@ const FIXED_ROLES: readonly Exclude<LineItemRole, "revenue_stream" | "bridge_oth
   "diluted_shares",
 ];
 
-const REVENUE_TOTAL_FORECAST =
-  "LAG(revenue.total, 1) * (1 + growth.revenue.total)";
-const OPERATING_NWC_FORECAST =
-  "revenue.total * ratio.operating_nwc_to_revenue";
-
 /**
  * The spine targets the model cannot be built without: every one is read by a forecast formula or an
  * accounting identity below. A mapping decision must place each of these or say in writing why the
@@ -67,6 +62,12 @@ const OPERATING_NWC_FORECAST =
  * The working-capital components are here for a reason worth stating: `operating_working_capital` is
  * derived from them by an identity rather than mapped directly, so what counts as working capital
  * stays declared and checkable instead of becoming an invisible judgment inside one number.
+ *
+ * This set is also what makes an intent-level dispatch safe. The orchestrator describes the job, not
+ * the chart of accounts; the mapping subagent is held to this list and declares a written gap for
+ * anything the issuer does not report. Anything the history gate needs but this list omits therefore
+ * gets mapped only if a task text happens to name it — see requiredHistoryCoverage.test.ts, which
+ * fails when the two lists drift.
  */
 export const REQUIRED_MAPPING_IDS = new Set([
   // Forecast formula inputs.
@@ -76,6 +77,14 @@ export const REQUIRED_MAPPING_IDS = new Set([
   "income_tax_expense",
   "depreciation_amortization",
   "capital_expenditures",
+  // Read straight off the income statement by the history gate. Each is arithmetically implied by
+  // rows above it, but deriving it would make the identity that checks it tautological — the point
+  // of mapping the issuer's own figure is that it can disagree with the sum, and that disagreement
+  // is what reconciliation exists to surface.
+  "cost_of_revenue",
+  "gross_profit",
+  "operating_expenses",
+  "net_income",
   // Operating working capital identity.
   "accounts_receivable",
   "inventory",
@@ -176,27 +185,30 @@ export function createSkeleton(input: CreateSkeletonInput): Skeleton {
   };
 
   add({ id: "revenue", label: "Revenue", role: "revenue_root", unit: currency, section: "revenue", historical: "none", forecast: "none" });
-  add({ id: "revenue.total", label: "Total revenue", parentId: "revenue", role: "revenue_total", unit: currency, section: "revenue", historical: "actual", forecast: "formula" });
-  add({ id: "growth.revenue.total", label: "Total revenue growth", parentId: "revenue.total", role: "none", unit: percent, section: "revenue", historical: "formula", forecast: "assumption" });
-  add({ id: "margin.operating", label: "Operating margin", role: "none", unit: percent, section: "operations", historical: "formula", forecast: "assumption" });
-  add({ id: "operating_income", label: "Operating income", role: "operating_income", unit: currency, section: "operations", historical: "actual", forecast: "formula" });
-  add({ id: "tax_rate", label: "Operating tax rate", role: "tax_rate", unit: percent, section: "operations", historical: "formula", forecast: "assumption" });
-  add({ id: "nopat", label: "NOPAT", role: "nopat", unit: currency, section: "operations", historical: "formula", forecast: "formula" });
-  add({ id: "depreciation_amortization", label: "Depreciation and amortization", role: "depreciation_amortization", unit: currency, section: "operations", historical: "actual", forecast: "formula" });
-  add({ id: "ratio.da_to_revenue", label: "D&A to revenue", role: "none", unit: ratio, section: "operations", historical: "formula", forecast: "assumption" });
-  add({ id: "ebitda", label: "EBITDA", role: "ebitda", unit: currency, section: "operations", historical: "formula", forecast: "formula" });
-  add({ id: "capital_expenditures", label: "Capital expenditures", role: "capex", unit: currency, section: "operations", historical: "actual", forecast: "formula" });
-  add({ id: "ratio.capex_to_revenue", label: "Capital expenditures to revenue", role: "none", unit: ratio, section: "operations", historical: "formula", forecast: "assumption" });
-  add({ id: "operating_working_capital", label: "Operating working capital", role: "operating_working_capital", unit: currency, section: "operations", historical: "formula", forecast: "formula" });
-  add({ id: "ratio.operating_nwc_to_revenue", label: "Operating working capital to revenue", role: "none", unit: ratio, section: "operations", historical: "formula", forecast: "assumption" });
-  add({ id: "change_nwc", label: "Change in operating working capital", role: "change_nwc", unit: currency, section: "operations", historical: "formula", forecast: "formula" });
-  add({ id: "fcff", label: "Free cash flow to firm", role: "fcff", unit: currency, section: "dcf", historical: "formula", forecast: "formula" });
-  // forecast: "calculated" — the WACC sheet is the single source for this row (see waccSheet.ts and
-  // service.ts's recalculate). set_assumption is refused for it via the ordinary "not assumption-
-  // sourced" check; recalculate() seeds its forecast cells straight from the sheet's wacc row.
-  add({ id: "wacc", label: "WACC", role: "wacc", unit: percent, section: "dcf", historical: "none", forecast: "calculated" });
-  add({ id: "terminal_growth", label: "Terminal growth", role: "terminal_growth", unit: percent, section: "dcf", historical: "none", forecast: "assumption" });
-  add({ id: "exit_multiple", label: "Exit multiple", role: "exit_multiple", unit: ratio, section: "dcf", historical: "none", forecast: "assumption" });
+  // A skeleton describes what a row means, not where its values will come from.  A statement
+  // mapping activates the historical side as `actual`; an agent that derives a row activates it
+  // as `formula`.  Pre-declaring the former made unmapped rows look like mapped filing fields.
+  // A skeleton contains only the stable chart of accounts. Sources are deliberately inert until
+  // their acquisition channel is known: committed facts select `actual`, agent-authored formulas
+  // select `formula`, and agent assumptions select `assumption`.
+  add({ id: "revenue.total", label: "Total revenue", parentId: "revenue", role: "revenue_total", unit: currency, section: "revenue", historical: "none", forecast: "none" });
+  add({ id: "growth.revenue.total", label: "Total revenue growth", parentId: "revenue.total", role: "none", unit: percent, section: "revenue", historical: "none", forecast: "none" });
+  add({ id: "margin.operating", label: "Operating margin", role: "none", unit: percent, section: "operations", historical: "none", forecast: "none" });
+  add({ id: "operating_income", label: "Operating income", role: "operating_income", unit: currency, section: "operations", historical: "none", forecast: "none" });
+  add({ id: "tax_rate", label: "Operating tax rate", role: "tax_rate", unit: percent, section: "operations", historical: "none", forecast: "none" });
+  add({ id: "nopat", label: "NOPAT", role: "nopat", unit: currency, section: "operations", historical: "none", forecast: "none" });
+  add({ id: "depreciation_amortization", label: "Depreciation and amortization", role: "depreciation_amortization", unit: currency, section: "operations", historical: "none", forecast: "none" });
+  add({ id: "ratio.da_to_revenue", label: "D&A to revenue", role: "none", unit: ratio, section: "operations", historical: "none", forecast: "none" });
+  add({ id: "ebitda", label: "EBITDA", role: "ebitda", unit: currency, section: "operations", historical: "none", forecast: "none" });
+  add({ id: "capital_expenditures", label: "Capital expenditures", role: "capex", unit: currency, section: "operations", historical: "none", forecast: "none" });
+  add({ id: "ratio.capex_to_revenue", label: "Capital expenditures to revenue", role: "none", unit: ratio, section: "operations", historical: "none", forecast: "none" });
+  add({ id: "operating_working_capital", label: "Operating working capital", role: "operating_working_capital", unit: currency, section: "operations", historical: "none", forecast: "none" });
+  add({ id: "ratio.operating_nwc_to_revenue", label: "Operating working capital to revenue", role: "none", unit: ratio, section: "operations", historical: "none", forecast: "none" });
+  add({ id: "change_nwc", label: "Change in operating working capital", role: "change_nwc", unit: currency, section: "operations", historical: "none", forecast: "none" });
+  add({ id: "fcff", label: "Free cash flow to firm", role: "fcff", unit: currency, section: "dcf", historical: "none", forecast: "none" });
+  add({ id: "wacc", label: "WACC", role: "wacc", unit: percent, section: "dcf", historical: "none", forecast: "none" });
+  add({ id: "terminal_growth", label: "Terminal growth", role: "terminal_growth", unit: percent, section: "dcf", historical: "none", forecast: "none" });
+  add({ id: "exit_multiple", label: "Exit multiple", role: "exit_multiple", unit: ratio, section: "dcf", historical: "none", forecast: "none" });
 
   const incomeRows: Array<[string, string, typeof currency | typeof perShare]> = [
     ["cost_of_revenue", "Cost of revenue", currency],
@@ -244,14 +256,14 @@ export function createSkeleton(input: CreateSkeletonInput): Skeleton {
     ["share_repurchases", "Share repurchases"],
   ];
 
-  // History rows are containers for mapped filing facts: historical "actual" so committed facts
-  // surface into cells (a "none" row swallows its facts silently — the registry metrics reading
-  // these lines would compute null forever). Unmapped rows simply stay null, same as any actual row.
+  // These are potential filing concepts, not filing facts. `commitSpineFacts` declares the
+  // historical source as `actual` only for rows a mapping really materializes.  Otherwise an
+  // agent may elect a formula or leave the row absent; the skeleton must not make that decision.
   for (const [id, label, unit] of incomeRows) {
-    add({ id, label, role: "none", unit, section: "history", historical: "actual", forecast: "none" });
+    add({ id, label, role: "none", unit, section: "history", historical: "none", forecast: "none" });
   }
   for (const [id, label] of [...balanceRows, ...cashFlowRows]) {
-    add({ id, label, role: "none", unit: currency, section: "history", historical: "actual", forecast: "none" });
+    add({ id, label, role: "none", unit: currency, section: "history", historical: "none", forecast: "none" });
   }
 
   const bridgeRows: Array<[string, string, LineItemRole, typeof currency | typeof shares]> = [
@@ -264,46 +276,13 @@ export function createSkeleton(input: CreateSkeletonInput): Skeleton {
     ["diluted_shares", "Diluted shares", "diluted_shares", shares],
   ];
   for (const [id, label, role, unit] of bridgeRows) {
-    add({ id, label, role, unit, section: "dcf", historical: "actual", forecast: "none" });
+    add({ id, label, role, unit, section: "dcf", historical: "none", forecast: "none" });
   }
-
-  const actualIds = input.periods.filter((period) => period.cls === "actual").map((period) => period.id);
-  const forecastIds = input.periods.filter((period) => period.cls === "forecast").map((period) => period.id);
-  const formulas: Formula[] = [];
-  const formula = (
-    lineItemId: string,
-    appliesTo: "historical" | "forecast",
-    source: string,
-    periodIds: readonly string[],
-  ): void => {
-    if (periodIds.length > 0) formulas.push({ lineItemId, appliesTo, source, periodIds: [...periodIds] });
-  };
-
-  formula("growth.revenue.total", "historical", "YOY(revenue.total)", actualIds);
-  formula("margin.operating", "historical", "operating_income / revenue.total", actualIds);
-  formula("tax_rate", "historical", "income_tax_expense / pretax_income", actualIds);
-  formula("nopat", "historical", "operating_income * (1 - tax_rate)", actualIds);
-  formula("ratio.da_to_revenue", "historical", "depreciation_amortization / revenue.total", actualIds);
-  formula("ebitda", "historical", "operating_income + depreciation_amortization", actualIds);
-  formula("ratio.capex_to_revenue", "historical", "capital_expenditures / revenue.total", actualIds);
-  formula("ratio.operating_nwc_to_revenue", "historical", "operating_working_capital / revenue.total", actualIds);
-  formula("change_nwc", "historical", "operating_working_capital - LAG(operating_working_capital, 1)", actualIds);
-  formula("fcff", "historical", "nopat + depreciation_amortization - capital_expenditures - change_nwc", actualIds);
-
-  formula("revenue.total", "forecast", REVENUE_TOTAL_FORECAST, forecastIds);
-  formula("operating_income", "forecast", "revenue.total * margin.operating", forecastIds);
-  formula("nopat", "forecast", "operating_income * (1 - tax_rate)", forecastIds);
-  formula("depreciation_amortization", "forecast", "revenue.total * ratio.da_to_revenue", forecastIds);
-  formula("ebitda", "forecast", "operating_income + depreciation_amortization", forecastIds);
-  formula("capital_expenditures", "forecast", "revenue.total * ratio.capex_to_revenue", forecastIds);
-  formula("operating_working_capital", "forecast", OPERATING_NWC_FORECAST, forecastIds);
-  formula("change_nwc", "forecast", "operating_working_capital - LAG(operating_working_capital, 1)", forecastIds);
-  formula("fcff", "forecast", "nopat + depreciation_amortization - capital_expenditures - change_nwc", forecastIds);
 
   const skeleton: Skeleton = {
     periods: input.periods.map((period) => ({ ...period })),
     lineItems,
-    formulas,
+    formulas: [],
   };
   validateRoleCardinality(skeleton.lineItems);
   return skeleton;
@@ -350,7 +329,7 @@ export function addSourceStatementRows(
       unit: { ...row.unit },
       section: sections[row.statement],
       order: row.order,
-      historical: "actual",
+      historical: "none",
       forecast: "none",
     });
   }
@@ -387,8 +366,8 @@ export function addRevenueStream(
       unit: { ...revenueTotal.unit },
       section: "revenue",
       order: maxOrder + 1,
-      historical: "actual",
-      forecast: "formula",
+      historical: "none",
+      forecast: "none",
     },
     {
       id: growthId,
@@ -398,24 +377,10 @@ export function addRevenueStream(
       unit: { kind: "percent" },
       section: "revenue",
       order: maxOrder + 2,
-      historical: "formula",
-      forecast: "assumption",
+      historical: "none",
+      forecast: "none",
     },
   );
-  const axes = periodAxes(next);
-  const actualIds = axes.historical;
-  const forecastIds = axes.forecast;
-  if (actualIds.length > 0) {
-    next.formulas.push({ lineItemId: growthId, appliesTo: "historical", source: `YOY(${valueId})`, periodIds: actualIds });
-  }
-  if (forecastIds.length > 0) {
-    next.formulas.push({
-      lineItemId: valueId,
-      appliesTo: "forecast",
-      source: `LAG(${valueId}, 1) * (1 + ${growthId})`,
-      periodIds: forecastIds,
-    });
-  }
   return next;
 }
 
@@ -449,7 +414,7 @@ export function addDcfDetailLineItem(
     unit: structuredClone(parent.unit),
     section: parent.section,
     order,
-    historical: "actual",
+    historical: "none",
     forecast: "none",
   });
   return next;
@@ -519,12 +484,10 @@ export function applyDcfCategoryGroups(
     })));
     const historicalIds = periodIds.filter((periodId) =>
       next.periods.find((period) => period.id === periodId)?.cls !== "forecast");
-    const uncoveredHistoricalIds = parent.historical === "formula"
-      ? historicalIds.filter((periodId) => !next.formulas.some((formula) =>
-          formula.lineItemId === parent.id
-          && formula.appliesTo === "historical"
-          && (formula.periodIds ?? periodAxes(next).historical).includes(periodId)))
-      : [];
+    const uncoveredHistoricalIds = historicalIds.filter((periodId) => !next.formulas.some((formula) =>
+      formula.lineItemId === parent.id
+      && formula.appliesTo === "historical"
+      && (formula.periodIds ?? periodAxes(next).historical).includes(periodId)));
     if (uncoveredHistoricalIds.length > 0) {
       next = replaceFormulaCoverage(
         next,
@@ -549,7 +512,7 @@ export function applyDcfCategoryGroups(
         "forecast",
         forecastIds,
         source,
-        new Set([REVENUE_TOTAL_FORECAST, OPERATING_NWC_FORECAST]),
+        new Set(),
       );
       next.lineItems = next.lineItems.map((item) => item.id === parent.id
         ? { ...item, forecast: "formula" }

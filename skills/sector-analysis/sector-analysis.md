@@ -2,7 +2,6 @@
 name: sector-analysis
 description: Analyze US equity sectors using relative-strength and trend data, recent news, macro drivers, and conditional forward scenarios. Use for sector rotation, sector leadership, which sectors are improving or weakening, comparisons among sectors, or a deep diagnosis of one S&P 500 GICS sector.
 layer: topic
-agents: [market_data, market_research]
 tools: [get_sector_analysis, financial_search]
 ---
 

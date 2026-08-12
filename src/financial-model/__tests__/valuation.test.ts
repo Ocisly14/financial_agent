@@ -147,12 +147,12 @@ test("mid-year discounting applies full prior years and half the current year", 
   close(output.explicitPeriods[2]?.discountFactor, 1.29218494032);
 });
 
-test("Gordon growth uses final FCFF, growth, final WACC, and final discount factor", () => {
+test("Perpetuity growth uses final FCFF, growth, final WACC, and final discount factor", () => {
   const output = calculateValuation(baseInput());
-  close(output.gordonGrowth.terminalValue, 1373.33333333);
-  close(output.gordonGrowth.terminalPresentValue, 1004.25100425);
-  close(output.gordonGrowth.enterpriseValue, 1273.000273);
-  close(output.gordonGrowth.impliedValuePerShare, 122.8000273);
+  close(output.perpetuityGrowth.terminalValue, 1373.33333333);
+  close(output.perpetuityGrowth.terminalPresentValue, 1004.25100425);
+  close(output.perpetuityGrowth.enterpriseValue, 1273.000273);
+  close(output.perpetuityGrowth.impliedValuePerShare, 122.8000273);
 });
 
 test("exit multiple selects the configured unique EBITDA or FCFF role", () => {
@@ -167,10 +167,10 @@ test("exit multiple selects the configured unique EBITDA or FCFF role", () => {
 
 test("both terminal methods return separately and are never averaged", () => {
   const output = calculateValuation(baseInput());
-  assert.equal(output.gordonGrowth.method, "gordon_growth");
+  assert.equal(output.perpetuityGrowth.method, "perpetuity_growth");
   assert.equal(output.exitMultiple.method, "exit_multiple");
   assert.notEqual(
-    output.gordonGrowth.impliedValuePerShare,
+    output.perpetuityGrowth.impliedValuePerShare,
     output.exitMultiple.impliedValuePerShare,
   );
   assert.equal("blended" in output, false);
@@ -179,7 +179,7 @@ test("both terminal methods return separately and are never averaged", () => {
 
 test("equity bridge applies every signed component and preserves explicit N/A lineage", () => {
   const output = calculateValuation(baseInput());
-  const bridge = output.gordonGrowth.bridge;
+  const bridge = output.perpetuityGrowth.bridge;
   assert.equal(
     bridge.reduce((total, adjustment) => total + adjustment.appliedAdjustment, 0),
     -45,
@@ -194,7 +194,7 @@ test("equity bridge applies every signed component and preserves explicit N/A li
     appliedAdjustment: 0,
     refs: [cellKey("preferred_equity", "FY2025")],
   });
-  close(output.gordonGrowth.equityValue, output.gordonGrowth.enterpriseValue - 45);
+  close(output.perpetuityGrowth.equityValue, output.perpetuityGrowth.enterpriseValue - 45);
 });
 
 test("missing required bridge input is not converted to zero", () => {
@@ -238,7 +238,7 @@ test("reference WACC not greater than growth throws invalid_terminal_assumptions
   );
 });
 
-test("Gordon sensitivity invalid cells are null rather than negative or infinite", () => {
+test("Perpetuity-growth sensitivity invalid cells are null rather than negative or infinite", () => {
   const output = calculateValuation(baseInput({
     valuationConfig: {
       ...CONFIG,

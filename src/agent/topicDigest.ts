@@ -54,7 +54,7 @@ export function buildIndexedTurns(events: readonly SessionEvent[]): IndexedTurn[
   const byTurn = new Map<number, { user: string[]; finalReply?: string; lastReply?: string }>();
 
   for (const event of events) {
-    if (event.is_sidechain) continue;
+    if (event.thread_id !== event.session_id) continue; // main thread only
     if (event.kind !== "user_message" && event.kind !== "reply") continue;
     const bucket = byTurn.get(event.turn) ?? { user: [] };
     if (event.kind === "user_message") {

@@ -5,12 +5,14 @@ import { toast as sonnerToast } from "sonner";
 import type { MemberInputCard } from "@/lib/memberInput";
 import { answerText, shouldContinueResearch } from "@/lib/memberInput";
 import type { MemberInputRequestFrame, UUID, UserInputAnswer, UserInputRequestView, UserInputSubmission } from "@/types/core";
+import type { ModelRevisionFrame } from "@/types/financialModel";
 import { apiClient, StreamingApiClient, type ProcessingStep } from "@/lib/api";
 import type { StrategyApprovalDialogData } from "@/components/Dialog/StrategyApprovalDialog";
 import { useToast } from "@/hooks/use-toast";
 import { useTranslation } from "react-i18next";
 import type { ContentWithUser } from "@/components/chat/types";
-import type { ProgressAgent, ProgressTask } from "@/components/ChatProgressPill";
+import { isProgressAgent } from "@/components/ChatProgressPill";
+import type { ProgressTask } from "@/components/ChatProgressPill";
 
 type ClientInterrupt = {
     type: "strategy_approval";
@@ -37,7 +39,10 @@ type ClientInterrupt = {
 export function useTopicStream(
     agentId: UUID,
     topicId: UUID,
-    options?: { onDirective?: (step: ProcessingStep) => void },
+    options?: {
+        onDirective?: (step: ProcessingStep) => void;
+        onModelRevision?: (frame: ModelRevisionFrame) => void;
+    },
 ) {
     const queryClient = useQueryClient();
     const navigate = useNavigate();
@@ -54,6 +59,11 @@ export function useTopicStream(
     // `sendMessage` (and with it the whole stream identity) on every render.
     const onDirectiveRef = useRef(options?.onDirective);
     onDirectiveRef.current = options?.onDirective;
+
+    // Same rationale as onDirectiveRef: keeps an inline closure from a caller
+    // from re-creating `sendMessage` (and the whole stream identity) every render.
+    const onModelRevisionRef = useRef(options?.onModelRevision);
+    onModelRevisionRef.current = options?.onModelRevision;
 
     // Strategy approval state populated by the backend approval event.
     const [pendingInterrupt, setPendingInterrupt] = useState<ClientInterrupt | null>(null);
@@ -167,15 +177,27 @@ export function useTopicStream(
                             const map = tasksRef.current;
                             const rec: ProgressTask = { ...(map.get(id) ?? { taskId: id, description: "", status: "in_progress" }) };
                             if (step.name === "dispatch") {
-                                const data = step.data as { agent?: string; task?: string } | undefined;
+                                const data = step.data as { agent?: string; task?: string; thread_id?: string } | undefined;
                                 const task = data?.task;
                                 rec.description = task || rec.description || step.message || "";
-                                if (data?.agent === "market_data" || data?.agent === "market_research" || data?.agent === "trading_operations") {
-                                    rec.agent = data.agent as ProgressAgent;
-                                }
+                                if (isProgressAgent(data?.agent)) rec.agent = data.agent;
+                                // Only the dispatch frame carries the thread —
+                                // the later progress/task_done frames for this
+                                // same row do not, so it must stick.
+                                if (data?.thread_id) rec.threadId = data.thread_id;
                                 if (rec.status !== "completed" && rec.status !== "error") rec.status = "in_progress";
                             } else if (step.name === "tool_call") {
-                                rec.description = step.message || rec.description;
+                                // A row's identity is the TASK it was dispatched
+                                // to do; the tool is just what it reached for on
+                                // this step. Overwriting `description` here made
+                                // the pill read "list_financial_models" instead
+                                // of "build the DCF model" — the row would then
+                                // rename itself on every tool call.
+                                rec.tool = step.message || rec.tool;
+                                // Orchestrator-level tool calls arrive with no
+                                // preceding dispatch, so there is no task to
+                                // show; the tool name is the best label there.
+                                rec.description = rec.description || step.message || "";
                                 if (rec.status !== "completed" && rec.status !== "error") rec.status = "in_progress";
                             } else if (step.name === "task_done") {
                                 rec.status = step.status === "error" ? "error" : "completed";
@@ -239,6 +261,7 @@ export function useTopicStream(
                     undefined, // language
                     0,
                     inputResponse,
+                    (frame) => onModelRevisionRef.current?.(frame),
                 );
             } catch {
                 failed = true;

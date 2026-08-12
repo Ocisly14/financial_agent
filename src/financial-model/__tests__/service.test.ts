@@ -89,18 +89,18 @@ function invalidCode(code: FinancialModelError["code"]): (error: unknown) => boo
     error instanceof FinancialModelError && error.code === code;
 }
 
-test("createModel writes revision zero with the fixed skeleton and default metrics", () => {
+test("createModel writes revision zero with a source-free fixed skeleton", () => {
   const { store, service } = setup();
   const result = service.createModel(CREATE_INPUT);
   assert.equal(result.revision, 0);
   assert.equal(result.status, "draft");
   const snapshot = current(store);
   assert.ok(snapshot.lineItems.some((item) => item.id === "fcff" && item.role === "fcff"));
-  assert.ok(snapshot.lineItems.some((item) => item.id === "metric.roa"));
-  assert.ok(snapshot.formulas.some((formula) => formula.lineItemId === "metric.roa"));
+  assert.equal(snapshot.lineItems.some((item) => item.id === "metric.roa"), false);
+  assert.deepEqual(snapshot.formulas, []);
   assert.equal(snapshot.compiledFormulas.length, snapshot.formulas.length);
   assert.equal(snapshot.engineVersion.length > 0, true);
-  assert.equal(snapshot.cells.size > 0, true);
+  assert.equal(snapshot.cells.size, 0);
   assert.equal(result.currentWorkbook.mode, "statement_mapping");
   assert.equal(
     result.currentWorkbook.sourceStatementReview.sheets.income_statement[0]
@@ -111,6 +111,49 @@ test("createModel writes revision zero with the fixed skeleton and default metri
     (row) => row.lineItemId === "revenue.total",
   )!;
   assert.deepEqual(Object.keys(revenueRow.cells), PERIODS.map((period) => period.id));
+});
+
+test("lifecycle gate failures remain visible as structured blockers", () => {
+  const { service } = setup();
+  const result = service.createModel(CREATE_INPUT);
+
+  assert.deepEqual(result.currentWorkbook.diagnostics, [{
+    code: "history_review_required",
+    refs: [],
+    message: "history requires selected periods and committed spine facts",
+    stage: "history_committed",
+  }]);
+});
+
+test("source declarations are reconciled from each row's filled channel", () => {
+  const { store, service } = setup();
+  service.createModel(CREATE_INPUT);
+  let current = service.commitSpineFacts("model-1", 0, { facts: [
+    spineFact("cash_and_equivalents", "FY2024", 80),
+    spineFact("short_term_investments", "FY2024", 20),
+  ], historicalPeriodIds: ["FY2024"] });
+  let snapshot = store.getRevision("model-1")!.snapshot;
+  const row = (id: string) => snapshot.lineItems.find((item) => item.id === id)!;
+  assert.equal(row("cash_and_equivalents").historical, "actual");
+  assert.equal(row("cash_available_for_bridge").historical, "none");
+
+  current = service.applyOperations("model-1", current.revision, [{
+    kind: "set_formula",
+    formula: {
+      lineItemId: "cash_available_for_bridge", appliesTo: "historical", periodIds: ["FY2024"],
+      source: "cash_and_equivalents + short_term_investments",
+    },
+  }]);
+  snapshot = store.getRevision("model-1")!.snapshot;
+  assert.equal(row("cash_available_for_bridge").historical, "formula");
+  assert.equal(snapshot.cells.get(cellKey("cash_available_for_bridge", "FY2024"))?.value, 100);
+
+  service.commitSpineFacts("model-1", current.revision, { facts: [
+    spineFact("cash_available_for_bridge", "FY2025", 95),
+  ], historicalPeriodIds: ["FY2024", "FY2025"] });
+  snapshot = store.getRevision("model-1")!.snapshot;
+  assert.equal(row("cash_available_for_bridge").historical, "actual");
+  assert.equal(snapshot.formulas.some((formula) => formula.lineItemId === "cash_available_for_bridge"), false);
 });
 
 test("createModel commits a deterministic value-free model-created summary", () => {
@@ -444,7 +487,7 @@ test("the history commit installs the working-capital identity over exactly the 
   assert.equal(formula?.source, "accounts_receivable + inventory - accounts_payable");
   const operations = reviewed.currentWorkbook.sections.operations;
   assert.equal(operations.find((r) => r.lineItemId === "operating_working_capital")!.cells["FY2025"]!.value, 33 + 11 - 22);
-  assert.equal(operations.find((r) => r.lineItemId === "ratio.operating_nwc_to_revenue")!.cells["FY2025"]!.value, (33 + 11 - 22) / 110);
+  assert.equal(operations.find((r) => r.lineItemId === "ratio.operating_nwc_to_revenue")!.cells["FY2025"]?.status, "not_modeled");
 });
 
 test("a nested stream batch installs the child under its parent stream, whatever the input order", () => {
@@ -535,7 +578,7 @@ test("a custom metric row carries its description into the workbook view and sur
   assert.equal(decoded.lineItems.find((i) => i.id === "metric.custom.opex_ratio")?.description, "Operating expense intensity");
 });
 
-test("metric.custom rows accept formulas while registry metrics and fixed drivers stay immutable", () => {
+test("metric.custom rows and fixed drivers accept agent-authored formulas", () => {
   const { service } = setup();
   service.createModel(CREATE_INPUT);
   const result = service.applyOperations("model-1", 0, [
@@ -547,9 +590,11 @@ test("metric.custom rows accept formulas while registry metrics and fixed driver
   assert.throws(() => service.applyOperations("model-1", 1, [
     { kind: "set_formula", formula: { lineItemId: "metric.roa", appliesTo: "historical", source: "net_income", periodIds: ["FY2024"] } },
   ]), invalidCode("invalid_model_operation"));
-  assert.throws(() => service.applyOperations("model-1", 1, [
-    { kind: "set_formula", formula: { lineItemId: "margin.operating", appliesTo: "historical", source: "net_income", periodIds: ["FY2024"] } },
-  ]), invalidCode("invalid_model_operation"));
+  const configured = service.applyOperations("model-1", 1, [
+    { kind: "set_formula", formula: { lineItemId: "margin.operating", appliesTo: "historical",
+      source: "net_income / revenue.total", periodIds: ["FY2024"] } },
+  ]);
+  assert.equal(configured.revision, 2);
 });
 
 test("createModel initializes a 12-row WACC sheet dated today with wacc unresolved", () => {

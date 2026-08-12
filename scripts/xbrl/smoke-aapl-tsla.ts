@@ -1,6 +1,5 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import type { FinancialModelSnapshot } from "../../src/financial-model/operations.ts";
 import type { RevisionChangeSummary } from "../../src/financial-model/service.ts";
 import { financialModelSnapshotCodec } from "../../src/financial-model/snapshotCodec.ts";
@@ -15,11 +14,8 @@ import { createPreparedStatementProvider } from "../../src/infra/xbrl/preparedSt
 import { SqliteSourceReviewStore } from "../../src/infra/xbrl/sourceReviewStore.ts";
 import { createFinancialModelTools } from "../../mcp_tools/financial-model/financialModelTools.ts";
 
-const companion = fileURLToPath(new URL("./arelle_companion.py", import.meta.url));
+// Only the interpreter is a local choice; the adapter resolves the companion script itself.
 const command = process.env["ARELLE_ADAPTER_COMMAND"]?.trim() || "python3";
-const args = process.env["ARELLE_ADAPTER_ARGS"]
-  ? parseArgs(process.env["ARELLE_ADAPTER_ARGS"]!)
-  : [companion];
 const historyYears = boundedInteger(process.env["SMOKE_HISTORY_YEARS"], 3, 2, 5);
 const symbols = smokeSymbols(process.env["SMOKE_SYMBOLS"]);
 const skipInsights = process.env["SMOKE_SKIP_INSIGHTS"] === "1";
@@ -28,7 +24,7 @@ const outputDirectory = resolve(process.env["SMOKE_OUTPUT_DIR"]?.trim()
   || join("data", "smoke", "xbrl", runTimestamp.replaceAll(":", "-").replaceAll(".", "-")));
 const databasePath = join(outputDirectory, "financial-models.sqlite");
 const provider = createPreparedStatementProvider({
-  arelle: createArelleProcessRunner({ command, args, timeoutMs: 300_000 }),
+  arelle: createArelleProcessRunner({ command, timeoutMs: 300_000 }),
 });
 
 await mkdir(outputDirectory, { recursive: true });
@@ -148,14 +144,6 @@ try {
   insightStore.close();
   modelStore.close();
   }
-
-function parseArgs(value: string): string[] {
-  const parsed: unknown = JSON.parse(value);
-  if (!Array.isArray(parsed) || !parsed.every((entry) => typeof entry === "string")) {
-    throw new Error("ARELLE_ADAPTER_ARGS must be a JSON string array");
-  }
-  return parsed;
-}
 
 function boundedInteger(value: string | undefined, fallback: number, minimum: number, maximum: number): number {
   if (!value) return fallback;

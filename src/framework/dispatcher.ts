@@ -12,23 +12,37 @@ const log = createLogger("dispatcher");
  *  subagent ran on, answered, and nobody was listening. */
 const DEFAULT_TASK_TIMEOUT_MS = 5 * 60_000;
 const DEFAULT_TRADE_TASK_TIMEOUT_MS = 16 * 60_000;
+/** A DCF round is not one lookup: 30 tool steps at several seconds of model time each, and
+ *  `run_dcf_subagent` nests a whole agent (unification, spine mapping) inside a single step.
+ *  Five minutes could not cover that, and the timeout does not cancel — the agent finished,
+ *  wrote its own task_result, and the task already carried a timeout nobody could reconcile. */
+const DCF_TASK_TIMEOUT_MS = 15 * 60_000;
+
+/** Per-agent, because the right ceiling is a property of the work: a quote is seconds, a DCF round
+ *  is many minutes. A caller's explicit `timeout_ms` still wins. */
+export function taskTimeoutMs(request: TaskRequest): number {
+  if (request.timeout_ms !== undefined) return request.timeout_ms;
+  if (request.agent === "trading_operations") return DEFAULT_TRADE_TASK_TIMEOUT_MS;
+  if (request.agent === "financial_modeling") return DCF_TASK_TIMEOUT_MS;
+  return DEFAULT_TASK_TIMEOUT_MS;
+}
 
 /**
- * Thrown when a caller explicitly requested (via `request.tools`) a tool the
- * active skill's `tools:` frontmatter does not declare. Kept as a distinct
- * type — rather than a plain Error — so runExistingTask's catch can surface
- * the `tool_not_allowed` code from spec §8 instead of the generic
- * `task_failed` it uses for every other thrown error.
+ * Thrown when a caller names a thread this session never opened, or one that
+ * belongs to a different agent.
+ *
+ * Opening a fresh thread instead would be the quiet failure: the run would
+ * succeed, the caller would believe it had continued the work, and the earlier
+ * rounds would simply be gone. Continuity you cannot detect the loss of is
+ * worse than an error, so this fails the task and lets the caller read why.
  */
-class ToolNotAllowedError extends Error {}
-
-/**
- * Thrown when a skill's `tools:` list and the agent's own pool have nothing in
- * common. Distinct from ToolNotAllowedError because the cause is different — a
- * malformed skill declaration rather than an over-reaching request — and the
- * orchestrator should be able to tell them apart.
- */
-class NoToolsAvailableError extends Error {}
+class ThreadError extends Error {
+  readonly code: "thread_not_found" | "thread_agent_mismatch";
+  constructor(code: "thread_not_found" | "thread_agent_mismatch", message: string) {
+    super(message);
+    this.code = code;
+  }
+}
 
 /**
  * Spawns subagent runs. The subagent writes its own `task_result` to the session
@@ -44,7 +58,8 @@ export class Dispatcher {
   private readonly state: SessionState;
   private readonly agentId: string;
   private skillSections: Partial<Record<AgentKind, string>> = {};
-  private skillAllowance: { agents?: AgentKind[]; tools?: string[] } = {};
+  private skillTools: string[] | undefined;
+  private userInputAllowed = true;
 
   constructor(
     sessionId: string,
@@ -72,11 +87,24 @@ export class Dispatcher {
   }
 
   /**
-   * 激活的 skill 的工作范围（agents / tools 白名单）。叠加在 toolAccess 的
-   * category 隔离之上，不取代它——两者都必须成立才放行。
+   * 激活的 skill 额外授予的工具。它只放宽 agent 自己的池，从不收窄——收窄那套
+   * 已经删掉了：skill 是指导不是沙箱。真正的隔离仍在 toolAccess 的 category 门，
+   * 并集里每个名字照样要过那道门。
    */
-  setSkillAllowance(allowance: { agents?: AgentKind[]; tools?: string[] }): void {
-    this.skillAllowance = allowance;
+  setSkillTools(tools: string[] | undefined): void {
+    this.skillTools = tools;
+  }
+
+  /**
+   * Mirrors the orchestrator's own `allowUserInput`: when a caller declares
+   * that no human is watching this stream, a question would end the turn
+   * against an empty seat and stall that caller until its timeout. So
+   * `ask_user` is removed from every pool before the subagent ever sees it.
+   * (A Research driving a member Topic deliberately leaves this on — the
+   * controller relays the member's question to the user itself.)
+   */
+  setUserInputAllowed(allowed: boolean): void {
+    this.userInputAllowed = allowed;
   }
 
   async dispatch(tasks: TaskRequest[]): Promise<void> {
@@ -85,9 +113,9 @@ export class Dispatcher {
 
   dispatchAsync(tasks: TaskRequest[]): { task_id: string }[] {
     return tasks.map((request) => {
-      const taskId = this.recordDispatch(request);
-      void this.runExistingTask(taskId, request);
-      return { task_id: taskId };
+      const opened = this.recordDispatch(request);
+      if (!opened.error) void this.runExistingTask(opened.taskId, request, opened.threadId);
+      return { task_id: opened.taskId };
     });
   }
 
@@ -110,13 +138,60 @@ export class Dispatcher {
   }
 
   private async runTask(request: TaskRequest): Promise<void> {
-    const taskId = this.recordDispatch(request);
-    await this.runExistingTask(taskId, request);
+    const opened = this.recordDispatch(request);
+    if (opened.error) return;
+    await this.runExistingTask(opened.taskId, request, opened.threadId);
   }
 
-  /** Record the dispatch event; its id is the task id. */
-  private recordDispatch(request: TaskRequest): string {
-    return this.state.recordDispatch(request.agent, request.task).event_id;
+  /**
+   * Settle which conversation this task runs in, then record the dispatch —
+   * whose event id is the task id.
+   *
+   * A bad thread name still gets a dispatch event and a fresh (empty) thread:
+   * the dispatch really happened and the caller needs to see it fail, and every
+   * thread id that reaches `liveThreads()` should be one a later dispatch could
+   * legitimately name.
+   *
+   * Runs synchronously, which is what keeps two tasks sent to the same agent in
+   * one step from sharing a thread number — see SessionState.openThread.
+   */
+  private recordDispatch(request: TaskRequest): { taskId: string; threadId: string; error?: ThreadError } {
+    let threadId: string;
+    let error: ThreadError | undefined;
+    try {
+      threadId = this.resolveThread(request);
+    } catch (thrown) {
+      if (!(thrown instanceof ThreadError)) throw thrown;
+      error = thrown;
+      threadId = this.state.openThread(request.agent);
+    }
+    const taskId = this.state.recordDispatch(request.agent, request.task, threadId).event_id;
+    if (error) {
+      log.warn(`bad thread ← ${request.agent}`, { taskId, thread: request.thread, code: error.code });
+      this.state.recordTaskResult(request.agent, taskId, {
+        task_id: taskId,
+        agent: request.agent,
+        status: "failed",
+        summary: error.message,
+        error: { code: error.code, message: error.message },
+      });
+    }
+    return { taskId, threadId, ...(error ? { error } : {}) };
+  }
+
+  /** Continue the named thread, or open a new one when none was named. */
+  private resolveThread(request: TaskRequest): string {
+    if (!request.thread) return this.state.openThread(request.agent);
+    const owner = this.state.threadOwner(request.thread);
+    if (!owner) {
+      throw new ThreadError("thread_not_found",
+        `no thread ${request.thread} in this topic; omit "thread" to start a new one`);
+    }
+    if (owner !== request.agent) {
+      throw new ThreadError("thread_agent_mismatch",
+        `thread ${request.thread} belongs to ${owner}, not ${request.agent}`);
+    }
+    return request.thread;
   }
 
   /** The event log should show the user's intent; only the subagent's input carries skill text. */
@@ -126,39 +201,16 @@ export class Dispatcher {
     return { ...request, task: `${request.task}\n\n[SKILL GUIDANCE]\n${section}` };
   }
 
-  private async runExistingTask(taskId: string, request: TaskRequest): Promise<void> {
-    log.info(`dispatch → ${request.agent}`, { task: request.task, taskId });
-    const allowedAgents = this.skillAllowance.agents;
-    if (allowedAgents && !allowedAgents.includes(request.agent)) {
-      const message = `agent ${request.agent} is outside the active skill's declared agents`;
-      this.state.recordTaskResult(request.agent, taskId, {
-        task_id: taskId,
-        agent: request.agent,
-        status: "failed",
-        summary: message,
-        error: { code: "agent_not_allowed", message },
-      });
-      return;
-    }
+  private async runExistingTask(taskId: string, request: TaskRequest, threadId: string): Promise<void> {
+    log.info(`dispatch → ${request.agent}`, { task: request.task, taskId, threadId });
     const definition = this.subagents.get(request.agent);
     let allowedTools: ToolDefinition[];
     try {
       allowedTools = this.resolveAllowedTools(request.agent, definition.defaultTools, request.tools);
     } catch (error) {
-      if (error instanceof ToolNotAllowedError || error instanceof NoToolsAvailableError) {
-        const code = error instanceof ToolNotAllowedError ? "tool_not_allowed" : "no_tools_available";
-        this.state.recordTaskResult(request.agent, taskId, {
-          task_id: taskId,
-          agent: request.agent,
-          status: "failed",
-          summary: error.message,
-          error: { code, message: error.message },
-        });
-        return;
-      }
-      // Any other resolution failure (unknown tool name, category mismatch, etc.)
-      // is not a skill-allowance refusal — fall through to the generic task_failed
-      // path below so its handling stays identical to a subagent-run failure.
+      // Unknown tool name, category mismatch, and anything else resolution can
+      // throw share the generic task_failed path, so their handling stays
+      // identical to a subagent-run failure.
       this.recordGenericFailure(request, taskId, error);
       return;
     }
@@ -169,12 +221,12 @@ export class Dispatcher {
           sessionId: this.sessionId,
           agentId: this.agentId,
           taskId,
+          threadId,
           request: this.withSkillSection(request),
           allowedTools,
           state: this.state,
-          parentEventId: taskId,
         }),
-        request.timeout_ms ?? (request.agent === "trading_operations" ? DEFAULT_TRADE_TASK_TIMEOUT_MS : DEFAULT_TASK_TIMEOUT_MS),
+        taskTimeoutMs(request),
       );
       log.info(`done ← ${request.agent}`, { taskId });
     } catch (error) {
@@ -186,7 +238,7 @@ export class Dispatcher {
   private recordGenericFailure(request: TaskRequest, taskId: string, error: unknown): void {
     const isTimeout = error instanceof Error && error.message === "timeout";
     if (isTimeout) {
-      log.warn(`timeout ← ${request.agent}`, { taskId, timeout_ms: request.timeout_ms ?? (request.agent === "trading_operations" ? DEFAULT_TRADE_TASK_TIMEOUT_MS : DEFAULT_TASK_TIMEOUT_MS) });
+      log.warn(`timeout ← ${request.agent}`, { taskId, timeout_ms: taskTimeoutMs(request) });
     } else {
       log.error(`failed ← ${request.agent}`, { taskId, error: error instanceof Error ? error.message : String(error) });
     }
@@ -203,39 +255,27 @@ export class Dispatcher {
     this.state.recordTaskResult(request.agent, taskId, result);
   }
 
-  private resolveAllowedTools(agent: AgentKind, defaultTools: string[], requestedTools?: string[]): ToolDefinition[] {
-    const defaultSet = new Set(defaultTools);
-    const skillTools = this.skillAllowance.tools;
+  private resolveAllowedTools(agent: AgentKind, pool: string[], requestedTools?: string[]): ToolDefinition[] {
+    // The agent's own pool plus whatever the active skill grants. The union is
+    // the upper bound for this dispatch — an explicit request may pick from it,
+    // never past it.
+    const granted = this.skillTools ? [...new Set([...pool, ...this.skillTools])] : pool;
+    // The strip runs on the union, not on the pool: a skill that happens to
+    // declare ask_user must not smuggle it past `userInputAllowed`, or a stream
+    // with nobody watching would end its turn on a question against an empty seat.
+    const available = this.userInputAllowed ? granted : granted.filter((name) => name !== "ask_user");
+    const availableSet = new Set(available);
     let names: string[];
 
     if (requestedTools) {
-      // An explicit request must stay inside both the agent's own pool and the
-      // skill's declared list — the skill list narrows, it never widens.
       for (const name of requestedTools) {
-        if (!defaultSet.has(name)) {
-          throw new Error(`tool ${name} is not in default tool pool for ${agent}`);
-        }
-        if (skillTools && !skillTools.includes(name)) {
-          throw new ToolNotAllowedError(`tool ${name} is outside the active skill's declared tools`);
+        if (!availableSet.has(name)) {
+          throw new Error(`tool ${name} is not available to ${agent} for this task`);
         }
       }
       names = requestedTools;
     } else {
-      // No explicit request: the skill narrows the agent's default pool down to
-      // the intersection rather than throwing on the first pool member it
-      // doesn't mention (that would fail the whole task for using its own
-      // defaults).
-      names = skillTools ? defaultTools.filter((name) => skillTools.includes(name)) : defaultTools;
-      if (skillTools && names.length === 0) {
-        // Running anyway would hand the agent no way to look anything up, and it
-        // would still answer — from prose alone, returning `ok`. Nothing in the
-        // session log would distinguish that from a grounded answer. The realistic
-        // cause is a typo in the skill's `tools:` list, so say so where the
-        // orchestrator can see it rather than only in the server log.
-        throw new NoToolsAvailableError(
-          `the active skill's declared tools do not overlap ${agent}'s pool (skill: ${skillTools.join(", ") || "none"}; pool: ${defaultTools.join(", ")})`,
-        );
-      }
+      names = available;
     }
 
     return names.map((name) => {

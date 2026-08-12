@@ -103,23 +103,41 @@ A ratio trending one direction for five years is an anchor AND a question: Move 
 
 ## §3 Translate judgments into the chain (Move 3)
 
-set_formula / set_assumption patterns via apply_financial_model_operations. Two prerequisites rule everything: a row must be formula-sourced for the range you set a formula on (switch with set_line_item_source first — it clears that range), and `metric.custom.*` rows are born historical-formula / forecast-none, so using one as a forecast driver needs `set_line_item_source forecast -> assumption` before its set_assumption.
+set_formula / set_assumption patterns via apply_financial_model_operations. The skeleton is inert: writing a formula or assumption is itself what declares that range formula- or assumption-sourced after the batch recalculates. Use set_line_item_source only when clearing or replacing existing coverage, in the same batch as its replacement.
 
 `add_line_item` creates your own rows under one of: revenue, cost_of_revenue, operating_expenses, total_current_assets, total_current_liabilities, operating_working_capital, or custom_metrics — a driver you invent lives there.
 
-Six driver rows are fixed and cannot be redefined (set_formula / set_line_item_source on them fails): growth.revenue.total, margin.operating, tax_rate, ratio.da_to_revenue, ratio.capex_to_revenue, ratio.operating_nwc_to_revenue. You still set their forecast values with set_assumption, and their historical values are always derived as anchors. To stop USING one, do not try to retire it — rewrite the amount row so it no longer references it (give operating_income a forecast formula of `gross_profit - operating_expenses` and margin.operating simply stops feeding anything, still visible as the historical anchor it is).
+The six conventional driver rows (growth.revenue.total, margin.operating, tax_rate, ratio.da_to_revenue, ratio.capex_to_revenue, ratio.operating_nwc_to_revenue) are available but unconfigured. Author their historical anchor formulas and any forecast assumptions you use; if a driver does not fit the issuer, do not write it and instead author formulas at the level where the story lives.
 
 **Segment-driven revenue** (sources with different stories):
 
 ```text
-1. set_assumption  growth.revenue.<stream>  per stream, rationale = the Move-2 sentence
-   (streams already carry forecast formula LAG(stream,1) * (1 + growth.revenue.<stream>))
-2. set_line_item_source  revenue.total  forecast -> formula
-3. set_formula  revenue.total  forecast:
+1. set_formula growth.revenue.<stream> historical: YOY(revenue.<stream>)
+2. set_assumption growth.revenue.<stream> per stream, rationale = the Move-2 sentence
+3. set_formula revenue.<stream> forecast: LAG(revenue.<stream>, 1) * (1 + growth.revenue.<stream>)
+4. set_formula revenue.total forecast:
    revenue.automotiverevenues + revenue.energygenerationandstorage + revenue.servicesandother
 ```
 
 A two-level tree forecasts at the level where the story lives: give the leaves growth assumptions and make the parent stream their sum (same pattern, one level down) — or drive the parent and leave the leaves informational.
+
+**Segment economics — required companion to segment revenue**:
+
+If forecast revenue is split into material segments, first look for segment cost-of-revenue, gross-profit, margin, or management disclosure that supports a distinct economic view. Do not silently collapse different segment economics into a single consolidated operating-margin assumption. Build the bridge at the most evidenced level:
+
+```text
+1. set_formula gross_margin.<segment> historical: gross_profit.<segment> / revenue.<segment>
+2. set_assumption gross_margin.<segment> forecast, with the segment-specific causal rationale
+3. set_formula gross_profit.<segment> forecast:
+   revenue.<segment> * gross_margin.<segment>
+4. set_formula gross_profit forecast:
+   gross_profit.<segment_a> + gross_profit.<segment_b> + ...
+5. forecast attributable operating-expense rows per segment where disclosed; forecast shared expenses separately
+6. set_formula operating_income forecast:
+   gross_profit - operating_expenses
+```
+
+If the statements provide segment revenue but only consolidated costs, do **not** manufacture an allocation merely to fill the rows. Use a consolidated gross-margin or operating-margin chain only after recording: (a) the missing disclosure, (b) why a cost allocation would be unsupported, and (c) the historical and company-specific evidence behind the consolidated driver. The same discipline applies to shared R&D, corporate and platform costs: model them as a named shared pool unless the company discloses a defensible allocation.
 
 **Cost structure at the story's level**:
 
@@ -131,7 +149,7 @@ gross-margin story:   calculate_model_rows {id:"gm_fcst"}          (historical a
                       set_formula gross_profit = revenue.total * metric.custom.gm_fcst
                       set_line_item_source operating_income forecast -> formula
                       set_formula operating_income = gross_profit - operating_expenses
-single-margin story:  keep the default chain; set_assumption margin.operating against its anchor
+single-margin story:  author margin.operating's historical formula and forecast assumption, then author operating_income = revenue.total * margin.operating
 ```
 
 **Fades — the honest middle between "changes" and "persists"** (YEAR_INDEX is forecast-only, so these formulas belong on forecast ranges only):

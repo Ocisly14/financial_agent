@@ -6,20 +6,18 @@
 // Needs SEC_USER_AGENT in .env. Writes to data/e2e-test/<symbol>/:
 //   step1-source.json      — resolved company, periods, selected filings
 //   step1-extraction.json  — full FilingExtraction[] (statements, calc relations, negated concepts)
-import { fileURLToPath } from "node:url";
 import { createArelleProcessRunner } from "../../../src/infra/xbrl/arelleAdapter.ts";
 import { createPreparedStatementProvider } from "../../../src/infra/xbrl/preparedStatementProvider.ts";
 import { outputDirectory, symbol, writeStep } from "./common.ts";
 
-const companion = fileURLToPath(new URL("../arelle_companion.py", import.meta.url));
+// Only the interpreter is a local choice; the adapter resolves the companion script itself.
 const command = process.env["ARELLE_ADAPTER_COMMAND"]?.trim() || "python3";
-const args = process.env["ARELLE_ADAPTER_ARGS"] ? JSON.parse(process.env["ARELLE_ADAPTER_ARGS"]) as string[] : [companion];
 const historyYears = Number(process.env["E2E_HISTORY_YEARS"] ?? 5);
 
 console.log(`# Step 1 — Arelle extraction for ${symbol} (${historyYears} fiscal years) → ${outputDirectory}`);
 
 const provider = createPreparedStatementProvider({
-  arelle: createArelleProcessRunner({ command, args, timeoutMs: 600_000 }),
+  arelle: createArelleProcessRunner({ command, timeoutMs: 600_000 }),
 });
 
 const source = await provider.resolve({ symbol, historyYears, forecastYears: 0, filingForms: ["10-K", "10-K/A"] });

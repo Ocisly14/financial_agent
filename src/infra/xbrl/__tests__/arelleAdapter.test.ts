@@ -1,8 +1,22 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import test from "node:test";
-import { ArelleAdapterError, createArelleProcessRunner } from "../arelleAdapter.ts";
+import { ARELLE_COMPANION_SCRIPT, ArelleAdapterError, createArelleProcessRunner } from "../arelleAdapter.ts";
 
 const REQUEST = { protocolVersion: 3 as const, filings: [], periods: [] };
+
+test("the companion script ships with the repo rather than being operator-wired", () => {
+  assert.match(ARELLE_COMPANION_SCRIPT, /scripts[/\\]xbrl[/\\]arelle_companion\.py$/);
+  assert.ok(existsSync(ARELLE_COMPANION_SCRIPT), `${ARELLE_COMPANION_SCRIPT} should exist`);
+});
+
+// A bare interpreter reads the piped request as its own program, prints nothing, and exits 0 —
+// which arrives downstream as a truncated protocol response instead of the misconfiguration it is.
+test("an unset ARELLE_ADAPTER_ARGS still hands the interpreter the companion script", async () => {
+  const runner = createArelleProcessRunner({ command: process.execPath, timeoutMs: 10_000 });
+  await assert.rejects(runner(REQUEST), (error) => error instanceof ArelleAdapterError
+    && error.message.includes("arelle_companion.py"));
+});
 
 test("unconfigured Arelle runtime fails explicitly without falling back", async () => {
   const runner = createArelleProcessRunner({ command: "" });

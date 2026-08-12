@@ -22,7 +22,7 @@ Locked formulas then cascade: cost_of_equity = rf + beta × ERP; e_over_v / d_ov
 Read the sheet's missingInputs — each empty row names exactly what is absent:
 
 - **equity_risk_premium — always yours.** It has no measurable source by nature; state it as your judgment via set_wacc_input (inside apply_financial_model_operations) with sourceType `agent_estimate` and a rationale that says what regime you are assuming.
-- **risk_free_rate** — only if the Treasury feed was unreachable: get_treasury_yield fetches the official curve at any tenor (`{ term: "30Y" | "10Y" | … }`); if you deliberately prefer a different tenor than the auto 30Y, fetch it and override with sourceType `market` and the tenor in the rationale.
+- **risk_free_rate** — the automatic 30Y Treasury point is a measurable starting value, not a methodological default you are obliged to keep. Before valuation, confirm the curve date and choose the tenor that fits this issuer's cash-flow duration and forecast horizon. get_treasury_yield fetches the official curve at any tenor (`{ term: "30Y" | "10Y" | … }`); if a different tenor is more defensible, fetch it and override with sourceType `market`, preserving the curve date, tenor and reason in the rationale.
 - **cost_of_debt** — override when the engine could not derive it (no separate interest-expense line — Apple and Microsoft both bury it) or when its backward-looking estimate is stale: search the issuer's current bond yields (financial_search), override with sourceType `search` and the source in refs.
 
 set_wacc_input on any locked row is refused; there is no wacc assumption to set anywhere — the wacc row's value IS the model's one official discount rate, valuation reads it directly, and the valuation cannot compute (so the model never reads as valued) until it resolves non-null. When it is null, its missingInputs chain tells you which input to fill next.
@@ -30,5 +30,6 @@ set_wacc_input on any locked row is refused; there is no wacc assumption to set 
 ## Judgment notes
 
 - ERP: pick a defensible long-run figure and hold it across scenarios — sensitivity handles the range; do not tune ERP to move the answer.
+- The discount-rate review is a classification of economic duration, not a way to close a gap to the share price. State the as-of date and why the selected risk-free-rate tenor fits the DCF. A current quote is a reasonableness check after the valuation, never an input target for WACC, ERP, beta, or cost of debt.
 - A cash-rich issuer showing negative net_debt is normal and does not make D/V negative — that is why weights use total debt.
 - Beta from a 10-year window smooths regime changes; if the business transformed recently (major acquisition, delisting-scale buybacks), say so in the ERP/beta discussion in your final report rather than hand-editing beta.

@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { toast as sonnerToast } from "sonner";
 import type { TopicChartPreference, UUID } from "@/types/core";
+import type { ModelRevisionFrame } from "@/types/financialModel";
 import { apiClient, type ProcessingStep } from "@/lib/api";
 import { DEFAULT_STOCK_RANGE, parseStockRange } from "@/lib/stockChart";
 import { useTopicStream } from "@/hooks/useTopicStream";
@@ -99,7 +100,11 @@ function asTopicIds(value: unknown): string[] {
  * a reload loses the offer. Nothing here implies otherwise: the offer lives in
  * a transient toast and never in persistent chrome.
  */
-export function useResearchStream(agentId: UUID, researchId: UUID) {
+export function useResearchStream(
+    agentId: UUID,
+    researchId: UUID,
+    options?: { onModelRevision?: (frame: ModelRevisionFrame) => void },
+) {
     const { t } = useTranslation();
     const queryClient = useQueryClient();
 
@@ -173,7 +178,10 @@ export function useResearchStream(agentId: UUID, researchId: UUID) {
         [agentId, researchId, queryClient, t, undoLastLayoutChange],
     );
 
-    const stream = useTopicStream(agentId, researchId, { onDirective: handleDirective });
+    const stream = useTopicStream(agentId, researchId, {
+        onDirective: handleDirective,
+        onModelRevision: options?.onModelRevision,
+    });
 
     return {
         ...stream,

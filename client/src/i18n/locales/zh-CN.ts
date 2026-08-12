@@ -164,7 +164,6 @@ const zhCN = {
             tabs: "agent 调整了图表",
             members: "agent 调整了成员",
         },
-        memberAsked: "{{topic}} 想确认",
         continueAfterMemberInput: "（已回答上述追问，请继续。）",
     },
     conversation: {
@@ -186,6 +185,19 @@ const zhCN = {
             submitting: "提交中…",
             answered: "已提交选择",
             skipped: "已跳过",
+            // 每张卡片都标出提问者。嵌套一层时（Research 里成员话题内部的 agent
+            // 在问）两层都写，否则看不出问题来自别人的窗口。
+            askedBy: "{{agent}} 想确认",
+            askedByMember: "{{topic}} · {{agent}} 想确认",
+            agentNames: {
+                orchestrator: "分析 agent",
+                research_controller: "研究协调 agent",
+                financial_modeling: "DCF 建模 agent",
+                market_data: "行情数据 agent",
+                market_research: "研究检索 agent",
+                trading_operations: "策略 agent",
+                fallback: "agent",
+            },
         },
     },
     audio: {

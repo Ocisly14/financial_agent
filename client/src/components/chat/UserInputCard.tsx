@@ -8,14 +8,23 @@ import { cn } from "@/lib/utils";
 export function UserInputCard({
     request,
     onSubmit,
-    attribution,
+    memberTopicName,
 }: {
     request: UserInputRequestView;
     onSubmit: (request: UserInputRequestView, answers: UserInputAnswer[]) => Promise<void> | void;
-    /** Which member asked. Absent when the controller itself is asking. */
-    attribution?: string;
+    /** Set only when the question travelled in from a Research member's own
+     *  window; then the label names both the Topic and the agent inside it. */
+    memberTopicName?: string;
 }) {
     const { t } = useTranslation();
+    // Missing asked_by = history recorded before the field existed, all of which
+    // is the Topic agent's own asking.
+    const agent = t(`chat.userInput.agentNames.${request.asked_by ?? "orchestrator"}`, {
+        defaultValue: t("chat.userInput.agentNames.fallback"),
+    });
+    const askedBy = memberTopicName
+        ? t("chat.userInput.askedByMember", { topic: memberTopicName, agent })
+        : t("chat.userInput.askedBy", { agent });
     const [submitting, setSubmitting] = useState(false);
     const [selected, setSelected] = useState<Record<string, string[]>>(() =>
         Object.fromEntries(
@@ -80,11 +89,9 @@ export function UserInputCard({
             aria-label={t("chat.userInput.title")}
             data-testid="user-input-card"
         >
-            {attribution ? (
-                <div className="border-b border-sep px-4 pt-3">
-                    <span className="text-xs text-muted-foreground">{t("research.memberAsked", { topic: attribution })}</span>
-                </div>
-            ) : null}
+            <div className="border-b border-sep px-4 pt-3 pb-2">
+                <span className="text-xs text-muted-foreground">{askedBy}</span>
+            </div>
             <div className="space-y-5 px-4 py-4">
                 {request.questions.map((question, questionIndex) => {
                     const values = selected[question.id] ?? [];

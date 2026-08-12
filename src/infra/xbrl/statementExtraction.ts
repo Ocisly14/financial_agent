@@ -32,6 +32,13 @@ export type StatementCurationSummary = {
   verification: VerificationReport;
 };
 
+/**
+ * A misconfigured interpreter and a broken protocol answer identically on every
+ * call, so telling the agent it may retry only spends its steps on the same
+ * failure. Timeouts and crashes stay retryable — those can genuinely differ.
+ */
+const NON_RETRYABLE_CODES = new Set(["xbrl_runtime_unavailable", "xbrl_protocol_error"]);
+
 export type StatementExtractionResult = {
   ingestionRunId: string;
   modelId: string;
@@ -41,14 +48,15 @@ export type StatementExtractionResult = {
   statementCoverage?: StatementCoverageView;
   filingInsights?: FilingInsightContextView;
   curation?: StatementCurationSummary;
-  error?: { code: string; message: string; retryable: true };
+  error?: { code: string; message: string; retryable: boolean };
 };
 
 export type StatementExtractionDeps = {
   provider: PreparedStatementProvider;
   ingestionStore: FilingIngestionStore;
   insightStore: FilingInsightStore;
-  generateInsights: ChunkInsightGenerator;
+  /** Omit to skip the insight pass entirely — the only part of an ingestion that spends model calls. */
+  generateInsights?: ChunkInsightGenerator;
   tableStore: FilingTableStore;
 };
 
@@ -69,10 +77,16 @@ export async function runStatementExtraction(
       ({ filing, calculationRelations, negatedConcepts, statements }) => ({ filing, calculationRelations, negatedConcepts, statements }));
     const curation = selectFilingTables(deps, ingestionRunId, source, extractions);
     const prepared = prepareCuratedStatements(source, extractions, curation);
+    // Disabled still persists a set: downstream reads a filingInsightSetId off the snapshot, so the
+    // switch changes what the set contains rather than whether one exists.
+    const generate = deps.generateInsights;
     let insights: FilingInsightContextView;
-    try {
+    if (!generate) {
+      insights = persistUnavailableInsightSet({ modelId, filings: source.filings, store: deps.insightStore,
+        failureCode: "filing_insights_disabled" });
+    } else try {
       const documents = await deps.provider.filingDocuments(source);
-      insights = await extractFilingInsights({ modelId, documents, store: deps.insightStore, generate: deps.generateInsights,
+      insights = await extractFilingInsights({ modelId, documents, store: deps.insightStore, generate,
         sourceRows: Object.values(prepared?.statementViews ?? {}).flatMap((view) => view.candidate.rows.map((row) => ({
           sourceLineItemId: row.sourceLineItemId, conceptQName: row.conceptQName, label: row.label,
         }))) });
@@ -99,7 +113,7 @@ export async function runStatementExtraction(
     deps.ingestionStore.saveIngestion({ ingestionRunId, modelId, ownerAgentId, symbol: request.symbol.toUpperCase(), status: "failed",
       ...(resolvedSource ? { source: resolvedSource } : {}), diagnostics, error: { code, message } });
     return { ingestionRunId, modelId, status: "failed", accessions: resolvedSource?.filings.map((filing) => filing.accession) ?? [],
-      diagnostics, error: { code, message, retryable: true } };
+      diagnostics, error: { code, message, retryable: !NON_RETRYABLE_CODES.has(code) } };
   }
 }
 

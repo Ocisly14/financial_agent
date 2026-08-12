@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { SessionRegistry } from "../../../framework/sessionState.ts";
 import { SqliteEventStore } from "../sqliteEventStore.ts";
@@ -73,4 +74,47 @@ test("SQLite room catalog persists metadata, message previews, rename, and delet
   assert.deepEqual(store.listTopics("default"), []);
   assert.deepEqual(await store.loadEvents("room-1"), []);
   store.close();
+});
+
+/**
+ * Databases written before threads existed carry `is_sidechain` and no
+ * `thread_id`. The two old columns together say everything a thread id says —
+ * "inside some subagent" plus "which task" — so the read path reconstructs one
+ * instead of requiring a data migration.
+ */
+test("rows written before threads existed are read back into threads", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "financial-agent-legacy-"));
+  const databasePath = join(directory, "sessions.sqlite");
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+
+  // Build a database the way the previous build would have: the table without
+  // thread_id, then rows carrying only is_sidechain.
+  const legacy = new DatabaseSync(databasePath);
+  legacy.exec(`CREATE TABLE session_events (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE,
+    parent_event_id TEXT, session_id TEXT NOT NULL, timestamp TEXT NOT NULL,
+    source TEXT NOT NULL, kind TEXT NOT NULL, is_sidechain INTEGER NOT NULL,
+    turn INTEGER NOT NULL, payload_json TEXT NOT NULL)`);
+  const insert = legacy.prepare(`INSERT INTO session_events
+    (event_id, parent_event_id, session_id, timestamp, source, kind, is_sidechain, turn, payload_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+  insert.run("ev_1", null, "room-old", "2026-01-01T00:00:00.000Z", "user", "user_message", 0, 1, JSON.stringify({ content: "hi" }));
+  insert.run("ev_2", "ev_1", "room-old", "2026-01-01T00:00:01.000Z", "orchestrator", "dispatch", 0, 1, JSON.stringify({ agent: "market_data", task: "look" }));
+  insert.run("ev_3", "ev_2", "room-old", "2026-01-01T00:00:02.000Z", "market_data", "tool_result", 1, 1, JSON.stringify({ task_id: "ev_2", name: "probe", summary: "found" }));
+  legacy.close();
+
+  const store = SqliteEventStore.open(databasePath);
+  t.after(() => store.close());
+  const state = await new SessionRegistry(store).getOrCreate("room-old");
+
+  const byKind = new Map(state.allEvents().map((e) => [e.kind, e.thread_id]));
+  assert.equal(byKind.get("user_message"), "room-old", "main-chain rows land on the main thread");
+  assert.equal(byKind.get("dispatch"), "room-old");
+  // The old trace keeps grouping the way it always did, under the only key it
+  // ever had — the dispatch event id.
+  assert.equal(byKind.get("tool_result"), "ev_2");
+  assert.deepEqual(state.subagentToolOutputs({ thread: "ev_2" }).map((o) => o.summary), ["found"]);
+  // Nothing here is offered to the orchestrator as continuable: these runs were
+  // one-shot and there is no `child_thread_id` to name.
+  assert.deepEqual(state.liveThreads(), []);
 });

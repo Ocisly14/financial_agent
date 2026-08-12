@@ -28,8 +28,10 @@ const assumption = object({ assumptionId: string(), lineItemId: string(), period
   sourceType: { type: "string", enum: ["user", "management_guidance", "company_disclosure", "consensus", "macro_research", "industry_research", "analyst_inference"] },
   sourceRefs: strings, asOfDate: string(), rationale: string() },
   ["assumptionId", "lineItemId", "periods", "payload", "sourceType", "sourceRefs", "asOfDate", "rationale"]);
+// periodIds is required here because validateFormula refuses a formula without it: leaving it
+// optional made the schema promise something the engine then rejected.
 const formula = object({ lineItemId: string(), appliesTo: { type: "string", enum: ["historical", "forecast"] }, source: string(), periodIds: strings },
-  ["lineItemId", "appliesTo", "source"]);
+  ["lineItemId", "appliesTo", "source", "periodIds"]);
 const categoryGroup = object({ parentLineItemId: string(), category: string(), periodIds: strings, members: array(groupMember), reviewDecisionId: string() },
   ["parentLineItemId", "category", "periodIds", "members", "reviewDecisionId"]);
 const sensitivity = object({ waccDeltas: array(number), terminalGrowthDeltas: array(number), exitMultipleDeltas: array(number) },
@@ -45,7 +47,10 @@ const operationVariants: JsonSchema[] = [
   object({ kind: { type: "string", enum: ["set_line_item_source"] }, lineItemId: string(), range: { type: "string", enum: ["historical", "forecast"] },
     source: { type: "string", enum: ["actual", "assumption", "formula", "none"] } }, ["kind", "lineItemId", "range", "source"]),
   object({ kind: { type: "string", enum: ["add_line_item"] }, lineItem: object({ id: string(), label: string(),
-    parentId: { type: "string", enum: ["revenue", "cost_of_revenue", "operating_expenses", "total_current_assets", "total_current_liabilities", "operating_working_capital", "custom_metrics"] }, unit: unitSchema },
+    // Parent eligibility is semantic, not a fixed enum: a committed revenue stream may safely own
+    // its disclosed economics (for example Product Revenue → Product Gross Profit). The engine
+    // validates the supplied id against the skeleton, so do not make the tool schema narrower.
+    parentId: string("A permitted DCF parent, including an existing revenue stream or custom_metrics"), unit: unitSchema },
   ["id", "label", "parentId"]) }, ["kind", "lineItem"]),
   object({ kind: { type: "string", enum: ["add_metric"] }, metric: object({ registryId: { type: "string", enum: ["cagr"] },
     targetLineItemId: string(), lookbackPeriods: number }, ["registryId", "targetLineItemId", "lookbackPeriods"]) }, ["kind", "metric"]),

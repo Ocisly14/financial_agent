@@ -132,15 +132,6 @@ export type FinancialModelSnapshot = {
   engineVersion: string;
 };
 
-const REGISTRY_DRIVER_IDS = new Set([
-  "growth.revenue.total",
-  "margin.operating",
-  "tax_rate",
-  "ratio.da_to_revenue",
-  "ratio.capex_to_revenue",
-  "ratio.operating_nwc_to_revenue",
-]);
-
 function operationError(message: string): never {
   throw new FinancialModelError("invalid_model_operation", message);
 }
@@ -183,7 +174,7 @@ function coverageOf(snapshot: FinancialModelSnapshot, formula: Formula): string[
 function assertMutableDefinition(item: LineItem): void {
   // metric.custom.* is agent-owned: no engine identity or default chain reads it, so redefining it
   // can only affect chains the agent built itself. Registry metrics and the fixed drivers stay locked.
-  if ((item.section === "metrics" && !item.id.startsWith("metric.custom.")) || REGISTRY_DRIVER_IDS.has(item.id)) {
+  if (item.section === "metrics" && !item.id.startsWith("metric.custom.")) {
     operationError(`registry-owned definition is immutable: ${item.id}`);
   }
   if (item.historical === "calculated" || item.forecast === "calculated") {
@@ -252,7 +243,9 @@ function validateAssumption(snapshot: FinancialModelSnapshot, assumption: Assump
     const optionalBridgeNarrowing = assumption.payload.kind === "not_applicable"
       && candidate.cls !== "forecast"
       && isOptionalBridgeRole(item.role);
-    if (source !== "assumption" && !optionalBridgeNarrowing) {
+    // Source declarations are reconciled from the values present once the batch finishes.  `none`
+    // is therefore valid while this very operation is the first assumption to fill the range.
+    if (source !== "assumption" && source !== "none" && !optionalBridgeNarrowing) {
       operationError(`line item ${item.id} is not assumption-sourced for ${periodId}`);
     }
     seen.add(periodId);
@@ -301,7 +294,9 @@ function validateFormula(snapshot: FinancialModelSnapshot, formula: Formula): vo
       operationError(`formula period ${periodId} is outside ${formula.appliesTo}`);
     }
     const source = formula.appliesTo === "forecast" ? item.forecast : item.historical;
-    if (source !== "formula") operationError(`line item ${item.id} is not formula-sourced`);
+    // As with assumptions, a formula is allowed to be the first fill for an inert skeleton row.
+    // It may not silently overwrite an evidence-backed or assumption-backed range.
+    if (source !== "formula" && source !== "none") operationError(`line item ${item.id} is not formula-sourced`);
     seen.add(periodId);
   }
 }
@@ -374,7 +369,7 @@ function addExtensibleLineItem(snapshot: FinancialModelSnapshot, input: NewExten
     unit: structuredClone(input.unit),
     section: "metrics",
     order,
-    historical: "formula",
+    historical: "none",
     forecast: "none",
     ...(input.description !== undefined ? { description: input.description } : {}),
   });
@@ -390,7 +385,7 @@ function importSourceRow(snapshot: FinancialModelSnapshot, row: ImportedSourceRo
   // Evidence, not an authorable row: it lands in the metrics section OUTSIDE the metric.custom.*
   // namespace, so assertMutableDefinition keeps its definition immutable by construction.
   snapshot.lineItems.push({ id, label: row.label, role: "none", unit: structuredClone(row.unit),
-    section: "metrics", order, historical: "actual", forecast: "none",
+    section: "metrics", order, historical: "none", forecast: "none",
     ...(row.description !== undefined ? { description: row.description } : {}) });
   const known = new Set(snapshot.periods.filter((period) => period.cls === "actual").map((period) => period.id));
   for (const [periodId, value] of Object.entries(row.values)) {

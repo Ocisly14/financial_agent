@@ -1,6 +1,7 @@
 import type { RegisteredTool } from "../toolRegistry.ts";
 import type { JsonObject } from "../../src/framework/types.ts";
-import type { ModelRouter } from "../../src/infra/llm/provider.ts";
+import type { SubagentRegistry, SubagentRuntime } from "../../src/framework/subagent.ts";
+import type { SessionRegistry } from "../../src/framework/sessionState.ts";
 import { FinancialModelService } from "../../src/financial-model/service.ts";
 import { refreshWaccSheetFromSpine, type FinancialModelToolDeps } from "./financialModelTools.ts";
 import { validate } from "./schemas.ts";
@@ -9,25 +10,30 @@ import { createSpineMappingTools, createStatementUnificationTools, type LoadedWo
 import { resolveDetailLineItemIds } from "../../src/infra/xbrl/spineFromUnified.ts";
 import { runSpineMappingAgent } from "../../src/agent/financial-modeling/spineMappingAgent.ts";
 import { runStatementUnificationAgent } from "../../src/agent/financial-modeling/statementUnificationAgent.ts";
-import { DcfSubagentRegistry } from "../../src/agent/financial-modeling/subagents.ts";
 
 export const DCF_PRIVATE_SUBAGENT_TOOL = "run_dcf_subagent";
 
 const SUBAGENT_INPUT_SCHEMA: JsonSchema = { type: "object", additionalProperties: false,
   required: ["subagent", "modelId", "task"], properties: {
     subagent: { type: "string", enum: ["statement_unification", "spine_mapping"] },
-    modelId: { type: "string" }, task: { type: "string" },
+    modelId: { type: "string" },
+    task: { type: "string", description: "What the work is for, in your own words: the ticker (required — "
+      + "the subagent loads its working set by it), the periods, what this issuer or the user needs "
+      + "respected, and on a re-run the shortfall to address. Not a list of concepts, rows, or spine "
+      + "target ids — the subagent loads those itself and is checked against the engine's requirements, "
+      + "and a task that enumerates them reads as the full scope of the job." },
   } };
 
 export function createDcfSubagentTool(deps: {
-  modelRouter: ModelRouter;
+  subagentRuntime: SubagentRuntime;
+  /** The one registry: these two agents are defined beside market_data and the rest. */
+  subagents: SubagentRegistry;
+  sessions: SessionRegistry;
   financial: FinancialModelToolDeps;
-  subagentRegistry?: DcfSubagentRegistry;
 }): RegisteredTool {
-  const subagents = deps.subagentRegistry ?? new DcfSubagentRegistry();
   return {
     name: DCF_PRIVATE_SUBAGENT_TOOL,
-    description: "Private delegation from the DCF Agent to one bounded DCF subagent. Each works from data extract_filing_statements already stored, writes its result back to the store, and returns a description of what it did — never a model revision it committed itself.",
+    description: "Private delegation from the DCF Agent to one bounded DCF subagent. Each works from data extract_filing_statements already stored, writes its result back to the store, and returns an account of what it did.",
     category: "non_trading",
     inputSchema: SUBAGENT_INPUT_SCHEMA,
     async execute(input, context) {
@@ -48,9 +54,11 @@ export function createDcfSubagentTool(deps: {
           const loader = createStatementUnificationTools({ modelStore: deps.financial.modelStore,
             sourceReviewStore: deps.financial.sourceReviewStore, ownerAgentId: context.agentId, modelId,
             ...(deps.financial.tableStore ? { tableStore: deps.financial.tableStore } : {}) });
-          const run = await runStatementUnificationAgent({ modelRouter: deps.modelRouter,
-            systemPrompt: subagents.get("statement_unification").prompt,
-            task: requiredString(input, "task"), tools: loader.tools,
+          const run = await runStatementUnificationAgent({
+            subagentRuntime: deps.subagentRuntime, definition: deps.subagents.get("statement_unification"),
+            state: deps.sessions.getExisting(context.sessionId),
+            sessionId: context.sessionId, agentId: context.agentId,
+            task: requiredString(input, "task"), readTools: loader.tools,
             filings: sourceReview.presentationExtracts, requestedPeriods,
             tables: deps.financial.tableStore?.getRunTables(sourceReview.ingestionRunId) ?? [] });
           const mismatch = wrongIssuer(loader.loaded(), modelId);
@@ -70,7 +78,7 @@ export function createDcfSubagentTool(deps: {
             + `${material === 0 ? "" : `, ${material} material roll-up break(s)`}`
             + `${breakdownRows.length === 0 ? "" : `, ${breakdownRows.length} breakdown row(s) on ${new Set(breakdownRows.map((r) => r.axisQName)).size} axis/axes`}`
             + `${run.artifact.unresolvedFindings.length === 0 ? ". Stored; run spine_mapping next."
-              : ` — SHIPPED WITH ${run.artifact.unresolvedFindings.length} unresolved finding(s).`}`, run.notes),
+              : ` — SHIPPED WITH ${run.artifact.unresolvedFindings.length} unresolved finding(s).`}`, run.summary),
           generation_context: { data: { unifiedStatements: { periods: run.artifact.periods, rowsByStatement: byStatement,
             restatements: run.artifact.restatements.length, rollupBreaks: run.artifact.rollupBreaks.length,
             breakdownRows: breakdownRows.length,
@@ -80,9 +88,12 @@ export function createDcfSubagentTool(deps: {
           error: { code: "unified_statements_unavailable", message: "spine_mapping needs unifiedStatements; run statement_unification first" } };
         const loader = createSpineMappingTools({ modelStore: deps.financial.modelStore,
           sourceReviewStore: deps.financial.sourceReviewStore, ownerAgentId: context.agentId, modelId });
-        const run = await runSpineMappingAgent({ modelRouter: deps.modelRouter,
-          systemPrompt: subagents.get("spine_mapping").prompt, task: requiredString(input, "task"),
-          tools: loader.tools, unified: sourceReview.unifiedStatements });
+        const run = await runSpineMappingAgent({
+          subagentRuntime: deps.subagentRuntime, definition: deps.subagents.get("spine_mapping"),
+          state: deps.sessions.getExisting(context.sessionId),
+          sessionId: context.sessionId, agentId: context.agentId,
+          task: requiredString(input, "task"), readTools: loader.tools,
+          unified: sourceReview.unifiedStatements });
         const mismatch = wrongIssuer(loader.loaded(), modelId);
         if (mismatch) return { summary: mismatch, error: { code: "subagent_loaded_wrong_issuer", message: mismatch } };
         // Facts commit directly — no staged intermediate: the pipeline verified roll-ups upstream,
@@ -116,7 +127,7 @@ export function createDcfSubagentTool(deps: {
           + `${run.decision.spineGaps.length === 0 ? "" : `, ${run.decision.spineGaps.length} declared spine gap(s)`}`
           + `${run.coverageGaps.length === 0 ? "" : `, ${run.coverageGaps.length} coverage gap(s)`}`
           + `${run.unresolvedFindings.length === 0 ? ""
-            : ` — SHIPPED WITH ${run.unresolvedFindings.length} unresolved finding(s).`}`, run.notes),
+            : ` — SHIPPED WITH ${run.unresolvedFindings.length} unresolved finding(s).`}`, run.summary),
         generation_context: { data: { spineMapping: { revision: committed.revision,
           mappedTargetIds: run.decision.mappings.map((mapping) => mapping.targetId),
           detailLineItemIds: Object.keys(labels),
@@ -143,21 +154,22 @@ function wrongIssuer(loaded: LoadedWorkingSet | undefined, modelId: string): str
 
 /**
  * What the DCF orchestrator reads. Two parts, deliberately in this order: the host's counts, which
- * are measured and cannot be wrong, then the subagent's own account of the judgment calls behind
- * them, which is the only place that reasoning survives — the orchestrator never sees the rows.
+ * are measured and cannot be wrong, then the summary the subagent wrote when it called finish —
+ * written after it had seen the host's verdict on its submission, and the only place its reasoning
+ * survives, since the orchestrator never sees the rows.
  *
  * Capped so a subagent that ignores its word limit cannot flood the orchestrator's context. The
- * counts are never truncated; only the notes are, at a sentence boundary where one is near.
+ * counts are never truncated; only the summary is, at a sentence boundary where one is near.
  */
-export const SUBAGENT_NOTES_BUDGET_CHARS = 700; // ~175 tokens of English prose
+export const SUBAGENT_SUMMARY_BUDGET_CHARS = 700; // ~175 tokens of English prose
 
-export function composeSubagentReport(counts: string, notes: string): string {
-  const trimmed = notes.trim();
+export function composeSubagentReport(counts: string, summary: string): string {
+  const trimmed = summary.trim();
   if (trimmed.length === 0) return counts;
-  if (trimmed.length <= SUBAGENT_NOTES_BUDGET_CHARS) return `${counts}\n\n${trimmed}`;
-  const clipped = trimmed.slice(0, SUBAGENT_NOTES_BUDGET_CHARS);
+  if (trimmed.length <= SUBAGENT_SUMMARY_BUDGET_CHARS) return `${counts}\n\n${trimmed}`;
+  const clipped = trimmed.slice(0, SUBAGENT_SUMMARY_BUDGET_CHARS);
   const lastStop = clipped.lastIndexOf(". ");
-  return `${counts}\n\n${lastStop > SUBAGENT_NOTES_BUDGET_CHARS / 2 ? clipped.slice(0, lastStop + 1) : `${clipped.trimEnd()}…`}`;
+  return `${counts}\n\n${lastStop > SUBAGENT_SUMMARY_BUDGET_CHARS / 2 ? clipped.slice(0, lastStop + 1) : `${clipped.trimEnd()}…`}`;
 }
 
 function requiredString(input: JsonObject, key: string): string { const value = input[key]; if (typeof value !== "string" || !value.trim()) throw new Error(`${key} is required`); return value.trim(); }

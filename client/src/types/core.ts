@@ -27,11 +27,19 @@ export type UserInputAnswer = {
   selected_option_ids: string[];
 };
 
+/** Which actor asked. Three can: the Topic agent the user is talking to, the
+ *  Research controller above it, and the financial_modeling subagent below it.
+ *  Optional because history recorded before the field existed has none — treat
+ *  a missing value as `orchestrator`. */
+export type UserInputAskedBy = "orchestrator" | "research_controller" | "financial_modeling"
+  | "market_data" | "market_research" | "trading_operations";
+
 export type UserInputRequestView = {
   request_id: string;
   questions: UserInputQuestion[];
   status: "pending" | "answered" | "skipped";
   answers?: UserInputAnswer[];
+  asked_by?: UserInputAskedBy;
 };
 
 /** A member Topic's own question, surfaced on the Research stream (see the

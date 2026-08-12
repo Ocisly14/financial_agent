@@ -1,5 +1,5 @@
-import type { SessionEvent } from "../framework/sessionState.ts";
-import type { ArtifactRef, JsonObject, UserInputRequest, UserInputRequestView, UserInputResponse } from "../framework/types.ts";
+import { foldUserInputRequest, type SessionEvent } from "../framework/sessionState.ts";
+import type { ArtifactRef, JsonObject, UserInputRequestView } from "../framework/types.ts";
 import { collectTurnSources, type CitationSource } from "../framework/citationSources.ts";
 
 type ProgressTask = {
@@ -7,6 +7,10 @@ type ProgressTask = {
   description: string;
   status: "completed" | "error";
   agent?: string;
+  /** The subagent conversation this round belongs to. Absent on dispatches
+   *  recorded before threads existed. Not rendered yet — carried so the client
+   *  can group rounds of one thread without a second round trip. */
+  threadId?: string;
   summary?: string;
 };
 
@@ -41,16 +45,7 @@ function turnDetails(events: readonly SessionEvent[], turn: number) {
   let inputRequest: UserInputRequestView | undefined;
 
   const requestEvent = events.find((event) => event.turn === turn && event.kind === "user_input_required");
-  if (requestEvent) {
-    const request = requestEvent.payload.request as unknown as UserInputRequest;
-    const nextUserMessage = events.find((event) => event.kind === "user_message" && event.turn > turn);
-    const response = nextUserMessage?.payload.input_response as unknown as UserInputResponse | undefined;
-    inputRequest = nextUserMessage
-      ? nextUserMessage.payload.response_to === request.request_id && response
-        ? { ...request, status: "answered", answers: response.answers }
-        : { ...request, status: "skipped" }
-      : { ...request, status: "pending" };
-  }
+  if (requestEvent) inputRequest = foldUserInputRequest(requestEvent, events);
 
   for (const dispatch of events) {
     if (dispatch.turn !== turn || dispatch.kind !== "dispatch") continue;
@@ -69,6 +64,7 @@ function turnDetails(events: readonly SessionEvent[], turn: number) {
       status: result?.payload.status === "ok" ? "completed" : "error",
     };
     if (typeof dispatch.payload.agent === "string") task.agent = dispatch.payload.agent;
+    if (typeof dispatch.payload.child_thread_id === "string") task.threadId = dispatch.payload.child_thread_id;
     if (typeof result?.payload.summary === "string") task.summary = result.payload.summary;
     progressTasks.push(task);
   }
