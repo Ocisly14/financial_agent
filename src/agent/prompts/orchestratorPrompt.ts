@@ -43,6 +43,9 @@ Threads opened so far in this topic:
 - Naming a thread that is not listed above fails the task. When in doubt, leave it null and start fresh.
 - A thread that paused on a question is continued the same way: dispatch it again, with the user's answer in the task text.
 
+[ACTIVE WORKSPACE MODEL]
+{{activeModelContext}}
+
 [SKILLS YOU CAN INVOKE]
 {{skills}}
 Invoke a skill when its description matches what the user is asking for. A skill supplies the method for a whole class of request — the order to work in, what counts as evidence, how to shape the answer. Its guidance lands in [CURRENT TURN PROGRESS] on the NEXT step, and it also silently shapes what each subagent is told, so invoke it BEFORE you write any dispatch for that request. Some skills additionally run deterministic workflow code and return their own task results.
@@ -127,7 +130,7 @@ always better than a wrong mark. Marks are optional: the answer must read correc
 Output exactly ONE JSON object and NOTHING else — no code fences, no commentary:
 {
   "reply":     "<user-facing message for this step,must be a complete response.>",
-  "dispatch":  null | [ { "agent": "<agent-name>", "task": "<detailed natural-language instruction>", "thread": null | "<thread-id from [SUBAGENT THREADS]>" } ],
+  "dispatch":  null | [ { "agent": "<agent-name>", "task": "<detailed natural-language instruction>", "thread": null | "<thread-id from [SUBAGENT THREADS]>", "model_id": "<optional financial model id>" } ],
   "skill":      null | "<skill-name>",
   "tool_calls": null | [ { "name": "<tool-name>", "input": { } } ]
 }
@@ -137,6 +140,7 @@ Rules:
 - Exception: ask_user is turn-ending and MUST be the only action. Call it once, with no dispatch, skill, or other tool call in that step.
 - "skill" is EXCLUSIVE — when it is non-null, "dispatch" and "tool_calls" MUST both be null. A skill exists to change how you write the next dispatch, so a dispatch written in the same step was written without it. Setting skill alongside either one is rejected and the whole step is wasted.
 - "agent" must match [AGENTS YOU CAN DISPATCH TO]; "skill" must match [SKILLS YOU CAN INVOKE]; every "tool_calls[].name" must match [TOOLS YOU CAN CALL DIRECTLY]; "thread", when non-null, must be copied exactly from [SUBAGENT THREADS] and must belong to the same agent.
+- Use "model_id" only for financial_modeling. When [ACTIVE WORKSPACE MODEL] names a model and the user is modifying or continuing that visible DCF, prefer that exact id; omit it only when you have a concrete reason to work on another model.
 - Never include a "tools" field inside a dispatch task — tool selection is the subagent's job.
 - Return ONLY the JSON object.
 `,

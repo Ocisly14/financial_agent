@@ -458,6 +458,9 @@ export class StreamingApiClient {
         retryCount = 0,
         inputResponse?: UserInputSubmission,
         onModelRevision?: (frame: ModelRevisionFrame) => void,
+        /** Model currently open in the workspace. It is advisory context for
+         * the agent, never a client-side command to mutate it. */
+        activeModelId?: string,
     ) {
         // Create a unique key for request deduplication.
         const classificationKeySegment = messageClassification ?? "";
@@ -493,11 +496,11 @@ export class StreamingApiClient {
         // it back via X-Session-Id). File uploads are not supported by this backend.
         void selectedFiles; void messageClassification;
         void language;
-        const body: string = JSON.stringify(
-            inputResponse
-                ? { inputResponse, sessionId: topicId }
-                : { message, sessionId: topicId },
-        );
+        const body: string = JSON.stringify({
+            ...(inputResponse ? { inputResponse } : { message }),
+            sessionId: topicId,
+            ...(activeModelId ? { activeModelId } : {}),
+        });
         const headers: HeadersInit = { "Content-Type": "application/json", "X-Agent-Id": agentId };
 
         let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
@@ -869,6 +872,7 @@ export class StreamingApiClient {
                         retryCount + 1,
                         inputResponse,
                         onModelRevision,
+                        activeModelId,
                     );
                 }, delay);
                 return;

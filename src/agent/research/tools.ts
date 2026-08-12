@@ -39,6 +39,8 @@ import {
 import { buildIndexedTurns } from "../topicDigest.ts";
 import { MAX_RANGE_DAYS, MIN_RANGE_DAYS, parseRangeDays } from "../../data/stock/index.ts";
 import { mapWithConcurrency, Semaphore, TimeoutError, withTimeout } from "./concurrency.ts";
+import { projectEvent } from "../../infra/events/sseProjector.ts";
+import type { ActiveWorkspaceModel } from "../../framework/orchestrator.ts";
 
 // ── guards (§4.4) ─────────────────────────────────────────────────────────
 /** At most this many Topics driven at once, per controller turn. */
@@ -70,7 +72,14 @@ export type ResearchToolStore = {
 /** The existing OrchestratorRuntime, seen through the only method this layer
  *  is allowed to use — the same one `handleChat` calls. */
 export type TopicOrchestrator = {
-  run(input: { agentId: string; sessionId: string; userMessage: string; allowUserInput?: boolean }): Promise<{ response: string }>;
+  run(input: {
+    agentId: string;
+    sessionId: string;
+    userMessage: string;
+    allowUserInput?: boolean;
+    /** Advisory model context for a member Topic's DCF agent. */
+    activeModel?: ActiveWorkspaceModel;
+  }): Promise<{ response: string }>;
 };
 
 export type SessionAccess = Pick<SessionRegistry, "getOrCreate" | "loadEvents">;
@@ -88,6 +97,21 @@ export type ResearchFrame =
       data: { topicId: string; topicName: string; task: string; status: AskStatus };
     }
   | { name: "topic_focus"; data: { topicId: string; symbol?: string } }
+  | {
+      /** Forwarded from the driven Topic so a Research workspace refreshes the
+       * member model it is currently showing. */
+      name: "model_revision";
+      data: {
+        display: "focus" | "silent";
+        model_id: string;
+        revision: number;
+        lifecycle_stage: string;
+        changed_sections: string[];
+        changed_line_item_ids: string[];
+        changed_period_ids: string[];
+        change_kinds: string[];
+      };
+    }
   | {
       name: "member_input_request";
       data: { topicId: string; topicName: string; request: UserInputRequestView };
@@ -115,6 +139,10 @@ export type ResearchToolContext = {
   orchestrator: TopicOrchestrator;
   modelRouter: ModelRouter;
   emit: (frame: ResearchFrame) => void;
+  /** The model visible in the parent Research workspace, if its owner Topic
+   * is the member being driven. It informs the member agent but never locks it
+   * to that model. */
+  activeModel?: ActiveWorkspaceModel & { topicId: string };
   /** Injectable for tests. */
   askTimeoutMs?: number;
   idFactory?: (prefix: string) => string;
@@ -371,17 +399,46 @@ export class ResearchToolset {
       // behind. `getOrCreate` is registry-cached — this is not a second load.
       const memberState = await this.ctx.sessions.getOrCreate(topicId);
 
+      // Research subscribes to its own session, while a member Topic writes
+      // model revisions to its separate session. Relay only revision frames so
+      // the currently visible member workbook refetches without duplicating
+      // the member's chat or progress stream in the Research conversation.
+      const unforwardModelRevisions = memberState.subscribe((event) => {
+        for (const frame of projectEvent(event, memberState)) {
+          if (frame.type !== "model_revision") continue;
+          this.ctx.emit({
+            name: "model_revision",
+            data: {
+              display: frame.display,
+              model_id: frame.model_id,
+              revision: frame.revision,
+              lifecycle_stage: frame.lifecycle_stage,
+              changed_sections: frame.changed_sections,
+              changed_line_item_ids: frame.changed_line_item_ids,
+              changed_period_ids: frame.changed_period_ids,
+              change_kinds: frame.change_kinds,
+            },
+          });
+        }
+      });
+
       const unstamp = await this.stampOrigin(topicId, task);
       let response: string;
       try {
         const result = await withTimeout(
-          this.ctx.orchestrator.run({ agentId: this.ctx.agentId, sessionId: topicId, userMessage: task }),
+          this.ctx.orchestrator.run({
+            agentId: this.ctx.agentId,
+            sessionId: topicId,
+            userMessage: task,
+            ...(this.ctx.activeModel?.topicId === topicId ? { activeModel: this.ctx.activeModel } : {}),
+          }),
           this.ctx.askTimeoutMs ?? ASK_TOPIC_TIMEOUT_MS,
           `ask_topic(${topicId})`,
         );
         response = result.response;
       } finally {
         unstamp();
+        unforwardModelRevisions();
       }
 
       // Changes this controller caused are not "external" (§4.2.3), so move the

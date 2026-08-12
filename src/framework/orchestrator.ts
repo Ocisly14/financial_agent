@@ -151,11 +151,24 @@ function normalizeToolCalls(raw: unknown): OrchestratorToolCall[] | null {
   return calls.length > 0 ? calls : null;
 }
 
+/** A compact, automatically derived description of the model open in the UI.
+ * The workbook itself remains tool-readable rather than prompt-injected. */
+export type ActiveWorkspaceModel = {
+  modelId: string;
+  symbol: string;
+  createdAt: string;
+  updatedAt: string;
+  currentRevision: number;
+  lifecycleStage: string;
+};
+
 export type OrchestratorInput = {
   sessionId: string;
   agentId: string;
   userMessage: string;
   inputResponse?: UserInputResponse;
+  /** Model open in the caller's workspace; advisory context for DCF work. */
+  activeModel?: ActiveWorkspaceModel;
   /** False for agent-to-agent Topic drives, where no human is watching that Topic stream. */
   allowUserInput?: boolean;
 };
@@ -254,6 +267,9 @@ export class OrchestratorRuntime {
         userMessage: input.userMessage,
         history,
         threads: formatThreads(state.liveThreads()),
+        activeModelContext: input.activeModel
+          ? `The user is currently viewing this financial model:\n- Model ID: ${input.activeModel.modelId}\n- Symbol: ${input.activeModel.symbol}\n- Created: ${input.activeModel.createdAt}\n- Last updated: ${input.activeModel.updatedAt}\n- Current revision: ${input.activeModel.currentRevision}\n- Lifecycle stage: ${input.activeModel.lifecycleStage}\nIf their request concerns this DCF, prefer continuing it: dispatch financial_modeling with this model ID in model_id so the subagent can refresh its state first. This is advisory context, not a command to ignore evidence that a different model is needed.`
+          : "No financial model is currently selected in the workspace.",
         subagents: formatList(this.subagents.list().map((a) => ({ name: a.name, description: a.description }))),
         skills: formatList(this.skills.list().map((s) => ({ name: s.name, description: s.description }))),
         tools: formatList(this.tools.list()
@@ -321,7 +337,14 @@ export class OrchestratorRuntime {
         .filter((t) => t && typeof t.task === "string" && t.task.trim() && validAgents.has(t.agent as AgentKind))
         .map((t) => ({ agent: t.agent as AgentKind, task: t.task.trim(),
           ...(typeof t.thread === "string" && t.thread.trim() ? { thread: t.thread.trim() } : {}),
-          ...(typeof t.model_id === "string" && t.model_id.trim() ? { model_id: t.model_id.trim() } : {}) }));
+          // The completion can name another model when the task justifies it.
+          // Otherwise carry the one the user is inspecting into the subagent's
+          // prompt as the natural continuation point.
+          ...(typeof t.model_id === "string" && t.model_id.trim()
+            ? { model_id: t.model_id.trim() }
+            : t.agent === "financial_modeling" && input.activeModel
+              ? { model_id: input.activeModel.modelId }
+              : {}) }));
 
       const toolCalls = (stepObj.tool_calls ?? []).filter((call) => directTools.has(call.name));
 

@@ -430,7 +430,7 @@ export class SubagentRuntime {
         task: input.request.task,
         skills: skillRoster,
         modelContext: input.request.model_id
-          ? `Resume model ${input.request.model_id}; refresh it before any mutation.`
+          ? `The user is currently viewing model ${input.request.model_id}. Prefer continuing it: refresh it before any mutation and keep your work in that model unless the task or evidence gives a concrete reason to select or create another model.`
           : "No existing model handle was supplied.",
         progress: `(you are at step ${step} of your ${maxToolSteps}-step budget)\n` + (definition.name === "financial_modeling"
           // Thread scope, not task scope: continuing a thread means the agent

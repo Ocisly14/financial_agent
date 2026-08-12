@@ -18,7 +18,7 @@ import type { JsonObject, TaskRequest } from "../types.ts";
  */
 
 type Harness = {
-  run: (steps: string[], options?: { allowUserInput?: boolean }) => Promise<void>;
+  run: (steps: string[], options?: { allowUserInput?: boolean; activeModel?: { modelId: string; symbol: string; createdAt: string; updatedAt: string; currentRevision: number; lifecycleStage: string } }) => Promise<void>;
   dispatched: TaskRequest[];
   toolCalls: { name: string; input: JsonObject }[];
   sessions: SessionRegistry;
@@ -31,6 +31,13 @@ function harness(): Harness {
   const subagents = new SubagentRegistry();
   subagents.register({
     name: "market_data",
+    description: "d",
+    modelClass: "MEDIUM",
+    defaultTools: [],
+    systemPrompt: { system: "", prompt: "" },
+  });
+  subagents.register({
+    name: "financial_modeling",
     description: "d",
     modelClass: "MEDIUM",
     defaultTools: [],
@@ -79,7 +86,7 @@ function harness(): Harness {
     dispatched,
     toolCalls,
     sessions,
-    run: async (steps: string[], options?: { allowUserInput?: boolean }) => {
+    run: async (steps: string[], options?: { allowUserInput?: boolean; activeModel?: { modelId: string; symbol: string; createdAt: string; updatedAt: string; currentRevision: number; lifecycleStage: string } }) => {
       let call = 0;
       const provider: LlmProvider = {
         name: "stub",
@@ -145,6 +152,28 @@ test("dispatch and tool calls in the same step both run", async () => {
 
   assert.deepEqual(h.dispatched.map((d) => d.task), ["quote NVDA"]);
   assert.deepEqual(h.toolCalls.map((c) => c.input["path"]), ["a.md"]);
+});
+
+test("the visible model becomes the advisory default for a DCF dispatch", async () => {
+  const h = harness();
+
+  await h.run([
+    JSON.stringify({ reply: "updating", dispatch: [{ agent: "financial_modeling", task: "update the DCF" }] }),
+    JSON.stringify({ reply: "done" }),
+  ], { activeModel: { modelId: "model-visible", symbol: "AAPL", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-08-12T00:00:00Z", currentRevision: 7, lifecycleStage: "valued" } });
+
+  assert.equal(h.dispatched[0]?.model_id, "model-visible");
+});
+
+test("an explicit DCF model choice remains available to the agent", async () => {
+  const h = harness();
+
+  await h.run([
+    JSON.stringify({ reply: "updating", dispatch: [{ agent: "financial_modeling", task: "build a comparison model", model_id: "model-other" }] }),
+    JSON.stringify({ reply: "done" }),
+  ], { activeModel: { modelId: "model-visible", symbol: "AAPL", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-08-12T00:00:00Z", currentRevision: 7, lifecycleStage: "valued" } });
+
+  assert.equal(h.dispatched[0]?.model_id, "model-other");
 });
 
 test("pairing skill with another action is refused outright, not silently resolved by priority", async () => {

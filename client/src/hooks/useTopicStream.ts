@@ -42,6 +42,8 @@ export function useTopicStream(
     options?: {
         onDirective?: (step: ProcessingStep) => void;
         onModelRevision?: (frame: ModelRevisionFrame) => void;
+        /** Model currently visible in this workspace, if any. */
+        activeModelId?: string | null;
     },
 ) {
     const queryClient = useQueryClient();
@@ -64,6 +66,9 @@ export function useTopicStream(
     // from re-creating `sendMessage` (and the whole stream identity) every render.
     const onModelRevisionRef = useRef(options?.onModelRevision);
     onModelRevisionRef.current = options?.onModelRevision;
+
+    const activeModelIdRef = useRef(options?.activeModelId);
+    activeModelIdRef.current = options?.activeModelId;
 
     // Strategy approval state populated by the backend approval event.
     const [pendingInterrupt, setPendingInterrupt] = useState<ClientInterrupt | null>(null);
@@ -262,6 +267,7 @@ export function useTopicStream(
                     0,
                     inputResponse,
                     (frame) => onModelRevisionRef.current?.(frame),
+                    activeModelIdRef.current ?? undefined,
                 );
             } catch {
                 failed = true;

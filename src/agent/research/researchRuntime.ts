@@ -48,6 +48,7 @@ import { mapWithConcurrency } from "./concurrency.ts";
 import { buildIndexedTurns, turnCountOf } from "../topicDigest.ts";
 import { renderExternalDelta, renderRoster, type MemberFacts } from "./memberContext.ts";
 import { RESEARCH_TOOL_SPECS } from "./researchPrompt.ts";
+import type { ActiveWorkspaceModel } from "../../framework/orchestrator.ts";
 import {
   requireRangeDays,
   ResearchToolset,
@@ -105,6 +106,8 @@ export type ResearchRunInput = {
   researchName: string;
   userMessage: string;
   inputResponse?: UserInputResponse;
+  /** Model selected in the Research workspace and the member Topic that owns it. */
+  activeModel?: ActiveWorkspaceModel & { topicId: string };
   /** Research-layer frames (§4.5). The caller writes them to the SSE stream;
    *  standard reply/token/final frames still come from `attachSse`. */
   emit: (frame: ResearchFrame) => void;
@@ -234,6 +237,7 @@ export class ResearchRuntime {
       orchestrator: this.topicOrchestrator,
       modelRouter: this.modelRouter,
       emit: input.emit,
+      ...(input.activeModel ? { activeModel: input.activeModel } : {}),
     });
     toolset.beginTurn();
 
@@ -253,6 +257,9 @@ export class ResearchRuntime {
         history: this.renderHistory(state, turn),
         roster,
         externalDelta,
+        activeModelContext: input.activeModel
+          ? `The user is currently viewing this model in member Topic ${input.activeModel.topicId}:\n- Model ID: ${input.activeModel.modelId}\n- Symbol: ${input.activeModel.symbol}\n- Created: ${input.activeModel.createdAt}\n- Last updated: ${input.activeModel.updatedAt}\n- Current revision: ${input.activeModel.currentRevision}\n- Lifecycle stage: ${input.activeModel.lifecycleStage}\nFor a request to build, inspect, or modify that visible DCF, ask that member Topic; it will receive this model as advisory continuation context. Do not assume it is relevant to unrelated research requests.`
+          : "No member financial model is currently selected in the workspace.",
         tools,
         skills,
       });

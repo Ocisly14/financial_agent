@@ -120,18 +120,22 @@ type Harness = {
   store: FakeStore;
   sessions: SessionRegistry;
   frames: ResearchFrame[];
-  runs: Array<{ sessionId: string; userMessage: string; allowUserInput?: boolean }>;
+  runs: Array<{ sessionId: string; userMessage: string; allowUserInput?: boolean; activeModel?: { modelId: string } }>;
 };
 
 function harness(options: {
-  run?: (input: { sessionId: string; userMessage: string; allowUserInput?: boolean }) => Promise<{ response: string }>;
+  run?: (input: { sessionId: string; userMessage: string; allowUserInput?: boolean; activeModel?: { modelId: string } }) => Promise<{ response: string }>;
   router?: ModelRouter;
   askTimeoutMs?: number;
+  activeModel?: {
+    modelId: string; topicId: string; symbol: string; createdAt: string; updatedAt: string;
+    currentRevision: number; lifecycleStage: string;
+  };
 } = {}): Harness {
   const store = new FakeStore();
   const sessions = new SessionRegistry(new InMemoryEventStore());
   const frames: ResearchFrame[] = [];
-  const runs: Array<{ sessionId: string; userMessage: string; allowUserInput?: boolean }> = [];
+  const runs: Array<{ sessionId: string; userMessage: string; allowUserInput?: boolean; activeModel?: { modelId: string } }> = [];
   const toolset = new ResearchToolset({
     agentId: "default",
     researchId: "res_1",
@@ -146,6 +150,7 @@ function harness(options: {
     },
     modelRouter: options.router ?? routerReturning("{}"),
     emit: (frame) => frames.push(frame),
+    ...(options.activeModel ? { activeModel: options.activeModel } : {}),
     ...(options.askTimeoutMs === undefined ? {} : { askTimeoutMs: options.askTimeoutMs }),
     idFactory: (prefix) => `${prefix}_test_${store.topics.length + 1}`,
   });
@@ -166,6 +171,23 @@ test("ask_topic runs the topic's own orchestrator and returns its final reply", 
   assert.equal(result.reply, "reply to 渠道库存怎么样？");
   assert.deepEqual(h.runs, [{ agentId: "default", sessionId: "room_a", userMessage: "渠道库存怎么样？" }],
     "the background Topic run must not surface an input card outside the current Research");
+});
+
+test("a selected Research model is advisory context only for its owning member", async () => {
+  const h = harness({ activeModel: {
+    modelId: "model_aapl", topicId: "room_a", symbol: "AAPL", createdAt: "2026-08-01T00:00:00Z",
+    updatedAt: "2026-08-12T00:00:00Z", currentRevision: 7, lifecycleStage: "valued",
+  } });
+  h.store.createTopic("default", "room_a", "AAPL");
+  h.store.createTopic("default", "room_b", "NVDA");
+  h.store.replaceResearchMembers("res_1", ["room_a", "room_b"]);
+
+  await h.toolset.askTopic("room_a", "revise the visible DCF");
+  h.toolset.beginTurn();
+  await h.toolset.askTopic("room_b", "compare margins");
+
+  assert.equal(h.runs[0]?.activeModel?.modelId, "model_aapl");
+  assert.equal(h.runs[1]?.activeModel, undefined);
 });
 
 test("the user_message written on the topic carries origin, unchanged content, and no framework edit", async () => {
