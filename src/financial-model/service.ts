@@ -97,6 +97,11 @@ export type ViewOptions = {
   selector?: ModelQuery["selector"];
   includeLineage?: boolean;
   reopenSources?: boolean;
+  /** Attach the three as-filed statements to the context view regardless of
+   *  lifecycle stage. Unlike the options above this does NOT narrow the read to
+   *  a slice — it widens the full context view, so it is deliberately excluded
+   *  from the `targeted` test below. */
+  includeSourceStatements?: boolean;
 };
 
 const SECTION_ORDER: readonly ModelReadSection[] = [
@@ -392,6 +397,7 @@ export class FinancialModelService {
       meta,
       this.store.listRevisionHeaders(modelId),
       current,
+      { includeSourceStatements: options.includeSourceStatements ?? false },
     );
   }
 

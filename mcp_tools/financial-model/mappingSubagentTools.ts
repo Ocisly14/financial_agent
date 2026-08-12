@@ -1,5 +1,6 @@
 import { validate } from "./schemas.ts";
-import type { JsonObject, JsonSchema, JsonValue, ToolDefinition } from "../../src/framework/types.ts";
+import type { RegisteredTool } from "../toolRegistry.ts";
+import type { JsonObject, JsonSchema, JsonValue, ToolExecutionResult } from "../../src/framework/types.ts";
 import type { ModelStore } from "../../src/financial-model/store.ts";
 import type { FinancialModelSnapshot } from "../../src/financial-model/operations.ts";
 import type { RevisionChangeSummary } from "../../src/financial-model/service.ts";
@@ -8,7 +9,29 @@ import { buildAxisCatalog, buildAxisBreakdown } from "../../src/infra/xbrl/dimen
 import type { SourceReviewStore } from "../../src/infra/xbrl/sourceReviewStore.ts";
 import type { FilingTableStore } from "../../src/infra/xbrl/filingTableStore.ts";
 
-export type LoopTool = ToolDefinition & { execute(input: JsonObject): JsonValue };
+/**
+ * Wraps a synchronous body — these read from stores already in memory — as an ordinary MCP tool, so
+ * the DCF subagents call the same shape of tool as every other agent and can reach the shared ones
+ * (`invoke_skill`, `read_skill_reference`) without an adapter. A thrown error becomes an error
+ * result: the subagent reads the message and corrects on its next round.
+ */
+export function subagentTool(
+  definition: Omit<RegisteredTool, "execute">,
+  body: (input: JsonObject) => JsonValue,
+): RegisteredTool {
+  return {
+    ...definition,
+    execute: async (input: JsonObject): Promise<ToolExecutionResult> => {
+      try {
+        return { summary: `${definition.name} ok`, generation_context: { data: body(input) as JsonObject } };
+      } catch (error) {
+        // Returned rather than thrown: the subagent reads the message and corrects on its next round.
+        const message = error instanceof Error ? error.message : String(error);
+        return { summary: message, error: { code: "subagent_tool_failed", message } };
+      }
+    },
+  };
+}
 
 export type MappingSubagentDeps = {
   modelStore: ModelStore<FinancialModelSnapshot, RevisionChangeSummary>;
@@ -73,17 +96,17 @@ function runContext(deps: MappingSubagentDeps, raw: JsonObject, schema: JsonSche
  * extraction actually persisted rather than a copy that could drift from it.
  */
 export function createStatementUnificationTools(deps: MappingSubagentDeps): {
-  tools: Map<string, LoopTool>;
+  tools: RegisteredTool[];
   /** Set once the subagent loads; the host reads it back to verify what it worked on. */
   loaded: () => LoadedWorkingSet | undefined;
 } {
   let loaded: LoadedWorkingSet | undefined;
-  const tool: LoopTool = {
+  const tool = subagentTool({
     name: "load_concept_inventory", category: "non_trading",
     description: "Load the XBRL concept inventory and requested periods for one ticker's extracted filings.",
     inputSchema: SYMBOL_INPUT,
-    execute(raw) {
-      const { modelId, symbol } = resolveModel(deps, raw, this.inputSchema);
+  }, (raw) => {
+      const { modelId, symbol } = resolveModel(deps, raw, SYMBOL_INPUT);
       const review = deps.sourceReviewStore.get(modelId);
       if (!review) throw new Error(`no source review stored for ${symbol}`);
       if (!review.presentationExtracts?.length) throw new Error(`${symbol} has no presentation extracts; re-run extract_filing_statements`);
@@ -92,27 +115,25 @@ export function createStatementUnificationTools(deps: MappingSubagentDeps): {
       loaded = { symbol, modelId };
       return { symbol, requestedPeriods: requestedPeriods.map((period) => period.id),
         inventory } as unknown as JsonValue;
-    },
-  };
-  const tools = new Map([[tool.name, tool]]);
+  });
+  const tools = [tool];
   if (deps.tableStore) {
     // Progressive disclosure: the concept inventory alone doesn't surface segment/geography axes,
     // so a subagent that needs a dimensional breakdown asks for it explicitly, one axis at a time.
-    const axesTool: LoopTool = {
+    const axesTool = subagentTool({
       name: "list_dimension_axes", category: "non_trading",
       description: "List every XBRL dimension axis present in one ticker's extracted filings, with member counts and top concepts.",
       inputSchema: SYMBOL_INPUT,
-      execute(raw) {
-        const c = runContext(deps, raw, this.inputSchema);
+    }, (raw) => {
+        const c = runContext(deps, raw, SYMBOL_INPUT);
         return { symbol: c.symbol, axes: buildAxisCatalog({ tables: c.tables, requestedPeriods: c.requestedPeriods }) } as unknown as JsonValue;
-      },
-    };
-    const breakdownTool: LoopTool = {
+    });
+    const breakdownTool = subagentTool({
       name: "get_axis_breakdown", category: "non_trading",
       description: "Member-level values for one axis and concept, resolved latest-filing-wins.",
       inputSchema: AXIS_INPUT,
-      execute(raw) {
-        const c = runContext(deps, raw, this.inputSchema);
+    }, (raw) => {
+        const c = runContext(deps, raw, AXIS_INPUT);
         const cursor = raw["cursor"];
         if (cursor !== undefined && (typeof cursor !== "number" || !Number.isInteger(cursor) || cursor < 0)) {
           throw new Error("cursor must be a non-negative integer from a previous response's nextCursor");
@@ -121,32 +142,29 @@ export function createStatementUnificationTools(deps: MappingSubagentDeps): {
           axisQName: String(raw["axisQName"]), conceptQName: String(raw["conceptQName"]),
           ...(typeof raw["memberFilter"] === "string" ? { memberFilter: raw["memberFilter"] } : {}),
           ...(cursor !== undefined ? { cursor } : {}) }) } as unknown as JsonValue;
-      },
-    };
-    tools.set(axesTool.name, axesTool);
-    tools.set(breakdownTool.name, breakdownTool);
+    });
+    tools.push(axesTool, breakdownTool);
   }
   return { tools, loaded: () => loaded };
 }
 
 /** The spine_mapping subagent's initialization tool: the unified statements the previous stage stored. */
 export function createSpineMappingTools(deps: MappingSubagentDeps): {
-  tools: Map<string, LoopTool>;
+  tools: RegisteredTool[];
   loaded: () => LoadedWorkingSet | undefined;
 } {
   let loaded: LoadedWorkingSet | undefined;
-  const tool: LoopTool = {
+  const tool = subagentTool({
     name: "load_unified_statements", category: "non_trading",
     description: "Load the unified multi-year statements statement_unification stored for one ticker.",
     inputSchema: SYMBOL_INPUT,
-    execute(raw) {
-      const { modelId, symbol } = resolveModel(deps, raw, this.inputSchema);
+  }, (raw) => {
+      const { modelId, symbol } = resolveModel(deps, raw, SYMBOL_INPUT);
       const review = deps.sourceReviewStore.get(modelId);
       if (!review?.unifiedStatements) throw new Error(`${symbol} has no unified statements; run statement_unification first`);
       loaded = { symbol, modelId };
       return { symbol, periods: review.unifiedStatements.periods,
         rows: review.unifiedStatements.rows } as unknown as JsonValue;
-    },
-  };
-  return { tools: new Map([[tool.name, tool]]), loaded: () => loaded };
+  });
+  return { tools: [tool], loaded: () => loaded };
 }

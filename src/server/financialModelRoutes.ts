@@ -36,7 +36,13 @@ export function getModelContext(
 ): RouteResult<ModelContextView> {
   const service = new FinancialModelService(deps.modelStore, READ_SESSION_ID);
   try {
-    return { status: 200, body: service.getModel(modelId) as ModelContextView };
+    // The three as-filed statements ride along at every lifecycle stage. The
+    // engine only volunteers them while the spine is unmapped, on the reasoning
+    // that a mapped model is a DCF and not a source review — true for the agent,
+    // which reads this view into a prompt budget, and wrong for a human, who
+    // wants to check a DCF row against the filing it came from precisely when
+    // the model is finished.
+    return { status: 200, body: service.getModel(modelId, { includeSourceStatements: true }) as ModelContextView };
   } catch (error) {
     if (error instanceof FinancialModelError && error.code === "financial_model_not_found") {
       return { status: 404, body: { success: false, error: `model not found: ${modelId}` } };

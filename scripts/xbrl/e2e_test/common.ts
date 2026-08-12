@@ -1,4 +1,6 @@
-import type { LoopTool } from "../../../mcp_tools/financial-model/mappingSubagentTools.ts";
+import { subagentTool } from "../../../mcp_tools/financial-model/mappingSubagentTools.ts";
+import type { RegisteredTool } from "../../../mcp_tools/toolRegistry.ts";
+import type { JsonValue } from "../../../src/framework/types.ts";
 // Shared plumbing for the three-step e2e test (step1-extract → step2-unify → step3-spine).
 // Every step writes its artifact to the same directory so each output can be checked
 // by hand before the next step consumes it.
@@ -30,15 +32,13 @@ export function readStep<T>(name: string): T {
  * what the previous step wrote — the agent still spends its load turn, which is the point: what these
  * scripts exercise is the same code path production takes.
  */
-export function fileLoader(toolName: string, payload: unknown): Map<string, LoopTool> {
-  const tool: LoopTool = {
+export function fileLoader(toolName: string, payload: unknown): RegisteredTool[] {
+  return [subagentTool({
     name: toolName, category: "non_trading",
     description: `Load the working set ${toolName.replace("load_", "").replace(/_/g, " ")} for one ticker.`,
     inputSchema: { type: "object", properties: { symbol: { type: "string" } }, required: ["symbol"] },
-    execute: (input) => {
-      console.log(`  [load] ${toolName}(${JSON.stringify(input)})`);
-      return payload as never;
-    },
-  };
-  return new Map([[tool.name, tool]]);
+  }, (input) => {
+    console.log(`  [load] ${toolName}(${JSON.stringify(input)})`);
+    return payload as JsonValue;
+  })];
 }

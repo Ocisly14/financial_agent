@@ -221,6 +221,12 @@ export function buildModelContextView(
   meta: ModelView,
   headers: RevisionHeader<RevisionChangeSummary>[],
   current: Revision<FinancialModelSnapshot, RevisionChangeSummary>,
+  /** Forwarded to the workbook builder. The only caller that passes anything is
+   *  the HTTP read path, which asks for the source statements unconditionally:
+   *  a reader wants the three as-filed statements available at any lifecycle
+   *  stage, not only while the spine is still unmapped. The agent's own reads
+   *  leave this empty and keep the narrower, cheaper view. */
+  options: WorkbookViewOptions = {},
 ): ModelContextView {
   if (headers.length === 0 || current.modelId !== meta.modelId || current.revision !== meta.currentRevision) {
     queryError("model context current revision is inconsistent");
@@ -251,7 +257,7 @@ export function buildModelContextView(
   return {
     model: structuredClone(meta),
     revisionHistory: headers.slice(0, -1).map(toRevisionSummary),
-    currentWorkbook: buildWorkbookView(current.modelId, current.revision, current.snapshot),
+    currentWorkbook: buildWorkbookView(current.modelId, current.revision, current.snapshot, options),
   };
 }
 

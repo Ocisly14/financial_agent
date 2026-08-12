@@ -1,22 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ModelRouter, type LlmProvider } from "../../../infra/llm/provider.ts";
+import { ModelRouter, type LlmProvider, type LlmToolCall } from "../../../infra/llm/provider.ts";
 import { buildConceptInventory } from "../../../infra/xbrl/conceptInventory.ts";
 import { buildUnifiedStatements, type UnificationDecision } from "../../../infra/xbrl/unifiedStatements.ts";
 import { fact, filing, node, period, statement } from "../../../infra/xbrl/__tests__/spineFixture.ts";
-import type { LoopTool } from "../../../../mcp_tools/financial-model/mappingSubagentTools.ts";
+import { McpToolRegistry, type RegisteredTool } from "../../../../mcp_tools/toolRegistry.ts";
+import { SessionState } from "../../../framework/sessionState.ts";
+import { SubagentRuntime, type SubagentDefinition } from "../../../framework/subagent.ts";
 import { runSpineMappingAgent } from "../spineMappingAgent.ts";
-
-function scripted(responses: string[]): { router: ModelRouter; prompts: () => string[] } {
-  let call = 0;
-  const seen: string[] = [];
-  const provider: LlmProvider = { name: "scripted", generate: async (messages) => {
-    seen.push(messages.map((m) => m.content).join("\n---\n"));
-    return { text: responses[Math.min(call++, responses.length - 1)]!,
-      metrics: { tokens_in: 1, tokens_out: 1, ms: 0, model_class: "MEDIUM", provider: "scripted" } };
-  } };
-  return { router: new ModelRouter(provider), prompts: () => seen };
-}
 
 // Fixture through the real ① → ②/③ pipeline: d_and_a is FY2025-only, so its FY2024 cell is null.
 // depreciation_amortization is a REQUIRED spine id, so that gap is worth a finding.
@@ -35,92 +26,128 @@ const unified = buildUnifiedStatements({ decision: unificationDecision, filings,
   inventory: buildConceptInventory({ filings, requestedPeriods: periods }) });
 
 const spineIds = ["revenue.total", "depreciation_amortization"];
-
-// The subagent's first turn is always the load call, so every script starts with one and the tool
-// map records that it happened. The data itself still comes from the `unified` argument.
 const task = "Map TSLA's unified statements onto the canonical spine.";
-const loadCall = JSON.stringify({ tool: "load_unified_statements", input: { symbol: "TSLA" } });
-function loader(): { tools: Map<string, LoopTool>; calls: () => number } {
-  let calls = 0;
-  const tool: LoopTool = { name: "load_unified_statements", category: "non_trading",
-    description: "stub", inputSchema: { type: "object", properties: { symbol: { type: "string" } } },
-    execute: () => { calls += 1; return { rows: unified.rows, periods: unified.periods } as never; } };
-  return { tools: new Map([[tool.name, tool]]), calls: () => calls };
-}
-// Literal on purpose: the registry prompt is owned by a parallel change.
-const systemPrompt = "You are the DCF spine mapping agent. Place every unified row.";
-const good = JSON.stringify({
+
+const goodDecision = {
   mappings: [{ targetId: "revenue.total", rowIds: ["revenues"], rationale: "top line" }],
   detailRows: [],
   excluded: [{ rowId: "d_and_a", reason: "FY2024 missing; not modeled" }],
   spineGaps: [{ targetId: "depreciation_amortization", reason: "no complete series" }],
+};
+
+function loadTool(counter: { calls: number }): RegisteredTool {
+  return { name: "load_unified_statements", category: "non_trading", description: "stub",
+    inputSchema: { type: "object", properties: { symbol: { type: "string" } } },
+    execute: async () => { counter.calls += 1;
+      return { summary: "ok", generation_context: { data: { rows: unified.rows, periods: unified.periods } } }; } };
+}
+
+function scripted(calls: LlmToolCall[][]): SubagentRuntime {
+  let step = 0;
+  const provider: LlmProvider = { name: "scripted", generate: async () => ({
+    text: "note", toolCalls: calls[Math.min(step++, calls.length - 1)]!,
+    metrics: { tokens_in: 1, tokens_out: 1, ms: 0, model_class: "MEDIUM", provider: "scripted" } }) };
+  return new SubagentRuntime(new ModelRouter(provider), new McpToolRegistry());
+}
+
+const call = (name: string, input: object): LlmToolCall[] => [{ id: "t", name, input } as LlmToolCall];
+
+const definition: SubagentDefinition = {
+  name: "spine_mapping", description: "d", modelClass: "MEDIUM",
+  defaultTools: [], maxToolSteps: 8,
+  systemPrompt: { system: "{{skills}}", prompt: "{{task}}\n{{progress}}" },
+};
+
+async function run(runtime: SubagentRuntime, counter = { calls: 0 }) {
+  const state = new SessionState("s", new Date().toISOString());
+  state.beginTurn("go");
+  return runSpineMappingAgent({ subagentRuntime: runtime, definition, state, sessionId: "s", agentId: "a",
+    task, readTools: [loadTool(counter)], unified, spineIds });
+}
+
+test("a submitted mapping builds spine facts and returns with no unresolved findings", async () => {
+  const counter = { calls: 0 };
+  const runtime = scripted([
+    call("load_unified_statements", { symbol: "TSLA" }),
+    call("submit_spine_decision", { decision: goodDecision }),
+    call("finish", { summary: "done" }),
+  ]);
+
+  const result = await run(runtime, counter);
+
+  assert.equal(counter.calls, 1, "the agent loads its own working set");
+  assert.deepEqual(result.unresolvedFindings, []);
+  assert.equal(result.facts.length, 2, "revenue.total over both periods");
+  assert.ok(result.decision.spineGaps.some((gap) => gap.targetId === "depreciation_amortization"));
 });
 
-test("a clean decision builds spine facts and returns with no unresolved findings in one run", async () => {
-  const { router, prompts } = scripted([loadCall, good]);
-  const run = await runSpineMappingAgent({ modelRouter: router, systemPrompt, task, tools: loader().tools, unified, spineIds });
-  assert.deepEqual(run.unresolvedFindings, []);
-  assert.deepEqual(run.coverageGaps, []);
-  assert.equal(run.facts.length, 2);
-  assert.equal(run.facts[0]!.lineItemId, "revenue.total");
-  assert.ok(run.facts.some((f) => f.factId === "spine.revenue.total.FY2025" && f.value === 100e9));
-  const prompt = prompts()[1]!;
-  assert.ok(prompt.includes("[UNIFIED STATEMENTS]") && prompt.includes('"revenues"'));
-  assert.ok(!prompt.includes("unified.income_statement"), "unified.facts must not be sent to the model");
+test("findings come back on the submission, and a patch corrects what was submitted", async () => {
+  // Declaring no gap for a required id it also did not map is the finding; the patch adds the gap.
+  const incomplete = { ...goodDecision, spineGaps: [] };
+  const runtime = scripted([
+    call("submit_spine_decision", { decision: incomplete }),
+    call("patch_spine_decision", { patch: { upsertSpineGaps: goodDecision.spineGaps } }),
+    call("finish", { summary: "done" }),
+  ]);
+
+  const result = await run(runtime);
+
+  assert.deepEqual(result.unresolvedFindings, []);
+  assert.equal(result.decision.spineGaps.length, 1);
 });
 
-test("a re-run is asked for a patch over the previous mapping, not a fresh one", async () => {
-  // d_and_a placed nowhere -> dangling finding.
-  const incomplete = JSON.stringify({ mappings: [{ targetId: "revenue.total", rowIds: ["revenues"], rationale: "r" }],
-    detailRows: [], excluded: [], spineGaps: [{ targetId: "depreciation_amortization", reason: "r" }] });
-  const patch = JSON.stringify({ upsertExcluded: [{ rowId: "d_and_a", reason: "FY2024 missing; not modeled" }] });
-  const { router, prompts } = scripted([loadCall, incomplete, patch]);
-  const run = await runSpineMappingAgent({ modelRouter: router, systemPrompt, task, tools: loader().tools, unified, spineIds });
-  assert.deepEqual(run.unresolvedFindings, []);
-  // The untouched mapping and gap survive the patch.
-  assert.deepEqual(run.decision.mappings.map((m) => m.targetId), ["revenue.total"]);
-  assert.deepEqual(run.decision.spineGaps.map((g) => g.targetId), ["depreciation_amortization"]);
-  assert.ok(prompts()[2]!.includes("[YOUR PREVIOUS DECISION]"), prompts()[2]);
-  assert.ok(prompts()[2]!.includes("[FINDINGS AGAINST IT]"), prompts()[2]);
-  assert.ok(prompts()[2]!.includes("d_and_a"), prompts()[2]);
+test("patches stack on each other — a second correction needs no resubmission", async () => {
+  // Two things wrong at once, fixed one round at a time: the gap is missing, and the row it should
+  // have excluded was mapped onto the wrong id. Each patch is re-checked in full against the
+  // accumulated decision, so the second must not lose what the first fixed.
+  const wrong = { ...goodDecision, spineGaps: [],
+    mappings: [...goodDecision.mappings, { targetId: "depreciation_amortization", rowIds: ["d_and_a"], rationale: "wrong" }],
+    excluded: [] };
+  const runtime = scripted([
+    call("submit_spine_decision", { decision: wrong }),
+    call("patch_spine_decision", { patch: { deleteMappingTargetIds: ["depreciation_amortization"],
+      upsertExcluded: goodDecision.excluded } }),
+    call("patch_spine_decision", { patch: { upsertSpineGaps: goodDecision.spineGaps } }),
+    call("finish", { summary: "done" }),
+  ]);
+
+  const result = await run(runtime);
+
+  assert.deepEqual(result.unresolvedFindings, []);
+  assert.equal(result.decision.mappings.length, 1, "the first patch's deletion survived the second patch");
+  assert.equal(result.decision.excluded.length, 1);
+  assert.equal(result.decision.spineGaps.length, 1);
+  assert.equal(result.facts.length, 2, "facts are rebuilt from the fully patched decision");
 });
 
-test("an optional spine id needs no declaration, a required one does", async () => {
-  const withOptional = [...spineIds, "share_repurchases"];
-  // Neither maps nor gap-declares share_repurchases — optional, so silence is accepted.
-  const { router } = scripted([loadCall, good]);
-  const run = await runSpineMappingAgent({ modelRouter: router, systemPrompt, task, tools: loader().tools, unified, spineIds: withOptional });
-  assert.deepEqual(run.unresolvedFindings, []);
+test("the summary the agent writes at finish is what comes back to the DCF orchestrator", async () => {
+  const written = "Gapped D&A rather than forcing the FY2025-only line onto it.";
+  const runtime = scripted([
+    call("submit_spine_decision", { decision: goodDecision }),
+    call("finish", { summary: written }),
+  ]);
 
-  // Dropping the REQUIRED id's declaration is a finding on every run.
-  const missingRequired = JSON.stringify({
-    mappings: [{ targetId: "revenue.total", rowIds: ["revenues"], rationale: "r" }],
-    detailRows: [], excluded: [{ rowId: "d_and_a", reason: "r" }], spineGaps: [] });
-  const { router: r2 } = scripted([loadCall, missingRequired, "{}", "{}"]);
-  const dirty = await runSpineMappingAgent({ modelRouter: r2, systemPrompt, task, tools: loader().tools, unified, spineIds: withOptional, maxRuns: 3 });
-  assert.ok(dirty.unresolvedFindings.some((f) => f.includes("required") && f.includes("depreciation_amortization")),
-    dirty.unresolvedFindings.join("\n"));
-  assert.ok(!dirty.unresolvedFindings.some((f) => f.includes("share_repurchases")),
-    dirty.unresolvedFindings.join("\n"));
+  const result = await run(runtime);
+
+  // Written AFTER the submission, so it can speak to the host's verdict — that is the whole point
+  // of routing the report through finish rather than through a field on the decision.
+  assert.equal(result.summary, written);
 });
 
-test("after maxRuns the last run ships with its unresolved findings instead of looping or passing silently", async () => {
-  // Completeness passes, but cost_of_revenue FY2024 has no value and is not gap-declared -> coverage gap every run.
-  const gapped = JSON.stringify({ mappings: [
-    { targetId: "revenue.total", rowIds: ["revenues"], rationale: "r" },
-    { targetId: "depreciation_amortization", rowIds: ["d_and_a"], rationale: "r" },
-  ], detailRows: [], excluded: [], spineGaps: [] });
-  // Runs 2 and 3 answer with an empty patch: nothing changes, so the gap persists to the end.
-  const { router } = scripted([loadCall, gapped, "{}", "{}"]);
-  const run = await runSpineMappingAgent({ modelRouter: router, systemPrompt, task, tools: loader().tools, unified, spineIds, maxRuns: 3 });
-  assert.deepEqual(run.coverageGaps, [{ targetId: "depreciation_amortization", periodId: "FY2024" }]);
-  assert.ok(run.unresolvedFindings.some((f) => f.includes("coverage_gap") && f.includes("FY2024")));
+test("a run that never finishes reports that, rather than a summary it never wrote", async () => {
+  const runtime = scripted([
+    call("submit_spine_decision", { decision: goodDecision }),
+    call("load_unified_statements", { symbol: "TSLA" }),
+  ]);
+
+  const result = await run(runtime);
+
+  assert.equal(result.facts.length, 2, "the delivery is still salvaged");
+  assert.match(result.summary, /without writing a finish summary/);
 });
 
-test("a schema-invalid decision gets one in-band correction round, then throws", async () => {
-  const invalid = JSON.stringify({ mappings: "not an array", detailRows: [], excluded: [], spineGaps: [] });
-  const { router } = scripted([loadCall, invalid, invalid]);
-  await assert.rejects(
-    runSpineMappingAgent({ modelRouter: router, systemPrompt, task, tools: loader().tools, unified, spineIds }),
-    /mappings/);
+test("an agent that finishes without submitting fails loudly", async () => {
+  const runtime = scripted([call("finish", { summary: "nothing to do" })]);
+
+  await assert.rejects(() => run(runtime), /finished without submitting a mapping/);
 });

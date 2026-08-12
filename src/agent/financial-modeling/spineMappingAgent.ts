@@ -1,154 +1,66 @@
-import { validate } from "../../../mcp_tools/financial-model/schemas.ts";
-import type { LoopTool } from "../../../mcp_tools/financial-model/mappingSubagentTools.ts";
-import { loadWorkingSet } from "./loadWorkingSet.ts";
-import type { JsonSchema, JsonValue } from "../../framework/types.ts";
-import type { LlmMessage, ModelRouter } from "../../infra/llm/provider.ts";
+import { createSpineDeliveryTools } from "../../../mcp_tools/financial-model/spineDeliveryTools.ts";
+import { McpToolRegistry, type RegisteredTool } from "../../../mcp_tools/toolRegistry.ts";
+import { createLogger } from "../../infra/logger/logger.ts";
+import type { SubagentDefinition, SubagentRuntime } from "../../framework/subagent.ts";
+import type { SessionState } from "../../framework/sessionState.ts";
 import type { Fact } from "../../financial-model/types.ts";
 import { CANONICAL_MAPPING_IDS, REQUIRED_MAPPING_IDS } from "../../financial-model/skeleton.ts";
-import { correctionInstruction, schemaCorrectionInstruction, spineMappingCorrectionPrompt,
-  spineMappingEnvelope } from "../prompts/dcfSubagentPrompts.ts";
-import { applySpinePatch, buildSpineFromUnified, checkSpineCompleteness,
-  type SpineDecision, type SpinePatch } from "../../infra/xbrl/spineFromUnified.ts";
+import type { SpineDecision } from "../../infra/xbrl/spineFromUnified.ts";
 import type { UnifiedStatementsArtifact } from "../../infra/xbrl/unifiedStatements.ts";
 
-const MAPPING: JsonSchema = { type: "object", additionalProperties: false,
-  required: ["targetId", "rowIds", "rationale"],
-  properties: { targetId: { type: "string" }, rowIds: { type: "array", items: { type: "string" } },
-    rationale: { type: "string" } } };
-const DETAIL_ROW: JsonSchema = { type: "object", additionalProperties: false,
-  required: ["parentTargetId", "rowId", "rationale"],
-  properties: { parentTargetId: { type: "string" }, rowId: { type: "string" }, rationale: { type: "string" } } };
-const EXCLUSION: JsonSchema = { type: "object", additionalProperties: false,
-  required: ["rowId", "reason"], properties: { rowId: { type: "string" }, reason: { type: "string" } } };
-const SPINE_GAP: JsonSchema = { type: "object", additionalProperties: false,
-  required: ["targetId", "reason"], properties: { targetId: { type: "string" }, reason: { type: "string" } } };
-const idList: JsonSchema = { type: "array", items: { type: "string" } };
-
-const DECISION_SCHEMA: JsonSchema = { type: "object", additionalProperties: false,
-  required: ["mappings", "detailRows", "excluded", "spineGaps"], properties: {
-    mappings: { type: "array", items: MAPPING },
-    detailRows: { type: "array", items: DETAIL_ROW },
-    excluded: { type: "array", items: EXCLUSION },
-    spineGaps: { type: "array", items: SPINE_GAP },
-    notes: { type: "string" },
-  } };
-
-const PATCH_SCHEMA: JsonSchema = { type: "object", additionalProperties: false, required: [], properties: {
-  upsertMappings: { type: "array", items: MAPPING }, deleteMappingTargetIds: idList,
-  upsertDetailRows: { type: "array", items: DETAIL_ROW }, deleteDetailRowIds: idList,
-  upsertExcluded: { type: "array", items: EXCLUSION }, deleteExcludedRowIds: idList,
-  upsertSpineGaps: { type: "array", items: SPINE_GAP }, deleteSpineGapTargetIds: idList,
-  notes: { type: "string" },
-} };
+const log = createLogger("spine_mapping");
 
 export type SpineMappingRun = {
   decision: SpineDecision;
-  /** The subagent's own short account of what it did, for the DCF orchestrator. */
-  notes: string;
+  /**
+   * What the agent wrote when it called finish — its own account of the work, composed after it had
+   * seen the host's verdict on the submission. This is the single channel back to the DCF
+   * orchestrator, so it is also the agent's judgment that the task is done.
+   */
+  summary: string;
   facts: Fact[];
   coverageGaps: Array<{ targetId: string; periodId: string }>;
-  /** Findings the ≤maxRuns loop could not clear. Empty on a clean run. Never silently empty on a dirty one. */
+  /** Empty on a clean run. Never silently empty on a dirty one. */
   unresolvedFindings: string[];
 };
 
+/**
+ * Host for the spine_mapping agent — the same shape as statement_unification's: build the run's
+ * tools, run the shared SubagentRuntime, read back the delivery. The sequence is the agent's,
+ * described by its skill; the checks stay here, where the model cannot reach them.
+ */
 export async function runSpineMappingAgent(input: {
-  modelRouter: ModelRouter;
-  /** The registry definition's prompt: new DcfSubagentRegistry().get("spine_mapping").prompt. */
-  systemPrompt: string;
-  /** The orchestrator's instruction. Names the ticker the subagent loads through its tool. */
+  subagentRuntime: SubagentRuntime;
+  definition: SubagentDefinition;
+  state: SessionState;
+  sessionId: string;
+  agentId: string;
   task: string;
-  /** From createSpineMappingTools: the subagent's initialization tool. */
-  tools: Map<string, LoopTool>;
+  /** From createSpineMappingTools: the read side, pinned to this run's model. */
+  readTools: RegisteredTool[];
   unified: UnifiedStatementsArtifact;
   spineIds?: readonly string[];
-  /** Initial run + findings-driven re-runs. Spec §5: 3 (initial + 2). */
-  maxRuns?: number;
 }): Promise<SpineMappingRun> {
-  // The subagent asks for its own working set, the unified statements the previous stage stored.
-  await loadWorkingSet({ modelRouter: input.modelRouter, subagent: "spine_mapping",
-    systemPrompt: input.systemPrompt, task: input.task, tools: input.tools });
   const spineIds: ReadonlySet<string> = new Set(input.spineIds ?? [...CANONICAL_MAPPING_IDS]);
   const requiredIds: ReadonlySet<string> = new Set([...REQUIRED_MAPPING_IDS].filter((id) => spineIds.has(id)));
-  const maxRuns = input.maxRuns ?? 3;
-  let findings: string[] = [];
-  let last: SpineMappingRun | undefined;
+  const delivery = createSpineDeliveryTools({ unified: input.unified, spineIds, requiredIds });
 
-  let decision: SpineDecision | undefined;
-  for (let run = 1; run <= maxRuns; run += 1) {
-    // First run states the whole mapping; later runs only correct it, against what they last decided.
-    decision = decision === undefined
-      ? await requestDecision(input.modelRouter, input.systemPrompt, input.unified, spineIds, requiredIds)
-      : applySpinePatch(decision,
-        await requestPatch(input.modelRouter, input.systemPrompt, input.unified, spineIds, requiredIds, decision, findings));
-    const completeness = checkSpineCompleteness({ unified: input.unified, decision, spineIds, requiredIds });
-    if (completeness.length > 0) {
-      findings = completeness;
-      // Out of runs: ship the mapping carrying its findings rather than discarding the work.
-      if (run < maxRuns) continue;
-    }
-    const built = buildSpineFromUnified({ decision, unified: input.unified, spineIds, requiredIds });
-    findings = [...completeness, ...built.findings];
-    last = { decision, notes: decision.notes ?? "", facts: built.facts,
-      coverageGaps: built.coverageGaps, unresolvedFindings: findings };
-    if (findings.length === 0) return last;
-  }
-  if (!last) throw new Error(`spine_mapping completeness check failed on all ${maxRuns} runs:\n${findings.join("\n")}`);
-  return last;
-}
+  const runTools = [...input.readTools, ...delivery.tools];
+  const registry = new McpToolRegistry();
+  for (const tool of runTools) registry.register(tool);
 
-const context = (unified: UnifiedStatementsArtifact, spineIds: ReadonlySet<string>, requiredIds: ReadonlySet<string>) =>
-  `[REQUIRED SPINE IDS]\n${JSON.stringify([...requiredIds])}\n\n[OPTIONAL SPINE IDS]\n${JSON.stringify([...spineIds].filter((id) => !requiredIds.has(id)))}\n\n[UNIFIED STATEMENTS]\n${JSON.stringify({ rows: unified.rows, periods: unified.periods,
-    breakdownRows: (unified.breakdownRows ?? []).map(({ rowId, parentRowId, axisQName, label, values, parentMemberQName }) =>
-      ({ rowId, parentRowId, axisQName, label, values,
-        ...(parentMemberQName !== undefined ? { parentMemberQName } : {}) })) })}`;
+  const threadId = input.state.openThread("spine_mapping");
+  const taskId = input.state.recordDispatch("spine_mapping", input.task, threadId).event_id;
+  const task = await input.subagentRuntime.run(input.definition, {
+    sessionId: input.sessionId, agentId: input.agentId, taskId, threadId, state: input.state,
+    request: { agent: "spine_mapping", task: input.task },
+    allowedTools: runTools.map(({ execute: _execute, ...definition }) => definition),
+    toolRegistry: registry,
+  });
 
-function requestDecision(modelRouter: ModelRouter, systemPrompt: string, unified: UnifiedStatementsArtifact,
-  spineIds: ReadonlySet<string>, requiredIds: ReadonlySet<string>): Promise<SpineDecision> {
-  return request(modelRouter, DECISION_SCHEMA, [
-    { role: "system", content: `${systemPrompt}\n\n${spineMappingEnvelope}` },
-    { role: "user", content: context(unified, spineIds, requiredIds) },
-  ]);
-}
-
-function requestPatch(modelRouter: ModelRouter, systemPrompt: string, unified: UnifiedStatementsArtifact,
-  spineIds: ReadonlySet<string>, requiredIds: ReadonlySet<string>, previous: SpineDecision,
-  findings: readonly string[]): Promise<SpinePatch> {
-  return request(modelRouter, PATCH_SCHEMA, [
-    { role: "system", content: `${systemPrompt}\n\n${spineMappingCorrectionPrompt}` },
-    { role: "user", content: `${context(unified, spineIds, requiredIds)}
-
-[YOUR PREVIOUS DECISION]
-${JSON.stringify(previous)}
-
-[FINDINGS AGAINST IT]
-${findings.join("\n")}
-
-${correctionInstruction}` },
-  ]);
-}
-
-async function request<T>(modelRouter: ModelRouter, schema: JsonSchema, messages: LlmMessage[]): Promise<T> {
-  let schemaRetried = false;
-  for (;;) {
-    let completion;
-    try { completion = await modelRouter.generate(messages, { modelClass: "MEDIUM", temperature: 0.1, metadata: { mode: "dcf_subagent", subagent: "spine_mapping" } }); }
-    catch (firstError) {
-      // Transient provider errors need spacing, not an instant retry.
-      await new Promise((resolve) => setTimeout(resolve, 2_000 + Math.floor(Math.random() * 2_000)));
-      try { completion = await modelRouter.generate(messages, { modelClass: "MEDIUM", temperature: 0.1, metadata: { mode: "dcf_subagent", subagent: "spine_mapping", retry: "malformed_response" } }); }
-      catch { throw firstError; }
-    }
-    const start = completion.text.indexOf("{"); const end = completion.text.lastIndexOf("}");
-    try {
-      if (start < 0 || end < start) throw new Error("spine_mapping did not return JSON");
-      const parsed = JSON.parse(completion.text.slice(start, end + 1)) as JsonValue;
-      validate(parsed, schema, "$", true);
-      return parsed as T;
-    } catch (validationError) {
-      if (schemaRetried) throw validationError;
-      schemaRetried = true;
-      messages.push({ role: "assistant", content: completion.text });
-      messages.push({ role: "user", content: `[VALIDATION ERROR]\n${validationError instanceof Error ? validationError.message : String(validationError)}\n\n${schemaCorrectionInstruction}` });
-    }
-  }
+  const delivered = delivery.delivered();
+  if (!delivered) throw new Error(`spine_mapping finished without submitting a mapping: ${input.task}`);
+  log.info(`mapping produced ${delivered.facts.length} facts, ${delivered.coverageGaps.length} coverage gaps, ${delivered.findings.length} unresolved findings`);
+  return { decision: delivered.decision, summary: task?.summary ?? "", facts: delivered.facts,
+    coverageGaps: delivered.coverageGaps, unresolvedFindings: delivered.findings };
 }

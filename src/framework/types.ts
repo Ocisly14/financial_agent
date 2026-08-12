@@ -1,5 +1,12 @@
 import type { CitationSource } from "./citationSources.ts";
-export type AgentKind = "market_data" | "market_research" | "trading_operations" | "financial_modeling";
+/**
+ * Every agent in the system, at whatever level it sits. statement_unification and spine_mapping
+ * report to financial_modeling rather than to the Topic orchestrator, but they are agents in the
+ * same sense as the rest: same runtime, same tool shape, same session events. The hierarchy is who
+ * dispatches whom, not what kind of thing they are.
+ */
+export type AgentKind = "market_data" | "market_research" | "trading_operations" | "financial_modeling"
+  | "statement_unification" | "spine_mapping";
 
 /** The runtime companion to AgentKind, for the places that have to validate a
  *  string that came from a model or from a stored id. */
@@ -8,6 +15,8 @@ export const AGENT_KINDS: ReadonlySet<string> = new Set<AgentKind>([
   "market_research",
   "trading_operations",
   "financial_modeling",
+  "statement_unification",
+  "spine_mapping",
 ]);
 
 export function isAgentKind(value: string): value is AgentKind {

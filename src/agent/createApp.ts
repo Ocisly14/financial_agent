@@ -34,7 +34,6 @@ export async function createFinancialAgentApp() {
   // Both need the router, which registerAllTools has no handle on: extraction for its small-model
   // insight pass, the subagent tool for the subagents themselves.
   toolRegistry.register(createStatementExtractionTool({ modelRouter, financial: financialModelDeps }));
-  toolRegistry.register(createDcfSubagentTool({ modelRouter, financial: financialModelDeps }));
   const subagents = createSubagentRegistry();
   const skills = new SkillRegistry();
   await skills.loadFromDirectory(resolveSkillsPath());
@@ -44,6 +43,9 @@ export async function createFinancialAgentApp() {
   toolRegistry.register(createInvokeSkillTool(skills));
   toolRegistry.register(createReadSkillReferenceTool(skills));
   toolRegistry.register(createRunSkillScriptTool(skills));
+  // Registered after the runtime exists: run_dcf_subagent hands work to it. The registry is looked up
+  // by name at call time, so registering into it after construction is fine.
+  toolRegistry.register(createDcfSubagentTool({ subagentRuntime, subagents, sessions, financial: financialModelDeps }));
 
   const dispatcherFactory = (sessionId: string, agentId: string) =>
     new Dispatcher(sessionId, subagents, subagentRuntime, toolRegistry, sessions.getExisting(sessionId), agentId);

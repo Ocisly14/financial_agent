@@ -1,9 +1,14 @@
 import { SubagentRegistry } from "../../framework/subagent.ts";
 import { SKILL_FRAMEWORK_TOOLS } from "../../framework/skillTools.ts";
-import { financialModelingSubagentPrompt, marketDataSubagentPrompt, marketResearchSubagentPrompt, tradingOperationsSubagentPrompt } from "../prompts/subagentPrompts.ts";
+import { financialModelingSubagentPrompt, marketDataSubagentPrompt, marketResearchSubagentPrompt,
+  spineMappingSubagentPrompt, statementUnificationSubagentPrompt, tradingOperationsSubagentPrompt } from "../prompts/subagentPrompts.ts";
 import { FINANCIAL_MODELING_TOOLS, MARKET_DATA_TOOLS, MARKET_RESEARCH_TOOLS, TRADING_OPERATIONS_TOOLS } from "../../../mcp_tools/registerTools.ts";
 import { DCF_PRIVATE_SUBAGENT_TOOL } from "../../../mcp_tools/financial-model/dcfSubagentTool.ts";
 import { STATEMENT_EXTRACTION_TOOL } from "../../../mcp_tools/financial-model/statementExtractionTool.ts";
+
+/** A mapping run is load, judge, submit, correct — 8-10 rounds in practice. The rest absorbs a schema
+ *  retry, an extra correction, or an issuer with more dimension axes than Apple. */
+const MAPPING_AGENT_STEPS = 15;
 
 export function createSubagentRegistry(): SubagentRegistry {
   const registry = new SubagentRegistry();
@@ -52,6 +57,32 @@ export function createSubagentRegistry(): SubagentRegistry {
     modelClass: "MEDIUM",
     defaultTools: [...TRADING_OPERATIONS_TOOLS],
     systemPrompt: tradingOperationsSubagentPrompt,
+  });
+  // The two mapping agents report to financial_modeling rather than to the orchestrator — that is a
+  // reporting line, not a different kind of thing. Same runtime, same tool shape, same session events.
+  // Their tools are run-scoped (pinned to one model, holding the decision submitted so far), so the
+  // caller passes them per run rather than registering them process-wide.
+  registry.register({
+    name: "statement_unification",
+    description:
+      "Aligns one issuer's XBRL face-statement concepts across filings into unified multi-year statements in the issuer's own structure. financial_modeling delegates to it during a DCF; it needs a model whose filings are already extracted.",
+    modelClass: "MEDIUM",
+    // No skills, and none of the skill framework tools: this agent's methodology is inline in its
+    // prompt, where it rides the cached prefix instead of being re-sent as progress every step.
+    defaultTools: ["load_concept_inventory", "list_dimension_axes", "get_axis_breakdown",
+      "submit_unification_decision", "patch_unification_decision"],
+    maxToolSteps: MAPPING_AGENT_STEPS,
+    systemPrompt: statementUnificationSubagentPrompt,
+  });
+  registry.register({
+    name: "spine_mapping",
+    description:
+      "Places an issuer's unified statement rows onto the DCF engine's canonical spine. financial_modeling delegates to it during a DCF; it needs unified statements statement_unification has already stored.",
+    modelClass: "MEDIUM",
+    // Inline methodology, no skills — see statement_unification above.
+    defaultTools: ["load_unified_statements", "submit_spine_decision", "patch_spine_decision"],
+    maxToolSteps: MAPPING_AGENT_STEPS,
+    systemPrompt: spineMappingSubagentPrompt,
   });
   return registry;
 }

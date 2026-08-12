@@ -7,8 +7,12 @@
 //   step3-spine-mapping.json — { decision, facts, coverageGaps, unresolvedFindings }
 import { resolveLlmProvider } from "../../../src/agent/createApp.ts";
 import { runSpineMappingAgent } from "../../../src/agent/financial-modeling/spineMappingAgent.ts";
+import { McpToolRegistry } from "../../../mcp_tools/toolRegistry.ts";
+import { SkillRegistry } from "../../../src/framework/skill.ts";
+import { SessionState } from "../../../src/framework/sessionState.ts";
+import { SubagentRuntime } from "../../../src/framework/subagent.ts";
+import { createSubagentRegistry } from "../../../src/agent/subagents/registerSubagents.ts";
 import type { StatementUnificationRun } from "../../../src/agent/financial-modeling/statementUnificationAgent.ts";
-import { DcfSubagentRegistry } from "../../../src/agent/financial-modeling/subagents.ts";
 import { ModelRouter } from "../../../src/infra/llm/provider.ts";
 import { fileLoader, outputDirectory, readStep, symbol, writeStep } from "./common.ts";
 
@@ -17,11 +21,19 @@ const { artifact: unified } = readStep<StatementUnificationRun>("step2-unified-s
 console.log(`# Step 3 — spine mapping for ${symbol} (${unified.periods.join(", ")}) → ${outputDirectory}`);
 console.log(`Unified rows in: ${unified.rows.length}`);
 
+// The same runtime production uses; the agent decides its own sequence from its skill.
+const skills = new SkillRegistry();
+await skills.loadFromDirectory("skills");
+const subagents = createSubagentRegistry();
+const state = new SessionState("e2e-spine", new Date().toISOString());
+state.beginTurn("step3");
+
 const spine = await runSpineMappingAgent({
-  modelRouter: new ModelRouter(resolveLlmProvider()),
-  systemPrompt: new DcfSubagentRegistry().get("spine_mapping").prompt,
+  subagentRuntime: new SubagentRuntime(new ModelRouter(resolveLlmProvider()), new McpToolRegistry(), skills),
+  definition: subagents.get("spine_mapping"),
+  state, sessionId: "e2e-spine", agentId: "e2e-agent",
   task: `Map ${symbol}'s unified statements onto the canonical spine.`,
-  tools: fileLoader("load_unified_statements", { symbol, periods: unified.periods, rows: unified.rows }),
+  readTools: fileLoader("load_unified_statements", { symbol, periods: unified.periods, rows: unified.rows }),
   unified,
 });
 

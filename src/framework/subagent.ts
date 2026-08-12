@@ -245,6 +245,12 @@ export type RunSubagentInput = {
   taskId: string;
   request: TaskRequest;
   allowedTools: ToolDefinition[];
+  /**
+   * Tools scoped to this run, resolved before the shared registry. The DCF mapping agents need it:
+   * their tools close over the model they were pinned to and the decision they have submitted so
+   * far, so they cannot live in a process-wide registry two concurrent runs would share.
+   */
+  toolRegistry?: McpToolRegistry;
   state: SessionState;       // the session event log — subagent records its internal trace here
   /**
    * The conversation this run belongs to. Every event the agent writes is
@@ -318,11 +324,15 @@ export class SubagentRuntime {
 
   /**
    * Run the subagent's tool-calling loop and WRITE its own task_result to the
-   * session event log. Returns nothing — the subagent interacts only with state.
+   * session event log. The result is also RETURNED, for the hosts that drive an
+   * agent directly rather than through the dispatcher: the DCF mapping agents
+   * report to their caller through the summary the agent wrote at finish, and
+   * reading it back out of the log by taskId would be the same value at more
+   * cost. Callers that only care about the log may ignore it.
    * Internal tool_use/tool_result go on the agent's own thread. (Timeout /
    * subagent-throw is handled by the dispatcher, which writes the failure result.)
    */
-  async run(definition: SubagentDefinition, input: RunSubagentInput): Promise<void> {
+  async run(definition: SubagentDefinition, input: RunSubagentInput): Promise<TaskResult | undefined> {
     const started = Date.now();
     const { state, threadId } = input;
     // Live, not a snapshot: invoke_skill folds the skill's declared tools in here
@@ -525,7 +535,7 @@ export class SubagentRuntime {
           error: { code: "approval_timeout", message: "Timed out waiting for user approval. The strategy was not activated." },
         });
       }
-      return;
+      return state.task(input.taskId)?.result;
     }
 
     // Assemble the task_result from the tool outputs read back from the log.
@@ -553,8 +563,13 @@ export class SubagentRuntime {
       task_id: input.taskId,
       agent: definition.name,
       status: !finished && !pausedForInput && firstToolError ? "failed" : "ok",
-      summary: pausedForInput ?? (finished ? finishSummary : (firstToolError?.message ?? (exhausted && definition.name === "financial_modeling"
-        ? `Paused after ${maxToolSteps} tool steps; dispatch thread ${threadId} again to continue ${latestModel.model_id ?? input.request.model_id ?? "the model"} at revision ${latestModel.revision ?? "unknown"} (${latestModel.lifecycle_stage ?? "unknown stage"}).`
+      // No clean finish means no summary the agent stands behind. Say which it was —
+      // a host that reports this upward must not pass "completed task" off as an account
+      // of work that stopped mid-stride.
+      summary: pausedForInput ?? (finished ? finishSummary : (firstToolError?.message ?? (exhausted
+        ? (definition.name === "financial_modeling"
+          ? `Paused after ${maxToolSteps} tool steps; dispatch thread ${threadId} again to continue ${latestModel.model_id ?? input.request.model_id ?? "the model"} at revision ${latestModel.revision ?? "unknown"} (${latestModel.lifecycle_stage ?? "unknown stage"}).`
+          : `${definition.name} stopped after ${maxToolSteps} tool steps without writing a finish summary.`)
         : `${definition.name} completed task.`))),
       artifacts: outputs.flatMap((o) => o.artifacts ?? []),
       visualizations: outputs.flatMap((o) => o.visualizations ?? []),
@@ -574,6 +589,7 @@ export class SubagentRuntime {
       if (prompts.length > 0) result.generation_context.prompt = prompts.join("\n\n");
     }
     state.recordTaskResult(definition.name, input.taskId, result);
+    return result;
   }
 
   /** Execute one tool call and record its tool_use/tool_result (and any approval)
@@ -632,7 +648,10 @@ export class SubagentRuntime {
 
     let output: Awaited<ReturnType<McpToolRegistry["call"]>>;
     try {
-      output = await this.toolRegistry.call(tool.name, callInput, {
+      // Run-scoped first, shared second, so a run only has to register what is peculiar to it and
+      // still reaches `invoke_skill` and the rest from the process registry.
+      const registry = input.toolRegistry?.get(tool.name) ? input.toolRegistry : this.toolRegistry;
+      output = await registry.call(tool.name, callInput, {
         sessionId: input.sessionId,
         agentId: input.agentId,
         taskId: input.taskId,

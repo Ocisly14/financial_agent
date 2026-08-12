@@ -50,7 +50,13 @@ export function SummarySheet({
 function Section({ title, children, defaultOpen = false }: { title: string; children: React.ReactNode; defaultOpen?: boolean }) {
     const [open, setOpen] = useState(defaultOpen);
     return (
-        <div className="border-b">
+        // `shrink-0` is load-bearing. These sections are flex items, and their
+        // content is a WorkbookGrid — a scroll container, whose automatic
+        // minimum size is therefore zero. Without this, opening a second fold
+        // while another is open crushes it to no height at all: the toggle
+        // flips, the chevron turns, and nothing appears. The parent scrolls
+        // instead, which is what a stack of folds should do anyway.
+        <div className="shrink-0 border-b">
             <button
                 type="button"
                 className="flex w-full items-center gap-1.5 px-3 py-2 text-xs font-medium hover:bg-muted/40"

@@ -1,5 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+
+import type { RegisteredTool } from "../../toolRegistry.ts";
+const byName = (tools: RegisteredTool[], name: string): RegisteredTool | undefined => tools.find((tool) => tool.name === name);
+
+/** These are ordinary MCP tools now: async, and the payload rides in generation_context.data.
+ *  A failure comes back as an error result rather than a throw. */
+async function data<T>(tool: RegisteredTool | undefined, input: object): Promise<T> {
+  const result = await tool!.execute(input as never, { sessionId: "s", agentId: "owner" });
+  if (result.error) throw new Error(result.error.message);
+  return result.generation_context!.data as T;
+}
+
 import type { FinancialModelSnapshot } from "../../../src/financial-model/operations.ts";
 import { FinancialModelService, type RevisionChangeSummary } from "../../../src/financial-model/service.ts";
 import { financialModelSnapshotCodec } from "../../../src/financial-model/snapshotCodec.ts";
@@ -63,61 +75,61 @@ function setup(symbols: readonly string[]) {
     deps: { modelStore, sourceReviewStore, ownerAgentId: "agent-1" } };
 }
 
-test("the unification subagent's load tool resolves the ticker it was told to work on", () => {
+test("the unification subagent's load tool resolves the ticker it was told to work on", async () => {
   const { sourceReviewStore, modelIds, deps } = setup(["TSLA"]);
   sourceReviewStore.save(modelIds[0]!, review({ presentationExtracts: [{ filing: { accession: "a" },
     calculationRelations: [], negatedConcepts: [], statements: [] } as never] }));
   const loader = createStatementUnificationTools(deps);
 
-  const loaded = loader.tools.get("load_concept_inventory")!.execute({ symbol: "tsla" }) as { symbol: string };
+  const loaded = await data<{ symbol: string }>(byName(loader.tools, "load_concept_inventory"), { symbol: "tsla" });
   assert.equal(loaded.symbol, "TSLA");
   // The host reads this back to check the subagent worked on the model the orchestrator named.
   assert.deepEqual(loader.loaded(), { symbol: "TSLA", modelId: modelIds[0] });
 });
 
-test("a pinned modelId resolves among multiple versions of one ticker, and catches a wrong-ticker instruction", () => {
+test("a pinned modelId resolves among multiple versions of one ticker, and catches a wrong-ticker instruction", async () => {
   const { sourceReviewStore, modelIds, deps } = setup(["TST", "TST"]);
   sourceReviewStore.save(modelIds[1]!, review({ presentationExtracts: [{ filing: { accession: "a" },
     calculationRelations: [], negatedConcepts: [], statements: [] } as never] }));
   const { tools } = createStatementUnificationTools({ ...deps, modelId: modelIds[1]! });
-  const loaded = tools.get("load_concept_inventory")!.execute({ symbol: "TST" }) as { symbol: string };
+  const loaded = await data<{ symbol: string }>(byName(tools, "load_concept_inventory"), { symbol: "TST" });
   assert.equal(loaded.symbol, "TST");
-  assert.throws(() => tools.get("load_concept_inventory")!.execute({ symbol: "NOPE" }), /not the issuer|NOPE/);
+  await assert.rejects(() => data(byName(tools, "load_concept_inventory"), { symbol: "NOPE" }), /not the issuer|NOPE/);
 });
 
-test("two models for one ticker is refused rather than guessed at", () => {
+test("two models for one ticker is refused rather than guessed at", async () => {
   const { sourceReviewStore, modelIds, deps } = setup(["TSLA", "TSLA"]);
   for (const modelId of modelIds) sourceReviewStore.save(modelId, review({ presentationExtracts: [{} as never] }));
   const loader = createStatementUnificationTools(deps);
-  assert.throws(() => loader.tools.get("load_concept_inventory")!.execute({ symbol: "TSLA" }),
+  await assert.rejects(() => data(byName(loader.tools, "load_concept_inventory"), { symbol: "TSLA" }),
     /2 models exist for TSLA/);
 });
 
-test("a ticker with no extracted data names the step that has to run first", () => {
+test("a ticker with no extracted data names the step that has to run first", async () => {
   const { deps } = setup(["TSLA"]);
   const loader = createStatementUnificationTools(deps);
-  assert.throws(() => loader.tools.get("load_concept_inventory")!.execute({ symbol: "AAPL" }),
+  await assert.rejects(() => data(byName(loader.tools, "load_concept_inventory"), { symbol: "AAPL" }),
     /run extract_filing_statements/);
 });
 
-test("spine mapping refuses to load before unification has stored anything", () => {
+test("spine mapping refuses to load before unification has stored anything", async () => {
   const { sourceReviewStore, modelIds, deps } = setup(["TSLA"]);
   sourceReviewStore.save(modelIds[0]!, review());
   const loader = createSpineMappingTools(deps);
-  assert.throws(() => loader.tools.get("load_unified_statements")!.execute({ symbol: "TSLA" }),
+  await assert.rejects(() => data(byName(loader.tools, "load_unified_statements"), { symbol: "TSLA" }),
     /run statement_unification first/);
   assert.equal(loader.loaded(), undefined);
 });
 
-test("another agent's model is invisible, so a subagent cannot load across owners", () => {
+test("another agent's model is invisible, so a subagent cannot load across owners", async () => {
   const { sourceReviewStore, modelIds, deps } = setup(["TSLA"]);
   sourceReviewStore.save(modelIds[0]!, review({ presentationExtracts: [{} as never] }));
   const loader = createStatementUnificationTools({ ...deps, ownerAgentId: "agent-2" });
-  assert.throws(() => loader.tools.get("load_concept_inventory")!.execute({ symbol: "TSLA" }),
+  await assert.rejects(() => data(byName(loader.tools, "load_concept_inventory"), { symbol: "TSLA" }),
     /no model holds extracted data for TSLA/);
 });
 
-test("list_dimension_axes returns the axis catalog for the resolved run", () => {
+test("list_dimension_axes returns the axis catalog for the resolved run", async () => {
   const { sourceReviewStore, modelIds, deps } = setup(["TST"]);
   sourceReviewStore.save(modelIds[0]!, review());
   const tableStore = new InMemoryFilingTableStore();
@@ -126,12 +138,12 @@ test("list_dimension_axes returns the axis catalog for the resolved run", () => 
     dimFact(REV, "FY2025", 40e9, [dim("x:BMember", "Segment B")]),
   ] })]);
   const { tools } = createStatementUnificationTools({ ...deps, tableStore });
-  const result = tools.get("list_dimension_axes")!.execute({ symbol: "TST" }) as { axes: Array<{ axisQName: string }> };
+  const result = await data<{ axes: Array<{ axisQName: string }> }>(byName(tools, "list_dimension_axes"), { symbol: "TST" });
   assert.equal(result.axes.length, 1);
   assert.equal(result.axes[0]!.axisQName, SEG);
 });
 
-test("get_axis_breakdown returns member series", () => {
+test("get_axis_breakdown returns member series", async () => {
   const { sourceReviewStore, modelIds, deps } = setup(["TST"]);
   sourceReviewStore.save(modelIds[0]!, review());
   const tableStore = new InMemoryFilingTableStore();
@@ -140,12 +152,12 @@ test("get_axis_breakdown returns member series", () => {
     dimFact(REV, "FY2025", 40e9, [dim("x:BMember", "Segment B")]),
   ] })]);
   const { tools } = createStatementUnificationTools({ ...deps, tableStore });
-  const result = tools.get("get_axis_breakdown")!.execute({ symbol: "TST",
-    axisQName: SEG, conceptQName: REV }) as { members: unknown[] };
+  const result = await data<{ members: unknown[] }>(byName(tools, "get_axis_breakdown"), { symbol: "TST",
+    axisQName: SEG, conceptQName: REV });
   assert.equal(result.members.length, 2);
 });
 
-test("get_axis_breakdown passes memberFilter and cursor through and rejects a bad cursor", () => {
+test("get_axis_breakdown passes memberFilter and cursor through and rejects a bad cursor", async () => {
   const { sourceReviewStore, modelIds, deps } = setup(["TST"]);
   sourceReviewStore.save(modelIds[0]!, review());
   const tableStore = new InMemoryFilingTableStore();
@@ -154,19 +166,19 @@ test("get_axis_breakdown passes memberFilter and cursor through and rejects a ba
     dimFact(REV, "FY2025", 40e9, [dim("x:BMember", "Segment B")]),
   ] })]);
   const { tools } = createStatementUnificationTools({ ...deps, tableStore });
-  const breakdownTool = tools.get("get_axis_breakdown")!;
-  const filtered = breakdownTool.execute({ symbol: "TST", axisQName: SEG, conceptQName: REV,
-    memberFilter: "segment b" }) as { members: Array<{ memberQName: string }> };
+  const breakdownTool = byName(tools, "get_axis_breakdown")!;
+  const filtered = await data<{ members: Array<{ memberQName: string }> }>(breakdownTool, { symbol: "TST", axisQName: SEG, conceptQName: REV,
+    memberFilter: "segment b" });
   assert.deepEqual(filtered.members.map((m) => m.memberQName), ["x:BMember"]);
-  const paged = breakdownTool.execute({ symbol: "TST", axisQName: SEG, conceptQName: REV,
-    cursor: 1 }) as { members: Array<{ memberQName: string }> };
+  const paged = await data<{ members: Array<{ memberQName: string }> }>(breakdownTool, { symbol: "TST", axisQName: SEG, conceptQName: REV,
+    cursor: 1 });
   assert.deepEqual(paged.members.map((m) => m.memberQName), ["x:BMember"]);
-  assert.throws(() => breakdownTool.execute({ symbol: "TST", axisQName: SEG, conceptQName: REV, cursor: -1 }));
+  await assert.rejects(() => data(breakdownTool, { symbol: "TST", axisQName: SEG, conceptQName: REV, cursor: -1 }));
 });
 
-test("dimension tools are absent without a tableStore", () => {
+test("dimension tools are absent without a tableStore", async () => {
   const { deps } = setup(["TST"]);
   const { tools } = createStatementUnificationTools(deps);
-  assert.equal(tools.has("list_dimension_axes"), false);
-  assert.equal(tools.has("get_axis_breakdown"), false);
+  assert.equal(byName(tools, "list_dimension_axes"), undefined);
+  assert.equal(byName(tools, "get_axis_breakdown"), undefined);
 });

@@ -11,6 +11,10 @@ import { ModelRouter, type LlmProvider } from "../../../src/infra/llm/provider.t
 import { fact, filing, node, period, statement } from "../../../src/infra/xbrl/__tests__/spineFixture.ts";
 import type { FilingTable } from "../../../src/infra/xbrl/tableTypes.ts";
 import type { FilingTableFactOccurrence, XbrlDimension } from "../../../src/infra/xbrl/types.ts";
+import { McpToolRegistry } from "../../toolRegistry.ts";
+import { SessionRegistry } from "../../../src/framework/sessionState.ts";
+import { SubagentRuntime } from "../../../src/framework/subagent.ts";
+import { createSubagentRegistry } from "../../../src/agent/subagents/registerSubagents.ts";
 import { createDcfSubagentTool } from "../dcfSubagentTool.ts";
 import type { FinancialModelToolDeps } from "../financialModelTools.ts";
 
@@ -80,13 +84,33 @@ function setup(): { financial: FinancialModelToolDeps; modelId: string; sourceRe
       insightStore: new InMemoryFilingInsightStore() } };
 }
 
+/** The tool hands work to the shared SubagentRuntime now, so a test drives it with scripted tool
+ *  calls rather than scripted text. */
+function harness(calls: Array<{ name: string; input: object }>) {
+  let step = 0;
+  const provider: LlmProvider = { name: "scripted", generate: async () => ({
+    text: "note", toolCalls: [{ id: `t${step}`, ...calls[Math.min(step++, calls.length - 1)]! }] as never,
+    metrics: { tokens_in: 1, tokens_out: 1, ms: 0, model_class: "MEDIUM", provider: "scripted" } }) };
+  const sessions = new SessionRegistry();
+  return { subagentRuntime: new SubagentRuntime(new ModelRouter(provider), new McpToolRegistry()),
+    subagents: createSubagentRegistry(), sessions };
+}
+
+async function session(sessions: SessionRegistry, sessionId: string): Promise<void> {
+  const state = await sessions.getOrCreate(sessionId);
+  state.beginTurn("go");
+}
+
 test("statement_unification reports breakdown counts in summary and generation_context when a tableStore is wired", async () => {
   const { financial, modelId, sourceReviewStore } = setup();
   sourceReviewStore.save(modelId, review());
   const tableStore = new InMemoryFilingTableStore();
   tableStore.saveTables("ing-1", [segTableFixture()]);
-  const tool = createDcfSubagentTool({ modelRouter: scripted([loadCall, exploreDone, decisionWithBreakdown]),
-    financial: { ...financial, tableStore } });
+  const runner = harness([{ name: "load_concept_inventory", input: { symbol: "TEST" } },
+    { name: "submit_unification_decision", input: { decision: JSON.parse(decisionWithBreakdown) } },
+    { name: "finish", input: { summary: "done" } }]);
+  await session(runner.sessions, "s1");
+  const tool = createDcfSubagentTool({ ...runner, financial: { ...financial, tableStore } });
   const result = await tool.execute({ subagent: "statement_unification", modelId, task: "Unify TEST's filings." },
     { agentId: "agent-1", sessionId: "s1" });
   assert.equal(result.error, undefined);
@@ -98,7 +122,11 @@ test("statement_unification reports breakdown counts in summary and generation_c
 test("statement_unification behaves as before when deps has no tableStore", async () => {
   const { financial, modelId, sourceReviewStore } = setup();
   sourceReviewStore.save(modelId, review());
-  const tool = createDcfSubagentTool({ modelRouter: scripted([loadCall, decisionWithoutBreakdown]), financial });
+  const runner = harness([{ name: "load_concept_inventory", input: { symbol: "TEST" } },
+    { name: "submit_unification_decision", input: { decision: JSON.parse(decisionWithoutBreakdown) } },
+    { name: "finish", input: { summary: "done" } }]);
+  await session(runner.sessions, "s1");
+  const tool = createDcfSubagentTool({ ...runner, financial });
   const result = await tool.execute({ subagent: "statement_unification", modelId, task: "Unify TEST's filings." },
     { agentId: "agent-1", sessionId: "s1" });
   assert.equal(result.error, undefined);
@@ -143,8 +171,11 @@ test("spine_mapping labels a breakdown detail row from breakdownRows, not the ro
         asOfDate: "2026-01-30" }],
     } as never,
   }));
-  const tool = createDcfSubagentTool({
-    modelRouter: scripted([loadUnifiedCall, spineDecisionWithBreakdownDetail]), financial });
+  const runner = harness([{ name: "load_unified_statements", input: { symbol: "TEST" } },
+    { name: "submit_spine_decision", input: { decision: JSON.parse(spineDecisionWithBreakdownDetail) } },
+    { name: "finish", input: { summary: "done" } }]);
+  await session(runner.sessions, "s1");
+  const tool = createDcfSubagentTool({ ...runner, financial });
   const result = await tool.execute({ subagent: "spine_mapping", modelId, task: "Map TEST's unified statements." },
     { agentId: "agent-1", sessionId: "s1" });
   assert.equal(result.error, undefined, result.summary);

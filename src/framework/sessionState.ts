@@ -33,7 +33,7 @@ import type { CompactionCache, EventStore } from "./eventStore.ts";
  * transport; the two are not the same concern.
  */
 
-export type Source = "user" | "orchestrator" | "market_data" | "market_research" | "trading_operations" | "financial_modeling" | "skill";
+export type Source = "user" | "orchestrator" | AgentKind | "skill";
 
 export interface SessionEvent {
   event_id: string;
@@ -83,6 +83,10 @@ const KINDS: Record<Source, ReadonlySet<string>> = {
   market_research: new Set(["task_result", "tool_use", "tool_result", "subagent_note"]),
   trading_operations: new Set(["task_result", "tool_use", "tool_result", "approval_required", "approval_resolved", "subagent_note"]),
   financial_modeling: new Set(["task_result", "tool_use", "tool_result", "subagent_note"]),
+  // The DCF mapping agents report to financial_modeling rather than to the orchestrator, but they
+  // write the same events — which is what makes their progress visible while they run.
+  statement_unification: new Set(["task_result", "tool_use", "tool_result", "subagent_note"]),
+  spine_mapping: new Set(["task_result", "tool_use", "tool_result", "subagent_note"]),
   skill: new Set(["skill_invoke", "workflow_started", "workflow_step", "workflow_done"]),
 };
 
