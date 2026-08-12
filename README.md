@@ -14,7 +14,7 @@ Financial Agent turns isolated AI chats into durable financial workspaces. It co
 
 The result is not merely a chat summary: a DCF request can create a revisioned workbook whose historical facts trace to filings and whose forecast, WACC, terminal-value, and equity-bridge choices remain inspectable after the agent finishes.
 
-![Financial Agent Research workspace](docs/assets/financial-agent-research.png)
+![Financial Agent Topic workspace](docs/assets/financial-agent-topic.png)
 
 ## Highlights
 
@@ -41,8 +41,6 @@ _An end-to-end AAPL DCF workspace: forecast drivers, formula lineage, highlighte
 | **Strategy** | A locally monitored, approval-gated paper or shadow workflow that can operationalize a research or valuation thesis through price or technical-indicator conditions. |
 
 Each Topic is a long-lived financial workstream with its own conversation and chart workspace. The agent can attach live charts and technical studies, use cited external research, or construct a DCF from SEC filings; the user keeps control of the visible tabs and layout.
-
-![Financial Agent Topic workspace](docs/assets/financial-agent-topic.png)
 
 ## How it works
 
