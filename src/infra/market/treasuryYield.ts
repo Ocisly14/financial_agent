@@ -24,6 +24,15 @@ const FEED_FIELD_BY_TERM: Record<TreasuryTerm, string> = {
 
 export type TreasuryYieldPoint = { date: string; value: number };
 export type TreasuryYieldResult = { value: number; curveDate: string };
+export type TreasuryYieldFailureReason = "http_error" | "network_error" | "invalid_feed" | "no_data";
+export type TreasuryYieldFailure = {
+  reason: TreasuryYieldFailureReason;
+  message: string;
+  retryable: boolean;
+  /** Present for an HTTP failure so callers can distinguish a transient 5xx from a bad request. */
+  httpStatus?: number;
+};
+export type TreasuryYieldFetchOutcome = TreasuryYieldResult | { failure: TreasuryYieldFailure };
 /** @deprecated kept for existing 30y-only callers; identical shape to `TreasuryYieldPoint`. */
 export type Treasury30yPoint = TreasuryYieldPoint;
 /** @deprecated kept for existing 30y-only callers; identical shape to `TreasuryYieldResult`. */
@@ -83,20 +92,41 @@ function previousMonth(month: string): string {
 
 async function fetchMonth(month: string, term: TreasuryTerm, fetchImpl: typeof fetch): Promise<TreasuryYieldPoint[]> {
   const response = await fetchImpl(monthUrl(month));
-  if (!response.ok) throw new Error(`treasury.gov feed returned ${response.status}`);
-  return parseTreasuryYield(await response.text(), term);
+  if (!response.ok) throw new TreasuryFeedError(response.status);
+  const xml = await response.text();
+  // `parseTreasuryYield` deliberately skips entries without this tenor; that is
+  // legitimate no-data. A non-Atom response, however, is a broken upstream
+  // feed and should not be reported as if the Treasury published no yield.
+  if (!/<feed(?:\s|>)/.test(xml)) throw new TreasuryFeedParseError("response did not contain an Atom feed");
+  return parseTreasuryYield(xml, term);
+}
+
+class TreasuryFeedError extends Error {
+  readonly status: number;
+
+  constructor(status: number) {
+    super(`treasury.gov feed returned HTTP ${status}`);
+    this.name = "TreasuryFeedError";
+    this.status = status;
+  }
+}
+
+class TreasuryFeedParseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TreasuryFeedParseError";
+  }
 }
 
 /**
  * A Treasury yield-curve term as of `asOfDate`: the latest published point on or before it. Treasury
  * publishes on business days only, so a weekend/holiday `asOfDate` still resolves to the prior
  * session's close. If `asOfDate`'s own month has no point at or before that date (e.g. asOfDate is the
- * 1st of the month), the previous month is fetched once as a fallback. Never throws — any failure
- * (network, parse, empty feed) resolves to `undefined` so the caller reports the term unreachable
- * instead of crashing a refresh.
+ * 1st of the month), the previous month is fetched once as a fallback. Never throws: failures are
+ * classified so tool callers can give the agent an actionable retry decision.
  */
-export async function fetchTreasuryYield(term: TreasuryTerm, asOfDate: string, fetchImpl: typeof fetch = fetch):
-Promise<TreasuryYieldResult | undefined> {
+export async function fetchTreasuryYieldOutcome(term: TreasuryTerm, asOfDate: string, fetchImpl: typeof fetch = fetch):
+Promise<TreasuryYieldFetchOutcome> {
   try {
     const month = yyyymm(asOfDate);
     const points = await fetchMonth(month, term, fetchImpl);
@@ -106,12 +136,35 @@ Promise<TreasuryYieldResult | undefined> {
       return { value: latest.value, curveDate: latest.date };
     }
     const priorPoints = await fetchMonth(previousMonth(month), term, fetchImpl);
-    if (priorPoints.length === 0) return undefined;
+    if (priorPoints.length === 0) {
+      return { failure: { reason: "no_data", retryable: false,
+        message: `treasury.gov published no ${term} yield on or before ${asOfDate}, including the prior month fallback` } };
+    }
     const latest = [...priorPoints].sort((a, b) => a.date.localeCompare(b.date)).at(-1)!;
     return { value: latest.value, curveDate: latest.date };
-  } catch {
-    return undefined;
+  } catch (error) {
+    if (error instanceof TreasuryFeedError) {
+      return { failure: { reason: "http_error", httpStatus: error.status,
+        retryable: error.status === 408 || error.status === 429 || error.status >= 500,
+        message: error.message } };
+    }
+    if (error instanceof TypeError) {
+      return { failure: { reason: "network_error", retryable: true,
+        message: `network request to treasury.gov failed: ${error.message}` } };
+    }
+    if (error instanceof TreasuryFeedParseError) {
+      return { failure: { reason: "invalid_feed", retryable: false, message: error.message } };
+    }
+    return { failure: { reason: "invalid_feed", retryable: false,
+      message: `could not parse the treasury.gov feed: ${error instanceof Error ? error.message : String(error)}` } };
   }
+}
+
+/** Compatibility wrapper for internal callers that only need a value. */
+export async function fetchTreasuryYield(term: TreasuryTerm, asOfDate: string, fetchImpl: typeof fetch = fetch):
+Promise<TreasuryYieldResult | undefined> {
+  const outcome = await fetchTreasuryYieldOutcome(term, asOfDate, fetchImpl);
+  return "failure" in outcome ? undefined : outcome;
 }
 
 /**

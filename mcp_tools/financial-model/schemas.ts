@@ -11,7 +11,17 @@ const array = (items: JsonSchema): JsonSchema => ({ type: "array", items });
 /** Accepted for compatibility and then overwritten: the ledger's review clock is the host's. */
 const HOST_STAMPED = string("Ignored. The host stamps the review time.");
 
-export const unitSchema = object({ kind: { type: "string", enum: ["currency", "percent", "ratio", "shares", "per_share", "number"] }, code: string("Required for currency/per_share") }, ["kind"]);
+/**
+ * Currency-bearing units must always name their currency. Keeping this as a
+ * discriminated union makes the runtime contract match `Unit` exactly instead
+ * of accepting `{ kind: "currency" }` and letting an undefined code leak into
+ * later unit arithmetic.
+ */
+export const unitSchema: JsonSchema = { type: "object", oneOf: [
+  object({ kind: { type: "string", enum: ["currency"] }, code: string("ISO currency code, e.g. USD") }, ["kind", "code"]),
+  object({ kind: { type: "string", enum: ["per_share"] }, code: string("ISO currency code, e.g. USD") }, ["kind", "code"]),
+  object({ kind: { type: "string", enum: ["percent", "ratio", "shares", "number"] } }, ["kind"]),
+] };
 const groupMember = object({ lineItemId: string(), treatment: { type: "string", enum: ["add", "subtract", "exclude"] } }, ["lineItemId", "treatment"]);
 const provenance = object({ sourceType: string(), sourceRefs: strings, asOfDate: string(), decimals: number, accession: string(), concept: string(), filingUrl: string() },
   ["sourceType", "sourceRefs", "asOfDate"]);
@@ -110,6 +120,34 @@ export function parseOperations(input: JsonObject): ModelOperation[] {
 
 export function validate(value: JsonValue, schema: JsonSchema, path: string, root = false): void {
   if (schema.oneOf) {
+    // Most tool unions are explicitly discriminated by `kind` (operations and assumption
+    // payloads). Once the caller declares that discriminator, validate its matching contract
+    // directly so an invalid nested field reaches the agent as a useful path-level error rather
+    // than the opaque "does not match exactly one allowed variant".
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      const kind = (value as JsonObject)["kind"];
+      const allowedKinds = [...new Set(schema.oneOf.flatMap((candidate) => {
+        const values = candidate.properties?.["kind"]?.enum;
+        return Array.isArray(values) ? values.filter((entry): entry is string => typeof entry === "string") : [];
+      }))];
+      // All current tool unions use `kind`. Diagnose a missing or unknown
+      // discriminator before attempting every branch, whose aggregate failure
+      // otherwise hides the field the caller must change.
+      if (allowedKinds.length > 0 && kind === undefined) {
+        throw new Error(`${path}.kind is required; allowed values: ${allowedKinds.join(", ")}`);
+      }
+      if (allowedKinds.length > 0 && typeof kind !== "string") {
+        throw new Error(`${path}.kind must be a string; allowed values: ${allowedKinds.join(", ")}`);
+      }
+      if (typeof kind === "string") {
+        const matching = schema.oneOf.filter((candidate) =>
+          candidate.properties?.["kind"]?.enum?.includes(kind));
+        if (matching.length === 1) return validate(value, matching[0]!, path, root);
+        if (allowedKinds.length > 0 && matching.length === 0) {
+          throw new Error(`${path}.kind must be one of ${allowedKinds.join(", ")}; received ${JSON.stringify(kind)}`);
+        }
+      }
+    }
     const errors = schema.oneOf.map((candidate) => { try { validate(value, candidate, path); return null; } catch (error) { return error; } });
     if (errors.filter((error) => error === null).length !== 1) throw new Error(`${path} does not match exactly one allowed variant`);
     return;
@@ -131,5 +169,7 @@ export function validate(value: JsonValue, schema: JsonSchema, path: string, roo
   if (schema.type === "string" && typeof value !== "string") throw new Error(`${path} must be a string`);
   if (schema.type === "number" && (typeof value !== "number" || !Number.isFinite(value))) throw new Error(`${path} must be a number`);
   if (schema.type === "boolean" && typeof value !== "boolean") throw new Error(`${path} must be a boolean`);
-  if (schema.enum && !schema.enum.includes(value as string)) throw new Error(`${path} must be one of ${schema.enum.join(", ")}`);
+  if (schema.enum && !schema.enum.includes(value as string)) {
+    throw new Error(`${path} must be one of ${schema.enum.join(", ")}; received ${JSON.stringify(value)}`);
+  }
 }

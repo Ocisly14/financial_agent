@@ -25,6 +25,9 @@ const HELD_OUT = (extra: Record<string, JsonSchema>, required: string[]): JsonSc
     properties: { conceptQName: { type: "string" }, dimensionSignature: { type: "string" },
       openingBalance: { type: "boolean" }, reason: { type: "string" }, ...extra } } });
 
+const HELD_OUT_REF: JsonSchema = { type: "object", additionalProperties: false, required: ["conceptQName"],
+  properties: { conceptQName: { type: "string" }, dimensionSignature: { type: "string" }, openingBalance: { type: "boolean" } } };
+
 const ROW: JsonSchema = { type: "object", additionalProperties: false,
   required: ["rowId", "statement", "label", "components", "rationale"],
   properties: { rowId: { type: "string" }, statement: { type: "string" }, label: { type: "string" },
@@ -44,7 +47,12 @@ export const UNIFICATION_DECISION_SCHEMA: JsonSchema = { type: "object", additio
 export const UNIFICATION_PATCH_SCHEMA: JsonSchema = { type: "object", additionalProperties: false,
   required: ["patch"], properties: { patch: { type: "object", additionalProperties: false, required: [],
     properties: { upsertRows: { type: "array", items: ROW }, deleteRowIds: { type: "array", items: { type: "string" } },
-      excluded: HELD_OUT({}, []), supplemental: HELD_OUT({ label: { type: "string" } }, ["label"]) } } } };
+      excluded: HELD_OUT({}, []), supplemental: HELD_OUT({ label: { type: "string" } }, ["label"]),
+      upsertExcluded: HELD_OUT({}, []), deleteExcluded: { type: "array", items: HELD_OUT_REF },
+      upsertSupplemental: HELD_OUT({ label: { type: "string" } }, ["label"]),
+      deleteSupplemental: { type: "array", items: HELD_OUT_REF } } } } };
+
+const EMPTY_OBJECT_SCHEMA: JsonSchema = { type: "object", additionalProperties: false, properties: {} };
 
 export type UnificationDelivery = { decision: UnificationDecision; artifact: UnifiedStatementsArtifact; findings: string[] };
 
@@ -64,6 +72,9 @@ export function createUnificationDeliveryTools(context: {
   tables: readonly FilingTable[];
 }): { tools: RegisteredTool[]; delivered: () => UnificationDelivery | undefined } {
   let delivered: UnificationDelivery | undefined;
+  // A draft lets the agent put a large issuer on file a statement at a time. Only a validated
+  // decision may escape this run to downstream mapping.
+  let draft: UnificationDecision | undefined;
 
   const evaluate = (decision: UnificationDecision): JsonValue => {
     const completeness = checkUnificationCompleteness({ inventory: context.inventory, decision,
@@ -91,18 +102,43 @@ export function createUnificationDeliveryTools(context: {
     inputSchema: UNIFICATION_DECISION_SCHEMA,
   }, (raw: JsonObject) => {
     validate(raw, UNIFICATION_DECISION_SCHEMA, "$", true);
-    return evaluate(raw["decision"] as unknown as UnificationDecision);
+    draft = raw["decision"] as unknown as UnificationDecision;
+    return evaluate(draft);
+  });
+
+  const startDraft = subagentTool({
+    name: "start_unification_draft", category: "non_trading",
+    description: "Start an empty unification draft. Add small statement-sized batches with patch_unification_decision, then validate the completed draft.",
+    inputSchema: EMPTY_OBJECT_SCHEMA,
+  }, (raw: JsonObject) => {
+    validate(raw, EMPTY_OBJECT_SCHEMA, "$", true);
+    draft = { rows: [] };
+    delivered = undefined;
+    return { status: "draft_started", rows: 0 } as unknown as JsonValue;
   });
 
   const patch = subagentTool({
     name: "patch_unification_decision", category: "non_trading",
-    description: "Correct the decision you already submitted, without restating it whole. rows are patched by rowId — upsert or delete only the ones at fault, and any row you do not name is left as it is. excluded and supplemental are not keyed: each REPLACES its list wholesale, so send the complete list or omit the key. Returns the host's findings against the patched decision, so you can patch again without resubmitting.",
+    description: "Update a decision without restating it whole. Rows are patched by rowId; excluded and supplemental can be patched by concept/dimension/opening-balance identity with upsertExcluded/deleteExcluded and upsertSupplemental/deleteSupplemental. The legacy excluded and supplemental fields replace their lists wholesale. Returns findings after validation, or just draft progress before first validation.",
     inputSchema: UNIFICATION_PATCH_SCHEMA,
   }, (raw: JsonObject) => {
-    if (!delivered) throw new Error("no decision submitted yet — call submit_unification_decision first");
+    if (!draft) throw new Error("no decision on file — call start_unification_draft or submit_unification_decision first");
     validate(raw, UNIFICATION_PATCH_SCHEMA, "$", true);
-    return evaluate(applyUnificationPatch(delivered.decision, raw["patch"] as unknown as UnificationPatch));
+    draft = applyUnificationPatch(draft, raw["patch"] as unknown as UnificationPatch);
+    // Preserve the existing submit → patch → findings workflow. Before the first validation, a
+    // batch only updates the draft so the model is not flooded with premature completeness findings.
+    return delivered ? evaluate(draft) : { status: "draft_updated", rows: draft.rows.length } as unknown as JsonValue;
   });
 
-  return { tools: [submit, patch], delivered: () => delivered };
+  const validateDraft = subagentTool({
+    name: "validate_unification_decision", category: "non_trading",
+    description: "Validate the completed draft. Returns findings; patch only the named rows, then validate again until accepted.",
+    inputSchema: EMPTY_OBJECT_SCHEMA,
+  }, (raw: JsonObject) => {
+    if (!draft) throw new Error("no draft on file — call start_unification_draft first");
+    validate(raw, EMPTY_OBJECT_SCHEMA, "$", true);
+    return evaluate(draft);
+  });
+
+  return { tools: [submit, startDraft, patch, validateDraft], delivered: () => delivered };
 }

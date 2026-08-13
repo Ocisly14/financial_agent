@@ -1,5 +1,5 @@
-import type { JsonSchema, ToolExecutionResult } from "../../src/framework/types.ts";
-import { fetchTreasuryYield, TREASURY_TERMS, type TreasuryTerm } from "../../src/infra/market/treasuryYield.ts";
+import type { JsonObject, JsonSchema, ToolExecutionResult } from "../../src/framework/types.ts";
+import { fetchTreasuryYieldOutcome, TREASURY_TERMS, type TreasuryTerm } from "../../src/infra/market/treasuryYield.ts";
 import type { RegisteredTool } from "../toolRegistry.ts";
 import { validate } from "./schemas.ts";
 
@@ -36,21 +36,25 @@ export function createTreasuryYieldTool(fetchImpl?: typeof fetch): RegisteredToo
       const term = input["term"] as TreasuryTerm;
       const asOfDate = typeof input["asOfDate"] === "string" ? input["asOfDate"] : today();
 
-      const result = await fetchTreasuryYield(term, asOfDate, fetchImpl);
-      if (!result) {
-        return failure("treasury_yield_unavailable", `Could not fetch the ${term} Treasury yield as of ${asOfDate} from treasury.gov.`);
+      const outcome = await fetchTreasuryYieldOutcome(term, asOfDate, fetchImpl);
+      if ("failure" in outcome) {
+        const { failure: cause } = outcome;
+        return failure("treasury_yield_unavailable",
+          `Could not fetch the ${term} Treasury yield as of ${asOfDate} from treasury.gov: ${cause.message}.`,
+          { term, as_of_date: asOfDate, failure_reason: cause.reason, retryable: cause.retryable,
+            ...(cause.httpStatus === undefined ? {} : { http_status: cause.httpStatus }) });
       }
 
-      const percent = (result.value * 100).toFixed(2);
+      const percent = (outcome.value * 100).toFixed(2);
       return {
-        summary: `${term} Treasury yield ${percent}% as of ${result.curveDate} (treasury.gov)`,
-        generation_context: { data: { term, value: result.value, curve_date: result.curveDate, source: "treasury.gov daily yield curve" } },
+        summary: `${term} Treasury yield ${percent}% as of ${outcome.curveDate} (treasury.gov)`,
+        generation_context: { data: { term, value: outcome.value, curve_date: outcome.curveDate, source: "treasury.gov daily yield curve" } },
       };
     },
   };
 }
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
-function failure(code: string, message: string): ToolExecutionResult {
-  return { summary: message, error: { code, message }, generation_context: { data: { error: code } } };
+function failure(code: string, message: string, data: JsonObject = {}): ToolExecutionResult {
+  return { summary: message, error: { code, message }, generation_context: { data: { error: code, ...data } } };
 }

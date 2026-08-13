@@ -9,6 +9,7 @@ import { buildConceptInventory } from "../../src/infra/xbrl/conceptInventory.ts"
 import { buildAxisCatalog, buildAxisBreakdown } from "../../src/infra/xbrl/dimensionInventory.ts";
 import type { SourceReviewStore } from "../../src/infra/xbrl/sourceReviewStore.ts";
 import type { FilingTableStore } from "../../src/infra/xbrl/filingTableStore.ts";
+import { FinancialModelError } from "../../src/financial-model/errors.ts";
 
 /**
  * Wraps a synchronous body — these read from stores already in memory — as an ordinary MCP tool, so
@@ -28,7 +29,13 @@ export function subagentTool(
       } catch (error) {
         // Returned rather than thrown: the subagent reads the message and corrects on its next round.
         const message = error instanceof Error ? error.message : String(error);
-        return { summary: message, error: { code: "subagent_tool_failed", message } };
+        // Do not flatten a typed model error into `subagent_tool_failed`: callers
+        // use its code and details to decide whether to refresh, reconcile, or
+        // correct a specific cell. Generic mapping failures retain their stable
+        // wrapper code and still expose the message.
+        const code = error instanceof FinancialModelError ? error.code : "subagent_tool_failed";
+        const details = error instanceof FinancialModelError ? error.details ?? {} : {};
+        return { summary: message, error: { code, message }, generation_context: { data: { error: code, ...details } } };
       }
     },
   };

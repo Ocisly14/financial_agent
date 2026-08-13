@@ -61,6 +61,23 @@ test("naming an existing thread continues it rather than opening another", async
   assert.equal(threads[0]!.rounds, 2, "both dispatches count as rounds of the same conversation");
 });
 
+test("subagent progress retains a failed tool's code and structured correction details", () => {
+  const state = new SessionState("room_1", new Date().toISOString());
+  state.beginTurn("build DCF");
+  const thread = state.openThread("financial_modeling");
+  const task = state.recordDispatch("financial_modeling", "complete FCFF", thread).event_id;
+  state.record("financial_modeling", "tool_result", {
+    task_id: task, name: "apply_financial_model_operations", summary: "fcff incomplete",
+    error: { code: "missing_formula_input", message: "fcff is incomplete at the requested stage" },
+    generation_context: { data: { error: "missing_formula_input", refs: ["fcff@FY2027", "fcff@FY2028"] } },
+  }, { threadId: thread, parent: task });
+
+  const progress = state.subagentProgress({ thread });
+  assert.match(progress, /error\(missing_formula_input\)/);
+  assert.match(progress, /fcff@FY2027/);
+  assert.match(progress, /fcff@FY2028/);
+});
+
 test("two tasks for one agent in the same step get separate threads", async () => {
   const h = harness();
 

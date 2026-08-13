@@ -74,6 +74,28 @@ export function parseThreadId(threadId: string): { session_id: string; agent: Ag
 }
 
 const APPROVAL_TTL_MS = 15 * 60_000;
+const ERROR_PROGRESS_DETAILS_MAX_CHARS = 6_000;
+
+/**
+ * Failed tools often return the exact refs or revision needed for a corrective
+ * call in generation_context.data. Keep that structured feedback in the
+ * subagent's next prompt, but cap it so one malformed response cannot crowd
+ * out the rest of its working memory.
+ */
+function formatToolErrorProgress(name: string, payload: JsonObject): string {
+  const error = payload.error as { code?: string; message?: string } | undefined;
+  const code = error?.code ?? "tool_error";
+  const message = error?.message ?? "";
+  const context = payload.generation_context as GenerationContext | undefined;
+  if (!context?.data) return `[${name} error(${code})] ${message}`;
+  let details: string;
+  try { details = JSON.stringify(context.data); }
+  catch { details = "[unserializable error details]"; }
+  if (details.length > ERROR_PROGRESS_DETAILS_MAX_CHARS) {
+    details = `${details.slice(0, ERROR_PROGRESS_DETAILS_MAX_CHARS)}…[truncated]`;
+  }
+  return `[${name} error(${code})] ${message} | details=${details}`;
+}
 
 /** Allowed (source, kind) pairs. Lightweight fail-fast guard against dirty events. */
 const KINDS: Record<Source, ReadonlySet<string>> = {
@@ -560,7 +582,7 @@ export class SessionState {
       const name = (e.payload.name as string) ?? "tool";
       const err = e.payload.error as { message?: string } | undefined;
       if (err) {
-        lines.push(`[${name} error] ${err.message ?? ""}`);
+        lines.push(formatToolErrorProgress(name, e.payload));
         continue;
       }
       const gc = e.payload.generation_context as GenerationContext | undefined;
@@ -804,7 +826,7 @@ export class SessionState {
         const name = e.payload.name as string;
         const err = e.payload.error as { message?: string } | undefined;
         if (err) {
-          progressLines.push(`[${name} error] ${err.message ?? ""}`);
+          progressLines.push(formatToolErrorProgress(name, e.payload));
         } else {
           const gc = e.payload.generation_context as GenerationContext | undefined;
           const lines = [`[${name} result] ${e.payload.summary as string}`];

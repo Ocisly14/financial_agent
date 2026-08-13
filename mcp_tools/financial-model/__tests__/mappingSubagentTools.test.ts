@@ -21,8 +21,9 @@ import { InMemoryFilingTableStore } from "../../../src/infra/xbrl/filingTableSto
 import type { FilingTable } from "../../../src/infra/xbrl/tableTypes.ts";
 import type { FilingTableFactOccurrence, XbrlDimension } from "../../../src/infra/xbrl/types.ts";
 import type { Period } from "../../../src/financial-model/types.ts";
+import { FinancialModelError } from "../../../src/financial-model/errors.ts";
 import { CANONICAL_MAPPING_IDS, REQUIRED_MAPPING_IDS } from "../../../src/financial-model/skeleton.ts";
-import { createSpineMappingTools, createStatementUnificationTools } from "../mappingSubagentTools.ts";
+import { createSpineMappingTools, createStatementUnificationTools, subagentTool } from "../mappingSubagentTools.ts";
 
 const PERIODS: Period[] = [
   { id: "FY2024", label: "FY2024", start: "2024-01-01", end: "2024-12-31", cls: "actual" },
@@ -75,6 +76,17 @@ function setup(symbols: readonly string[]) {
   return { modelStore, sourceReviewStore, modelIds,
     deps: { modelStore, sourceReviewStore, ownerAgentId: "agent-1" } };
 }
+
+test("mapping tool preserves typed errors and their correction details", async () => {
+  const tool = subagentTool({ name: "typed_failure", description: "test", category: "non_trading",
+    inputSchema: { type: "object" } }, () => {
+    throw new FinancialModelError("revision_conflict", "revision is stale", { currentRevision: 7 });
+  });
+  const result = await tool.execute({}, { sessionId: "s", agentId: "owner" });
+  assert.equal(result.error?.code, "revision_conflict");
+  assert.equal(result.error?.message, "revision is stale");
+  assert.deepEqual(result.generation_context?.data, { error: "revision_conflict", currentRevision: 7 });
+});
 
 test("the unification subagent's load tool resolves the ticker it was told to work on", async () => {
   const { sourceReviewStore, modelIds, deps } = setup(["TSLA"]);

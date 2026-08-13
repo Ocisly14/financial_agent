@@ -307,6 +307,21 @@ test("a patch that includes a held-out list replaces that list wholesale", () =>
   assert.deepEqual(patched.supplemental, base.supplemental);
 });
 
+test("a patch can incrementally upsert and delete held-out entries", () => {
+  const base: UnificationDecision = { rows: [decisionRow("a", "us-gaap:A")],
+    excluded: [{ conceptQName: "us-gaap:Abstract", reason: "abstract" }],
+    supplemental: [{ conceptQName: "us-gaap:Shares", label: "Shares", reason: "not a face line" }] };
+  const patched = applyUnificationPatch(base, {
+    upsertExcluded: [{ conceptQName: "us-gaap:Old", reason: "superseded" }],
+    deleteSupplemental: [{ conceptQName: "us-gaap:Shares" }],
+  });
+  assert.deepEqual(patched.excluded, [
+    { conceptQName: "us-gaap:Abstract", reason: "abstract" },
+    { conceptQName: "us-gaap:Old", reason: "superseded" },
+  ]);
+  assert.deepEqual(patched.supplemental, []);
+});
+
 test("a merged row sums its components by weight", () => {
   const filings = simpleFilings();
   const inventory = buildConceptInventory({ filings, requestedPeriods: periods });

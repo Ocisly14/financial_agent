@@ -43,18 +43,23 @@ export type UnificationSupplemental = { conceptQName: string; dimensionSignature
   openingBalance?: boolean; label: string; reason: string };
 export type UnificationDecision = { rows: UnifiedRowDecision[];
   excluded?: UnificationExclusion[]; supplemental?: UnificationSupplemental[] };
+export type HeldOutEntryRef = Pick<UnificationExclusion, "conceptQName" | "dimensionSignature" | "openingBalance">;
 
 /**
  * A correction to an existing decision. Findings normally touch a handful of rows out of a hundred,
  * and re-emitting the whole decision costs far more to generate than it does to describe the change —
- * so a re-run patches instead. `rows` is patched by rowId because it is the bulk; the held-out lists
- * are small enough to restate wholesale, and omitting one leaves it untouched.
+ * so a re-run patches instead. Rows are patched by rowId and held-out entries by their concept,
+ * dimension signature, and opening-balance flag. The wholesale list fields remain for compatibility.
  */
 export type UnificationPatch = {
   upsertRows?: UnifiedRowDecision[];
   deleteRowIds?: string[];
   excluded?: UnificationExclusion[];
   supplemental?: UnificationSupplemental[];
+  upsertExcluded?: UnificationExclusion[];
+  deleteExcluded?: HeldOutEntryRef[];
+  upsertSupplemental?: UnificationSupplemental[];
+  deleteSupplemental?: HeldOutEntryRef[];
 };
 
 /** Applies a patch, preserving row order: replaced rows stay put, new ones append. */
@@ -66,10 +71,26 @@ export function applyUnificationPatch(base: UnificationDecision, patch: Unificat
     .map((row) => upserts.get(row.rowId) ?? row);
   const existing = new Set(rows.map((row) => row.rowId));
   for (const row of patch.upsertRows ?? []) if (!existing.has(row.rowId) && !deleted.has(row.rowId)) rows.push(row);
+  const heldOutKey = (entry: HeldOutEntryRef) =>
+    `${entry.conceptQName}|${entry.dimensionSignature ?? ""}|${entry.openingBalance ? "opening" : "closing"}`;
+  const patchHeldOut = <T extends HeldOutEntryRef>(current: T[] | undefined, replacement: T[] | undefined,
+    upserts: T[] | undefined, deletes: HeldOutEntryRef[] | undefined): T[] | undefined => {
+    if (replacement === undefined && !upserts?.length && !deletes?.length) return current;
+    const removed = new Set((deletes ?? []).map(heldOutKey));
+    const replacements = new Map((upserts ?? []).map((entry) => [heldOutKey(entry), entry]));
+    const next = (replacement ?? current ?? []).filter((entry) => !removed.has(heldOutKey(entry)))
+      .map((entry) => replacements.get(heldOutKey(entry)) ?? entry);
+    const present = new Set(next.map(heldOutKey));
+    for (const entry of upserts ?? []) if (!removed.has(heldOutKey(entry)) && !present.has(heldOutKey(entry))) next.push(entry);
+    return next;
+  };
+  const excluded = patchHeldOut(base.excluded, patch.excluded, patch.upsertExcluded, patch.deleteExcluded);
+  const supplemental = patchHeldOut(base.supplemental, patch.supplemental,
+    patch.upsertSupplemental, patch.deleteSupplemental);
   return {
     rows,
-    ...(patch.excluded ?? base.excluded ? { excluded: patch.excluded ?? base.excluded } : {}),
-    ...(patch.supplemental ?? base.supplemental ? { supplemental: patch.supplemental ?? base.supplemental } : {}),
+    ...(excluded ? { excluded } : {}),
+    ...(supplemental ? { supplemental } : {}),
   };
 }
 

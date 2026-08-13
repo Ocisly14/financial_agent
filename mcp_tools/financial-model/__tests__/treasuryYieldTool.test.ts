@@ -42,6 +42,33 @@ test("feed failure resolves to a treasury_yield_unavailable error result, not a 
   assert.equal(result.error?.code, "treasury_yield_unavailable");
   assert.match(result.error!.message, /10Y/);
   assert.match(result.error!.message, /2026-08-08/);
+  assert.match(result.error!.message, /HTTP 500/);
+  assert.deepEqual(result.generation_context?.data, {
+    error: "treasury_yield_unavailable", term: "10Y", as_of_date: "2026-08-08",
+    failure_reason: "http_error", retryable: true, http_status: 500,
+  });
+});
+
+test("an empty current and fallback feed identifies no-data as non-retryable", async () => {
+  const fetchImpl = async () => new Response("<feed></feed>", { status: 200 });
+  const tool = createTreasuryYieldTool(fetchImpl as unknown as typeof fetch);
+  const result = await tool.execute({ term: "10Y", asOfDate: "2026-08-08" }, CONTEXT);
+  assert.equal(result.error?.code, "treasury_yield_unavailable");
+  assert.deepEqual(result.generation_context?.data, {
+    error: "treasury_yield_unavailable", term: "10Y", as_of_date: "2026-08-08",
+    failure_reason: "no_data", retryable: false,
+  });
+});
+
+test("a malformed Treasury response is distinguished from genuine no-data", async () => {
+  const fetchImpl = async () => new Response("maintenance page", { status: 200 });
+  const tool = createTreasuryYieldTool(fetchImpl as unknown as typeof fetch);
+  const result = await tool.execute({ term: "10Y", asOfDate: "2026-08-08" }, CONTEXT);
+  assert.equal(result.error?.code, "treasury_yield_unavailable");
+  assert.deepEqual(result.generation_context?.data, {
+    error: "treasury_yield_unavailable", term: "10Y", as_of_date: "2026-08-08",
+    failure_reason: "invalid_feed", retryable: false,
+  });
 });
 
 test("schema rejects an unknown term", async () => {

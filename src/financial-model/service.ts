@@ -705,6 +705,7 @@ function historyGate(snapshot: FinancialModelSnapshot): void {
     throw new FinancialModelError(
       "history_review_required",
       "history requires selected periods and committed spine facts",
+      { selectedHistoricalPeriodIds: [...snapshot.selectedHistoricalPeriodIds], hasCommittedSpine: hasCommittedSpine(snapshot) },
     );
   }
   const selected = new Set(snapshot.selectedHistoricalPeriodIds);
@@ -719,9 +720,14 @@ function historyGate(snapshot: FinancialModelSnapshot): void {
     && selected.has(fact.periodId)
     && !(fact.lineItemId !== undefined && sourceRowIds.has(fact.lineItemId)));
   if (unreviewed) {
+    const stagedRefs = snapshot.facts
+      .filter((fact) => fact.status === "staged" && selected.has(fact.periodId)
+        && !(fact.lineItemId !== undefined && sourceRowIds.has(fact.lineItemId)))
+      .map((fact) => fact.lineItemId === undefined ? fact.factId : `${fact.lineItemId}@${fact.periodId}`);
     throw new FinancialModelError(
       "history_review_required",
       "selected history still contains staged facts",
+      { refs: stagedRefs },
     );
   }
   const failedReconciliations = snapshot.reconciliationResults.filter(

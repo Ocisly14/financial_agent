@@ -88,6 +88,21 @@ test("findings come back on the submission itself, and a patch corrects what was
   assert.match(seen()[1]!, /incomplete/);
 });
 
+test("a large decision can be drafted in batches, then validated and corrected incrementally", async () => {
+  const { runtime, seen } = scripted([
+    call("start_unification_draft", {}),
+    call("patch_unification_decision", { patch: { upsertRows: [revenueRow] } }),
+    call("validate_unification_decision", {}),
+    call("finish", { summary: "done" }),
+  ]);
+
+  const result = await run(runtime);
+
+  assert.deepEqual(result.artifact.unresolvedFindings, []);
+  assert.equal(result.decision.rows.length, 1);
+  assert.match(seen()[2]!, /draft_updated/, "the batch is recorded without triggering full findings");
+});
+
 test("the summary the agent writes at finish is what comes back to the DCF orchestrator", async () => {
   const written = "Merged the two revenue tags; FY2024 is the restated figure.";
   const { runtime } = scripted([

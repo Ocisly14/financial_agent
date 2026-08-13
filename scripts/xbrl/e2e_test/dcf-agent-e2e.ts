@@ -55,7 +55,7 @@ const roundTimeoutMs = Number(process.env["E2E_ROUND_TIMEOUT_MIN"] ?? 25) * 60_0
 const initialPrompt = process.env["E2E_PROMPT"]?.trim()
   || `Build me a DCF valuation model for ${symbol} `;
 
-const continuationPrompt = `Continue the ${symbol} DCF in this same thread. Read the model first to `
+const continuationPrompt = process.env["E2E_CONTINUATION_PROMPT"]?.trim() || `Continue the ${symbol} DCF in this same thread. Read the model first to `
   + `see what is already filled, keep what holds, redo nothing, and complete only what is still `
   + `missing through to the valued stage.`;
 
