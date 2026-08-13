@@ -5,6 +5,8 @@ import type { SessionEvent } from "./sessionState.ts";
 export type PreservedDataEntry = {
   turn: number;
   agent: string;
+  /** Durable task-result event containing the complete, auditable tool data. */
+  sourceEventId?: string;
   data: JsonObject;
 };
 

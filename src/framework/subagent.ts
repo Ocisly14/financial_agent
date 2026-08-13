@@ -424,6 +424,9 @@ export class SubagentRuntime {
     /** Last step's progress region, so this step can mark how much of it held still and cache it. */
     let previousProgress: string | undefined;
     for (let step = 1; step <= maxToolSteps; step++) {
+      // Compact only completed earlier rounds before every prompt. The current
+      // dispatch remains verbatim, even if it is itself large.
+      await maybeCompactThread(state, this.modelRouter, definition.name, threadId, input.taskId);
       // Loop context is read back from the log: the subagent sees its own prior
       // tool results (state) and decides whether to call another tool or finish.
       const rendered = this.renderer.render(definition.systemPrompt, {

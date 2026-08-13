@@ -11,7 +11,7 @@ import type {
   UserInputRequestView,
   UserInputResponse,
 } from "./types.ts";
-import type { CompactionCache, EventStore } from "./eventStore.ts";
+import type { CompactionCache, EventStore, PreservedDataEntry } from "./eventStore.ts";
 
 /**
  * SessionState — a single append-only event log per session that is the ONE
@@ -157,6 +157,43 @@ export function foldUserInputRequest(event: SessionEvent, events: readonly Sessi
   return { ...request, asked_by, status: "skipped" };
 }
 
+/**
+ * One compacted task index as a line rather than as raw JSON — the same facts
+ * at roughly a third of the tokens, and readable.
+ *
+ * `data_keys` is dropped: it is exactly the key set of `data_shape`, so printing
+ * both spent tokens saying the same thing twice. `source_event_id` keeps its
+ * field name because the orchestrator prompt tells the model to pass that name
+ * to `read_compacted_task_data`.
+ *
+ * Tolerant of rows written before merging existed: those carry no call count and
+ * simply render as a single turn.
+ */
+function formatPreservedEntry(entry: PreservedDataEntry): string {
+  const data = entry.data;
+  const head: string[] = [];
+  if (entry.sourceEventId) head.push(`source_event_id=${entry.sourceEventId}`);
+  head.push(entry.agent);
+  const calls = typeof data.calls === "number" ? data.calls : 1;
+  const firstTurn = typeof data.first_turn === "number" ? data.first_turn : entry.turn;
+  const span = firstTurn === entry.turn ? `turn ${entry.turn}` : `turns ${firstTurn}–${entry.turn}`;
+  head.push(calls > 1 ? `${calls} calls, ${span}` : span);
+  if (typeof data.status === "string") head.push(data.status);
+  const summary = typeof data.summary === "string" && data.summary !== "" ? ` — ${data.summary}` : "";
+
+  const shape = (data.data_shape ?? {}) as JsonObject;
+  const keys = Object.keys(shape).length > 0
+    ? Object.entries(shape).map(([key, value]) => `${key}(${String(value)})`).join(", ")
+    : (Array.isArray(data.data_keys) ? data.data_keys.join(", ") : "");
+  // `scalar_fields` is the pre-`values` name, still present in caches written
+  // before nested blocks were preserved.
+  const preserved = (data.values ?? data.scalar_fields ?? {}) as JsonObject;
+  const values = Object.entries(preserved).map(([key, value]) => `${key}=${JSON.stringify(value)}`).join(", ");
+  const detail = [keys ? `keys: ${keys}` : "", values ? `values: ${values}` : ""].filter(Boolean).join("; ");
+
+  return `- ${head.join(" | ")}${summary}${detail ? `\n  ${detail}` : ""}`;
+}
+
 export class SessionState {
   readonly session_id: string;
   readonly started_at: string;
@@ -166,7 +203,7 @@ export class SessionState {
   private readonly store: EventStore | undefined;
   private turn = 0;
   private promptTokensIn?: number;
-  private compaction?: CompactionCache;
+  private compaction: CompactionCache | undefined;
   /**
    * Highest thread number handed out per agent. Deliberately NOT derived from
    * the in-memory log on demand: `compactEvents` drops old events, so counting
@@ -284,7 +321,9 @@ export class SessionState {
     return this.compaction;
   }
 
-  setCompactionCache(cache: CompactionCache): void {
+  /** `undefined` restores "never compacted" — the rollback path when the write
+   *  that was supposed to make a compaction durable fails. */
+  setCompactionCache(cache: CompactionCache | undefined): void {
     this.compaction = cache;
   }
 
@@ -300,24 +339,42 @@ export class SessionState {
    * call after compact() has folded those turns into the compaction cache —
    * the EventStore retains the full history.
    *
-   * Events belonging to a subagent thread that is still being dispatched to
-   * survive: dropping them would make the next round of a long-running thread
-   * come back to an amnesiac agent. They cost the orchestrator nothing to keep
-   * — its own projection never looks at another thread — and the size of any
-   * one thread is bounded separately, by the thread-level cap in
-   * contextCompaction.
+   * Every thread this session opened stays whole, along with the dispatch and
+   * task_result that make it addressable — NOT only the threads dispatched to
+   * since the cutoff. A thread the orchestrator may still continue is one it
+   * has to be able to see (`liveThreads`) and come back to (`subagentProgress`);
+   * dropping either half is the silent failure, because `threadOwner` answers
+   * from the counters and would keep accepting an id whose work is gone, so the
+   * next round runs as an amnesiac instead of erroring.
+   *
+   * They cost the orchestrator no prompt space: `projectForPrompt` renders
+   * nothing at or below the compacted cutoff, and its own projection never
+   * looks at another thread. The size of any one thread is bounded separately,
+   * by the thread-level cap in contextCompaction, and `formatThreads` caps how
+   * many are ever listed.
    */
   compactEvents(throughTurn: number): void {
-    const liveThreads = new Set<string>();
+    // Legacy sidechain rows carry a dispatch event id as their thread, which no
+    // `child_thread_id` points at. Those tasks were one-shot and unresumable, so
+    // they are correctly left out of this set and dropped.
+    const threads = new Set<string>();
+    const threadDispatches = new Set<string>();
     for (const e of this.events) {
-      if (e.kind === "dispatch" && e.turn > throughTurn && typeof e.payload.child_thread_id === "string") {
-        liveThreads.add(e.payload.child_thread_id);
+      if (e.kind === "dispatch" && typeof e.payload.child_thread_id === "string") {
+        threads.add(e.payload.child_thread_id);
+        threadDispatches.add(e.event_id);
       }
     }
+    const retained = (e: SessionEvent): boolean => {
+      if (e.thread_id !== this.mainThread) return threads.has(e.thread_id);
+      if (e.kind === "dispatch") return threadDispatches.has(e.event_id);
+      if (e.kind === "task_result") return e.parent_event_id !== null && threadDispatches.has(e.parent_event_id);
+      return false;
+    };
     for (let i = this.events.length - 1; i >= 0; i--) {
       const e = this.events[i]!;
       if (e.turn > throughTurn) continue;
-      if (e.thread_id !== this.mainThread && liveThreads.has(e.thread_id)) continue;
+      if (retained(e)) continue;
       this.events.splice(i, 1);
     }
   }
@@ -438,25 +495,60 @@ export class SessionState {
     const all = this.events.filter((e) =>
       e.thread_id !== this.mainThread
       && ("thread" in scope ? e.thread_id === scope.thread : e.payload.task_id === scope.task));
-    // A thread summary is a barrier: the rounds before it have been folded into
-    // it, so replaying them too would defeat the fold.
-    let barrier = -1;
-    for (let i = all.length - 1; i >= 0; i--) {
-      const e = all[i]!;
-      if (e.kind === "subagent_note" && e.payload.thread_summary === true) { barrier = i; break; }
+    // A fold is a THREAD-level event that happens to be stamped with the round
+    // that was running when it ran. In task scope it is neither the round's own
+    // work (it describes earlier rounds) nor a barrier over it (its cutoff names
+    // an event from another round, so the barrier below would fall back to
+    // "everything after the note" and silently drop the evidence this round had
+    // already produced — which is what the round's task_result is assembled from).
+    if ("task" in scope) {
+      for (const event of all) {
+        if (event.kind === "subagent_note" && event.payload.thread_summary === true) continue;
+        yield event;
+      }
+      return;
     }
-    yield* barrier === -1 ? all : all.slice(barrier);
+    // A thread summary is a barrier: the rounds it names have been folded into
+    // it, so replaying them too would defeat the fold. Newer compactions carry
+    // an exact event-id cutoff, which matters when a long CURRENT round is
+    // still running: the summary is appended after its first tool results but
+    // must not hide those fresh results. Render the summary first, then the
+    // retained tail. Older summaries without a cutoff retain the old suffix
+    // behavior for backward compatibility.
+    const summaryIndex = [...all].map((event, index) => ({ event, index })).reverse()
+      .find(({ event }) => event.kind === "subagent_note" && event.payload.thread_summary === true)?.index;
+    if (summaryIndex === undefined) {
+      yield* all;
+      return;
+    }
+    const summary = all[summaryIndex]!;
+    const cutoffId = summary.payload.compacted_through_event_id;
+    if (typeof cutoffId !== "string") {
+      yield* all.slice(summaryIndex);
+      return;
+    }
+    const cutoffIndex = all.findIndex((event) => event.event_id === cutoffId);
+    if (cutoffIndex === -1) {
+      yield* all.slice(summaryIndex);
+      return;
+    }
+    yield summary;
+    for (const event of all.slice(cutoffIndex + 1)) {
+      if (event.event_id !== summary.event_id) yield event;
+    }
   }
 
-  /** Render a subagent's work so far into [PROGRESS SO FAR] text. This is its
-   *  loop context — it reads its own results back from the log to decide
-   *  whether to call more tools. The structured `generation_context.data` is
-   *  injected (not the tool's hand-written summary) so the decision is grounded
-   *  in real values. Scope this to the THREAD: the point of a thread is that
-   *  the agent comes back to what it already did. */
-  subagentProgress(scope: TraceScope): string {
+  /** The replayable portion of one subagent thread, after its latest compact
+   * summary barrier. Exposed for thread compaction, which must select complete
+   * old rounds from events rather than splitting a currently running round by
+   * arbitrary rendered lines. */
+  subagentTraceEvents(threadId: string): readonly SessionEvent[] {
+    return [...this.trace({ thread: threadId })];
+  }
+
+  private renderSubagentProgress(events: Iterable<SessionEvent>): string {
     const lines: string[] = [];
-    for (const e of this.trace(scope)) {
+    for (const e of events) {
       // 每步的 note 与工具结果按时间交错:模型上一步"打算做什么"的一行字
       // 跨步存活,是它自己的连续性记忆。
       if (e.kind === "subagent_note") {
@@ -476,6 +568,22 @@ export class SessionState {
       lines.push(`[${name}] ${body}`);
     }
     return lines.length ? lines.join("\n") : "(no tools called yet)";
+  }
+
+  /** Render an explicit subagent trace slice. Used by the compactor to pass
+   * complete old rounds to the SMALL model. */
+  subagentProgressFromEvents(events: Iterable<SessionEvent>): string {
+    return this.renderSubagentProgress(events);
+  }
+
+  /** Render a subagent's work so far into [PROGRESS SO FAR] text. This is its
+   *  loop context — it reads its own results back from the log to decide
+   *  whether to call more tools. The structured `generation_context.data` is
+   *  injected (not the tool's hand-written summary) so the decision is grounded
+   *  in real values. Scope this to the THREAD: the point of a thread is that
+   *  the agent comes back to what it already did. */
+  subagentProgress(scope: TraceScope): string {
+    return this.renderSubagentProgress(this.trace(scope));
   }
 
   /** Successful tool outputs, read from the log. Scope this to the TASK when
@@ -656,10 +764,14 @@ export class SessionState {
    */
   projectForPrompt(turn: number): { conversationSoFar: string; currentTurnProgress: string; artifacts: ArtifactRef[] } {
     const visible = this.events.filter((e) => e.thread_id === this.mainThread);
+    // The summary IS those turns now. Anything still in memory at or below the
+    // cutoff was kept for a subagent thread's sake, not for this prompt, and
+    // rendering it here would put the same history in twice.
+    const compactedThrough = this.compaction?.summarizedThroughTurn ?? 0;
 
     const priorArtifacts: ArtifactRef[] = [];
     const priorLines: string[] = [];
-    for (const e of visible.filter((e) => e.turn < turn)) {
+    for (const e of visible.filter((e) => e.turn < turn && e.turn > compactedThrough)) {
       if (e.kind === "user_message") priorLines.push(`User: ${e.payload.content as string}`);
       else if (e.kind === "reply" && e.payload.final === true) priorLines.push(`You: ${e.payload.content as string}`);
       else if (e.kind === "dispatch") priorLines.push(this.formatDispatchLine(e));
@@ -716,9 +828,7 @@ export class SessionState {
     if (!this.compaction) {
       return priorLines.length ? priorLines.join("\n") : "(no prior conversation)";
     }
-    const dataLines = this.compaction.preservedData.map(
-      (d) => `- turn ${d.turn} (${d.agent}): ${JSON.stringify(d.data)}`,
-    );
+    const dataLines = this.compaction.preservedData.map(formatPreservedEntry);
     return [
       "[EARLIER CONVERSATION SUMMARY]",
       this.compaction.summaryText,
@@ -819,7 +929,15 @@ export class SessionState {
       const seen = state.threadCounters.get(parsed.agent) ?? 0;
       if (parsed.n > seen) state.threadCounters.set(parsed.agent, parsed.n);
     }
-    if (compaction) state.compaction = compaction;
+    if (compaction) {
+      state.compaction = compaction;
+      // The durable event log is intentionally complete for audit/history
+      // reads, while the in-memory log is the compact prompt working set.
+      // Reapply the persisted cutoff after a cold start so the next prompt is
+      // identical in shape to the one immediately before a process restart;
+      // otherwise it receives the summary and all summarized source events.
+      state.compactEvents(compaction.summarizedThroughTurn);
+    }
     return state;
   }
 }
