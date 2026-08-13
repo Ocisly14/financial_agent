@@ -172,6 +172,36 @@ test("a digest write does not resurface the topic in the rail", () => {
   store.close();
 });
 
+test("a digest gives an untitled topic a title and symbols, without needing chart tabs", () => {
+  const store = SqliteEventStore.open(":memory:");
+  store.createTopic("a1", "t1", "Chat 08-12 10:00", 100);
+
+  store.setTopicDigest("t1", "估值仍取决于服务利润率。", "single_name", 1, {
+    title: "AAPL valuation", symbols: ["AAPL", "MSFT"],
+  });
+
+  const topic = store.listTopics("a1")[0];
+  assert.equal(topic?.name, "AAPL valuation");
+  assert.equal(topic?.leadSymbol, null, "digest symbols do not create or mutate chart tabs");
+  assert.deepEqual(topic?.subjectSymbols, ["AAPL", "MSFT"]);
+  store.close();
+});
+
+test("a manual title is never overwritten by later digest titles", () => {
+  const store = SqliteEventStore.open(":memory:");
+  store.createTopic("a1", "t1", "Chat 08-12 10:00");
+  store.updateTopic("a1", "t1", { name: "My Apple notes" });
+
+  store.setTopicDigest("t1", "摘要", "single_name", 1, {
+    title: "AAPL valuation", symbols: ["AAPL"],
+  });
+
+  const topic = store.listTopics("a1")[0];
+  assert.equal(topic?.name, "My Apple notes");
+  assert.deepEqual(topic?.subjectSymbols, ["AAPL"], "the lock applies only to the title");
+  store.close();
+});
+
 test("a hand-picked category is locked and survives the next digest", () => {
   const store = SqliteEventStore.open(":memory:");
   store.createTopic("a1", "t1", "英伟达");
@@ -237,6 +267,29 @@ test("staleness tracks the topic's own log", async () => {
   store.setTopicDigest("t1", "缩要", "macro", 1);
   assert.equal(store.isTopicDigestStale("t1"), false);
   assert.deepEqual(store.listStaleTopics("a1"), []);
+  store.close();
+});
+
+test("digest cadence is first turn, then each complete three-turn increment", async () => {
+  const store = SqliteEventStore.open(":memory:");
+  store.createTopic("a1", "t1", "T");
+  const state = await new SessionRegistry(store).getOrCreate("t1");
+  const append = (turn: number) => {
+    state.beginTurn(`问 ${turn}`);
+    state.recordReply(`答 ${turn}`, true);
+  };
+
+  append(1);
+  assert.equal(store.isTopicDigestDue("t1"), true);
+  assert.deepEqual(store.listDigestDueTopics("a1"), ["t1"]);
+  store.setTopicDigest("t1", "首版", "macro", 1);
+
+  append(2);
+  append(3);
+  assert.equal(store.isTopicDigestDue("t1"), false, "two new turns are an incomplete increment");
+  append(4);
+  assert.equal(store.isTopicDigestDue("t1"), true);
+  assert.deepEqual(store.getTopicDigest("t1"), { summary: "首版", throughTurn: 1 });
   store.close();
 });
 

@@ -60,6 +60,11 @@ CREATE TABLE IF NOT EXISTS chat_rooms (
   -- Set once the user picks a category by hand. The model then refreshes the
   -- summary but leaves the category alone, so the two never fight.
   category_locked    INTEGER NOT NULL DEFAULT 0,
+  -- A digest proposes a useful title after the first turn. A manual rename
+  -- locks that title while still allowing the digest body to refresh.
+  title_locked       INTEGER NOT NULL DEFAULT 0,
+  -- Structured ticker subjects from the digest; independent of chart tabs.
+  digest_symbols_json TEXT NOT NULL DEFAULT '[]',
   digest_through_turn INTEGER NOT NULL DEFAULT 0
 );
 
@@ -123,6 +128,8 @@ const CHAT_ROOM_ADDED_COLUMNS: ReadonlyArray<{ name: string; ddl: string }> = [
   { name: "summary", ddl: "summary TEXT" },
   { name: "category", ddl: "category TEXT" },
   { name: "category_locked", ddl: "category_locked INTEGER NOT NULL DEFAULT 0" },
+  { name: "title_locked", ddl: "title_locked INTEGER NOT NULL DEFAULT 0" },
+  { name: "digest_symbols_json", ddl: "digest_symbols_json TEXT NOT NULL DEFAULT '[]'" },
   { name: "digest_through_turn", ddl: "digest_through_turn INTEGER NOT NULL DEFAULT 0" },
 ];
 
@@ -154,6 +161,19 @@ function migrateSessionEvents(db: DatabaseSync): void {
   }
   db.exec(`CREATE INDEX IF NOT EXISTS idx_session_events_session_thread
              ON session_events (session_id, thread_id)`);
+}
+
+/** Digest model output is persisted as JSON; a malformed legacy value must not
+ * prevent the entire sidebar from rendering. Validation of ticker syntax has
+ * already happened at the digest boundary, so this is intentionally a small
+ * defensive parser rather than a second policy engine. */
+function parseDigestSymbols(value: string): string[] {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
 }
 
 type EventRow = {
@@ -222,6 +242,8 @@ export type TopicSummary = {
   name: string;
   /** Derived from `topic_charts` — the first visible chart (sort_order ASC). Never written directly. */
   leadSymbol: string | null;
+  /** Symbols identified by the Topic digest, ordered by relevance. */
+  subjectSymbols: string[];
   createdAt: number;
   lastMessage: { text: string; createdAt: number } | null;
   messageCount: number;
@@ -247,6 +269,7 @@ type TopicRow = {
   summary: string | null;
   category: string | null;
   category_locked: number;
+  digest_symbols_json: string;
 };
 type LastMessageRow = { payload_json: string; timestamp: string };
 
@@ -390,6 +413,7 @@ export class SqliteEventStore implements EventStore {
       id: topicId,
       name,
       leadSymbol: null,
+      subjectSymbols: [],
       createdAt,
       lastMessage: null,
       messageCount: 0,
@@ -408,6 +432,7 @@ export class SqliteEventStore implements EventStore {
       `SELECT chat_rooms.id AS id, chat_rooms.name AS name, chat_rooms.created_at AS created_at,
               chat_rooms.summary AS summary, chat_rooms.category AS category,
               chat_rooms.category_locked AS category_locked,
+              chat_rooms.digest_symbols_json AS digest_symbols_json,
               lead.symbol AS lead_symbol
        FROM chat_rooms
        LEFT JOIN (
@@ -446,6 +471,7 @@ export class SqliteEventStore implements EventStore {
         id: topic.id,
         name: topic.name,
         leadSymbol: topic.lead_symbol,
+        subjectSymbols: parseDigestSymbols(topic.digest_symbols_json),
         createdAt: topic.created_at,
         lastMessage,
         messageCount: countRow.count,
@@ -476,7 +502,12 @@ export class SqliteEventStore implements EventStore {
   ): boolean {
     const assignments: string[] = [];
     const values: Array<string | number | null> = [];
-    if (patch.name !== undefined) { assignments.push("name = ?"); values.push(patch.name); }
+    if (patch.name !== undefined) {
+      // A hand-edited name must not be overwritten by a later background
+      // digest. It remains a normal Topic title, merely user-owned now.
+      assignments.push("name = ?", "title_locked = 1");
+      values.push(patch.name);
+    }
     if (patch.category === null) {
       assignments.push("category_locked = 0");
     } else if (patch.category !== undefined) {
@@ -510,21 +541,27 @@ export class SqliteEventStore implements EventStore {
     summary: string,
     category: TopicCategory | null,
     throughTurn: number,
+    metadata: { title: string | null; symbols: string[] } = { title: null, symbols: [] },
   ): void {
     const locked = this.db
-      .prepare("SELECT category_locked FROM chat_rooms WHERE id = ?")
-      .get(topicId) as { category_locked: number } | undefined;
+      .prepare("SELECT category_locked, title_locked FROM chat_rooms WHERE id = ?")
+      .get(topicId) as { category_locked: number; title_locked: number } | undefined;
     if (!locked) return;
+
+    const symbols = JSON.stringify(metadata.symbols);
+    const title = metadata.title?.trim() || null;
+    const titleAssignment = locked.title_locked === 0 && title !== null ? ", name = ?" : "";
+    const titleValue = locked.title_locked === 0 && title !== null ? [title] : [];
 
     if (locked.category_locked === 1 || category === null) {
       this.db
-        .prepare("UPDATE chat_rooms SET summary = ?, digest_through_turn = ? WHERE id = ?")
-        .run(summary, throughTurn, topicId);
+        .prepare(`UPDATE chat_rooms SET summary = ?, digest_symbols_json = ?, digest_through_turn = ?${titleAssignment} WHERE id = ?`)
+        .run(summary, symbols, throughTurn, ...titleValue, topicId);
       return;
     }
     this.db
-      .prepare("UPDATE chat_rooms SET summary = ?, category = ?, digest_through_turn = ? WHERE id = ?")
-      .run(summary, category, throughTurn, topicId);
+      .prepare(`UPDATE chat_rooms SET summary = ?, category = ?, digest_symbols_json = ?, digest_through_turn = ?${titleAssignment} WHERE id = ?`)
+      .run(summary, category, symbols, throughTurn, ...titleValue, topicId);
   }
 
   /**
@@ -546,6 +583,26 @@ export class SqliteEventStore implements EventStore {
     return (row.max_turn ?? 0) > row.digested;
   }
 
+  /** A digest is due for its first completed turn, then only after three more
+   * completed turns. This keeps digest generation incremental and bounded. */
+  isTopicDigestDue(topicId: string): boolean {
+    const row = this.db.prepare(
+      `SELECT chat_rooms.digest_through_turn AS digested,
+              (SELECT MAX(turn) FROM session_events WHERE session_id = chat_rooms.id) AS max_turn
+       FROM chat_rooms WHERE id = ?`,
+    ).get(topicId) as { digested: number; max_turn: number | null } | undefined;
+    if (!row) return false;
+    const observed = row.max_turn ?? 0;
+    return row.digested === 0 ? observed >= 1 : observed >= row.digested + 3;
+  }
+
+  getTopicDigest(topicId: string): { summary: string | null; throughTurn: number } | null {
+    const row = this.db.prepare(
+      "SELECT summary, digest_through_turn FROM chat_rooms WHERE id = ?",
+    ).get(topicId) as { summary: string | null; digest_through_turn: number } | undefined;
+    return row ? { summary: row.summary, throughTurn: row.digest_through_turn } : null;
+  }
+
   /**
    * Topics whose log has moved past their digest — the same `turnCount >
    * digestThroughTurn` rule the Research layer already used, pushed into SQL
@@ -560,6 +617,23 @@ export class SqliteEventStore implements EventStore {
        ) turns ON turns.session_id = chat_rooms.id
        WHERE chat_rooms.agent_id = ?
          AND COALESCE(turns.max_turn, 0) > chat_rooms.digest_through_turn`,
+    ).all(agentId) as Array<{ id: string }>;
+    return rows.map((row) => row.id);
+  }
+
+  /** Topics whose first digest or next complete three-turn increment is due. */
+  listDigestDueTopics(agentId: string): string[] {
+    const rows = this.db.prepare(
+      `SELECT chat_rooms.id AS id
+       FROM chat_rooms
+       LEFT JOIN (
+         SELECT session_id, MAX(turn) AS max_turn FROM session_events GROUP BY session_id
+       ) turns ON turns.session_id = chat_rooms.id
+       WHERE chat_rooms.agent_id = ?
+         AND (
+           (chat_rooms.digest_through_turn = 0 AND COALESCE(turns.max_turn, 0) >= 1)
+           OR COALESCE(turns.max_turn, 0) >= chat_rooms.digest_through_turn + 3
+         )`,
     ).all(agentId) as Array<{ id: string }>;
     return rows.map((row) => row.id);
   }

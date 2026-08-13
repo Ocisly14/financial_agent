@@ -424,13 +424,16 @@ export class SubagentRuntime {
     /** Last step's progress region, so this step can mark how much of it held still and cache it. */
     let previousProgress: string | undefined;
     for (let step = 1; step <= maxToolSteps; step++) {
+      // Compact only completed earlier rounds before every prompt. The current
+      // dispatch remains verbatim, even if it is itself large.
+      await maybeCompactThread(state, this.modelRouter, definition.name, threadId, input.taskId);
       // Loop context is read back from the log: the subagent sees its own prior
       // tool results (state) and decides whether to call another tool or finish.
       const rendered = this.renderer.render(definition.systemPrompt, {
         task: input.request.task,
         skills: skillRoster,
         modelContext: input.request.model_id
-          ? `Resume model ${input.request.model_id}; refresh it before any mutation.`
+          ? `The user is currently viewing model ${input.request.model_id}. Prefer continuing it: refresh it before any mutation and keep your work in that model unless the task or evidence gives a concrete reason to select or create another model.`
           : "No existing model handle was supplied.",
         progress: `(you are at step ${step} of your ${maxToolSteps}-step budget)\n` + (definition.name === "financial_modeling"
           // Thread scope, not task scope: continuing a thread means the agent

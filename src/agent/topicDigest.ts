@@ -21,20 +21,47 @@ import type { ModelRouter } from "../infra/llm/provider.ts";
 import type { SessionEvent } from "../framework/sessionState.ts";
 import type { SessionRegistry } from "../framework/sessionState.ts";
 import { asTopicCategory, TOPIC_CATEGORIES, type TopicCategory } from "../infra/db/sqliteEventStore.ts";
-import { estimateTokens, type IndexedTurn } from "./research/retrieval.ts";
+
+export type IndexedTurn = { turn: number; user: string; reply: string };
 
 /** Model calls for digests run at most this many at a time (spec: concurrency cap 3). */
 export const DIGEST_CONCURRENCY = 3;
 
-/** Soft cap on how much history a single digest call is allowed to read. The
- *  most RECENT turns are kept — a digest describes where conclusions stand
- *  now, so the tail is the part that matters. */
-const DIGEST_INPUT_BUDGET_TOKENS = 12_000;
-
 /** What this module needs from SessionRegistry — the durable log of a Topic. */
 export type TopicHistorySource = Pick<SessionRegistry, "loadEvents">;
 
-export type TopicDigest = { summary: string; category: TopicCategory | null };
+export type TopicDigest = {
+  /** Short human-readable title for the Topic rail. */
+  title: string | null;
+  /** Explicit tickers discussed by the Topic, ordered by relevance. */
+  symbols: string[];
+  summary: string;
+  category: TopicCategory | null;
+};
+
+const TICKER_PATTERN = /^[A-Z][A-Z.-]{0,5}$/;
+const MAX_DIGEST_SYMBOLS = 6;
+
+function asDigestTitle(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const title = value.replace(/\s+/g, " ").trim();
+  return title ? title.slice(0, 80) : null;
+}
+
+function asDigestSymbols(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const symbols: string[] = [];
+  const seen = new Set<string>();
+  for (const candidate of value) {
+    if (typeof candidate !== "string") continue;
+    const symbol = candidate.trim().toUpperCase();
+    if (!TICKER_PATTERN.test(symbol) || seen.has(symbol)) continue;
+    seen.add(symbol);
+    symbols.push(symbol);
+    if (symbols.length === MAX_DIGEST_SYMBOLS) break;
+  }
+  return symbols;
+}
 
 /**
  * Projects a Topic's event log into turn-indexed user/reply pairs.
@@ -81,20 +108,6 @@ export function turnCountOf(turns: readonly IndexedTurn[]): number {
   return turns.reduce((max, t) => Math.max(max, t.turn), 0);
 }
 
-/** Keeps the most recent turns that fit the input budget. */
-function tailWithinBudget(turns: readonly IndexedTurn[], budgetTokens: number): IndexedTurn[] {
-  const kept: IndexedTurn[] = [];
-  let used = 0;
-  for (let i = turns.length - 1; i >= 0; i--) {
-    const t = turns[i]!;
-    const cost = estimateTokens(t.user) + estimateTokens(t.reply);
-    if (kept.length > 0 && used + cost > budgetTokens) break;
-    kept.unshift(t);
-    used += cost;
-  }
-  return kept;
-}
-
 /** What each category means, as the model sees it. The wording is chosen so the
  *  boundaries fall where an analyst's NEXT ACTION differs — that is the whole
  *  point of the taxonomy, and a model told only the labels puts everything with
@@ -113,8 +126,10 @@ const DIGEST_SYSTEM = [
   "You are given the conversation history of a Topic (an ongoing research conversation).",
   "",
   "Reply with ONE JSON object and nothing else:",
-  '{"summary": "...", "category": "<one of the slugs below>"}',
+  '{"title": "...", "symbols": ["..."], "summary": "...", "category": "<one of the slugs below>"}',
   "",
+  "title: a concise, specific 2–7-word label for the Topic rail. Include the primary ticker when one exists (for example, \"AAPL valuation\"). Do not use generic labels such as \"Chat\" or \"Research\".",
+  "symbols: the 0–6 publicly traded ticker symbols actually discussed, uppercase, in relevance order. Use [] for a macro/topic with no listed-company focus. Never infer a ticker from an ordinary word.",
   "summary: no more than 300 tokens, covering two things —",
   "1) what this Topic is investigating (a ticker / macro theme / question of interest);",
   "2) where its conclusions stand (confirmed judgments, unresolved disagreements, what to check next).",
@@ -146,18 +161,28 @@ export function parseDigestReply(text: string): TopicDigest {
     try {
       const parsed = JSON.parse(raw.slice(start, end + 1)) as Record<string, unknown>;
       const summary = typeof parsed.summary === "string" ? parsed.summary.trim() : "";
-      if (summary) return { summary, category: asTopicCategory(parsed.category) };
+      if (summary) {
+        return {
+          title: asDigestTitle(parsed.title),
+          symbols: asDigestSymbols(parsed.symbols),
+          summary,
+          category: asTopicCategory(parsed.category),
+        };
+      }
     } catch {
       // Fall through to the whole-reply fallback below.
     }
   }
   // Strip a leading fence line, if the reply was fenced but unparsable.
   const fallback = raw.replace(/^```[a-z]*\n?/i, "").replace(/```$/, "").trim();
-  return { summary: fallback, category: null };
+  return { title: null, symbols: [], summary: fallback, category: null };
 }
 
 /**
- * Generates one Topic's digest and category with a SMALL model.
+ * Generates one Topic's digest and category with a SMALL model. After the
+ * first turn, callers pass the prior digest and exactly the next three turns;
+ * the model therefore updates its state instead of re-reading a Topic's full
+ * history on every refresh.
  *
  * Returns an empty summary for an empty history WITHOUT calling a model: asking
  * a model to summarise a conversation that hasn't happened yields a confident
@@ -166,12 +191,16 @@ export function parseDigestReply(text: string): TopicDigest {
 export async function generateDigest(
   turns: IndexedTurn[],
   modelRouter: ModelRouter,
+  previousDigest?: string | null,
 ): Promise<TopicDigest> {
-  if (turns.length === 0) return { summary: "", category: null };
+  if (turns.length === 0) return { title: null, symbols: [], summary: "", category: null };
 
-  const transcript = tailWithinBudget(turns, DIGEST_INPUT_BUDGET_TOKENS)
+  const transcript = turns
     .map((t) => `[turn ${t.turn}]\nUser: ${t.user}\nReply: ${t.reply}`)
     .join("\n\n");
+  const prior = previousDigest?.trim()
+    ? `Existing digest (preserve still-valid conclusions from it):\n${previousDigest.trim()}\n\n`
+    : "";
 
   const completion = await modelRouter.generate(
     [
@@ -179,7 +208,8 @@ export async function generateDigest(
       {
         role: "user",
         content:
-          `Conversation history:\n\n${transcript}\n\n` +
+          `${prior}New conversation turns to incorporate:\n\n${transcript}\n\n` +
+          `Update the digest using the existing digest and only these new turns. ` +
           `Please give the digest as JSON. Valid categories: ${TOPIC_CATEGORIES.join(", ")}.`,
       },
     ],

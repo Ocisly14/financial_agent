@@ -290,6 +290,7 @@ const activeTopic: TopicSummary = {
     id: DEMO_TOPIC_ID,
     name: "Apple valuation",
     leadSymbol: "AAPL",
+    subjectSymbols: ["AAPL"],
     createdAt: demoTime - 86_400_000,
     lastMessage: { text: "Build a complete DCF model for AAPL from its SEC filings.", createdAt: demoTime },
     messageCount: 2,
@@ -301,7 +302,7 @@ const activeTopic: TopicSummary = {
 const demoTopics: TopicSummary[] = [
     activeTopic,
     {
-        id: "demo-msft-topic", name: "Microsoft cloud research", leadSymbol: "MSFT",
+        id: "demo-msft-topic", name: "Microsoft cloud research", leadSymbol: "MSFT", subjectSymbols: ["MSFT"],
         createdAt: demoTime - 172_800_000, lastMessage: { text: "Compare Azure growth with peers.", createdAt: demoTime - 172_800_000 },
         messageCount: 6, summary: "Cloud and infrastructure research.", category: "single_name", categoryLocked: false,
     },

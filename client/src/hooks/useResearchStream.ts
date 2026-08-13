@@ -103,7 +103,7 @@ function asTopicIds(value: unknown): string[] {
 export function useResearchStream(
     agentId: UUID,
     researchId: UUID,
-    options?: { onModelRevision?: (frame: ModelRevisionFrame) => void },
+    options?: { onModelRevision?: (frame: ModelRevisionFrame) => void; activeModelId?: string | null },
 ) {
     const { t } = useTranslation();
     const queryClient = useQueryClient();
@@ -181,6 +181,7 @@ export function useResearchStream(
     const stream = useTopicStream(agentId, researchId, {
         onDirective: handleDirective,
         onModelRevision: options?.onModelRevision,
+        activeModelId: options?.activeModelId,
     });
 
     return {

@@ -104,6 +104,9 @@ function sseWrite(res: http.ServerResponse, data: unknown): void {
 type ChatBody = {
   message?: string;
   sessionId?: string;
+  /** The model currently open in the caller's workspace. Advisory only: the
+   * agent still decides whether that model is the right one for the request. */
+  activeModelId?: unknown;
   inputResponse?: {
     requestId?: unknown;
     answers?: unknown;
@@ -210,6 +213,37 @@ async function handleChat(
   const research = app.eventStore.getResearch(agentId, sessionId);
   if (!research) app.eventStore.ensureTopic(agentId, sessionId, defaultRoomName());
 
+  let activeModel: {
+    modelId: string;
+    topicId: string;
+    symbol: string;
+    createdAt: string;
+    updatedAt: string;
+    currentRevision: number;
+    lifecycleStage: string;
+  } | undefined;
+  if (body.activeModelId !== undefined) {
+    if (typeof body.activeModelId !== "string" || !body.activeModelId.trim()) {
+      return jsonError(res, 400, "activeModelId must be a non-empty string");
+    }
+    const model = getDefaultFinancialModelToolDeps().modelStore.getMeta(body.activeModelId);
+    if (!model) return jsonError(res, 404, "active financial model not found");
+    if (model.ownerAgentId !== agentId) return jsonError(res, 403, "active financial model belongs to another agent");
+    const belongsToSession = research
+      ? app.eventStore.listResearchMembers(sessionId).some((member) => member.topicId === model.originSessionId)
+      : model.originSessionId === sessionId;
+    if (!belongsToSession) return jsonError(res, 400, "active financial model is not part of this workspace");
+    activeModel = {
+      modelId: model.modelId,
+      topicId: model.originSessionId,
+      symbol: model.symbol,
+      createdAt: model.createdAt,
+      updatedAt: model.updatedAt,
+      currentRevision: model.currentRevision,
+      lifecycleStage: model.lifecycleStage,
+    };
+  }
+
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
@@ -230,6 +264,7 @@ async function handleChat(
         researchName: research.name,
         userMessage: message,
         ...(inputResponse ? { inputResponse } : {}),
+        ...(activeModel ? { activeModel } : {}),
         // §4.5: the driven Topic's own dispatch / tool_call / task_done frames
         // are never forwarded here — they belong to that Topic's stream. What
         // reaches this stream is the one compressed line the toolset emits.
@@ -239,7 +274,13 @@ async function handleChat(
       // in; without this the sidebar would order Researches by creation only.
       app.eventStore.renameResearch(agentId, sessionId, research.name);
     } else {
-      await app.orchestrator.run({ agentId, sessionId, userMessage: message, ...(inputResponse ? { inputResponse } : {}) });
+      await app.orchestrator.run({
+        agentId,
+        sessionId,
+        userMessage: message,
+        ...(inputResponse ? { inputResponse } : {}),
+        ...(activeModel ? { activeModel } : {}),
+      });
     }
   } catch (error) {
     sseWrite(res, { type: "error", scope: "main", message: String(error) });

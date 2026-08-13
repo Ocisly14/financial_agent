@@ -1,7 +1,7 @@
 // The six tools of the Research controller (spec §4.1).
 //
-// The one idea this file exists to protect: **the controller is the user's
-// stand-in, not a wrapper around the existing agent.** `ask_topic` goes down
+// The one idea this file exists to protect: **the controller delegates new
+// work to a Topic, rather than bypassing it.** `dispatch_task` goes down
 // exactly the path a human typing into the chat box goes down —
 // `orchestrator.run({ sessionId: topicId, userMessage })`, the same call
 // `handleChat` makes. Consequences:
@@ -14,43 +14,29 @@
 //     code here and no classifier deciding "is this a fact or a reading".
 //   - Recursion / concurrency / timeout guards (§4.4) live in THIS layer only.
 //
-// The other invariant: in `fetch_from_topic`, the SMALL model only ever
-// CHOOSES. Every number the controller sees is lifted verbatim from the
-// original turn text. See §4.3.2.
+// Historical questions use a read-only, ephemeral consultation of the Topic
+// itself; no SMALL-model chunk selector is involved.
 
 import { newId } from "../../framework/ids.ts";
 import type { SessionRegistry } from "../../framework/sessionState.ts";
-import type { CompactionCache } from "../../framework/eventStore.ts";
 import type { ModelRouter } from "../../infra/llm/provider.ts";
 import type {
   ResearchMember,
   TopicChartPreferenceRow,
   TopicSummary,
 } from "../../infra/db/sqliteEventStore.ts";
-import type { UserInputRequestView } from "../../framework/types.ts";
-import {
-  chunkTurns,
-  containsDigits,
-  mergeSelections,
-  renderChunkForModel,
-  type IndexedTurn,
-  type Selection,
-} from "./retrieval.ts";
-import { buildIndexedTurns } from "../topicDigest.ts";
+import type { JsonObject, UserInputRequestView } from "../../framework/types.ts";
 import { MAX_RANGE_DAYS, MIN_RANGE_DAYS, parseRangeDays } from "../../data/stock/index.ts";
 import { mapWithConcurrency, Semaphore, TimeoutError, withTimeout } from "./concurrency.ts";
+import { projectEvent } from "../../infra/events/sseProjector.ts";
+import type { ActiveWorkspaceModel } from "../../framework/orchestrator.ts";
 
 // ── guards (§4.4) ─────────────────────────────────────────────────────────
-/** At most this many Topics driven at once, per controller turn. */
-export const ASK_TOPIC_CONCURRENCY = 3;
-/** One `ask_topic` waits at most this long; a timeout fails that member's
+/** At most this many Topic task dispatches run at once, per Research turn. */
+export const DISPATCH_TASK_CONCURRENCY = 3;
+/** One `dispatch_task` waits at most this long; a timeout fails that member's
  *  attempt without aborting the whole controller turn. */
-export const ASK_TOPIC_TIMEOUT_MS = 6 * 60_000;
-
-// ── retrieval budgets (§4.3.1) ────────────────────────────────────────────
-const FETCH_CHUNK_TOKENS = 6_000;
-const FETCH_EXCERPT_BUDGET_TOKENS = 4_000;
-const FETCH_CHUNK_CONCURRENCY = 4;
+export const DISPATCH_TASK_TIMEOUT_MS = 6 * 60_000;
 
 // ── collaborators ─────────────────────────────────────────────────────────
 
@@ -64,16 +50,31 @@ export type ResearchToolStore = {
   listResearchMembers(researchId: string): ResearchMember[];
   replaceResearchMembers(researchId: string, topicIds: string[]): void;
   setMemberSeenTurn(researchId: string, topicId: string, seenThroughTurn: number): void;
-  loadCompaction(sessionId: string): Promise<CompactionCache | undefined>;
 };
 
 /** The existing OrchestratorRuntime, seen through the only method this layer
  *  is allowed to use — the same one `handleChat` calls. */
 export type TopicOrchestrator = {
-  run(input: { agentId: string; sessionId: string; userMessage: string; allowUserInput?: boolean }): Promise<{ response: string }>;
+  run(input: {
+    agentId: string;
+    sessionId: string;
+    userMessage: string;
+    allowUserInput?: boolean;
+    /** Advisory model context for a member Topic's DCF agent. */
+    activeModel?: ActiveWorkspaceModel;
+  }): Promise<{ response: string }>;
+  consult(input: {
+    agentId: string;
+    sessionId: string;
+    question: string;
+    activeModel?: ActiveWorkspaceModel;
+  }): Promise<{ response: string }>;
 };
 
 export type SessionAccess = Pick<SessionRegistry, "getOrCreate" | "loadEvents">;
+/** Only the scheduling boundary is needed here; the toolset never reads or
+ * writes digest state itself. */
+export type TopicDigestSchedulerAccess = Pick<import("../../server/topicDigestScheduler.ts").TopicDigestScheduler, "schedule">;
 
 /**
  * Frames the Research stream carries. Deliberately its OWN type rather than
@@ -85,9 +86,24 @@ export type SessionAccess = Pick<SessionRegistry, "getOrCreate" | "loadEvents">;
 export type ResearchFrame =
   | {
       name: "topic_dispatch";
-      data: { topicId: string; topicName: string; task: string; status: AskStatus };
+      data: { topicId: string; topicName: string; task: string; status: DispatchTaskStatus };
     }
   | { name: "topic_focus"; data: { topicId: string; symbol?: string } }
+  | {
+      /** Forwarded from the driven Topic so a Research workspace refreshes the
+       * member model it is currently showing. */
+      name: "model_revision";
+      data: {
+        display: "focus" | "silent";
+        model_id: string;
+        revision: number;
+        lifecycle_stage: string;
+        changed_sections: string[];
+        changed_line_item_ids: string[];
+        changed_period_ids: string[];
+        change_kinds: string[];
+      };
+    }
   | {
       name: "member_input_request";
       data: { topicId: string; topicName: string; request: UserInputRequestView };
@@ -113,8 +129,13 @@ export type ResearchToolContext = {
   store: ResearchToolStore;
   sessions: SessionAccess;
   orchestrator: TopicOrchestrator;
+  topicDigests?: TopicDigestSchedulerAccess;
   modelRouter: ModelRouter;
   emit: (frame: ResearchFrame) => void;
+  /** The model visible in the parent Research workspace, if its owner Topic
+   * is the member being driven. It informs the member agent but never locks it
+   * to that model. */
+  activeModel?: ActiveWorkspaceModel & { topicId: string };
   /** Injectable for tests. */
   askTimeoutMs?: number;
   idFactory?: (prefix: string) => string;
@@ -122,12 +143,12 @@ export type ResearchToolContext = {
 
 // ── tool results ──────────────────────────────────────────────────────────
 
-export type AskStatus = "running" | "ok" | "failed" | "timeout" | "skipped" | "needs_input";
+export type DispatchTaskStatus = "running" | "ok" | "failed" | "timeout" | "skipped" | "needs_input";
 
-export type AskTopicResult = {
+export type DispatchTaskResult = {
   topicId: string;
   topicName: string;
-  status: Exclude<AskStatus, "running">;
+  status: Exclude<DispatchTaskStatus, "running">;
   /** The Topic's final reply text, on success. */
   reply?: string;
   /** Why it did not succeed. */
@@ -137,16 +158,12 @@ export type AskTopicResult = {
   request?: UserInputRequestView;
 };
 
-export type FetchExcerpt = { turn: number; user: string; reply: string };
-
-export type FetchFromTopicResult = {
-  /** One sentence on why these were chosen. Empty when the model tried to put
-   *  a number in it — see §4.3.2. */
-  framing: string;
-  excerpts: FetchExcerpt[];
-  data: Array<{ index: number; turn: number; agent: string; data: unknown }>;
-  charts: TopicChartPreferenceRow[];
-  coverage: string;
+export type ConsultTopicResult = {
+  topicId: string;
+  topicName: string;
+  status: "ok" | "failed" | "timeout";
+  reply?: string;
+  reason?: string;
 };
 
 export type TabOp =
@@ -215,78 +232,6 @@ function normalizeMode(value: unknown): "pct" | "index100" {
   return value === "index100" ? "index100" : "pct";
 }
 
-// ── selection parsing ─────────────────────────────────────────────────────
-
-type ChunkSelection = { framing: string; turns: Selection[]; data: number[]; charts: string[] };
-
-function extractJsonObject(text: string): string | null {
-  const start = text.indexOf("{");
-  if (start === -1) return null;
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let i = start; i < text.length; i++) {
-    const ch = text[i];
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (ch === "\\") escaped = true;
-      else if (ch === '"') inString = false;
-      continue;
-    }
-    if (ch === '"') inString = true;
-    else if (ch === "{") depth++;
-    else if (ch === "}") {
-      depth--;
-      if (depth === 0) return text.slice(start, i + 1);
-    }
-  }
-  return null;
-}
-
-/** Parses one SMALL-model reply into a selection. Anything unparseable
- *  degrades to "this chunk selected nothing" — never to invented content. */
-export function parseChunkSelection(text: string): ChunkSelection {
-  const empty: ChunkSelection = { framing: "", turns: [], data: [], charts: [] };
-  const json = extractJsonObject(text);
-  if (!json) return empty;
-
-  let raw: Record<string, unknown>;
-  try {
-    raw = JSON.parse(json) as Record<string, unknown>;
-  } catch {
-    return empty;
-  }
-
-  const turns: Selection[] = Array.isArray(raw.turns)
-    ? raw.turns
-        .map((entry) => entry as { turn?: unknown; score?: unknown })
-        .filter((entry) => typeof entry?.turn === "number" && Number.isFinite(entry.turn))
-        .map((entry) => ({
-          turn: entry.turn as number,
-          score: typeof entry.score === "number" && Number.isFinite(entry.score) ? entry.score : 0,
-        }))
-    : [];
-
-  const data = Array.isArray(raw.data)
-    ? raw.data.filter((value): value is number => typeof value === "number" && Number.isInteger(value))
-    : [];
-  const charts = Array.isArray(raw.charts)
-    ? raw.charts.filter((value): value is string => typeof value === "string")
-    : [];
-
-  return { framing: typeof raw.framing === "string" ? raw.framing.trim() : "", turns, data, charts };
-}
-
-const FETCH_SYSTEM = [
-  "You are a retrieval assistant. You are given a numbered slice of conversation and a retrieval need.",
-  "Your ONLY job is to SELECT: pick out the turn numbers, preservedData indices, and chart symbols relevant to the need.",
-  "You must NEVER restate, summarize, or paraphrase any content from the slice, and above all NEVER write out any number —",
-  "everything will be resolved by the tool from the original text using the indices you give.",
-  "Output JSON only:",
-  '{"framing":"one sentence on why these were chosen (must not contain any number)","turns":[{"turn":3,"score":0.9}],"data":[0],"charts":["AAPL"]}',
-  "Return empty arrays if nothing is relevant.",
-].join("\n");
-
 // ── the toolset ───────────────────────────────────────────────────────────
 
 /**
@@ -296,7 +241,7 @@ const FETCH_SYSTEM = [
  */
 export class ResearchToolset {
   private readonly ctx: ResearchToolContext;
-  private readonly askSemaphore = new Semaphore(ASK_TOPIC_CONCURRENCY);
+  private readonly dispatchSemaphore = new Semaphore(DISPATCH_TASK_CONCURRENCY);
   /** Recursion depth 1: a Topic already driven THIS turn cannot be re-entered. */
   private drivenThisTurn = new Set<string>();
   /** The active skill's `## for: topic` section. Becomes visible text on the
@@ -329,7 +274,7 @@ export class ResearchToolset {
     return this.ctx.store.listTopics(this.ctx.agentId).find((t) => t.id === topicId)?.name ?? topicId;
   }
 
-  // ── ask_topic ───────────────────────────────────────────────────────────
+  // ── dispatch_task ───────────────────────────────────────────────────────
   /**
    * Delivers `message` to a Topic AS THE USER and waits for its final reply.
    *
@@ -341,7 +286,7 @@ export class ResearchToolset {
    * stays honest about which turns the user typed and which were asked on
    * their behalf. See `stampOrigin` for why that needs no framework change.
    */
-  async askTopic(topicId: string, message: string): Promise<AskTopicResult> {
+  async dispatchTask(topicId: string, message: string): Promise<DispatchTaskResult> {
     const topicName = this.topicName(topicId);
     const trimmed = message.trim();
     if (!trimmed) {
@@ -352,7 +297,7 @@ export class ResearchToolset {
     const task = this.topicSection ? `${trimmed}\n\n${this.topicSection}` : trimmed;
     if (this.drivenThisTurn.has(topicId)) {
       // Recursion depth 1 (§4.4): one drive per Topic per controller turn.
-      const result: AskTopicResult = {
+      const result: DispatchTaskResult = {
         topicId,
         topicName,
         status: "skipped",
@@ -363,7 +308,7 @@ export class ResearchToolset {
     }
     this.drivenThisTurn.add(topicId);
 
-    const release = await this.askSemaphore.acquire();
+    const release = await this.dispatchSemaphore.acquire();
     this.ctx.emit({ name: "topic_dispatch", data: { topicId, topicName, task, status: "running" } });
 
     try {
@@ -371,17 +316,55 @@ export class ResearchToolset {
       // behind. `getOrCreate` is registry-cached — this is not a second load.
       const memberState = await this.ctx.sessions.getOrCreate(topicId);
 
+      // Research subscribes to its own session, while a member Topic writes
+      // model revisions to its separate session. Relay only revision frames so
+      // the currently visible member workbook refetches without duplicating
+      // the member's chat or progress stream in the Research conversation.
+      const unforwardModelRevisions = memberState.subscribe((event) => {
+        for (const frame of projectEvent(event, memberState)) {
+          if (frame.type !== "model_revision") continue;
+          this.ctx.emit({
+            name: "model_revision",
+            data: {
+              display: frame.display,
+              model_id: frame.model_id,
+              revision: frame.revision,
+              lifecycle_stage: frame.lifecycle_stage,
+              changed_sections: frame.changed_sections,
+              changed_line_item_ids: frame.changed_line_item_ids,
+              changed_period_ids: frame.changed_period_ids,
+              change_kinds: frame.change_kinds,
+            },
+          });
+        }
+      });
+
       const unstamp = await this.stampOrigin(topicId, task);
       let response: string;
       try {
+        const topicRun = this.ctx.orchestrator.run({
+          agentId: this.ctx.agentId,
+          sessionId: topicId,
+          userMessage: task,
+          ...(this.ctx.activeModel?.topicId === topicId ? { activeModel: this.ctx.activeModel } : {}),
+        });
+        // Do this on the underlying run rather than after `withTimeout`: a
+        // timed-out controller tool does not cancel the Topic's work. Once that
+        // work eventually settles it still deserves the same digest check as a
+        // human-originated request.
+        void topicRun.then(
+          () => this.ctx.topicDigests?.schedule(topicId),
+          () => this.ctx.topicDigests?.schedule(topicId),
+        );
         const result = await withTimeout(
-          this.ctx.orchestrator.run({ agentId: this.ctx.agentId, sessionId: topicId, userMessage: task }),
-          this.ctx.askTimeoutMs ?? ASK_TOPIC_TIMEOUT_MS,
-          `ask_topic(${topicId})`,
+          topicRun,
+          this.ctx.askTimeoutMs ?? DISPATCH_TASK_TIMEOUT_MS,
+          `dispatch_task(${topicId})`,
         );
         response = result.response;
       } finally {
         unstamp();
+        unforwardModelRevisions();
       }
 
       // Changes this controller caused are not "external" (§4.2.3), so move the
@@ -422,6 +405,30 @@ export class ResearchToolset {
       };
     } finally {
       release();
+    }
+  }
+
+  /** A non-persistent answer from a member Topic's existing context. Unlike
+   * dispatch_task, this never adds a user turn, runs tools, or changes the model. */
+  async consultTopic(topicId: string, question: string): Promise<ConsultTopicResult> {
+    const topicName = this.topicName(topicId);
+    const trimmed = question.trim();
+    if (!trimmed) return { topicId, topicName, status: "failed", reason: "question is empty" };
+    try {
+      const result = await withTimeout(
+        this.ctx.orchestrator.consult({
+          agentId: this.ctx.agentId,
+          sessionId: topicId,
+          question: `Answer from your established Topic context only; do not do new research. Question: ${trimmed}`,
+          ...(this.ctx.activeModel?.topicId === topicId ? { activeModel: this.ctx.activeModel } : {}),
+        }),
+        this.ctx.askTimeoutMs ?? DISPATCH_TASK_TIMEOUT_MS,
+        `consult_topic(${topicId})`,
+      );
+      return { topicId, topicName, status: "ok", reply: result.response };
+    } catch (error) {
+      return { topicId, topicName, status: error instanceof TimeoutError ? "timeout" : "failed",
+        reason: error instanceof Error ? error.message : String(error) };
     }
   }
 
@@ -481,130 +488,6 @@ export class ResearchToolset {
       data: { scope: "members", researchId: this.ctx.researchId, source: "agent", previous: members, next },
     });
     return { topicId, name: trimmed, members: next };
-  }
-
-  // ── fetch_from_topic ────────────────────────────────────────────────────
-  /**
-   * Reads a Topic WITH A QUESTION IN HAND (§4.3).
-   *
-   * Map-reduce: chunk the turns, ask a SMALL model per chunk which turns are
-   * relevant, then merge the selections mechanically — no second model pass,
-   * because ranking has nothing to understand and another pass is another
-   * chance to distort.
-   *
-   * The model's answers are ids. Every excerpt returned here is read back out
-   * of the original turn, byte for byte. Its `framing` is checked with
-   * `containsDigits`: a framing with a number in it is dropped, the excerpts
-   * are kept. Losing one explanatory sentence is cheap; a paraphrased P/E is
-   * not.
-   */
-  async fetchFromTopic(topicId: string, need: string): Promise<FetchFromTopicResult> {
-    const turns = buildIndexedTurns(await this.ctx.sessions.loadEvents(topicId));
-    const compaction = await this.ctx.store.loadCompaction(topicId);
-    const preserved = compaction?.preservedData ?? [];
-    const charts = this.ctx.store.listTopicCharts(topicId);
-
-    if (turns.length === 0 && preserved.length === 0) {
-      return { framing: "", excerpts: [], data: [], charts: [], coverage: "This Topic has no conversation history yet" };
-    }
-
-    const sidecar = this.renderSidecar(preserved, charts);
-    const chunks = chunkTurns(turns, FETCH_CHUNK_TOKENS);
-
-    const selections = await mapWithConcurrency(chunks, FETCH_CHUNK_CONCURRENCY, async (chunk) => {
-      try {
-        const completion = await this.ctx.modelRouter.generate(
-          [
-            { role: "system", content: FETCH_SYSTEM },
-            {
-              role: "user",
-              content: [
-                `Retrieval need: ${need}`,
-                "",
-                "Conversation slice:",
-                renderChunkForModel(chunk),
-                sidecar,
-              ].join("\n"),
-            },
-          ],
-          { modelClass: "SMALL", temperature: 0, metadata: { mode: "research_fetch" } },
-        );
-        return parseChunkSelection(completion.text);
-      } catch {
-        return { framing: "", turns: [], data: [], charts: [] } as ChunkSelection;
-      }
-    });
-
-    const merged = mergeSelections(
-      selections.map((s) => s.turns),
-      FETCH_EXCERPT_BUDGET_TOKENS,
-      turns,
-    );
-
-    // Excerpts are resolved from `turns` — the ORIGINAL text — never from
-    // anything the model wrote.
-    const excerpts: FetchExcerpt[] = merged.turns.map((t) => ({ turn: t.turn, user: t.user, reply: t.reply }));
-
-    const dataIndices = [...new Set(selections.flatMap((s) => s.data))]
-      .filter((index) => index >= 0 && index < preserved.length)
-      .sort((a, b) => a - b);
-    const data = dataIndices.map((index) => ({
-      index,
-      turn: preserved[index]!.turn,
-      agent: preserved[index]!.agent,
-      data: preserved[index]!.data,
-    }));
-
-    const wantedSymbols = new Set(selections.flatMap((s) => s.charts).map((s) => s.toUpperCase()));
-    // Overlay rows have no single ticker to match against the model's symbol picks — that
-    // resolution is edit_overlay/overlay-tool territory (a later task), not this fetch path.
-    const selectedCharts = charts.filter(
-      (chart) => chart.kind === "symbol" && wantedSymbols.has(chart.symbol.toUpperCase()),
-    );
-
-    return {
-      framing: this.pickFraming(selections, merged.turns),
-      excerpts,
-      data,
-      charts: selectedCharts,
-      coverage:
-        merged.coverage === "full"
-          ? `Covered all ${turns.length} turns`
-          : `${turns.length} turns total; budget limited the return to the ${excerpts.length} most relevant`,
-    };
-  }
-
-  /** The numbered preservedData / chart block appended to every chunk prompt:
-   *  without indices the model has nothing to cite (§4.3.2). */
-  private renderSidecar(
-    preserved: CompactionCache["preservedData"],
-    charts: TopicChartPreferenceRow[],
-  ): string {
-    const parts: string[] = [];
-    if (preserved.length > 0) {
-      parts.push(
-        "",
-        "Preserved structured data (reference by index):",
-        ...preserved.map((entry, index) => `[data ${index}] turn ${entry.turn} · ${entry.agent} · ${JSON.stringify(entry.data)}`),
-      );
-    }
-    const symbolCharts = charts.filter((c): c is Extract<TopicChartPreferenceRow, { kind: "symbol" }> => c.kind === "symbol");
-    if (symbolCharts.length > 0) {
-      parts.push("", `This Topic's charts (reference by symbol): ${symbolCharts.map((c) => c.symbol).join(", ")}`);
-    }
-    return parts.join("\n");
-  }
-
-  /** Framing of the chunk that produced the top-ranked turn; dropped entirely
-   *  if it contains a digit (§4.3.2). */
-  private pickFraming(selections: ChunkSelection[], rankedTurns: IndexedTurn[]): string {
-    const top = rankedTurns[0]?.turn;
-    const owner =
-      top === undefined
-        ? undefined
-        : selections.find((s) => s.turns.some((sel) => sel.turn === top) && s.framing);
-    const framing = (owner ?? selections.find((s) => s.framing))?.framing ?? "";
-    return containsDigits(framing) ? "" : framing;
   }
 
   // ── focus ───────────────────────────────────────────────────────────────

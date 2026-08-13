@@ -14,7 +14,7 @@
 // All three are pure: no I/O, no model calls. Callers (a later task) supply
 // MemberFacts already loaded from storage.
 
-import { estimateTokens } from "./retrieval.ts";
+import { estimateTokens } from "./tokenEstimate.ts";
 
 export type MemberFacts = {
   topicId: string;

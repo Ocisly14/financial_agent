@@ -11,6 +11,7 @@ function topic(
         id,
         name: id,
         leadSymbol: over.symbol ?? null,
+        subjectSymbols: over.symbol ? [over.symbol] : [],
         createdAt: over.at ?? 0,
         lastMessage: { text: "x", createdAt: over.at ?? 0 },
         messageCount: 2,

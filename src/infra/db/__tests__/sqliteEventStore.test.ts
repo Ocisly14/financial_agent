@@ -30,7 +30,10 @@ test("SQLite event store restores events and compaction after reopening the file
   const restored = await new SessionRegistry(secondStore).getOrCreate("room-1");
 
   assert.equal(restored.currentTurn, 1);
-  assert.deepEqual(restored.allEvents().map((event) => event.kind), ["user_message", "reply"]);
+  // The durable audit log retains the raw turn, while the restored working
+  // context reapplies its saved compaction boundary to avoid double injection.
+  assert.deepEqual((await secondStore.loadEvents("room-1")).map((event) => event.kind), ["user_message", "reply"]);
+  assert.deepEqual(restored.allEvents().map((event) => event.kind), []);
   assert.deepEqual(restored.compactionCache(), {
     summarizedThroughTurn: 1,
     summaryText: "The user said hello.",
@@ -61,6 +64,7 @@ test("SQLite room catalog persists metadata, message previews, rename, and delet
     id: "room-1",
     name: "First room",
     leadSymbol: null,
+    subjectSymbols: [],
     createdAt: 100,
     lastMessage: { text: "hi", createdAt: Date.parse(state.allEvents()[1]!.timestamp) },
     messageCount: 2,

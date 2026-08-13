@@ -98,7 +98,10 @@ export function TopicWorkspace({
     const [activeSheetId, setActiveSheetId] = useState<string | undefined>(() => demo?.initialSheetId);
     const [userPickedThisTurn, setUserPickedThisTurn] = useState(false);
 
-    const stream = useResearchStream(agentId, sessionId, { onModelRevision: model.onRevisionFrame });
+    const stream = useResearchStream(agentId, sessionId, {
+        onModelRevision: model.onRevisionFrame,
+        activeModelId: model.activeModelId,
+    });
     // Called unconditionally: in narrow mode the result goes unused, but a
     // hook that only sometimes runs is not a hook.
     const { containerRef, ratio, setRatio } = useSplitLayout(railWidth);

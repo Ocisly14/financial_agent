@@ -62,7 +62,10 @@ export function TopicRailItem({
     const [mode, setMode] = useState<RowMode>("idle");
     const [draftName, setDraftName] = useState(topic.name);
 
-    const badge = topic.leadSymbol ? (
+    // A chart tab is a stronger display preference than a digest inference; if
+    // no chart exists yet, the digest still makes the Topic's subject visible.
+    const displayedSymbol = topic.leadSymbol ?? topic.subjectSymbols[0] ?? null;
+    const badge = displayedSymbol ? (
         <span
             className={cn(
                 "fin-figure inline-flex h-5 shrink-0 items-center justify-center rounded-[4px] border px-1.5 text-[10px] font-semibold tracking-wide",
@@ -71,7 +74,7 @@ export function TopicRailItem({
                     : "border-sep bg-fill-1 text-label-2",
             )}
         >
-            {topic.leadSymbol}
+            {displayedSymbol}
         </span>
     ) : null;
 
@@ -131,7 +134,7 @@ export function TopicRailItem({
                     "flex items-center justify-center rounded-md py-1.5 transition-colors",
                     isActive ? "bg-brand-sub" : "hover:bg-fill-1",
                 )}
-                title={topic.leadSymbol ?? topic.name}
+                title={displayedSymbol ?? topic.name}
             >
                 {badge ?? (
                     <span className="flex size-5 shrink-0 items-center justify-center rounded-[4px] bg-fill-1 text-[10px] font-semibold text-label-3">
@@ -266,7 +269,7 @@ export function TopicRailItem({
 }
 
 function RowText({ topic }: { topic: TopicSummary }) {
-    const preview = topic.lastMessage ? markdownPreviewText(topic.lastMessage.text) : "";
+    const preview = topic.summary ?? (topic.lastMessage ? markdownPreviewText(topic.lastMessage.text) : "");
     return (
         <div className="flex min-w-0 flex-1 flex-col">
             <span className="truncate text-sm font-medium">{topic.name}</span>

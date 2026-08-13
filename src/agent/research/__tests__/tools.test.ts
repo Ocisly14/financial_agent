@@ -3,12 +3,10 @@ import assert from "node:assert/strict";
 import { ModelRouter, type GenerateOptions, type LlmMessage, type LlmProvider } from "../../../infra/llm/provider.ts";
 import { SessionRegistry } from "../../../framework/sessionState.ts";
 import { InMemoryEventStore } from "../../../framework/eventStore.ts";
-import type { CompactionCache } from "../../../framework/eventStore.ts";
 import type { ResearchMember, TopicChartPreferenceRow, TopicSummary } from "../../../infra/db/sqliteEventStore.ts";
 import { buildIndexedTurns } from "../../topicDigest.ts";
 import {
   ResearchToolset,
-  parseChunkSelection,
   type ResearchFrame,
   type ResearchToolStore,
 } from "../tools.ts";
@@ -60,12 +58,11 @@ class FakeStore implements ResearchToolStore {
   topics: TopicSummary[] = [];
   charts = new Map<string, TopicChartPreferenceRow[]>();
   members: ResearchMember[] = [];
-  compactions = new Map<string, CompactionCache>();
   seen: Array<{ topicId: string; turn: number }> = [];
 
   createTopic(_agentId: string, topicId: string, name: string, createdAt = Date.now()): TopicSummary {
     const topic: TopicSummary = {
-      id: topicId, name, leadSymbol: null, createdAt, lastMessage: null, messageCount: 0,
+      id: topicId, name, leadSymbol: null, subjectSymbols: [], createdAt, lastMessage: null, messageCount: 0,
       summary: null, category: null, categoryLocked: false,
     };
     this.topics.push(topic);
@@ -96,9 +93,6 @@ class FakeStore implements ResearchToolStore {
   setMemberSeenTurn(_researchId: string, topicId: string, seenThroughTurn: number): void {
     this.seen.push({ topicId, turn: seenThroughTurn });
   }
-  async loadCompaction(sessionId: string): Promise<CompactionCache | undefined> {
-    return this.compactions.get(sessionId);
-  }
 }
 
 function routerReturning(reply: string | ((messages: LlmMessage[]) => string)): ModelRouter {
@@ -120,18 +114,23 @@ type Harness = {
   store: FakeStore;
   sessions: SessionRegistry;
   frames: ResearchFrame[];
-  runs: Array<{ sessionId: string; userMessage: string; allowUserInput?: boolean }>;
+  runs: Array<{ sessionId: string; userMessage: string; allowUserInput?: boolean; activeModel?: { modelId: string } }>;
 };
 
 function harness(options: {
-  run?: (input: { sessionId: string; userMessage: string; allowUserInput?: boolean }) => Promise<{ response: string }>;
+  run?: (input: { sessionId: string; userMessage: string; allowUserInput?: boolean; activeModel?: { modelId: string } }) => Promise<{ response: string }>;
   router?: ModelRouter;
   askTimeoutMs?: number;
+  activeModel?: {
+    modelId: string; topicId: string; symbol: string; createdAt: string; updatedAt: string;
+    currentRevision: number; lifecycleStage: string;
+  };
+  onDigestSchedule?: (topicId: string) => void;
 } = {}): Harness {
   const store = new FakeStore();
   const sessions = new SessionRegistry(new InMemoryEventStore());
   const frames: ResearchFrame[] = [];
-  const runs: Array<{ sessionId: string; userMessage: string; allowUserInput?: boolean }> = [];
+  const runs: Array<{ sessionId: string; userMessage: string; allowUserInput?: boolean; activeModel?: { modelId: string } }> = [];
   const toolset = new ResearchToolset({
     agentId: "default",
     researchId: "res_1",
@@ -143,9 +142,14 @@ function harness(options: {
         runs.push(input);
         return options.run ? options.run(input) : { response: `reply to ${input.userMessage}` };
       },
+      async consult(input) {
+        return { response: `consultation for ${input.question}` };
+      },
     },
     modelRouter: options.router ?? routerReturning("{}"),
     emit: (frame) => frames.push(frame),
+    ...(options.onDigestSchedule ? { topicDigests: { schedule: options.onDigestSchedule } } : {}),
+    ...(options.activeModel ? { activeModel: options.activeModel } : {}),
     ...(options.askTimeoutMs === undefined ? {} : { askTimeoutMs: options.askTimeoutMs }),
     idFactory: (prefix) => `${prefix}_test_${store.topics.length + 1}`,
   });
@@ -153,19 +157,46 @@ function harness(options: {
   return { toolset, store, sessions, frames, runs };
 }
 
-// ── ask_topic: it is the user's stand-in ──────────────────────────────────
+// ── dispatch_task: persistent Topic work ──────────────────────────────────
 
-test("ask_topic runs the topic's own orchestrator and returns its final reply", async () => {
+test("dispatch_task runs the Topic's own orchestrator and returns its final reply", async () => {
   const h = harness();
   h.store.createTopic("default", "room_a", "AAPL");
   h.store.replaceResearchMembers("res_1", ["room_a"]);
 
-  const result = await h.toolset.askTopic("room_a", "渠道库存怎么样？");
+  const result = await h.toolset.dispatchTask("room_a", "渠道库存怎么样？");
 
   assert.equal(result.status, "ok");
   assert.equal(result.reply, "reply to 渠道库存怎么样？");
   assert.deepEqual(h.runs, [{ agentId: "default", sessionId: "room_a", userMessage: "渠道库存怎么样？" }],
     "the background Topic run must not surface an input card outside the current Research");
+});
+
+test("dispatch_task arms the Topic digest scheduler after the driven turn completes", async () => {
+  const scheduled: string[] = [];
+  const h = harness({ onDigestSchedule: (topicId) => scheduled.push(topicId) });
+  h.store.createTopic("default", "room_a", "AAPL");
+
+  await h.toolset.dispatchTask("room_a", "Review the latest results");
+
+  assert.deepEqual(scheduled, ["room_a"]);
+});
+
+test("a selected Research model is advisory context only for its owning member", async () => {
+  const h = harness({ activeModel: {
+    modelId: "model_aapl", topicId: "room_a", symbol: "AAPL", createdAt: "2026-08-01T00:00:00Z",
+    updatedAt: "2026-08-12T00:00:00Z", currentRevision: 7, lifecycleStage: "valued",
+  } });
+  h.store.createTopic("default", "room_a", "AAPL");
+  h.store.createTopic("default", "room_b", "NVDA");
+  h.store.replaceResearchMembers("res_1", ["room_a", "room_b"]);
+
+  await h.toolset.dispatchTask("room_a", "revise the visible DCF");
+  h.toolset.beginTurn();
+  await h.toolset.dispatchTask("room_b", "compare margins");
+
+  assert.equal(h.runs[0]?.activeModel?.modelId, "model_aapl");
+  assert.equal(h.runs[1]?.activeModel, undefined);
 });
 
 test("the user_message written on the topic carries origin, unchanged content, and no framework edit", async () => {
@@ -184,7 +215,7 @@ test("the user_message written on the topic carries origin, unchanged content, a
   h.store.createTopic("default", "room_a", "AAPL");
   h.store.replaceResearchMembers("res_1", ["room_a"]);
 
-  await h.toolset.askTopic("room_a", "查一下渠道库存");
+  await h.toolset.dispatchTask("room_a", "查一下渠道库存");
 
   const state = await h.sessions.getOrCreate("room_a");
   const userEvent = state.allEvents().find((e) => e.kind === "user_message");
@@ -203,15 +234,15 @@ test("a topic already driven this turn is not re-entered (recursion depth 1)", a
   const h = harness();
   h.store.createTopic("default", "room_a", "AAPL");
 
-  const first = await h.toolset.askTopic("room_a", "问题一");
-  const second = await h.toolset.askTopic("room_a", "问题二");
+  const first = await h.toolset.dispatchTask("room_a", "问题一");
+  const second = await h.toolset.dispatchTask("room_a", "问题二");
 
   assert.equal(first.status, "ok");
   assert.equal(second.status, "skipped");
   assert.equal(h.runs.length, 1, "the second call must never reach the orchestrator");
 
   h.toolset.beginTurn();
-  const nextTurn = await h.toolset.askTopic("room_a", "下一轮的问题");
+  const nextTurn = await h.toolset.dispatchTask("room_a", "下一轮的问题");
   assert.equal(nextTurn.status, "ok", "the guard is per turn, not forever");
 });
 
@@ -230,13 +261,13 @@ test("at most 3 topics are driven at once", async () => {
   const ids = ["a", "b", "c", "d", "e", "f"].map((suffix) => `room_${suffix}`);
   for (const id of ids) h.store.createTopic("default", id, id);
 
-  const results = await Promise.all(ids.map((id) => h.toolset.askTopic(id, "go")));
+  const results = await Promise.all(ids.map((id) => h.toolset.dispatchTask(id, "go")));
 
   assert.equal(peak, 3, "concurrency cap is 3");
   assert.deepEqual(results.map((r) => r.status), ids.map(() => "ok"), "all six still run, queued");
 });
 
-test("a timed-out ask_topic fails only that member, and the turn goes on", async () => {
+test("a timed-out dispatch_task fails only that member, and the turn goes on", async () => {
   const h = harness({
     askTimeoutMs: 20,
     run: async (input) =>
@@ -248,95 +279,36 @@ test("a timed-out ask_topic fails only that member, and the turn goes on", async
   h.store.createTopic("default", "room_fast", "fast");
 
   const [slow, fast] = await Promise.all([
-    h.toolset.askTopic("room_slow", "go"),
-    h.toolset.askTopic("room_fast", "go"),
+    h.toolset.dispatchTask("room_slow", "go"),
+    h.toolset.dispatchTask("room_fast", "go"),
   ]);
 
   assert.equal(slow!.status, "timeout");
   assert.equal(fast!.status, "ok", "one member's timeout must not abort the whole turn");
 });
 
-// ── fetch_from_topic: the model chooses, it never speaks ──────────────────
-
-async function seedTopic(h: Harness, topicId: string, turns: Array<{ user: string; reply: string }>): Promise<void> {
-  const state = await h.sessions.getOrCreate(topicId);
-  for (const t of turns) {
-    state.beginTurn(t.user);
-    state.recordReply(t.reply, true);
-  }
-}
-
-test("excerpts are verbatim from the source and a framing with digits is dropped", async () => {
-  const router = routerReturning(JSON.stringify({
-    framing: "选了讨论估值倍数的两轮，P/E 大约 31.2",
-    turns: [{ turn: 2, score: 0.9 }, { turn: 1, score: 0.4 }],
-    data: [0],
-    charts: ["AAPL"],
-  }));
-  const h = harness({ router });
-  h.store.createTopic("default", "room_a", "AAPL");
-  h.store.charts.set("room_a", [symbolRow("AAPL", { range: 252, sortOrder: 0 })]);
-  h.store.compactions.set("room_a", {
-    summarizedThroughTurn: 1,
-    summaryText: "早期讨论",
-    preservedData: [{ turn: 1, agent: "market_data", data: { pe: 31.2 } }],
+test("consult_topic is ephemeral: it asks the Topic but writes no member turn", async () => {
+  let consulted: { sessionId: string; question: string } | undefined;
+  const store = new FakeStore();
+  const sessions = new SessionRegistry(new InMemoryEventStore());
+  store.createTopic("default", "room_a", "AAPL");
+  const toolset = new ResearchToolset({
+    agentId: "default", researchId: "res_1", researchName: "Research", store, sessions,
+    orchestrator: {
+      async run() { return { response: "unused" }; },
+      async consult(input) { consulted = input; return { response: "AAPL's established view is constructive." }; },
+    },
+    modelRouter: routerReturning("{}"), emit: () => {},
   });
-  await seedTopic(h, "room_a", [
-    { user: "AAPL 的估值？", reply: "当前 P/E 为 31.2，高于五年均值 24.8。" },
-    { user: "同业呢？", reply: "MSFT 的 P/E 为 34.1。" },
-  ]);
 
-  const result = await h.toolset.fetchFromTopic("room_a", "估值倍数");
-
-  assert.equal(result.framing, "", "a framing containing a number is discarded outright");
-  assert.equal(result.excerpts.length, 2, "the excerpts survive the dropped framing");
-  assert.equal(result.excerpts[0]?.turn, 2, "ranked by score");
-  assert.equal(result.excerpts[0]?.reply, "MSFT 的 P/E 为 34.1。", "byte-for-byte from the original turn");
-  assert.equal(result.excerpts[1]?.reply, "当前 P/E 为 31.2，高于五年均值 24.8。");
-  assert.deepEqual(result.data, [{ index: 0, turn: 1, agent: "market_data", data: { pe: 31.2 } }]);
-  assert.deepEqual(symbolsOf(result.charts), ["AAPL"]);
-  assert.equal(result.coverage, "Covered all 2 turns");
+  const result = await toolset.consultTopic("room_a", "What is the established view?");
+  assert.equal(result.status, "ok");
+  assert.equal(result.reply, "AAPL's established view is constructive.");
+  assert.match(consulted!.question, /established Topic context only/);
+  assert.equal((await sessions.getOrCreate("room_a")).allEvents().length, 0);
 });
 
-test("a digit-free framing is kept", async () => {
-  const router = routerReturning(JSON.stringify({
-    framing: "这几轮直接讨论了估值倍数",
-    turns: [{ turn: 1, score: 0.8 }],
-    data: [],
-    charts: [],
-  }));
-  const h = harness({ router });
-  await seedTopic(h, "room_a", [{ user: "估值？", reply: "P/E 为 31.2。" }]);
-
-  const result = await h.toolset.fetchFromTopic("room_a", "估值");
-  assert.equal(result.framing, "这几轮直接讨论了估值倍数");
-});
-
-test("a hallucinated turn id resolves to nothing rather than to some other turn", async () => {
-  const router = routerReturning(JSON.stringify({ framing: "无", turns: [{ turn: 99, score: 1 }], data: [7], charts: ["ZZZ"] }));
-  const h = harness({ router });
-  await seedTopic(h, "room_a", [{ user: "q", reply: "a" }]);
-
-  const result = await h.toolset.fetchFromTopic("room_a", "任何东西");
-  assert.deepEqual(result.excerpts, []);
-  assert.deepEqual(result.data, []);
-  assert.deepEqual(result.charts, []);
-});
-
-test("an unparseable model reply degrades to an empty selection, not to invented content", () => {
-  assert.deepEqual(parseChunkSelection("对不起，我没法只输出 JSON"), { framing: "", turns: [], data: [], charts: [] });
-});
-
-test("fetch on an empty topic says so without calling a model", async () => {
-  const router = routerReturning(() => {
-    throw new Error("the model must not be called for an empty topic");
-  });
-  const h = harness({ router });
-  const result = await h.toolset.fetchFromTopic("room_empty", "任何东西");
-  assert.equal(result.coverage, "This Topic has no conversation history yet");
-});
-
-// ── layout tools ──────────────────────────────────────────────────────────
+// ── layout tools ─────────────────────────────────────────────────────────
 
 test("focus emits a frame and writes nothing", async () => {
   const h = harness();
@@ -526,12 +498,12 @@ test("create_topic creates the topic and joins it to this research", () => {
 
 // ── setTopicSection: the skill's `## for: topic` text ──────────────────────
 
-test("setTopicSection appends its text to the message ask_topic sends", async () => {
+test("setTopicSection appends its text to the message dispatch_task sends", async () => {
   const h = harness();
   h.store.createTopic("default", "room_a", "AAPL");
   h.toolset.setTopicSection("请给出具体读数和日期。");
 
-  await h.toolset.askTopic("room_a", "渠道库存怎么样？");
+  await h.toolset.dispatchTask("room_a", "渠道库存怎么样？");
 
   assert.equal(h.runs.length, 1);
   assert.equal(h.runs[0]!.userMessage, "渠道库存怎么样？\n\n请给出具体读数和日期。");
@@ -541,7 +513,7 @@ test("without a topic section the message is unchanged", async () => {
   const h = harness();
   h.store.createTopic("default", "room_a", "AAPL");
 
-  await h.toolset.askTopic("room_a", "渠道库存怎么样？");
+  await h.toolset.dispatchTask("room_a", "渠道库存怎么样？");
 
   assert.equal(h.runs[0]!.userMessage, "渠道库存怎么样？");
 });
@@ -551,7 +523,7 @@ test("an empty message is still rejected before the section is appended", async 
   h.store.createTopic("default", "room_a", "AAPL");
   h.toolset.setTopicSection("请给出具体读数和日期。");
 
-  const result = await h.toolset.askTopic("room_a", "   ");
+  const result = await h.toolset.dispatchTask("room_a", "   ");
 
   assert.equal(result.status, "failed");
   assert.equal(h.runs.length, 0);
@@ -573,7 +545,7 @@ test("buildIndexedTurns pairs each turn with its final reply and keeps the turn 
   ]);
 });
 
-// ── ask_topic: a member may ask the user back ──────────────────────────────
+// ── dispatch_task: a member may ask the user back ──────────────────────────
 
 test("a member that leaves a pending question comes back as needs_input", async () => {
   const h = harness({
@@ -595,7 +567,7 @@ test("a member that leaves a pending question comes back as needs_input", async 
     },
   });
 
-  const result = await h.toolset.askTopic("room_a", "渠道库存怎么样？");
+  const result = await h.toolset.dispatchTask("room_a", "渠道库存怎么样？");
 
   assert.equal(result.status, "needs_input");
   assert.equal(result.request?.request_id, "req_1");
@@ -621,7 +593,7 @@ test("needs_input emits a member_input_request frame carrying the member's ident
     },
   });
 
-  await h.toolset.askTopic("room_a", "渠道库存怎么样？");
+  await h.toolset.dispatchTask("room_a", "渠道库存怎么样？");
 
   const frame = h.frames.find((f) => f.name === "member_input_request");
   assert.ok(frame, "a member_input_request frame should be emitted");
@@ -635,7 +607,7 @@ test("needs_input emits a member_input_request frame carrying the member's ident
 test("a member that answers normally is unaffected", async () => {
   const h = harness();   // default run() just returns a reply
 
-  const result = await h.toolset.askTopic("room_a", "渠道库存怎么样？");
+  const result = await h.toolset.dispatchTask("room_a", "渠道库存怎么样？");
 
   assert.equal(result.status, "ok");
   assert.equal(result.request, undefined);
@@ -644,6 +616,6 @@ test("a member that answers normally is unaffected", async () => {
 
 test("the driven Topic is no longer forbidden from asking the user", async () => {
   const h = harness();
-  await h.toolset.askTopic("room_a", "渠道库存怎么样？");
+  await h.toolset.dispatchTask("room_a", "渠道库存怎么样？");
   assert.equal(h.runs[0]!.allowUserInput, undefined);
 });
