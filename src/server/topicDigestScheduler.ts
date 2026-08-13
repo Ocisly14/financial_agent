@@ -10,20 +10,21 @@
 //
 // Two layers, because neither alone is enough:
 //
-//   schedule() — the in-process debounce. Fast and precise, but a Map of
-//                timers dies with the process.
-//   catchUp()  — the durable backstop. The dirty bit (`turnCount >
-//                digest_through_turn`) is in SQL, so anything a restart ate can
-//                be found again on the next sidebar poll, without loading a
-//                single event payload.
+//   schedule() — the in-process trigger. The first completed turn is immediate;
+//                subsequent calls debounce until a full three-turn batch is due.
+//   catchUp()  — the durable backstop. The due bit (`first turn`, or `turnCount
+//                >= digest_through_turn + 3`) is in SQL, so anything a restart
+//                ate can be found again on the next sidebar poll.
 
-import { DIGEST_CONCURRENCY, buildIndexedTurns, generateDigest, turnCountOf, type TopicHistorySource } from "../agent/topicDigest.ts";
+import { DIGEST_CONCURRENCY, buildIndexedTurns, generateDigest, type TopicHistorySource } from "../agent/topicDigest.ts";
 import { mapWithConcurrency } from "../agent/research/concurrency.ts";
 import type { ModelRouter } from "../infra/llm/provider.ts";
 import type { TopicCategory } from "../infra/db/sqliteEventStore.ts";
 
-/** How long a Topic must sit still after a turn before it is worth summarising. */
+/** How long a not-yet-complete three-turn batch must sit still before re-checking. */
 export const DEBOUNCE_MS = 30_000;
+/** The first digest covers one turn; every following digest incorporates three. */
+export const DIGEST_UPDATE_TURN_BATCH = 3;
 
 /** `catchUp` is driven by the sidebar poll, which the client repeats every 30s
  *  per open tab. Sweeping the whole agent that often is pointless — the debounce
@@ -32,9 +33,16 @@ export const CATCH_UP_THROTTLE_MS = 60_000;
 
 /** The slice of SqliteEventStore this scheduler needs. Narrow so tests can stub it. */
 export type TopicDigestStore = {
-  isTopicDigestStale(topicId: string): boolean;
-  listStaleTopics(agentId: string): string[];
-  setTopicDigest(topicId: string, summary: string, category: TopicCategory | null, throughTurn: number): void;
+  isTopicDigestDue(topicId: string): boolean;
+  listDigestDueTopics(agentId: string): string[];
+  getTopicDigest(topicId: string): { summary: string | null; throughTurn: number } | null;
+  setTopicDigest(
+    topicId: string,
+    summary: string,
+    category: TopicCategory | null,
+    throughTurn: number,
+    metadata: { title: string | null; symbols: string[] },
+  ): void;
 };
 
 export type TopicDigestSchedulerOptions = {
@@ -72,14 +80,22 @@ export class TopicDigestScheduler {
   }
 
   /**
-   * Arms (or re-arms) the debounce for one Topic. A rapid back-and-forth keeps
-   * pushing the deadline out, so a ten-turn conversation costs ONE model call
-   * at the end of it rather than ten.
+   * Runs the first digest and every complete three-turn increment immediately.
+   * Incomplete increments are merely debounced; their eventual third turn will
+   * make the next call due immediately.
    *
    * Only ever call this for real Topics. A Research session has no `chat_rooms`
    * row, so scheduling one would write a digest into nothing.
    */
   schedule(topicId: string): void {
+    if (this.store.isTopicDigestDue(topicId)) {
+      const existing = this.timers.get(topicId);
+      if (existing) clearTimeout(existing);
+      this.timers.delete(topicId);
+      void this.run(topicId);
+      return;
+    }
+
     const existing = this.timers.get(topicId);
     if (existing) clearTimeout(existing);
 
@@ -94,7 +110,7 @@ export class TopicDigestScheduler {
   }
 
   /**
-   * Re-summarises every Topic of one agent whose log has outrun its digest.
+   * Re-summarises every Topic of one agent with a complete digest increment.
    *
    * Throttled per agent, and safe to call from a hot request path: it returns
    * as soon as the work is dispatched only if the caller does not await it.
@@ -106,9 +122,9 @@ export class TopicDigestScheduler {
     if (last !== undefined && now - last < this.catchUpThrottleMs) return;
     this.lastCatchUp.set(agentId, now);
 
-    const stale = this.store.listStaleTopics(agentId).filter((topicId) => !this.inFlight.has(topicId));
-    if (stale.length === 0) return;
-    await mapWithConcurrency(stale, DIGEST_CONCURRENCY, (topicId) => this.run(topicId));
+    const due = this.store.listDigestDueTopics(agentId).filter((topicId) => !this.inFlight.has(topicId));
+    if (due.length === 0) return;
+    await mapWithConcurrency(due, DIGEST_CONCURRENCY, (topicId) => this.run(topicId));
   }
 
   /** Cancels every pending timer. For tests and clean shutdown. */
@@ -125,20 +141,28 @@ export class TopicDigestScheduler {
   private async run(topicId: string): Promise<void> {
     if (this.inFlight.has(topicId)) return;
 
-    // Re-check staleness at fire time rather than trusting whoever scheduled us.
-    // A catch-up sweep and an expiring debounce can both arrive for the same
-    // Topic, and the loser should cost nothing.
-    if (!this.store.isTopicDigestStale(topicId)) return;
+    // Re-check eligibility at fire time rather than trusting whoever scheduled
+    // us. A catch-up sweep and a just-expired timer can both arrive here.
+    if (!this.store.isTopicDigestDue(topicId)) return;
 
     this.inFlight.add(topicId);
     try {
-      const turns = buildIndexedTurns(await this.sessions.loadEvents(topicId));
-      const observedTurn = turnCountOf(turns);
-      if (observedTurn === 0) return;
+      // A restart can leave several three-turn increments behind. Process them
+      // serially: every model call sees only the previous digest plus one small
+      // batch, never an ever-growing transcript.
+      while (this.store.isTopicDigestDue(topicId)) {
+        const state = this.store.getTopicDigest(topicId);
+        const throughTurn = state?.throughTurn ?? 0;
+        const turns = buildIndexedTurns(await this.sessions.loadEvents(topicId));
+        const newTurns = turns.filter((turn) => turn.turn > throughTurn);
+        const batchSize = throughTurn === 0 ? 1 : DIGEST_UPDATE_TURN_BATCH;
+        const batch = newTurns.slice(0, batchSize);
+        if (batch.length < batchSize) return;
 
-      const { summary, category } = await generateDigest(turns, this.modelRouter);
-      if (!summary) return;
-      this.store.setTopicDigest(topicId, summary, category, observedTurn);
+        const { title, symbols, summary, category } = await generateDigest(batch, this.modelRouter, state?.summary);
+        if (!summary) return;
+        this.store.setTopicDigest(topicId, summary, category, batch[batch.length - 1]!.turn, { title, symbols });
+      }
     } catch (error) {
       this.onError(topicId, error);
     } finally {

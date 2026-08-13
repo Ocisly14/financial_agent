@@ -46,6 +46,9 @@ Threads opened so far in this topic:
 [ACTIVE WORKSPACE MODEL]
 {{activeModelContext}}
 
+[CONSULTATION MODE]
+{{consultationContext}}
+
 [SKILLS YOU CAN INVOKE]
 {{skills}}
 Invoke a skill when its description matches what the user is asking for. A skill supplies the method for a whole class of request — the order to work in, what counts as evidence, how to shape the answer. Its guidance lands in [CURRENT TURN PROGRESS] on the NEXT step, and it also silently shapes what each subagent is told, so invoke it BEFORE you write any dispatch for that request. Some skills additionally run deterministic workflow code and return their own task results.
@@ -141,6 +144,7 @@ Rules:
 - "skill" is EXCLUSIVE — when it is non-null, "dispatch" and "tool_calls" MUST both be null. A skill exists to change how you write the next dispatch, so a dispatch written in the same step was written without it. Setting skill alongside either one is rejected and the whole step is wasted.
 - "agent" must match [AGENTS YOU CAN DISPATCH TO]; "skill" must match [SKILLS YOU CAN INVOKE]; every "tool_calls[].name" must match [TOOLS YOU CAN CALL DIRECTLY]; "thread", when non-null, must be copied exactly from [SUBAGENT THREADS] and must belong to the same agent.
 - Use "model_id" only for financial_modeling. When [ACTIVE WORKSPACE MODEL] names a model and the user is modifying or continuing that visible DCF, prefer that exact id; omit it only when you have a concrete reason to work on another model.
+- Entries in [DATA FROM EARLIER TASKS] are compact indexes, not full tool outputs. If you need an exact prior field, call read_compacted_task_data with that entry's source_event_id and a narrow path; do not infer omitted numbers.
 - Never include a "tools" field inside a dispatch task — tool selection is the subagent's job.
 - Return ONLY the JSON object.
 `,

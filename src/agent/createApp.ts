@@ -21,6 +21,7 @@ import { researchPrompt } from "./research/researchPrompt.ts";
 import { getDefaultFinancialModelToolDeps } from "../../mcp_tools/financial-model/financialModelTools.ts";
 import { createDcfSubagentTool } from "../../mcp_tools/financial-model/dcfSubagentTool.ts";
 import { createStatementExtractionTool } from "../../mcp_tools/financial-model/statementExtractionTool.ts";
+import { createReadCompactedTaskDataTool } from "../../mcp_tools/session/readCompactedTaskDataTool.ts";
 
 export type FinancialAgentApp = Awaited<ReturnType<typeof createFinancialAgentApp>>;
 
@@ -43,12 +44,13 @@ export async function createFinancialAgentApp() {
   toolRegistry.register(createInvokeSkillTool(skills));
   toolRegistry.register(createReadSkillReferenceTool(skills));
   toolRegistry.register(createRunSkillScriptTool(skills));
+  toolRegistry.register(createReadCompactedTaskDataTool(sessions));
   // Registered after the runtime exists: run_dcf_subagent hands work to it. The registry is looked up
   // by name at call time, so registering into it after construction is fine.
   toolRegistry.register(createDcfSubagentTool({ subagentRuntime, subagents, sessions, financial: financialModelDeps }));
 
-  const dispatcherFactory = (sessionId: string, agentId: string) =>
-    new Dispatcher(sessionId, subagents, subagentRuntime, toolRegistry, sessions.getExisting(sessionId), agentId);
+  const dispatcherFactory = (sessionId: string, agentId: string, state?: import("../framework/sessionState.ts").SessionState) =>
+    new Dispatcher(sessionId, subagents, subagentRuntime, toolRegistry, state ?? sessions.getExisting(sessionId), agentId);
 
   const orchestrator = new OrchestratorRuntime(
     orchestratorPrompt,
@@ -60,8 +62,12 @@ export async function createFinancialAgentApp() {
     sessions,
   );
 
+  // Shared by the regular Topic endpoint and Research's dispatch_task
+  // route, so the two origins have one digest lifecycle.
+  const topicDigests = new TopicDigestScheduler({ store: eventStore, sessions, modelRouter });
+
   // The Research controller (spec §4). It sits BESIDE the orchestrator, not
-  // above it: `ask_topic` calls `orchestrator.run` — the same method a human
+  // above it: `dispatch_task` calls `orchestrator.run` — the same method a human
   // turn goes through — so the Topic agent never learns who is asking.
   const researchRuntime = new ResearchRuntime({
     prompt: researchPrompt,
@@ -69,6 +75,7 @@ export async function createFinancialAgentApp() {
     store: eventStore,
     sessions,
     topicOrchestrator: orchestrator,
+    topicDigests,
     tools: toolRegistry,
     skills,
   });
@@ -76,8 +83,6 @@ export async function createFinancialAgentApp() {
   // Keeps every Topic's own summary and category current, in the background.
   // Nothing reads from it — it only writes to `chat_rooms` — so both the
   // sidebar and the Research roster pick the result up through the store.
-  const topicDigests = new TopicDigestScheduler({ store: eventStore, sessions, modelRouter });
-
   return {
     eventStore,
     sessions,

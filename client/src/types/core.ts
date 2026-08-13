@@ -198,6 +198,8 @@ export type TopicSummary = {
   name: string;
   /** Derived from the topic's charts — the first visible chart (lowest sort order). Never written directly. */
   leadSymbol: string | null;
+  /** Symbols explicitly identified by the Topic digest, ordered by relevance. */
+  subjectSymbols: string[];
   createdAt: number;
   lastMessage: { text: string; createdAt: number } | null;
   messageCount: number;

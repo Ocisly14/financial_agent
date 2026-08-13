@@ -21,10 +21,10 @@
 //
 //   - Actions are tool calls only, and there can be SEVERAL in one step: the
 //     concurrency-3 guard (§4.4) only means something if the controller can
-//     drive three Topics at once, which means one step must be able to issue
-//     three `ask_topic` calls.
+//     dispatch three Topic tasks at once, which means one step must be able to
+//     issue three `dispatch_task` calls.
 //   - Member context is supplied in three layers (§4.2): a one-time roster, a
-//     per-turn external delta, and `fetch_from_topic` on demand.
+//     per-turn external delta, and `consult_topic` on demand.
 //   - The history projection is this file's own (`renderHistory`), not
 //     `SessionState.projectForPrompt`. That projection drops `tool_result`
 //     events from PRIOR turns — which for the Topic agent is right (a subagent
@@ -57,13 +57,14 @@ import {
   type ResearchFrame,
   type ResearchToolStore,
   type TabOp,
+  type TopicDigestSchedulerAccess,
   type TopicOrchestrator,
 } from "./tools.ts";
 
 /** Runaway-loop backstop, same intent (and same number) as the Topic agent's. */
 const MAX_STEPS = 6;
 
-/** How many tool calls from one step run at once. `ask_topic` is additionally
+/** How many tool calls from one step run at once. `dispatch_task` is additionally
  *  capped at 3 by the toolset's own semaphore (§4.4); this is only a ceiling on
  *  a step that asks for an absurd number of cheap calls. */
 const MAX_PARALLEL_TOOL_CALLS = 6;
@@ -74,7 +75,7 @@ const ROSTER_TOKENS_PER_MEMBER = 200;
 const ROSTER_MAX_TOKENS = 4_000;
 
 /** Prior-turn tool results are truncated in the history projection; the current
- *  turn's are not. Without this a Research with twenty `ask_topic` turns behind
+ *  turn's are not. Without this a Research with twenty `dispatch_task` turns behind
  *  it re-sends every member reply verbatim on every step. */
 const PRIOR_TOOL_SUMMARY_CHARS = 1_200;
 
@@ -93,9 +94,10 @@ export type ResearchRuntimeDeps = {
   modelRouter: ModelRouter;
   store: ResearchRuntimeStore;
   sessions: SessionRegistry;
-  /** The EXISTING, untouched Topic orchestrator. `ask_topic` calls exactly the
+  /** The EXISTING, untouched Topic orchestrator. `dispatch_task` calls exactly the
    *  method `handleChat` calls for a human turn. */
   topicOrchestrator: TopicOrchestrator;
+  topicDigests?: TopicDigestSchedulerAccess;
   tools: McpToolRegistry;
   skills: SkillRegistry;
 };
@@ -207,6 +209,7 @@ export class ResearchRuntime {
   private readonly store: ResearchRuntimeStore;
   private readonly sessions: SessionRegistry;
   private readonly topicOrchestrator: TopicOrchestrator;
+  private readonly topicDigests: TopicDigestSchedulerAccess | undefined;
   private readonly tools: McpToolRegistry;
   private readonly skills: SkillRegistry;
 
@@ -216,6 +219,7 @@ export class ResearchRuntime {
     this.store = deps.store;
     this.sessions = deps.sessions;
     this.topicOrchestrator = deps.topicOrchestrator;
+    this.topicDigests = deps.topicDigests;
     this.tools = deps.tools;
     this.skills = deps.skills;
   }
@@ -226,7 +230,6 @@ export class ResearchRuntime {
       throw new Error(`user input request '${input.inputResponse.request_id}' is no longer pending`);
     }
     const turn = state.beginTurn(input.userMessage, input.inputResponse);
-    await maybeCompact(state, this.modelRouter, turn);
 
     const toolset = new ResearchToolset({
       agentId: input.agentId,
@@ -235,6 +238,7 @@ export class ResearchRuntime {
       store: this.store,
       sessions: this.sessions,
       orchestrator: this.topicOrchestrator,
+      ...(this.topicDigests ? { topicDigests: this.topicDigests } : {}),
       modelRouter: this.modelRouter,
       emit: input.emit,
       ...(input.activeModel ? { activeModel: input.activeModel } : {}),
@@ -251,6 +255,9 @@ export class ResearchRuntime {
     let finalReply = "";
 
     for (let step = 1; step <= MAX_STEPS; step++) {
+      // Same boundary as the Topic orchestrator: compact older history as soon
+      // as a prior step crosses the threshold, never this in-flight turn.
+      await maybeCompact(state, this.modelRouter, turn);
       const rendered = this.renderer.render(this.prompt, {
         currentDate: new Date().toISOString().slice(0, 10),
         userMessage: input.userMessage,
@@ -306,7 +313,7 @@ export class ResearchRuntime {
         }
         if (status) state.recordReply(status, false);
         state.record("orchestrator", "skill_invoke", { skill: skill.name });
-        // The section has to land here: the ask_topic written next step is what carries it.
+        // The section has to land here: the dispatch_task written next step is what carries it.
         toolset.setTopicSection(skill.topicSection ?? "");
         const result = await this.skills.invoke(skill.name, {
           sessionId: state.session_id,
@@ -338,7 +345,7 @@ export class ResearchRuntime {
 
       const isAskingUser = askUserCalls.length === 1;
       if (status && !isAskingUser) state.recordReply(status, false);
-      // Calls in one step run together: three `ask_topic`s issued at once is the
+      // Calls in one step run together: three `dispatch_task`s issued at once is the
       // whole reason the concurrency guard exists.
       const outcomes = await mapWithConcurrency(parsed.toolCalls, MAX_PARALLEL_TOOL_CALLS, (call) =>
         this.invokeTool(toolset, state, input.agentId, call),
@@ -569,17 +576,17 @@ export class ResearchRuntime {
     const input = call.input;
 
     switch (call.name) {
-      case "ask_topic": {
+      case "dispatch_task": {
         const topicId = requireString(input, "topic_id");
         const message = requireString(input, "message");
-        const result = await toolset.askTopic(topicId, message);
+        const result = await toolset.dispatchTask(topicId, message);
         const summary =
           result.status === "ok"
             ? `[${result.topicName}] answered:\n${result.reply ?? ""}`
             : result.status === "needs_input"
               // Say plainly that this is an open question, not an empty answer —
               // otherwise the controller reads the gap as "no data" and fills it in.
-              ? `[${result.topicName}] is waiting on the user's answer to a question of its own and did not report this turn. Do not substitute another member's figures for it; once the user answers, fetch_from_topic will have its reply.`
+              ? `[${result.topicName}] is waiting on the user's answer to a question of its own and did not report this turn. Do not substitute another member's figures for it; once the user answers, dispatch_task can continue its work.`
               : `[${result.topicName}] ${result.status} this turn: ${result.reason ?? "unknown reason"}`;
         return { summary, data: result };
       }
@@ -593,11 +600,16 @@ export class ResearchRuntime {
         };
       }
 
-      case "fetch_from_topic": {
+      case "consult_topic": {
         const topicId = requireString(input, "topic_id");
-        const need = requireString(input, "need");
-        const result = await toolset.fetchFromTopic(topicId, need);
-        return { summary: renderFetchResult(result), data: result };
+        const question = requireString(input, "question");
+        const result = await toolset.consultTopic(topicId, question);
+        return {
+          summary: result.status === "ok"
+            ? `[${result.topicName}] consultation:\n${result.reply ?? ""}`
+            : `[${result.topicName}] consultation ${result.status}: ${result.reason ?? "unknown reason"}`,
+          data: result,
+        };
       }
 
       case "focus": {
@@ -724,37 +736,4 @@ function parseMemberOps(value: unknown): MemberOp[] {
 
 function truncate(text: string, limit: number): string {
   return text.length <= limit ? text : `${text.slice(0, limit)}…(truncated)`;
-}
-
-/**
- * Renders a `fetch_from_topic` result for the model. Excerpts go in VERBATIM —
- * every number the controller ever sees has to be the original text (§4.3.2),
- * and this is the last place that could quietly paraphrase one.
- */
-function renderFetchResult(result: {
-  framing: string;
-  excerpts: Array<{ turn: number; user: string; reply: string }>;
-  data: Array<{ index: number; turn: number; agent: string; data: unknown }>;
-  charts: TopicChartPreferenceRow[];
-  coverage: string;
-}): string {
-  const parts: string[] = [];
-  if (result.framing) parts.push(result.framing);
-  parts.push(`Coverage: ${result.coverage}`);
-  for (const excerpt of result.excerpts) {
-    parts.push(`[turn ${excerpt.turn}]\nUser: ${excerpt.user}\nReply: ${excerpt.reply}`);
-  }
-  for (const entry of result.data) {
-    parts.push(`[data ${entry.index}] turn ${entry.turn} · ${entry.agent} · ${JSON.stringify(entry.data)}`);
-  }
-  const symbolCharts = result.charts.filter(
-    (chart): chart is Extract<TopicChartPreferenceRow, { kind: "symbol" }> => chart.kind === "symbol",
-  );
-  if (symbolCharts.length) {
-    parts.push(`Related charts: ${symbolCharts.map((chart) => chart.symbol).join(", ")}`);
-  }
-  if (result.excerpts.length === 0 && result.data.length === 0) {
-    parts.push("(No content found relevant to this question.)");
-  }
-  return parts.join("\n\n");
 }

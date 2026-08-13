@@ -20,7 +20,7 @@ import type { TopicOrchestrator } from "../tools.ts";
 class EmptyResearchStore implements ResearchRuntimeStore {
   createTopic(_agentId: string, topicId: string, name: string, createdAt = Date.now()): TopicSummary {
     return {
-      id: topicId, name, leadSymbol: null, createdAt, lastMessage: null, messageCount: 0,
+      id: topicId, name, leadSymbol: null, subjectSymbols: [], createdAt, lastMessage: null, messageCount: 0,
       summary: null, category: null, categoryLocked: false,
     };
   }
@@ -115,6 +115,9 @@ function makeRuntime(options: { completions: string[]; skills: SkillRegistry }):
       topicRuns.push(input);
       return { response: `reply to ${input.userMessage}` };
     },
+    async consult(input) {
+      return { response: `consultation for ${input.question}` };
+    },
   };
   const tools = {} as unknown as McpToolRegistry; // unused by these tests: no ask_user call is scripted
 
@@ -184,7 +187,7 @@ test("invoking a research-layer skill records skill_result and installs the topi
   const runtime = makeRuntime({
     completions: [
       '{"reply":"读取方法后开始","skill":"probe","tool_calls":null}',
-      '{"reply":"正在查","tool_calls":[{"name":"ask_topic","input":{"topic_id":"room_a","message":"半导体怎么样？"}}]}',
+      '{"reply":"正在查","tool_calls":[{"name":"dispatch_task","input":{"topic_id":"room_a","message":"半导体怎么样？"}}]}',
       '{"reply":"结论如下","tool_calls":null}',
     ],
     skills: registryWith({
@@ -209,7 +212,7 @@ test("invoking a research-layer skill records skill_result and installs the topi
 test("skill and tool_calls in one step is a protocol error and runs nothing", async () => {
   const runtime = makeRuntime({
     completions: [
-      '{"reply":"两个一起","skill":"probe","tool_calls":[{"name":"ask_topic","input":{"topic_id":"room_a","message":"喂"}}]}',
+      '{"reply":"两个一起","skill":"probe","tool_calls":[{"name":"dispatch_task","input":{"topic_id":"room_a","message":"喂"}}]}',
       '{"reply":"收口","tool_calls":null}',
     ],
     skills: registryWith({ name: "probe", layer: "research", body: "Probe body.", topicSection: "请给出读数。" }),

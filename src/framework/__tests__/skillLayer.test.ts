@@ -71,7 +71,7 @@ test("a research-layer skill may not carry an agent section", async () => {
 });
 
 test("a research-layer skill may not declare tools or agents", async () => {
-  const root = await skillRoot("beta", RESEARCH_SKILL.replace("layer: research", "layer: research\ntools: [ask_topic]"));
+  const root = await skillRoot("beta", RESEARCH_SKILL.replace("layer: research", "layer: research\ntools: [dispatch_task]"));
   const registry = new SkillRegistry();
   await assert.rejects(() => registry.loadFromDirectory(root), /research-layer skill.*'tools'/);
 });

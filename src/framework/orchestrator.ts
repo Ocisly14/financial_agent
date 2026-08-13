@@ -3,7 +3,7 @@ import type { SkillRegistry } from "./skill.ts";
 import type { Dispatcher } from "./dispatcher.ts";
 import type { SubagentRegistry } from "./subagent.ts";
 import type { ModelRouter } from "../infra/llm/provider.ts";
-import type { LiveThread, SessionRegistry, SessionState } from "./sessionState.ts";
+import { type LiveThread, type SessionRegistry, SessionState } from "./sessionState.ts";
 import { maybeCompact } from "./contextCompaction.ts";
 import type { McpToolRegistry } from "../../mcp_tools/toolRegistry.ts";
 import type { PromptTemplate } from "./prompt.ts";
@@ -173,6 +173,14 @@ export type OrchestratorInput = {
   allowUserInput?: boolean;
 };
 
+/** A read-only, non-persistent consultation of a Topic's current working context. */
+export type TopicConsultationInput = {
+  sessionId: string;
+  agentId: string;
+  question: string;
+  activeModel?: ActiveWorkspaceModel;
+};
+
 /** Result of a turn. Task results / artifacts are read from the session log
  *  (via the SSE projector / state.turnResults), not returned here. */
 export type OrchestratorResult = {
@@ -181,7 +189,7 @@ export type OrchestratorResult = {
 };
 
 /** Tools the orchestrator can call directly (by name). */
-const ORCHESTRATOR_DIRECT_TOOLS = new Set<string>(["read_skill_reference", "run_skill_script", "ask_user"]);
+const ORCHESTRATOR_DIRECT_TOOLS = new Set<string>(["read_skill_reference", "run_skill_script", "read_compacted_task_data", "ask_user"]);
 
 /** How many subagent threads to show the orchestrator. Older ones are almost
  *  never what it wants to continue, and each line costs context. */
@@ -210,7 +218,7 @@ export class OrchestratorRuntime {
   private readonly renderer = new PromptRenderer();
   private readonly prompt: PromptTemplate;
   private readonly modelRouter: ModelRouter;
-  private readonly dispatcherFactory: (sessionId: string, agentId: string) => Dispatcher;
+  private readonly dispatcherFactory: (sessionId: string, agentId: string, state?: SessionState) => Dispatcher;
   private readonly subagents: SubagentRegistry;
   private readonly skills: SkillRegistry;
   private readonly tools: McpToolRegistry;
@@ -220,7 +228,7 @@ export class OrchestratorRuntime {
   constructor(
     prompt: PromptTemplate,
     modelRouter: ModelRouter,
-    dispatcherFactory: (sessionId: string, agentId: string) => Dispatcher,
+    dispatcherFactory: (sessionId: string, agentId: string, state?: SessionState) => Dispatcher,
     subagents: SubagentRegistry,
     skills: SkillRegistry,
     tools: McpToolRegistry,
@@ -237,13 +245,38 @@ export class OrchestratorRuntime {
 
   async run(input: OrchestratorInput): Promise<OrchestratorResult> {
     const state = await this.sessions.getOrCreate(input.sessionId);
+    return this.runWithState(input, state, false);
+  }
+
+  /**
+   * Answer from a disposable clone of the Topic's compact working state. The
+   * original Topic's event log, model, tools, and UI stream remain untouched.
+   */
+  async consult(input: TopicConsultationInput): Promise<OrchestratorResult> {
+    const source = await this.sessions.getOrCreate(input.sessionId);
+    const state = SessionState.restore(
+      source.session_id,
+      source.started_at,
+      structuredClone([...source.allEvents()]),
+      source.compactionCache() ? structuredClone(source.compactionCache()) : undefined,
+      undefined,
+    );
+    return this.runWithState({
+      sessionId: input.sessionId,
+      agentId: input.agentId,
+      userMessage: input.question,
+      ...(input.activeModel ? { activeModel: input.activeModel } : {}),
+      allowUserInput: false,
+    }, state, true);
+  }
+
+  private async runWithState(input: OrchestratorInput, state: SessionState, readOnlyConsultation: boolean): Promise<OrchestratorResult> {
     if (input.inputResponse && !state.pendingUserInput(input.inputResponse.request_id)) {
       throw new Error(`user input request '${input.inputResponse.request_id}' is no longer pending`);
     }
     const turn = state.beginTurn(input.userMessage, input.inputResponse);
-    await maybeCompact(state, this.modelRouter, turn);
 
-    const dispatcher = this.dispatcherFactory(input.sessionId, input.agentId);
+    const dispatcher = this.dispatcherFactory(input.sessionId, input.agentId, state);
     // The same rule the orchestrator applies to its own ask_user below, pushed
     // down to the subagents it dispatches: no human on this stream, no asking.
     dispatcher.setUserInputAllowed(input.allowUserInput !== false);
@@ -257,6 +290,10 @@ export class OrchestratorRuntime {
       : this.orchestratorTools;
 
     for (let step = 1; step <= MAX_STEPS; step++) {
+      // Run before every prompt, not just at the start of a user turn. The
+      // cutoff is deliberately before `turn`, so this never summarizes the
+      // current request or its in-flight results.
+      await maybeCompact(state, this.modelRouter, turn);
       const proj = state.projectForPrompt(turn);
       const history = proj.currentTurnProgress
         ? `${proj.conversationSoFar}\n\n[CURRENT TURN PROGRESS]\n${proj.currentTurnProgress}`
@@ -270,6 +307,9 @@ export class OrchestratorRuntime {
         activeModelContext: input.activeModel
           ? `The user is currently viewing this financial model:\n- Model ID: ${input.activeModel.modelId}\n- Symbol: ${input.activeModel.symbol}\n- Created: ${input.activeModel.createdAt}\n- Last updated: ${input.activeModel.updatedAt}\n- Current revision: ${input.activeModel.currentRevision}\n- Lifecycle stage: ${input.activeModel.lifecycleStage}\nIf their request concerns this DCF, prefer continuing it: dispatch financial_modeling with this model ID in model_id so the subagent can refresh its state first. This is advisory context, not a command to ignore evidence that a different model is needed.`
           : "No financial model is currently selected in the workspace.",
+        consultationContext: readOnlyConsultation
+          ? "This is a read-only consultation of an existing Topic for a Research controller. Answer from the Topic's existing context only. Do not dispatch agents, call tools, ask the user, create or modify models, or claim new research. Your reply is temporary and will not be written to the Topic history."
+          : "Normal Topic turn: use the available actions when needed.",
         subagents: formatList(this.subagents.list().map((a) => ({ name: a.name, description: a.description }))),
         skills: formatList(this.skills.list().map((s) => ({ name: s.name, description: s.description }))),
         tools: formatList(this.tools.list()
@@ -295,6 +335,14 @@ export class OrchestratorRuntime {
 
       const stepObj = parseStep(completionText);
       const status = stepObj.reply.trim();
+
+      // A consultation is deliberately an answer-only view of the Topic. Even
+      // if the model emits an action, it cannot mutate durable state or start
+      // background work from this ephemeral session.
+      if (readOnlyConsultation) {
+        finalReply = status || "This Topic has no established answer for that question yet.";
+        break;
+      }
 
       // `skill` cannot share a step with anything else: it installs the guidance
       // and allowance that are meant to shape the NEXT step's decisions, so a

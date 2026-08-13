@@ -16,17 +16,25 @@ class FakeStore implements TopicDigestStore {
   digested = new Map<string, number>();
   /** topicId -> the turn its log actually reaches. */
   logs = new Map<string, number>();
-  writes: Array<{ topicId: string; summary: string; category: TopicCategory | null; throughTurn: number }> = [];
+  summaries = new Map<string, string>();
+  writes: Array<{ topicId: string; summary: string; category: TopicCategory | null; throughTurn: number; metadata: { title: string | null; symbols: string[] } }> = [];
 
-  isTopicDigestStale(topicId: string): boolean {
-    return (this.logs.get(topicId) ?? 0) > (this.digested.get(topicId) ?? 0);
+  isTopicDigestDue(topicId: string): boolean {
+    const observed = this.logs.get(topicId) ?? 0;
+    const through = this.digested.get(topicId) ?? 0;
+    return through === 0 ? observed >= 1 : observed >= through + 3;
   }
-  listStaleTopics(): string[] {
-    return [...this.logs.keys()].filter((topicId) => this.isTopicDigestStale(topicId));
+  listDigestDueTopics(): string[] {
+    return [...this.logs.keys()].filter((topicId) => this.isTopicDigestDue(topicId));
   }
-  setTopicDigest(topicId: string, summary: string, category: TopicCategory | null, throughTurn: number): void {
+  getTopicDigest(topicId: string): { summary: string | null; throughTurn: number } | null {
+    if (!this.logs.has(topicId)) return null;
+    return { summary: this.summaries.get(topicId) ?? null, throughTurn: this.digested.get(topicId) ?? 0 };
+  }
+  setTopicDigest(topicId: string, summary: string, category: TopicCategory | null, throughTurn: number, metadata: { title: string | null; symbols: string[] }): void {
     this.digested.set(topicId, throughTurn);
-    this.writes.push({ topicId, summary, category, throughTurn });
+    this.summaries.set(topicId, summary);
+    this.writes.push({ topicId, summary, category, throughTurn, metadata });
   }
 }
 
@@ -51,13 +59,16 @@ function countingRouter(options: { delayMs?: number } = {}): { router: ModelRout
   return { router: new ModelRouter(provider), calls: () => calls, peak: () => peak };
 }
 
-async function seed(sessions: SessionRegistry, store: FakeStore, topicId: string, turns: number): Promise<void> {
+async function appendTurn(sessions: SessionRegistry, store: FakeStore, topicId: string): Promise<void> {
   const state = await sessions.getOrCreate(topicId);
-  for (let i = 1; i <= turns; i++) {
-    state.beginTurn(`问题 ${i}`);
-    state.recordReply(`答案 ${i}`, true);
-  }
-  store.logs.set(topicId, turns);
+  const turn = (store.logs.get(topicId) ?? 0) + 1;
+  state.beginTurn(`问题 ${turn}`);
+  state.recordReply(`答案 ${turn}`, true);
+  store.logs.set(topicId, turn);
+}
+
+async function seed(sessions: SessionRegistry, store: FakeStore, topicId: string, turns: number): Promise<void> {
+  for (let i = 0; i < turns; i++) await appendTurn(sessions, store, topicId);
 }
 
 function makeScheduler(store: FakeStore, sessions: SessionRegistry, router: ModelRouter, debounceMs = 10) {
@@ -71,43 +82,63 @@ function makeScheduler(store: FakeStore, sessions: SessionRegistry, router: Mode
   });
 }
 
-test("a burst of turns costs one model call, not one per turn", async () => {
+test("the first completed turn is digested immediately", async () => {
   const store = new FakeStore();
   const sessions = new SessionRegistry(new InMemoryEventStore());
   const { router, calls } = countingRouter();
-  const scheduler = makeScheduler(store, sessions, router, 30);
+  const scheduler = makeScheduler(store, sessions, router, 1_000);
 
   await seed(sessions, store, "room_a", 1);
-  // Five turns landing inside one debounce window — each one pushes the
-  // deadline out, which is the whole point.
-  for (let i = 0; i < 5; i++) {
-    scheduler.schedule("room_a");
-    await delay(5);
-  }
-  await delay(80);
+  scheduler.schedule("room_a");
+  await delay(15);
 
-  assert.equal(calls(), 1, "re-arming the timer must replace the pending run, not queue another");
+  assert.equal(calls(), 1, "the initial digest must not wait for the debounce");
   assert.equal(store.writes.length, 1);
+  assert.equal(store.writes[0]?.throughTurn, 1);
   scheduler.dispose();
 });
 
-test("a topic that has not moved past its digest spends nothing", async () => {
+test("updates only run after three new turns and consume exactly that batch", async () => {
   const store = new FakeStore();
   const sessions = new SessionRegistry(new InMemoryEventStore());
-  const { router, calls } = countingRouter();
-  const scheduler = makeScheduler(store, sessions, router);
+  let lastPrompt = "";
+  const { router, calls } = (() => {
+    let count = 0;
+    const provider: LlmProvider = {
+      name: "fake",
+      async generate(messages, options) {
+        count++;
+        lastPrompt = String(messages[messages.length - 1]?.content ?? "");
+        return { text: `{"summary":"digest ${count}","category":"macro"}`, metrics: { tokens_in: 0, tokens_out: 0, ms: 0, model_class: options.modelClass, provider: "fake" } };
+      },
+    };
+    return { router: new ModelRouter(provider), calls: () => count };
+  })();
+  const scheduler = makeScheduler(store, sessions, router, 10);
 
-  await seed(sessions, store, "room_a", 3);
-  store.digested.set("room_a", 3);
-
+  await appendTurn(sessions, store, "room_a");
   scheduler.schedule("room_a");
-  await delay(40);
+  await delay(15);
+  await appendTurn(sessions, store, "room_a");
+  scheduler.schedule("room_a");
+  await appendTurn(sessions, store, "room_a");
+  scheduler.schedule("room_a");
+  await delay(20);
+  assert.equal(calls(), 1, "two new turns are retained but not summarised");
 
-  assert.equal(calls(), 0, "staleness is re-checked at fire time, not trusted from the scheduling");
+  await appendTurn(sessions, store, "room_a");
+  scheduler.schedule("room_a");
+  await delay(15);
+
+  assert.equal(calls(), 2);
+  assert.deepEqual(store.writes.map((write) => write.throughTurn), [1, 4]);
+  assert.match(lastPrompt, /Existing digest[\s\S]*digest 1/);
+  assert.match(lastPrompt, /\[turn 2\][\s\S]*\[turn 3\][\s\S]*\[turn 4\]/);
+  assert.doesNotMatch(lastPrompt, /\[turn 1\]/);
   scheduler.dispose();
 });
 
-test("the digest is written through the turn actually read", async () => {
+test("catch-up processes an old backlog as incremental batches", async () => {
   const store = new FakeStore();
   const sessions = new SessionRegistry(new InMemoryEventStore());
   const { router } = countingRouter();
@@ -117,7 +148,7 @@ test("the digest is written through the turn actually read", async () => {
   scheduler.schedule("room_a");
   await delay(40);
 
-  assert.deepEqual(store.writes, [{ topicId: "room_a", summary: "缩要 #1", category: "macro", throughTurn: 4 }]);
+  assert.deepEqual(store.writes.map((write) => write.throughTurn), [1, 4]);
   scheduler.dispose();
 });
 
