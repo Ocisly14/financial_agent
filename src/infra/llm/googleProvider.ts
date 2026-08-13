@@ -1,11 +1,12 @@
-import type { LlmMessage, LlmProvider, LlmToolCall, GenerateOptions, GenerateResult } from "./provider.ts";
+import { resolveModelMap, type LlmMessage, type LlmProvider, type LlmToolCall, type GenerateOptions, type GenerateResult } from "./provider.ts";
 import type { JsonObject } from "../../framework/types.ts";
 
-const MODEL_MAP: Record<string, string> = {
-  SMALL:  process.env["LLM_MODEL_SMALL"]  ?? "gemini-2.5-flash",
-  MEDIUM: process.env["LLM_MODEL_MEDIUM"] ?? "gemini-2.5-flash",
-  LARGE:  process.env["LLM_MODEL_LARGE"]  ?? "gemini-2.5-pro",
-};
+// Override with GOOGLE_MODEL_{SMALL,MEDIUM,LARGE}.
+const MODEL_MAP = resolveModelMap({
+  SMALL: "gemini-2.5-flash",
+  MEDIUM: "gemini-2.5-flash",
+  LARGE: "gemini-2.5-pro",
+}, ["GOOGLE"]);
 
 type GeminiPart = { text?: string; functionCall?: { name: string; args?: JsonObject } };
 type GeminiContent = { role: "user" | "model"; parts: GeminiPart[] };

@@ -200,6 +200,7 @@ The Node server serves the built client at [http://localhost:3000](http://localh
 | Capability | Variables | Required? |
 | --- | --- | --- |
 | Anthropic | `LLM_PROVIDER=anthropic`, `ANTHROPIC_API_KEY` | Choose one LLM path |
+| DeepSeek | `LLM_PROVIDER=deepseek`, `DEEPSEEK_API_KEY` | Choose one LLM path |
 | Google AI Studio | `LLM_PROVIDER=google`, `GOOGLE_GENERATIVE_AI_API_KEY` | Choose one LLM path |
 | Google Vertex AI | `LLM_PROVIDER=vertex`, `GOOGLE_VERTEX_PROJECT`, `GOOGLE_APPLICATION_CREDENTIALS_JSON` | Choose one LLM path |
 | Current web research | `TAVILY_API_KEY` and optional rotation keys | Optional |
@@ -208,7 +209,7 @@ The Node server serves the built client at [http://localhost:3000](http://localh
 | Local persistence | `SESSION_DB_PATH`, `STOCK_DB_PATH`, `FINANCIAL_MODEL_DB_PATH` | Optional; defaults live under `data/` |
 | Server | `SERVER_PORT`, `SERVER_BASE_URL`, `SSE_KEEPALIVE_INTERVAL` | Optional |
 
-`LLM_MODEL_SMALL`, `LLM_MODEL_MEDIUM`, and `LLM_MODEL_LARGE` override the built-in model mapping. Only set them to model IDs supported by the selected provider.
+Each provider maps the `SMALL`, `MEDIUM`, and `LARGE` model classes to its own built-in defaults. Override a class with `<PROVIDER>_MODEL_<CLASS>` — `ANTHROPIC_MODEL_MEDIUM`, `DEEPSEEK_MODEL_LARGE`, `GOOGLE_MODEL_SMALL`, `VERTEX_MODEL_LARGE`. The overrides are namespaced per provider so that switching `LLM_PROVIDER` never hands the new provider another vendor's model IDs; Vertex additionally falls back to `GOOGLE_MODEL_*`.
 
 ## Development
 

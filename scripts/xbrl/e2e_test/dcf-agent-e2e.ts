@@ -50,7 +50,7 @@ const modelDatabasePath = resolve(process.env["E2E_MODEL_DB_PATH"]?.trim() || jo
 // The agent pauses with a resume line instead of failing, so the round loop just dispatches its own
 // thread again — continuity is the thread, not the model handle.
 const maxRounds = Number(process.env["E2E_MAX_ROUNDS"] ?? 6);
-const roundTimeoutMs = Number(process.env["E2E_ROUND_TIMEOUT_MIN"] ?? 25) * 60_000;
+const roundTimeoutMs = Number(process.env["E2E_ROUND_TIMEOUT_MIN"] ?? 60) * 60_000;
 
 const initialPrompt = process.env["E2E_PROMPT"]?.trim()
   || `Build me a DCF valuation model for ${symbol} `;
@@ -206,6 +206,16 @@ for (let round = 1; round <= maxRounds; round++) {
   // A hard failure is not something another round recovers from; a pause or an early finish short of
   // `valued` is, and continuing the thread is exactly how the agent is designed to be resumed.
   if (result!.status === "failed") { console.log(`\n   failed — stopping.`); break; }
+  // A timeout is the one status the dispatcher synthesizes itself, without metrics — so `llm_calls`
+  // reads 0 even for a round that worked the whole window. Nested subagents persist as they go, so
+  // whatever the thread reached is on disk and the next round resumes from it; that is what the
+  // round loop and `continuationPrompt` exist for. This must be read before the dead-provider check
+  // below, which would otherwise take the missing metrics for a provider that was never reached.
+  if (result!.status === "timeout") {
+    console.log(`\n   timed out after ${(roundTimeoutMs / 60_000).toFixed(0)}min at lifecycle `
+      + `"${entry.lifecycleAfter ?? "-"}" — resuming the thread in the next round.`);
+    continue;
+  }
   // A round that never reached the provider is reported as an ordinary step-budget pause (the loop
   // breaks on the LLM error with its "exhausted" flag still set). Left alone it would look like
   // progress and burn every remaining round against a dead provider, so read the metrics instead of

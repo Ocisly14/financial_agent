@@ -9,6 +9,7 @@ import { MockLlmProvider, ModelRouter, type LlmProvider } from "../infra/llm/pro
 import { AnthropicProvider } from "../infra/llm/anthropicProvider.ts";
 import { GoogleProvider } from "../infra/llm/googleProvider.ts";
 import { GoogleVertexProvider } from "../infra/llm/googleVertexProvider.ts";
+import { DeepSeekProvider } from "../infra/llm/deepseekProvider.ts";
 import { McpToolRegistry } from "../../mcp_tools/toolRegistry.ts";
 import { registerAllTools } from "../../mcp_tools/registerTools.ts";
 import { SessionRegistry } from "../framework/sessionState.ts";
@@ -126,7 +127,14 @@ export function resolveLlmProvider(): LlmProvider {
     return new AnthropicProvider(key);
   }
 
+  if (provider === "deepseek") {
+    const key = process.env["DEEPSEEK_API_KEY"];
+    if (!key) throw new Error("LLM_PROVIDER=deepseek but DEEPSEEK_API_KEY is not set");
+    return new DeepSeekProvider(key, process.env["DEEPSEEK_BASE_URL"] || undefined);
+  }
+
   // Auto-detect when LLM_PROVIDER is unset: prefer Vertex, then Google API key, then Anthropic.
+  // DeepSeek is deliberately absent — it is opt-in via LLM_PROVIDER only.
   if (!provider) {
     if (hasVertex) return new GoogleVertexProvider();
     if (googleKey) return new GoogleProvider(googleKey);

@@ -1,12 +1,13 @@
 import { createVertex } from "@ai-sdk/google-vertex";
 import { generateText, jsonSchema, streamText, type CoreMessage, type CoreTool } from "ai";
-import type {
-  GenerateOptions,
-  GenerateResult,
-  LlmMessage,
-  LlmProvider,
-  LlmToolCall,
-  ModelClass,
+import {
+  resolveModelMap,
+  type GenerateOptions,
+  type GenerateResult,
+  type LlmMessage,
+  type LlmProvider,
+  type LlmToolCall,
+  type ModelClass,
 } from "./provider.ts";
 import type { JsonObject } from "../../framework/types.ts";
 import { googleApplicationCredentialsFromSetting } from "./googleVertexCredentials.ts";
@@ -14,22 +15,13 @@ import { createLogger } from "../logger/logger.ts";
 
 const log = createLogger("llm");
 
-// Resolve per-class model names. Honors both naming schemes: the reference
-// repo's `*_GOOGLE_MODEL` / `GOOGLE_MODEL`, and this project's `LLM_MODEL_*`.
-function resolveModel(googleVar: string, projectVar: string, fallback: string): string {
-  return (
-    process.env[googleVar] ||
-    process.env["GOOGLE_MODEL"] ||
-    process.env[projectVar] ||
-    fallback
-  );
-}
-
-const MODEL_MAP: Record<ModelClass, string> = {
-  SMALL: resolveModel("SMALL_GOOGLE_MODEL", "LLM_MODEL_SMALL", "gemini-2.5-flash"),
-  MEDIUM: resolveModel("MEDIUM_GOOGLE_MODEL", "LLM_MODEL_MEDIUM", "gemini-2.5-flash"),
-  LARGE: resolveModel("LARGE_GOOGLE_MODEL", "LLM_MODEL_LARGE", "gemini-2.5-pro"),
-};
+// Override with VERTEX_MODEL_{SMALL,MEDIUM,LARGE}, falling back to GOOGLE_MODEL_* so a
+// single Gemini setting covers both this provider and the AI Studio one.
+const MODEL_MAP: Record<ModelClass, string> = resolveModelMap({
+  SMALL: "gemini-2.5-flash",
+  MEDIUM: "gemini-2.5-flash",
+  LARGE: "gemini-2.5-pro",
+}, ["VERTEX", "GOOGLE"]);
 
 /**
  * Gemini via Vertex AI, using `@ai-sdk/google-vertex` (Vercel AI SDK).

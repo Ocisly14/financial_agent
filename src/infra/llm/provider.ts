@@ -57,6 +57,32 @@ export type LlmProvider = {
   generate(messages: LlmMessage[], options: GenerateOptions): Promise<GenerateResult>;
 };
 
+/**
+ * Per-class model ids for one provider, read from `<PREFIX>_MODEL_{SMALL,MEDIUM,LARGE}`.
+ *
+ * Overrides are namespaced per provider rather than shared: a single global override
+ * would hand whichever provider is selected another vendor's model ids, which they
+ * reject outright. `prefixes` is tried in order, so a provider can accept a family-wide
+ * fallback (Vertex reads VERTEX_MODEL_*, then GOOGLE_MODEL_*).
+ *
+ * A declared-but-empty variable counts as unset — `.env` files carry blank placeholders,
+ * and forwarding "" as a model id fails at the API.
+ */
+export function resolveModelMap(
+  defaults: Record<ModelClass, string>,
+  prefixes: string[],
+  env: Record<string, string | undefined> = process.env,
+): Record<ModelClass, string> {
+  const resolve = (modelClass: ModelClass): string => {
+    for (const prefix of prefixes) {
+      const value = env[`${prefix}_MODEL_${modelClass}`];
+      if (value) return value;
+    }
+    return defaults[modelClass];
+  };
+  return { SMALL: resolve("SMALL"), MEDIUM: resolve("MEDIUM"), LARGE: resolve("LARGE") };
+}
+
 export class ModelRouter {
   private readonly provider: LlmProvider;
 

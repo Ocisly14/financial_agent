@@ -1,13 +1,12 @@
-import type { LlmMessage, LlmProvider, LlmToolCall, GenerateOptions, GenerateResult } from "./provider.ts";
+import { resolveModelMap, type LlmMessage, type LlmProvider, type LlmToolCall, type GenerateOptions, type GenerateResult } from "./provider.ts";
 import type { JsonObject } from "../../framework/types.ts";
 
-// `||`, not `??`: a declared-but-empty LLM_MODEL_* in .env is an unset override, and `??`
-// would forward "" as the model id.
-const MODEL_MAP: Record<string, string> = {
-  SMALL:  process.env["LLM_MODEL_SMALL"]  || "claude-haiku-4-5-20251001",
-  MEDIUM: process.env["LLM_MODEL_MEDIUM"] || "claude-sonnet-5",
-  LARGE:  process.env["LLM_MODEL_LARGE"]  || "claude-opus-5",
-};
+// Override with ANTHROPIC_MODEL_{SMALL,MEDIUM,LARGE}.
+const MODEL_MAP = resolveModelMap({
+  SMALL: "claude-haiku-4-5-20251001",
+  MEDIUM: "claude-sonnet-5",
+  LARGE: "claude-opus-5",
+}, ["ANTHROPIC"]);
 
 type AnthropicTextBlock = { type: "text"; text: string; cache_control?: { type: "ephemeral" } };
 type AnthropicMessage = { role: "user" | "assistant"; content: AnthropicTextBlock[] };
