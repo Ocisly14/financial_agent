@@ -16,7 +16,7 @@ The report's counts to check: committed fact count vs coverage gaps (a required 
 
 ## What the commit triggers
 
-The spine commit is the watershed: mapped cells fill and become actual-sourced, the working-capital identity installs over exactly the mapped components, reconciliation identities run, and the WACC sheet auto-refreshes in its own follow-up revision (see 05). It does not invent historical anchors, metrics, or a forecast chain: write the formulas for the economics you actually model.
+The spine commit is the watershed: mapped cells fill and become actual-sourced, reconciliation identities run, and the WACC sheet auto-refreshes in its own follow-up revision (see 05). It does not invent historical anchors, metrics, or a forecast chain: write every derived formula for the economics you actually model.
 
 ## What to inspect before moving to stage 4
 

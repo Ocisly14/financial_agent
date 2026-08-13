@@ -3,7 +3,6 @@ import test from "node:test";
 import { parseFormula } from "../dsl/parser.ts";
 import { evaluate, ENGINE_VERSION } from "../engine.ts";
 import { FinancialModelError } from "../errors.ts";
-import { installDefaultMetrics } from "../metrics.ts";
 import type { FinancialModelSnapshot } from "../operations.ts";
 import { addSourceStatementRows, createSkeleton } from "../skeleton.ts";
 import type { ModelView, Revision, RevisionHeader } from "../store.ts";
@@ -34,7 +33,6 @@ function snapshot(mapped = false): FinancialModelSnapshot {
     value: 100, unit: { kind: "currency", code: "USD" },
     provenance: { sourceType: "unified_statements", sourceRefs: ["unified.revenue.total"], asOfDate: "2025-01-01" },
   }] satisfies Fact[] : [];
-  skeleton = installDefaultMetrics(skeleton, periods);
   if (mapped) {
     skeleton.lineItems = skeleton.lineItems.map((item) => item.id === "revenue.total"
       ? { ...item, historical: "actual" as const }

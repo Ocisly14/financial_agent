@@ -53,12 +53,7 @@ const maxRounds = Number(process.env["E2E_MAX_ROUNDS"] ?? 6);
 const roundTimeoutMs = Number(process.env["E2E_ROUND_TIMEOUT_MIN"] ?? 25) * 60_000;
 
 const initialPrompt = process.env["E2E_PROMPT"]?.trim()
-  || `Build a complete DCF valuation model for ${symbol} from its SEC filings, end to end. `
-    + `Nothing has been prepared for you: extract the filing statements yourself, get the history `
-    + `unified and mapped onto the spine, analyze where the profit actually comes from, author the `
-    + `forecast on your own judgment, complete the WACC sheet and the terminal assumptions, and `
-    + `finish only once the model reads as valued. Report the implied value per share and the `
-    + `judgment calls behind it.`;
+  || `Build me a DCF valuation model for ${symbol} `;
 
 const continuationPrompt = `Continue the ${symbol} DCF in this same thread. Read the model first to `
   + `see what is already filled, keep what holds, redo nothing, and complete only what is still `

@@ -2,7 +2,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ENGINE_VERSION } from "../engine.ts";
 import { FinancialModelError } from "../errors.ts";
-import { installDefaultMetrics } from "../metrics.ts";
 import { applyModelOperations, type FinancialModelSnapshot, type ModelOperation } from "../operations.ts";
 import { addRevenueStream, addSourceStatementRows, createSkeleton } from "../skeleton.ts";
 import type { Assumption, Fact, FactReviewDecision, Period, ValuationConfig } from "../types.ts";
@@ -25,7 +24,7 @@ const CONFIG: ValuationConfig = {
   rationale: "Test configuration",
 };
 
-function snapshot(options: { metrics?: boolean; sources?: boolean; disclosures?: boolean } = {}): FinancialModelSnapshot {
+function snapshot(options: { sources?: boolean; disclosures?: boolean } = {}): FinancialModelSnapshot {
   let skeleton = createSkeleton({ currency: "USD", periods: PERIODS });
   if (options.sources) {
     skeleton = addSourceStatementRows(skeleton, [
@@ -37,7 +36,6 @@ function snapshot(options: { metrics?: boolean; sources?: boolean; disclosures?:
     skeleton = addRevenueStream(skeleton, { id: "products", label: "Products" });
     skeleton = addRevenueStream(skeleton, { id: "services", label: "Services" });
   }
-  if (options.metrics) skeleton = installDefaultMetrics(skeleton, PERIODS);
   return {
     lifecycleStage: "draft",
     periods: structuredClone(PERIODS),
@@ -132,10 +130,7 @@ test("source switching clears only that range and can be repopulated later in th
   assert.equal(next.assumptions.at(-1)?.assumptionId, "oi");
 });
 
-test("source switching rejects registry and engine-native definitions", () => {
-  invalid(() => applyModelOperations(snapshot({ metrics: true }), [{
-    kind: "set_line_item_source", lineItemId: "metric.roa", range: "historical", source: "none",
-  }]));
+test("source switching rejects engine-native definitions", () => {
   const base = snapshot();
   const fcff = base.lineItems.find((item) => item.id === "fcff")!;
   fcff.forecast = "calculated";
@@ -201,14 +196,6 @@ test("a committed revenue stream can own its gross-profit detail", () => {
   const detail = next.lineItems.find((item) => item.id === "revenue.products.gross_profit");
   assert.equal(detail?.parentId, "revenue.products");
   assert.deepEqual(detail?.unit, { kind: "currency", code: "USD" });
-});
-
-test("add_metric derives a registered CAGR definition", () => {
-  const next = applyModelOperations(snapshot(), [{
-    kind: "add_metric", metric: { registryId: "cagr", targetLineItemId: "revenue.total", lookbackPeriods: 4 },
-  }]);
-  assert.equal(next.lineItems.some((item) => item.id === "metric.cagr.revenue.total.4p"), true);
-  assert.equal(next.formulas.some((formula) => formula.source === "CAGR(revenue.total, 4)"), true);
 });
 
 test("an archived snapshot is immutable and advance_stage is no longer an operation", () => {

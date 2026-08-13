@@ -52,8 +52,6 @@ const operationVariants: JsonSchema[] = [
     // validates the supplied id against the skeleton, so do not make the tool schema narrower.
     parentId: string("A permitted DCF parent, including an existing revenue stream or custom_metrics"), unit: unitSchema },
   ["id", "label", "parentId"]) }, ["kind", "lineItem"]),
-  object({ kind: { type: "string", enum: ["add_metric"] }, metric: object({ registryId: { type: "string", enum: ["cagr"] },
-    targetLineItemId: string(), lookbackPeriods: number }, ["registryId", "targetLineItemId", "lookbackPeriods"]) }, ["kind", "metric"]),
   object({ kind: { type: "string", enum: ["set_formula"] }, formula }, ["kind", "formula"]),
   object({ kind: { type: "string", enum: ["set_category_group"] }, group: categoryGroup }, ["kind", "group"]),
   object({ kind: { type: "string", enum: ["set_valuation_config"] }, config: valuation }, ["kind", "config"]),
@@ -81,7 +79,7 @@ export function parseOperations(input: JsonObject): ModelOperation[] {
     if (match && rawOps[Number(match[1])]) {
       const kind = rawOps[Number(match[1])]?.["kind"];
       const known = new Set(["replace_fact", "set_assumption", "set_line_item_source", "add_line_item",
-        "add_metric", "set_formula", "set_category_group", "set_valuation_config", "set_wacc_input"]);
+        "set_formula", "set_category_group", "set_valuation_config", "set_wacc_input"]);
       const hint = typeof kind === "string"
         ? (known.has(kind) ? ` (operation kind "${kind}" — a field is missing or malformed)`
           : ` (unknown operation kind "${kind}"; allowed kinds: ${[...known].join(", ")})`)

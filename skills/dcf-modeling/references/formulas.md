@@ -14,7 +14,7 @@ Recipes for calculate_model_rows and set_formula, organized by the analysis move
 | `YOY(row)` | — | `row / prior − 1`, unit percent; prior null → null, prior 0 → divide_by_zero |
 | `CAGR(row, n)` | n = integer literal | `(row / row₋ₙ)^(1/n) − 1`, unit percent; base ≤ 0 → null |
 | `SUM(row, from, to)` | offsets = integer literals | sum of `row` over the window relative to the current period: `SUM(x, -2, 0)` = trailing 3 periods incl. current; window running off the grid → null |
-| `AVERAGE(row, from, to)` | same | windowed mean; `AVERAGE(x, -1, 0)` is the two-point average balance the preset ROA/ROE/ROIC use |
+| `AVERAGE(row, from, to)` | same | windowed mean; useful for two-point average-balance return metrics |
 | `MIN(a, b, …)` / `MAX(a, b, …)` | variadic expressions | units must be compatible |
 | `ABS(x)` | expression | keeps x's unit |
 | `POW(base, exp)` | expressions | base must be dimensionless; result ratio |
@@ -33,36 +33,22 @@ Recipes for calculate_model_rows and set_formula, organized by the analysis move
 
 **Nulls are never zero.** Any null input nulls the result and `missing_input` names the originating row; division by zero flags `divide_by_zero`. A row computing null in every period gets called out in the tool response with its missing inputs — read that instead of guessing.
 
-## §0.5 Preset rows — reference points, not truth
+## §0.5 Derived rows are authored, never prefilled
 
-The model carries computed, read-only anchor rows. Treat every preset as **someone else's first draft of the measurement**: before leaning on one, check from first principles that its definition measures what YOUR analysis needs for THIS issuer. A correct preset needs nothing — reference it (`metric.*` ids work inside formulas like any row). A wrong or insufficient one is never edited (they are read-only by design) — you **supersede** it with your own calculate_model_rows row whose description says what the preset missed.
+The model begins with facts only. Historical and forecast derived rows are your formulas, written only when they serve the valuation you are building. Before relying on any shorthand, verify that its definition fits this issuer and record the formula in the workbook rather than doing arithmetic in prose.
 
-Definitions genuinely differ where it matters. Real examples: `metric.net_debt` subtracts cash AND short_term_investments, while the WACC sheet's `net_debt` subtracts cash only — same name, different scope, both defensible, and only you know which your ratio needs. `metric.free_cash_flow` is CFO − capex, which quietly treats stock-based compensation as free — an owner-earnings view needs your own row. `margin.operating` includes lines a "core margin" analysis might strip.
-
-Fixed drivers (historical side auto-derived, forecast side takes your set_assumption):
+For a conventional FCFF valuation, write the historical anchors explicitly after the spine commit:
 
 ```text
-growth.revenue.total = YOY(revenue.total)          ratio.da_to_revenue   = depreciation_amortization / revenue.total
-margin.operating     = operating_income / revenue.total   ratio.capex_to_revenue = capital_expenditures / revenue.total
-tax_rate             = income_tax_expense / pretax_income ratio.operating_nwc_to_revenue = operating_working_capital / revenue.total
+tax_rate                  = income_tax_expense / pretax_income
+ebitda                    = operating_income + depreciation_amortization
+nopat                     = operating_income * (1 - tax_rate)
+operating_working_capital = accounts_receivable + inventory - accounts_payable
+change_nwc                = operating_working_capital - LAG(operating_working_capital, 1)
+fcff                      = nopat + depreciation_amortization - capital_expenditures - change_nwc
 ```
 
-Metrics registry (read-only, historical):
-
-```text
-metric.gross_margin   metric.ebitda_margin   metric.net_margin   metric.ocf_margin   metric.fcf_margin
-metric.free_cash_flow = operating_cash_flow - capital_expenditures
-metric.ocf_conversion = operating_cash_flow / net_income
-metric.operating_income_yoy  metric.net_income_yoy  metric.diluted_eps_yoy  metric.ocf_yoy  metric.fcf_yoy
-metric.current_ratio  metric.debt_to_equity
-metric.net_debt = debt - cash_and_equivalents - short_term_investments
-metric.invested_capital = debt + shareholders_equity - cash_and_equivalents - short_term_investments
-metric.roa / metric.roe / metric.roic   (two-point average balances via AVERAGE(x, -1, 0))
-metric.net_income_per_share  metric.ocf_per_share  metric.fcf_per_share
-metric.revenue_cagr_3p  metric.revenue_cagr_5p
-```
-
-calculate_model_rows is for what is NOT here: everything issuer-specific — segment structure, one-off isolation, days metrics, and any driver you invent. Also on the sheet already: the WACC table (beta, rates, weights) — never recompute those in a formula row.
+Adjust the working-capital composition to the issuer's mapped facts; do not add a component merely because a generic template names it. Formula rows such as margin, growth, returns, per-share measures, and custom metrics are also authored as needed. The WACC table (beta, rates, weights) remains host-computed — never recreate it as a formula row.
 
 ## §1 Decompose profit sources (Move 1)
 
@@ -85,8 +71,8 @@ Contribution-to-growth rows across all sources are the fastest honest picture of
 
 | purpose | formula |
 | --- | --- |
-| per-source growth | `YOY(revenue.energygenerationandstorage)` (streams also carry auto `growth.revenue.<id>` rows) |
-| compound anchor | `CAGR(revenue.total, 4)` — or read `metric.revenue_cagr_3p/5p` |
+| per-source growth | `YOY(revenue.energygenerationandstorage)` |
+| compound anchor | `CAGR(revenue.total, 4)` |
 | smoothed anchor for a noisy ratio | first make the ratio a row, then `AVERAGE(that_row, -2, 0)` |
 | trailing-sum base (bumpy flows) | `SUM(capital_expenditures, -2, 0) / SUM(revenue.total, -2, 0)` |
 | growth spread between sources | `YOY(revenue.energygenerationandstorage) - YOY(revenue.automotiverevenues)` |
@@ -97,7 +83,7 @@ Contribution-to-growth rows across all sources are the fastest honest picture of
 | reinvestment rate | `(capital_expenditures - depreciation_amortization + change_nwc) / nopat` |
 | receivable / inventory / payable days | `accounts_receivable / revenue.total * 365`, `inventory / cost_of_revenue * 365`, `accounts_payable / cost_of_revenue * 365` |
 | cash conversion cycle | build the three days rows, then `dso + dio - dpo` |
-| growth vs reinvestment cross-check | `metric.roic` × the reinvestment row ≈ sustainable growth — a claim of faster growth without reinvestment must say where it comes from |
+| growth vs reinvestment cross-check | write `roic = nopat / AVERAGE(invested_capital, -1, 0)`; then `roic × reinvestment` ≈ sustainable growth — a claim of faster growth without reinvestment must say where it comes from |
 
 A ratio trending one direction for five years is an anchor AND a question: Move 2 must say whether the trend continues, stops, or reverses — and why.
 
@@ -163,7 +149,7 @@ capex fading to depreciation parity (steady state):
   drive ratio.capex_to_revenue with a fade whose endpoint ≈ ratio.da_to_revenue's anchor
 ```
 
-**Working capital**: `operating_working_capital` is identity-derived from its components — do not rewrite it. The lever is `ratio.operating_nwc_to_revenue` (assumption), or component-level stories via the days rows you built in §2, translated back into that ratio's path.
+**Working capital**: author `operating_working_capital` from the operating components you mapped, then author `change_nwc` from it. The lever can be `ratio.operating_nwc_to_revenue` (assumption), or component-level stories via the days rows you built in §2, translated back into that ratio's path.
 
 **Retiring a fixed driver**: never redefine it — rewrite the amount row so nothing references it (`operating_income = gross_profit - operating_expenses` makes `margin.operating` a spectator). It stays visible as the historical anchor it is.
 
@@ -177,7 +163,7 @@ Put the forecast on trial against your own Move-2 sentences — each check is on
 | does margin drift contradict a "persists" claim | rebuild `margin drift` (§2) over the forecast range |
 | terminal-year reinvestment sanity | `capital_expenditures / depreciation_amortization` in the final year — steady state sits near 1 |
 | terminal continuity | final-year `YOY(fcff)` should approach terminal_growth, not cliff into it |
-| growth funded by what | reinvestment rate (§2) over forecast years vs `metric.roic` — growth ≈ ROIC × reinvestment, and a forecast violating it needs an explicit story (mix shift, pricing power) |
+| growth funded by what | reinvestment rate (§2) over forecast years vs your explicit ROIC row — growth ≈ ROIC × reinvestment, and a forecast violating it needs an explicit story (mix shift, pricing power) |
 | exit multiple vs explicit years | compare valuationConfig's exit multiple with the final-year `ebitda`-implied value; a gap is a claim about what changes after the horizon — defend or shrink it |
 
 Hard ceiling: terminal growth may not exceed long-run nominal GDP growth — nothing outgrows the economy forever. Everything else is principle, not number: every departure from an anchor names its cause; every "unchanged" names why it holds.

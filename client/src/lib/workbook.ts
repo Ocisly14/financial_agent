@@ -89,7 +89,7 @@ export function buildRowTree(rows: readonly WorkbookRowView[]): RowNode[] {
 }
 
 export type SheetGroup = "model" | "source" | "derived";
-export type SheetKind = "summary" | "source" | "revenue" | "wacc" | "dcf";
+export type SheetKind = "source" | "revenue" | "wacc" | "dcf";
 export type SheetId = string;
 
 export type SheetDescriptor = {
@@ -108,23 +108,6 @@ const SOURCE_LABELS: Record<SourceStatementKey, string> = {
   balance_sheet: "Balance Sheet",
   cash_flow_statement: "Cash Flow Statement",
 };
-
-/** The Key Financials block, in the order the reference workbook uses.
- *  These ids span four different sections — they are NOT co-located, so the
- *  pick has to be by line item id. `src/financial-model/__tests__/viewContract.test.ts`
- *  asserts every id here still exists in the skeleton. */
-export const SUMMARY_ROWS: ReadonlyArray<{ lineItemId: string; indent: boolean }> = [
-  { lineItemId: "revenue.total", indent: false },
-  { lineItemId: "growth.revenue.total", indent: true },
-  { lineItemId: "gross_profit", indent: false },
-  { lineItemId: "metric.gross_margin", indent: true },
-  { lineItemId: "ebitda", indent: false },
-  { lineItemId: "metric.ebitda_margin", indent: true },
-  { lineItemId: "operating_income", indent: false },
-  { lineItemId: "margin.operating", indent: true },
-  { lineItemId: "net_income", indent: false },
-  { lineItemId: "metric.net_margin", indent: true },
-];
 
 /**
  * The DCF sheet is a reading view over the whole model, not a sixth storage
@@ -178,16 +161,6 @@ const allRows = (workbook: CurrentWorkbookView): WorkbookRowView[] => [
   ...workbook.sections.history, ...workbook.sections.metrics,
   ...workbook.sections.revenue, ...workbook.sections.operations, ...workbook.sections.dcf,
 ];
-
-/** A whitelist row that the model has not built yet is skipped, not rendered
- *  as a blank — an empty row claims "this is zero", which is a different
- *  statement from "the model has not got here". */
-export function buildSummaryRows(workbook: CurrentWorkbookView): WorkbookRowView[] {
-  const byId = new Map(allRows(workbook).map((row) => [row.lineItemId, row]));
-  return SUMMARY_ROWS
-    .map((entry) => byId.get(entry.lineItemId))
-    .filter((row): row is WorkbookRowView => row !== undefined);
-}
 
 export type DcfRows = {
   rows: WorkbookRowView[];
@@ -246,15 +219,6 @@ function segmentMembers(workbook: CurrentWorkbookView): Map<string, Set<string>>
 export function deriveSheets(workbook: CurrentWorkbookView): SheetDescriptor[] {
   const sheets: SheetDescriptor[] = [];
 
-  // Gated on history/metrics specifically, NOT on `buildSummaryRows(workbook).length`:
-  // that function scans every section for a whitelist hit (by design — the summary
-  // sheet's own rows are pulled from operations too, e.g. `ebitda`). Reusing it here
-  // would light up the summary tab off an operations- or revenue-only workbook that
-  // has not actually had its historicals committed yet.
-  if (workbook.sections.history.length > 0 || workbook.sections.metrics.length > 0) {
-    sheets.push({ id: "summary", label: "Summary", group: "model", kind: "summary" });
-  }
-
   const review = workbook.sourceStatementReview;
   if (review) {
     for (const statement of ["income_statement", "balance_sheet", "cash_flow_statement"] as const) {
@@ -308,11 +272,7 @@ const SOURCE_SECTION: Record<SourceStatementKey, string> = {
  *   - `changed_line_item_ids` — resolves a `revenue` change to the specific
  *     segment sheet that owns the line item.
  *   - `changed_sections` — catches changes whose line items are not on any
- *     sheet's pick list, e.g. `line_item_added` outside the summary whitelist.
- *
- * A single change may legitimately touch two sheets (`ebitda` is both a summary
- * row and part of the DCF operations block). The result keeps both, in strip
- * order; the caller dot-marks all of them and auto-navigates to the first.
+ *     sheet's pick list, e.g. `line_item_added` outside a segment sheet.
  */
 export function sheetsTouchedBy(
   frame: ModelRevisionFrame,
@@ -324,7 +284,6 @@ export function sheetsTouchedBy(
   const kinds = new Set(frame.change_kinds);
   const changedIds = new Set(frame.changed_line_item_ids);
   const members = segmentMembers(workbook);
-  const summaryIds = new Set(SUMMARY_ROWS.map((entry) => entry.lineItemId));
 
   for (const sheet of sheets) {
     switch (sheet.kind) {
@@ -334,10 +293,6 @@ export function sheetsTouchedBy(
       case "dcf":
         if (sections.has("operations") || sections.has("dcf")) touched.add(sheet.id);
         if ([...kinds].some((kind) => DCF_KINDS.has(kind))) touched.add(sheet.id);
-        break;
-      case "summary":
-        if (sections.has("history") || sections.has("metrics")) touched.add(sheet.id);
-        if ([...changedIds].some((id) => summaryIds.has(id))) touched.add(sheet.id);
         break;
       case "source":
         if (sheet.statement && sections.has(SOURCE_SECTION[sheet.statement])) touched.add(sheet.id);

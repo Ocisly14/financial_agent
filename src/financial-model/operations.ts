@@ -1,6 +1,5 @@
 import { FinancialModelError } from "./errors.ts";
 import { applyFactReview, stageFacts } from "./factLifecycle.ts";
-import { installRegisteredMetric, type MetricRequest } from "./metrics.ts";
 import {
   addDcfDetailLineItem,
   addRevenueStream,
@@ -77,7 +76,6 @@ export type ModelOperation =
     ))
   | { kind: "add_line_item"; lineItem: NewExtensibleLineItem }
   | { kind: "import_source_row"; row: ImportedSourceRow }
-  | { kind: "add_metric"; metric: MetricRequest }
   | { kind: "set_formula"; formula: Formula }
   | { kind: "set_category_group"; group: DcfCategoryGroup }
   | { kind: "set_valuation_config"; config: ValuationConfig }
@@ -548,9 +546,6 @@ export function applyModelOperations(
         break;
       case "import_source_row":
         importSourceRow(next, operation.row);
-        break;
-      case "add_metric":
-        acceptSkeleton(next, installRegisteredMetric(skeletonOf(next), next.periods, operation.metric));
         break;
       case "set_formula":
         validateFormula(next, operation.formula);

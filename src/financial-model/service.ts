@@ -279,7 +279,6 @@ export class FinancialModelService {
       && knownPeriods.has(fact.periodId)
       && !existingFactIds.has(fact.factId));
     working.facts = [...working.facts, ...candidates.map((fact) => ({ ...structuredClone(fact), status: "committed" as const }))];
-    installWorkingCapitalIdentity(working);
     const calculated = recalculate(working);
     const factChange = factsStagedChange(calculated, candidates);
     return this.commit(modelId, expectedRevision, calculated, makeSummary(calculated, [{
@@ -637,32 +636,6 @@ function deriveLifecycle(next: FinancialModelSnapshot): void {
   next.lifecycleStage = stage;
 }
 
-const OWC_ASSET_COMPONENTS = ["accounts_receivable", "inventory", "other_operating_current_assets"] as const;
-const OWC_LIABILITY_COMPONENTS = [
-  "accounts_payable", "deferred_revenue", "accrued_operating_liabilities", "other_operating_current_liabilities",
-] as const;
-
-/**
- * The skeleton does not declare a source for operating_working_capital, because it cannot know the identity
- * until the mapping has decided which components this issuer actually reports — a declared spine gap
- * must drop out of the sum rather than null-poisoning the whole identity. Installed (and refreshed)
- * on every history review, over exactly the components carrying committed facts.
- */
-function installWorkingCapitalIdentity(snapshot: FinancialModelSnapshot): void {
-  const committed = new Set(snapshot.facts
-    .filter((fact) => fact.status === "committed" && fact.lineItemId !== undefined)
-    .map((fact) => fact.lineItemId));
-  const assets = OWC_ASSET_COMPONENTS.filter((id) => committed.has(id));
-  const liabilities = OWC_LIABILITY_COMPONENTS.filter((id) => committed.has(id));
-  if (assets.length === 0 && liabilities.length === 0) return;
-  let source = assets.length > 0 ? assets.join(" + ") : "0";
-  for (const liability of liabilities) source += ` - ${liability}`;
-  const historicalIds = snapshot.periods.filter((period) => period.cls !== "forecast").map((period) => period.id);
-  snapshot.formulas = snapshot.formulas.filter((formula) =>
-    !(formula.lineItemId === "operating_working_capital" && formula.appliesTo === "historical"));
-  snapshot.formulas.push({ lineItemId: "operating_working_capital", appliesTo: "historical", source, periodIds: historicalIds });
-}
-
 /**
  * The valuation configuration a new model starts with: the anchor period, and nothing else. Which
  * metric the exit multiple applies to, when cash is assumed to arrive, and what to stress are
@@ -776,14 +749,13 @@ function historyGate(snapshot: FinancialModelSnapshot): void {
 
 /**
  * What `historyGate` demands before a model leaves `draft`. Exported so the spine's own required
- * mapping set can be checked against it. Source declarations remain empty in the skeleton and are
- * inferred from the value channel that filled each row; a required item can therefore be supplied
- * either by a mapped filing fact or by a formula the agent deliberately installs.
+ * mapping set can be checked against it. It deliberately names only reported, directly mapped
+ * statements; derived DCF rows are authored later when the valuation approach needs them.
  */
 export const REQUIRED_HISTORY_LINE_ITEMS = [
   "revenue.total", "cost_of_revenue", "gross_profit", "operating_expenses", "operating_income",
-  "depreciation_amortization", "ebitda", "pretax_income", "income_tax_expense", "net_income",
-  "nopat", "capital_expenditures", "operating_working_capital", "change_nwc", "fcff",
+  "depreciation_amortization", "pretax_income", "income_tax_expense", "net_income",
+  "capital_expenditures",
 ] as const;
 
 function historicalCompleteness(snapshot: FinancialModelSnapshot): HistoricalDcfCompletenessView {
@@ -794,9 +766,6 @@ function historicalCompleteness(snapshot: FinancialModelSnapshot): HistoricalDcf
       const item = snapshot.lineItems.find((candidate) => candidate.id === lineItemId)!;
       return { lineItemId, role: item.role, periods: selected.map((period, index) => {
         const key = cellKey(lineItemId, period.id);
-        if ((lineItemId === "change_nwc" || lineItemId === "fcff") && index === 0) {
-          return { periodId: period.id, status: "not_applicable" as const, refs: [key] };
-        }
         const cell = snapshot.cells.get(key);
         return { periodId: period.id, status: cell?.value === null || cell?.value === undefined ? "missing" as const : "complete" as const,
           refs: [key, ...new Set(cell?.diagnostics.flatMap((diagnostic) => diagnostic.refs) ?? [])] };
@@ -908,12 +877,6 @@ function operationChanges(
       case "import_source_row":
         // A deterministic copy from the operable library reads as an added line item downstream.
         return { kind: "line_item_added", lineItemId: `unified.${operation.row.rowId}` };
-      case "add_metric":
-        return {
-          kind: "metric_added",
-          registryId: operation.metric.registryId,
-          lineItemId: `metric.cagr.${operation.metric.targetLineItemId}.${operation.metric.lookbackPeriods}p`,
-        };
       case "set_formula":
         return {
           kind: "formula_set",

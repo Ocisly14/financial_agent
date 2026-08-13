@@ -8,7 +8,7 @@ Profit is not one number; it is a sum of sources with different economics. Take 
 
 - get_financial_model for the committed workbook; list_unified_statements / get_unified_rows for every dimensional breakdown behind it — including axes spine_mapping did not promote (a geographic split is still evidence; reference it in formulas as `unified.<rowId>`).
 - Characterize each source with computed history, never prose arithmetic: one calculate_model_rows batch per theme — mix shares, per-source growth, contribution-to-growth, margin structure, cash conversion (toolbox §1–§2). Contribution-to-growth rows are the fastest honest picture: they sum to total growth, so they self-check.
-- The preset metric rows are reference points, not truth: verify from first principles that each definition measures what your analysis needs (toolbox §0.5 shows where definitions genuinely diverge — net-debt scopes, SBC-blind FCF). A correct preset you use as-is; a wrong or insufficient one you supersede with your own row and say why.
+- Build every metric you need as an explicit formula row. Verify from first principles that its definition fits this issuer, and state what it excludes or normalizes.
 - Separate recurring economics from one-off or structurally different streams (regulatory credits, asset sales, interest income on a cash pile): they get their own line and their own judgment, or they silently distort every ratio built on top.
 
 Output: a profit-source ledger — each source with its historical anchor: growth path, margin, share of profit, and how those trended.

@@ -54,8 +54,6 @@ const SOURCES: SourceDefinition[] = [
 
 const HISTORICAL_EXPECTED = {
   operatingNwc: [7, 8, 9],
-  roaFY2022: 0.0785714285714,
-  roeFY2022: 0.157142857143,
 };
 const FORECAST_EXPECTED = {
   revenue: [132, 145.2, 159.72],
@@ -97,6 +95,14 @@ const WACC_COMPUTED_INPUTS: WaccSheetComputedInput[] = [
 
 function setWaccInputOp(rowId: "risk_free_rate" | "equity_risk_premium", value: number, rationale: string): ModelOperation {
   return { kind: "set_wacc_input", input: { rowId, value, sourceType: "market", sourceRefs: ["golden-treasury"], rationale } };
+}
+
+function setForecastFormula(lineItemId: string, source: string): ModelOperation {
+  return { kind: "set_formula", formula: { lineItemId, appliesTo: "forecast", periodIds: FORECASTS, source } };
+}
+
+function setHistoricalFormula(lineItemId: string, source: string): ModelOperation {
+  return { kind: "set_formula", formula: { lineItemId, appliesTo: "historical", periodIds: ACTUALS, source } };
 }
 
 test("golden service workflow maps statements once and produces a deterministic DCF valuation", (t) => {
@@ -141,6 +147,13 @@ test("golden service workflow maps statements once and produces a deterministic 
   assert.equal(reviewed.status, "history_committed");
 
   const revenueResult = service.applyOperations("golden-dcf", 2, [
+    setHistoricalFormula("tax_rate", "income_tax_expense / pretax_income"),
+    setHistoricalFormula("ebitda", "operating_income + depreciation_amortization"),
+    setHistoricalFormula("nopat", "operating_income * (1 - tax_rate)"),
+    setHistoricalFormula("operating_working_capital", "accounts_receivable + inventory - accounts_payable"),
+    setHistoricalFormula("change_nwc", "operating_working_capital - LAG(operating_working_capital, 1)"),
+    setHistoricalFormula("fcff", "nopat + depreciation_amortization - capital_expenditures - change_nwc"),
+    setForecastFormula("revenue.total", "LAG(revenue.total, 1) * (1 + growth.revenue.total)"),
     setAssumption("growth.revenue.total", FORECASTS, [0.10]),
   ]);
   assert.equal(revenueResult.revision, 3);
@@ -148,6 +161,14 @@ test("golden service workflow maps statements once and produces a deterministic 
   assertRowValues(revenueResult.currentWorkbook.sections.revenue, "revenue.total", FORECASTS, FORECAST_EXPECTED.revenue);
 
   const operatingResult = service.applyOperations("golden-dcf", 3, [
+    setForecastFormula("operating_income", "revenue.total * margin.operating"),
+    setForecastFormula("ebitda", "operating_income + depreciation_amortization"),
+    setForecastFormula("nopat", "operating_income * (1 - tax_rate)"),
+    setForecastFormula("depreciation_amortization", "revenue.total * ratio.da_to_revenue"),
+    setForecastFormula("capital_expenditures", "revenue.total * ratio.capex_to_revenue"),
+    setForecastFormula("operating_working_capital", "revenue.total * ratio.operating_nwc_to_revenue"),
+    setForecastFormula("change_nwc", "operating_working_capital - LAG(operating_working_capital, 1)"),
+    setForecastFormula("fcff", "nopat + depreciation_amortization - capital_expenditures - change_nwc"),
     setAssumption("margin.operating", FORECASTS, [0.20]),
     setAssumption("tax_rate", FORECASTS, [0.25]),
     setAssumption("ratio.da_to_revenue", FORECASTS, [0.05]),
@@ -164,8 +185,6 @@ test("golden service workflow maps statements once and produces a deterministic 
   assertRowValues(operatingResult.currentWorkbook.sections.operations, "operating_working_capital", FORECASTS, FORECAST_EXPECTED.operatingNwc);
   assertRowValues(operatingResult.currentWorkbook.sections.operations, "change_nwc", FORECASTS, FORECAST_EXPECTED.changeNwc);
   assertRowValues(operatingResult.currentWorkbook.sections.dcf, "fcff", FORECASTS, FORECAST_EXPECTED.fcff);
-  assert.equal(cellValue(operatingResult.currentWorkbook.sections.metrics, "metric.roa", "FY2022"), HISTORICAL_EXPECTED.roaFY2022);
-  assert.equal(cellValue(operatingResult.currentWorkbook.sections.metrics, "metric.roe", "FY2022"), HISTORICAL_EXPECTED.roeFY2022);
 
   // A new model makes no valuation judgments for you: the three decisions start null and carry no
   // provenance, because there is nobody to attribute a value nobody chose.
@@ -358,10 +377,8 @@ function setAssumption(lineItemId: string, periods: string[], values: number[]):
 }
 
 function notApplicable(lineItemId: string, periods: string[]): ModelOperation {
-  return { kind: "set_assumption", assumption: {
-    assumptionId: `na:${lineItemId}`, lineItemId, periods, payload: { kind: "not_applicable" },
-    sourceType: "company_disclosure", sourceRefs: ["golden-10k"], asOfDate: "2023-12-31",
-    rationale: "Golden company has no such bridge component",
+  return { kind: "set_formula", formula: {
+    lineItemId, appliesTo: "historical", periodIds: periods, source: "0",
   } };
 }
 

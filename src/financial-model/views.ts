@@ -32,7 +32,6 @@ export type RevisionChange =
   | { kind: "assumption_set"; lineItemId: string; periodIds: string[] }
   | { kind: "line_item_source_set"; lineItemId: string; range: "historical" | "forecast"; source: "actual" | "assumption" | "formula" | "none" }
   | { kind: "line_item_added"; lineItemId: string; parentId?: string }
-  | { kind: "metric_added"; registryId: "cagr"; lineItemId: string }
   | { kind: "formula_set"; lineItemId: string; appliesTo: "historical" | "forecast"; periodIds: string[] }
   | { kind: "category_group_set"; parentLineItemId: string; category: string; periodIds: string[] }
   | { kind: "valuation_config_set" }
@@ -545,7 +544,7 @@ function validateSummary(summary: RevisionChangeSummary, snapshot: FinancialMode
   const validKinds = new Set([
     "model_created", "statements_staged",
     "fact_replaced", "assumption_set",
-    "line_item_source_set", "line_item_added", "metric_added", "formula_set",
+    "line_item_source_set", "line_item_added", "formula_set",
     "category_group_set", "valuation_config_set",
     "stage_advanced", "archived", "wacc_sheet_refreshed", "wacc_input_set",
   ]);
@@ -655,9 +654,6 @@ function validateChange(change: RevisionChange, snapshot: FinancialModelSnapshot
         || (change.parentId !== undefined && !lineIds.has(change.parentId))) {
         queryError("malformed line_item_added change");
       }
-      return;
-    case "metric_added":
-      if (change.registryId !== "cagr" || !validLine(change.lineItemId)) queryError("malformed metric_added change");
       return;
     case "formula_set":
       if (!validLine(change.lineItemId)

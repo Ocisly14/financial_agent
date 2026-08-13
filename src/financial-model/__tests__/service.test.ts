@@ -117,12 +117,10 @@ test("lifecycle gate failures remain visible as structured blockers", () => {
   const { service } = setup();
   const result = service.createModel(CREATE_INPUT);
 
-  assert.deepEqual(result.currentWorkbook.diagnostics, [{
-    code: "history_review_required",
-    refs: [],
-    message: "history requires selected periods and committed spine facts",
-    stage: "history_committed",
-  }]);
+  assert.ok(result.currentWorkbook.diagnostics.some((diagnostic) =>
+    diagnostic.code === "history_review_required"
+    && diagnostic.message === "history requires selected periods and committed spine facts"
+    && diagnostic.stage === "history_committed"));
 });
 
 test("source declarations are reconciled from each row's filled channel", () => {
@@ -470,7 +468,7 @@ test("committed spine facts are history evidence without legacy statement-mappin
     && fact.provenance.sourceType === "unified_statements"));
 });
 
-test("the history commit installs the working-capital identity over exactly the mapped components", () => {
+test("the history commit leaves working-capital modeling to an explicit formula", () => {
   const { store, service } = setup();
   service.createModel(CREATE_INPUT);
   // AR, inventory, AP mapped; the other four WC components are declared gaps for this issuer —
@@ -484,9 +482,9 @@ test("the history commit installs the working-capital identity over exactly the 
   const reviewed = service.commitSpineFacts("model-1", 0, { facts, historicalPeriodIds: ["FY2024", "FY2025"] });
   const formula = store.getRevision("model-1")!.snapshot.formulas
     .find((f) => f.lineItemId === "operating_working_capital" && f.appliesTo === "historical");
-  assert.equal(formula?.source, "accounts_receivable + inventory - accounts_payable");
+  assert.equal(formula, undefined);
   const operations = reviewed.currentWorkbook.sections.operations;
-  assert.equal(operations.find((r) => r.lineItemId === "operating_working_capital")!.cells["FY2025"]!.value, 33 + 11 - 22);
+  assert.equal(operations.find((r) => r.lineItemId === "operating_working_capital")!.cells["FY2025"]!.status, "not_modeled");
   assert.equal(operations.find((r) => r.lineItemId === "ratio.operating_nwc_to_revenue")!.cells["FY2025"]?.status, "not_modeled");
 });
 

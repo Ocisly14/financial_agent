@@ -81,12 +81,8 @@ function spineFact(lineItemId: string, periodId: string, value: number, unit: Un
 
 function notApplicableOp(lineItemId: string, periods: string[]): ModelOperation {
   return {
-    kind: "set_assumption",
-    assumption: {
-      assumptionId: `na:${lineItemId}`, lineItemId, periods, payload: { kind: "not_applicable" },
-      sourceType: "company_disclosure", sourceRefs: ["contract-test"], asOfDate: "2023-12-31",
-      rationale: "contract fixture has no such bridge component",
-    },
+    kind: "set_formula",
+    formula: { lineItemId, appliesTo: "historical", periodIds: periods, source: "0" },
   };
 }
 
@@ -99,6 +95,14 @@ function assumptionOp(lineItemId: string, periods: string[], values: number[], u
       rationale: "contract fixture assumption",
     },
   };
+}
+
+function forecastFormulaOp(lineItemId: string, source: string): ModelOperation {
+  return { kind: "set_formula", formula: { lineItemId, appliesTo: "forecast", periodIds: ["FY2024"], source } };
+}
+
+function historicalFormulaOp(lineItemId: string, source: string): ModelOperation {
+  return { kind: "set_formula", formula: { lineItemId, appliesTo: "historical", periodIds: ["FY2023"], source } };
 }
 
 function buildValuedContext(): ModelContextView {
@@ -138,6 +142,21 @@ function buildValuedContext(): ModelContextView {
     notApplicableOp("lease_liabilities", ["FY2023"]),
     notApplicableOp("preferred_equity", ["FY2023"]),
     notApplicableOp("non_controlling_interests", ["FY2023"]),
+    historicalFormulaOp("tax_rate", "income_tax_expense / pretax_income"),
+    historicalFormulaOp("ebitda", "operating_income + depreciation_amortization"),
+    historicalFormulaOp("nopat", "operating_income * (1 - tax_rate)"),
+    historicalFormulaOp("operating_working_capital", "accounts_receivable + inventory - accounts_payable"),
+    historicalFormulaOp("change_nwc", "operating_working_capital - LAG(operating_working_capital, 1)"),
+    historicalFormulaOp("fcff", "nopat + depreciation_amortization - capital_expenditures - change_nwc"),
+    forecastFormulaOp("revenue.total", "LAG(revenue.total, 1) * (1 + growth.revenue.total)"),
+    forecastFormulaOp("operating_income", "revenue.total * margin.operating"),
+    forecastFormulaOp("ebitda", "operating_income + depreciation_amortization"),
+    forecastFormulaOp("nopat", "operating_income * (1 - tax_rate)"),
+    forecastFormulaOp("depreciation_amortization", "revenue.total * ratio.da_to_revenue"),
+    forecastFormulaOp("capital_expenditures", "revenue.total * ratio.capex_to_revenue"),
+    forecastFormulaOp("operating_working_capital", "revenue.total * ratio.operating_nwc_to_revenue"),
+    forecastFormulaOp("change_nwc", "operating_working_capital - LAG(operating_working_capital, 1)"),
+    forecastFormulaOp("fcff", "nopat + depreciation_amortization - capital_expenditures - change_nwc"),
     assumptionOp("growth.revenue.total", ["FY2024"], [0.10], PERCENT),
     assumptionOp("margin.operating", ["FY2024"], [0.20], PERCENT),
     assumptionOp("tax_rate", ["FY2024"], [0.25], PERCENT),
@@ -249,26 +268,6 @@ test("revision summaries expose the keys the model_revision frame is built from"
     "revision", "parentRevision", "lifecycleStage", "createdAt",
     "changes", "changedSections", "warningCount", "blockerCount",
   ], "RevisionSummary");
-});
-
-test("the summary sheet whitelist line items exist in the skeleton", () => {
-  // Keep in sync with SUMMARY_ROWS in client/src/lib/workbook.ts (Task 6).
-  // The client picks these by id across four sections; a skeleton rename would
-  // otherwise blank the summary sheet with no error anywhere.
-  const sections = buildContext().currentWorkbook.sections;
-  const allIds = new Set(
-    [...sections.history, ...sections.metrics, ...sections.revenue, ...sections.operations]
-      .map((row) => row.lineItemId),
-  );
-  for (const id of [
-    "revenue.total", "growth.revenue.total",
-    "gross_profit", "metric.gross_margin",
-    "ebitda", "metric.ebitda_margin",
-    "operating_income", "margin.operating",
-    "net_income", "metric.net_margin",
-  ]) {
-    assert.ok(allIds.has(id), `summary whitelist line item "${id}" no longer exists`);
-  }
 });
 
 // --- Deep tripwires: Criticals 1-3 renamed or reshaped fields that live *inside* valuation,
