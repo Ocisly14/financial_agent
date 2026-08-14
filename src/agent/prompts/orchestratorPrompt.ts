@@ -154,8 +154,7 @@ Rules:
 [CONVERSATION SO FAR]
 {{history}}
 
-[CUSTOMER'S LATEST MESSAGE — RESPOND TO THIS]
-{{userMessage}}
+{{latestInput}}
 
 Output the next step as a single JSON object now.`,
 };

@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DeepSeekProvider } from "../deepseekProvider.ts";
+import { MalformedResponseError } from "../provider.ts";
 import type { JsonObject } from "../../../framework/types.ts";
 
 /** Builds an SSE Response body from the chunk objects a DeepSeek stream would emit. */
@@ -357,6 +358,88 @@ test("honors a custom base URL", async () => {
       const provider = new DeepSeekProvider("sk-test", "https://proxy.internal/v1");
       await provider.generate([{ role: "user", content: "hi" }], { modelClass: "MEDIUM" });
       assert.equal(captured[0]!.url, "https://proxy.internal/v1/chat/completions");
+    },
+  );
+});
+
+/** An SSE body whose tool-call arguments arrive as the given fragments, in order. */
+function toolCallResponse(name: string, fragments: string[], finishReason = "tool_calls"): Response {
+  return sseResponse([
+    ...fragments.map((argument, index) => ({
+      choices: [{
+        delta: {
+          tool_calls: [{
+            index: 0,
+            ...(index === 0 ? { function: { name, arguments: argument } } : { function: { arguments: argument } }),
+          }],
+        },
+      }],
+    })),
+    { choices: [{ finish_reason: finishReason }] },
+  ]);
+}
+
+test("a corrupt tool-call argument names the tool and invites a resend", async () => {
+  await withStubbedFetch(
+    () => toolCallResponse("apply_operations", ['{"modelId":"fm_1", rows:2}']),
+    async () => {
+      const provider = new DeepSeekProvider("sk-test");
+      await assert.rejects(
+        () => provider.generate([{ role: "user", content: "hi" }], { modelClass: "MEDIUM" }),
+        (error: Error) => {
+          assert.ok(error instanceof MalformedResponseError);
+          // Resending is the whole point: this sample is corrupt, the request is fine.
+          assert.equal(error.retryable, true);
+          assert.match(error.message, /apply_operations/);
+          assert.match(error.message, /finish_reason=tool_calls/);
+          // The offending bytes, not just the offset into a string nobody can see.
+          assert.match(error.message, /rows:2/);
+          return true;
+        },
+      );
+    },
+  );
+});
+
+test("arguments cut off at the output cap are not worth resending", async () => {
+  await withStubbedFetch(
+    () => toolCallResponse("apply_operations", ['{"modelId":"fm_1","rows":['], "length"),
+    async () => {
+      const provider = new DeepSeekProvider("sk-test");
+      await assert.rejects(
+        () => provider.generate([{ role: "user", content: "hi" }], { modelClass: "MEDIUM" }),
+        (error: Error) => {
+          assert.ok(error instanceof MalformedResponseError);
+          // A retry reproduces the truncation and pays for a second cap-length generation.
+          assert.equal(error.retryable, false);
+          assert.match(error.message, /finish_reason=length/);
+          return true;
+        },
+      );
+    },
+  );
+});
+
+test("a frame the stream could not parse is counted, not silently dropped", async () => {
+  await withStubbedFetch(
+    () => new Response(
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"f","arguments":"{\\"a\\":"}}]}}]}\n\n'
+      + "data: {not json}\n\n"
+      + 'data: {"choices":[{"finish_reason":"tool_calls"}]}\n\n'
+      + "data: [DONE]\n\n",
+      { status: 200, headers: { "Content-Type": "text/event-stream" } },
+    ),
+    async () => {
+      const provider = new DeepSeekProvider("sk-test");
+      await assert.rejects(
+        () => provider.generate([{ role: "user", content: "hi" }], { modelClass: "MEDIUM" }),
+        (error: Error) => {
+          // The dropped frame is the likeliest cause of the damage; the message has to say so,
+          // or the reader blames the model for bytes the transport lost.
+          assert.match(error.message, /dropped_frames=1/);
+          return true;
+        },
+      );
     },
   );
 });

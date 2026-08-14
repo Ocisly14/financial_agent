@@ -13,31 +13,31 @@ function samples(closes: number[]): OhlcSample[] {
 
 test("rolling_change down: fires on drawdown from window high (V-shape included)", () => {
   const buf = samples([100, 92, 98]);
-  const trigger: PriceTrigger = { type: "rolling_change", direction: "down", pct: 5, window_minutes: 10, confirm_samples: 1 };
+  const trigger: PriceTrigger = { type: "rolling_change", direction: "down", pct: 5, window_minutes: 10 };
   assert.equal(evaluatePriceTrigger(trigger, buf, 98).conditionMet, false);
   assert.equal(evaluatePriceTrigger(trigger, [...buf, { ts: 180000, high: 94, low: 94, close: 94 }], 94).conditionMet, true);
 });
 
 test("rolling_change uses window HIGH not endpoint (drawdown semantics)", () => {
   const buf = samples([100, 110, 104]);
-  const trigger: PriceTrigger = { type: "rolling_change", direction: "down", pct: 5, window_minutes: 10, confirm_samples: 1 };
+  const trigger: PriceTrigger = { type: "rolling_change", direction: "down", pct: 5, window_minutes: 10 };
   assert.equal(evaluatePriceTrigger(trigger, buf, 104).conditionMet, true);
 });
 
 test("rolling_change up: fires on rebound from window low", () => {
   const buf = samples([100, 90, 95]);
-  const trigger: PriceTrigger = { type: "rolling_change", direction: "up", pct: 5, window_minutes: 10, confirm_samples: 1 };
+  const trigger: PriceTrigger = { type: "rolling_change", direction: "up", pct: 5, window_minutes: 10 };
   assert.equal(evaluatePriceTrigger(trigger, buf, 95).conditionMet, true);
 });
 
 test("absolute_threshold down: level comparison", () => {
-  const trigger: PriceTrigger = { type: "absolute_threshold", direction: "down", price: 60000, confirm_samples: 1 };
+  const trigger: PriceTrigger = { type: "absolute_threshold", direction: "down", price: 60000 };
   assert.equal(evaluatePriceTrigger(trigger, [], 59999).conditionMet, true);
   assert.equal(evaluatePriceTrigger(trigger, [], 60001).conditionMet, false);
 });
 
 test("relative_change measures movement from a fixed fill anchor", () => {
-  const trigger: PriceTrigger = { type: "relative_change", direction: "up", pct: 10, reference_price: 100, confirm_samples: 1 };
+  const trigger: PriceTrigger = { type: "relative_change", direction: "up", pct: 10, reference_price: 100 };
   assert.equal(evaluatePriceTrigger(trigger, [], 109).conditionMet, false);
   const result = evaluatePriceTrigger(trigger, [], 111);
   assert.equal(result.conditionMet, true);
@@ -45,14 +45,14 @@ test("relative_change measures movement from a fixed fill anchor", () => {
 });
 
 test("trailing_stop down: maintains high-water and fires on retrace", () => {
-  const trigger: PriceTrigger = { type: "trailing_stop", direction: "down", pct: 10, reference_price: 150, confirm_samples: 1 };
+  const trigger: PriceTrigger = { type: "trailing_stop", direction: "down", pct: 10, reference_price: 150 };
   const r = evaluatePriceTrigger(trigger, [], 135);
   assert.equal(r.conditionMet, true);
   assert.equal(r.nextReferencePrice, 150);
 });
 
 test("trailing_stop down: raises anchor on new high, no fire", () => {
-  const trigger: PriceTrigger = { type: "trailing_stop", direction: "down", pct: 10, reference_price: 150, confirm_samples: 1 };
+  const trigger: PriceTrigger = { type: "trailing_stop", direction: "down", pct: 10, reference_price: 150 };
   const r = evaluatePriceTrigger(trigger, [], 160);
   assert.equal(r.conditionMet, false);
   assert.equal(r.nextReferencePrice, 160);
@@ -65,7 +65,6 @@ test("RSI threshold fires when the configured timeframe series is oversold", () 
     threshold: 30,
     period: 3,
     timeframe: "15Min",
-    confirm_samples: 1,
   };
   const result = evaluatePriceTrigger(trigger, samples([10, 9, 8, 7, 6]), 6);
   assert.equal(result.conditionMet, true);
@@ -80,7 +79,6 @@ test("moving-average trigger requires a fresh bullish cross", () => {
     fast_period: 2,
     slow_period: 3,
     timeframe: "1Day",
-    confirm_samples: 1,
   };
   assert.equal(evaluatePriceTrigger(trigger, samples([10, 10, 10, 10, 8, 14]), 14).conditionMet, true);
   assert.equal(evaluatePriceTrigger(trigger, samples([10, 10, 10, 12, 13, 14]), 14).conditionMet, false);
@@ -94,7 +92,6 @@ test("MACD trigger detects bullish and bearish line crosses", () => {
     slow_period: 4,
     signal_period: 2,
     timeframe: "1Day",
-    confirm_samples: 1,
   };
   const bearish: PriceTrigger = { ...bullish, direction: "bearish" };
   assert.equal(evaluatePriceTrigger(bullish, samples([10, 9, 8, 7, 6, 5, 4, 12]), 12).conditionMet, true);

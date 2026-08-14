@@ -3,7 +3,7 @@ import type { SkillRegistry } from "./skill.ts";
 import type { Dispatcher } from "./dispatcher.ts";
 import type { SubagentRegistry } from "./subagent.ts";
 import type { ModelRouter } from "../infra/llm/provider.ts";
-import { type LiveThread, type SessionRegistry, SessionState } from "./sessionState.ts";
+import { formatLatestInput, type LiveThread, type SessionRegistry, SessionState } from "./sessionState.ts";
 import { maybeCompact } from "./contextCompaction.ts";
 import type { McpToolRegistry } from "../../mcp_tools/toolRegistry.ts";
 import type { PromptTemplate } from "./prompt.ts";
@@ -310,7 +310,7 @@ export class OrchestratorRuntime {
 
       const rendered = this.renderer.render(this.prompt, {
         currentDate: new Date().toISOString().slice(0, 10),
-        userMessage: input.userMessage,
+        latestInput: formatLatestInput(input.userMessage, Boolean(input.inputResponse)),
         history,
         threads: formatThreads(state.liveThreads()),
         activeModelContext: input.activeModel

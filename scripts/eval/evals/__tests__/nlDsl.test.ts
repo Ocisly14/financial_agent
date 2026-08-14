@@ -92,22 +92,7 @@ test("multi: checks window_minutes, order_type, max_slippage_bps and mode when g
   assert.equal(r.intentMatch, false);
 });
 
-test("multi: checks confirm_samples and reanchor when gold pins them", () => {
-  const goldCs: GoldMultiDsl = {
-    tool: "create_strategy", symbol: "AAPL",
-    phases: [{ trigger_type: "rolling_change", direction: "down", pct: 5, window_minutes: 60, side: "BUY",
-      sizing_kind: "fixed_quote_usd", sizing_value: 200, confirm_samples: 3, recurrence_mode: "one_shot" }],
-  };
-  const hit = { tool: "create_strategy", input: { symbol: "AAPL", phases: [
-    { price_trigger: { type: "rolling_change", direction: "down", pct: 5, window_minutes: 60, confirm_samples: 3 },
-      action: { side: "BUY", quote_size: 200 }, recurrence: { mode: "one_shot" } }] } };
-  assert.equal(scoreMultiCase(hit, goldCs).intentMatch, true);
-  // model leaves confirm_samples at the default 2 → miss
-  const miss = { tool: "create_strategy", input: { symbol: "AAPL", phases: [
-    { price_trigger: { type: "rolling_change", direction: "down", pct: 5, window_minutes: 60 },
-      action: { side: "BUY", quote_size: 200 }, recurrence: { mode: "one_shot" } }] } };
-  assert.equal(scoreMultiCase(miss, goldCs).intentMatch, false);
-
+test("multi: checks reanchor when gold pins it", () => {
   const goldReanchor: GoldMultiDsl = {
     tool: "create_strategy", symbol: "AAPL",
     phases: [{ trigger_type: "rolling_change", direction: "down", pct: 5, window_minutes: 60, side: "BUY",
@@ -117,6 +102,11 @@ test("multi: checks confirm_samples and reanchor when gold pins them", () => {
     { price_trigger: { type: "rolling_change", direction: "down", pct: 5, window_minutes: 60 },
       action: { side: "BUY", quote_size: 100 }, recurrence: { mode: "recurring", max_triggers: 3, reanchor: true } }] } };
   assert.equal(scoreMultiCase(reHit, goldReanchor).intentMatch, true);
+
+  const reMiss = { tool: "create_strategy", input: { symbol: "AAPL", phases: [
+    { price_trigger: { type: "rolling_change", direction: "down", pct: 5, window_minutes: 60 },
+      action: { side: "BUY", quote_size: 100 }, recurrence: { mode: "recurring", max_triggers: 3 } }] } };
+  assert.equal(scoreMultiCase(reMiss, goldReanchor).intentMatch, false);
 });
 
 test("multi: wrong guardrail budget → not intentMatch even if phases match", () => {

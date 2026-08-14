@@ -1,5 +1,5 @@
 const ALPACA_BASE = "https://data.alpaca.markets/v2";
-const FEED = "iex";
+const DEFAULT_FEED: BarFeed = "iex";
 /** Consolidated tape: every exchange, and history well before IEX's own 2020 start. Beta needs both,
  *  so it opts in explicitly rather than changing what the chart and indicator tools already fetch. */
 export type BarFeed = "iex" | "sip";
@@ -64,22 +64,57 @@ function num(val: unknown): number | null {
   return typeof val === "number" && isFinite(val) ? val : null;
 }
 
-async function alpacaFetch(path: string): Promise<Record<string, unknown>> {
-  const res = await fetch(`${ALPACA_BASE}${path}`, {
-    headers: {
-      Accept: "application/json",
-      "APCA-API-KEY-ID": requiredEnv("ALPACA_API_KEY_ID"),
-      "APCA-API-SECRET-KEY": requiredEnv("ALPACA_API_SECRET_KEY"),
-    },
-  });
-  if (!res.ok) {
+/**
+ * Which tape to read. `ALPACA_FEED=sip` opts a paid subscription into the consolidated tape;
+ * anything unrecognised falls back to IEX rather than failing a request at runtime.
+ */
+export function resolveFeed(
+  explicit?: BarFeed,
+  env: Record<string, string | undefined> = process.env,
+): BarFeed {
+  if (explicit) return explicit;
+  return env["ALPACA_FEED"] === "sip" ? "sip" : DEFAULT_FEED;
+}
+
+/** Injection seam so retry backoff is testable without real waiting. */
+export type FetchOptions = { sleep?: (ms: number) => Promise<void> };
+
+/**
+ * Transient upstream failures are retried; everything else is surfaced immediately.
+ *
+ * 429 matters most: the free plan allows 200 requests a minute, and without a retry a burst
+ * turns into a thrown error that callers log and skip — a strategy silently not being evaluated
+ * looks exactly like a strategy whose condition was not met.
+ */
+const RETRYABLE_STATUS = (status: number): boolean => status === 429 || status >= 500;
+const MAX_ATTEMPTS = 3;
+const RETRY_BASE_MS = 1_000;
+
+const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function alpacaFetch(path: string, options: FetchOptions = {}): Promise<Record<string, unknown>> {
+  const sleep = options.sleep ?? defaultSleep;
+  let lastError = "";
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const res = await fetch(`${ALPACA_BASE}${path}`, {
+      headers: {
+        Accept: "application/json",
+        "APCA-API-KEY-ID": requiredEnv("ALPACA_API_KEY_ID"),
+        "APCA-API-SECRET-KEY": requiredEnv("ALPACA_API_SECRET_KEY"),
+      },
+    });
+    if (res.ok) {
+      const json: unknown = await res.json();
+      const rec = asRecord(json);
+      if (!rec) throw new Error("Alpaca returned a non-object response");
+      return rec;
+    }
     const body = await res.text();
-    throw new Error(`Alpaca ${res.status}: ${body.slice(0, 200)}`);
+    lastError = `Alpaca ${res.status}: ${body.slice(0, 200)}`;
+    if (!RETRYABLE_STATUS(res.status) || attempt === MAX_ATTEMPTS) throw new Error(lastError);
+    await sleep(RETRY_BASE_MS * 2 ** (attempt - 1));
   }
-  const json: unknown = await res.json();
-  const rec = asRecord(json);
-  if (!rec) throw new Error("Alpaca returned a non-object response");
-  return rec;
+  throw new Error(lastError);
 }
 
 function toBar(raw: unknown, dateOnly: boolean): DailyBar | undefined {
@@ -99,12 +134,12 @@ function toBar(raw: unknown, dateOnly: boolean): DailyBar | undefined {
   };
 }
 
-async function fetchBarsPaged(path: string, dateOnly: boolean): Promise<DailyBar[]> {
+async function fetchBarsPaged(path: string, dateOnly: boolean, options: FetchOptions = {}): Promise<DailyBar[]> {
   const bars: DailyBar[] = [];
   let pageToken: string | undefined;
   do {
     const suffix = pageToken ? `&page_token=${encodeURIComponent(pageToken)}` : "";
-    const body = await alpacaFetch(`${path}${suffix}`);
+    const body = await alpacaFetch(`${path}${suffix}`, options);
     for (const raw of Array.isArray(body["bars"]) ? body["bars"] : []) {
       const bar = toBar(raw, dateOnly);
       if (bar) bars.push(bar);
@@ -120,12 +155,13 @@ export async function fetchBars(
   timeframe: Timeframe,
   from: string,
   to: string,
-  feed: BarFeed = FEED,
+  feed: BarFeed = resolveFeed(),
+  options: FetchOptions = {},
 ): Promise<DailyBar[]> {
   const end = clampToFeedWindow(to, feed);
   if (from > end) return [];
   const qs = `timeframe=${timeframe}&start=${encodeURIComponent(from)}&end=${encodeURIComponent(end)}&adjustment=all&limit=10000&feed=${feed}`;
-  return fetchBarsPaged(`/stocks/${encodeURIComponent(symbol)}/bars?${qs}`, timeframe === "1Day");
+  return fetchBarsPaged(`/stocks/${encodeURIComponent(symbol)}/bars?${qs}`, timeframe === "1Day", options);
 }
 
 /** Daily bars. from/to are "YYYY-MM-DD", inclusive range. Kept for get_stock_price to call. */
@@ -139,7 +175,7 @@ export async function fetchIntradayBars(symbol: string, day: string): Promise<Da
 }
 
 export async function fetchSnapshot(symbol: string): Promise<Snapshot> {
-  const body = await alpacaFetch(`/stocks/${encodeURIComponent(symbol)}/snapshot?feed=${FEED}`);
+  const body = await alpacaFetch(`/stocks/${encodeURIComponent(symbol)}/snapshot?feed=${resolveFeed()}`);
   const trade = asRecord(body["latestTrade"]);
   const quote = asRecord(body["latestQuote"]);
   const daily = asRecord(body["dailyBar"]);

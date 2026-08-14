@@ -1,8 +1,62 @@
-{ "id": "trailing-stop-retrace", "symbol": "AAPL", "expectedFire": true,
-  "label": "trailing stop fires after 10% retrace from anchor, sustained",
-  "trigger": { "type": "trailing_stop", "direction": "down", "pct": 10, "reference_price": 150, "confirm_samples": 2 },
+{
+  "id": "trailing-stop-retrace",
+  "symbol": "AAPL",
+  "expectedFire": true,
+  "label": "trailing stop fires after a 10% retrace from anchor, sustained",
+  "trigger": {
+    "type": "trailing_stop",
+    "direction": "down",
+    "pct": 10,
+    "reference_price": 150
+  },
   "candles": [
-    {"ts":0,"high":150,"low":150,"close":150},
-    {"ts":60000,"high":150,"low":134,"close":134},
-    {"ts":120000,"high":135,"low":133,"close":133}
-  ] }
+    {
+      "ts": 0,
+      "high": 150,
+      "low": 150,
+      "close": 150
+    },
+    {
+      "ts": 60000,
+      "high": 150,
+      "low": 150,
+      "close": 150
+    },
+    {
+      "ts": 120000,
+      "high": 150,
+      "low": 150,
+      "close": 150
+    },
+    {
+      "ts": 180000,
+      "high": 150,
+      "low": 150,
+      "close": 150
+    },
+    {
+      "ts": 240000,
+      "high": 150,
+      "low": 150,
+      "close": 150
+    },
+    {
+      "ts": 300000,
+      "high": 134,
+      "low": 134,
+      "close": 134
+    },
+    {
+      "ts": 360000,
+      "high": 133,
+      "low": 133,
+      "close": 133
+    },
+    {
+      "ts": 420000,
+      "high": 132,
+      "low": 132,
+      "close": 132
+    }
+  ]
+}

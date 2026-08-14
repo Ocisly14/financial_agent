@@ -34,7 +34,7 @@ const validInput = {
   mode: "paper",
   phases: [{
     name: "Entry",
-    price_trigger: { type: "rolling_change", direction: "down", pct: 5, window_minutes: 10, confirm_samples: 2 },
+    price_trigger: { type: "rolling_change", direction: "down", pct: 5, window_minutes: 10 },
     action: { side: "BUY", size: { type: "fixed_quote_usd", value: 500 }, order_type: "marketable_limit", max_slippage_bps: 50 },
     recurrence: { mode: "one_shot", reanchor: false, trigger_count: 0 },
   }],

@@ -1,6 +1,7 @@
 import { createFinancialAgentApp } from "./agent/createApp.ts";
 import { createHttpServer } from "./server/server.ts";
 import { startMonitor } from "./trading/strategyMonitor.ts";
+import { getRealtimeFeed } from "./data/stock/realtime/sharedFeed.ts";
 
 const PORT = parseInt(process.env["SERVER_PORT"] ?? "3000");
 
@@ -15,6 +16,10 @@ server.listen(PORT, () => {
   console.log(`  Chat UI:  ${url}/`);
   console.log(`  Health:   ${url}/health`);
   console.log(`  LLM:      ${process.env["LLM_PROVIDER"] ?? "mock"}`);
+  // Opened here rather than on first use so the socket is up before the first request, and so a
+  // credential or connection-limit problem shows in the boot log instead of inside a tool call.
+  const realtime = getRealtimeFeed();
+  console.log(`  Realtime: ${realtime.status().state} (quote stream; REST fallback when unavailable)`);
   startMonitor();
   console.log("  Strategy monitor started (stock paper/shadow evaluation; idles when nothing is active)");
 });

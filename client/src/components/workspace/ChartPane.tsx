@@ -16,7 +16,8 @@ import { MessageTimeContext } from "@/components/stockChartContext";
 import { ChartTabBar } from "./ChartTabBar";
 import { FloatingChart } from "./FloatingChart";
 
-const MIN_CHART_HEIGHT = 320;
+/** Low enough that a short window still fits the chart's x-axis without scrolling. */
+const MIN_CHART_HEIGHT = 200;
 /** Height a chart is given inside a floating window, below its title bar. */
 const FLOATING_CHROME_HEIGHT = 60;
 
@@ -157,10 +158,11 @@ export function ChartPane({
 
     const containerRef = useRef<HTMLElement>(null);
     const headerRef = useRef<HTMLElement>(null);
-    const [containerHeight, setContainerHeight] = useState(
+    const scrollerObserverRef = useRef<ResizeObserver | null>(null);
+    /** Content-box height of the scrolling area — the space a chart actually has. */
+    const [paneHeight, setPaneHeight] = useState(
         () => (typeof window === "undefined" ? 628 : window.innerHeight),
     );
-    const [headerHeight, setHeaderHeight] = useState(0);
 
     const tabKeys = useMemo(() => tabs.map(chartTabKey), [tabs]);
     const { windows, detach, reattach, moveWindow, resizeWindow, raiseWindow } = useDetachedTabs(tabKeys);
@@ -191,20 +193,27 @@ export function ChartPane({
             && point.y >= rect.top && point.y <= rect.bottom;
     }, []);
 
-    useEffect(() => {
-        const container = containerRef.current;
-        const header = headerRef.current;
-        if (!container || !header) return;
+    /**
+     * Measure the scrolling area directly instead of deriving it as container minus header.
+     *
+     * That subtraction had to know the header's border box and the scroller's own padding, and
+     * got both wrong — the chart came out ~50px taller than the space it had, which is why its
+     * x-axis sat below the fold. The scroller is positioned `absolute inset-0`, so its height
+     * comes from its parent and never from its content: measuring it cannot feed back into
+     * itself, and its content box already excludes the padding a chart cannot draw into.
+     */
+    const attachScroller = useCallback((node: HTMLDivElement | null) => {
+        scrollerObserverRef.current?.disconnect();
+        scrollerObserverRef.current = null;
+        if (!node) return;
+        // A callback ref rather than an effect: this pane returns null before it has any tabs, so
+        // an effect with empty deps would run once against a ref that was never attached and
+        // never retry — leaving the height stuck at its initial guess.
         const observer = new ResizeObserver((entries) => {
-            for (const entry of entries) {
-                const height = entry.contentRect.height;
-                if (entry.target === container) setContainerHeight(height);
-                if (entry.target === header) setHeaderHeight(height);
-            }
+            for (const entry of entries) setPaneHeight(entry.contentRect.height);
         });
-        observer.observe(container);
-        observer.observe(header);
-        return () => observer.disconnect();
+        observer.observe(node);
+        scrollerObserverRef.current = observer;
     }, []);
 
     // A detached tab leaves the strip (§5 rule 1).
@@ -220,7 +229,7 @@ export function ChartPane({
 
     if (tabs.length === 0) return null;
 
-    const chartHeight = Math.max(MIN_CHART_HEIGHT, Math.floor(containerHeight - headerHeight));
+    const chartHeight = Math.max(MIN_CHART_HEIGHT, Math.floor(paneHeight));
 
     return (
         <section
@@ -270,7 +279,7 @@ export function ChartPane({
             </header>
 
             <div className="relative h-0 min-h-0 flex-1 overflow-hidden">
-                <div className="custom-scrollbar absolute inset-0 overflow-y-auto overflow-x-hidden p-3">
+                <div ref={attachScroller} className="custom-scrollbar absolute inset-0 overflow-y-auto overflow-x-hidden p-3">
                     {active ? (
                         active.kind === "model" ? (
                             modelPane

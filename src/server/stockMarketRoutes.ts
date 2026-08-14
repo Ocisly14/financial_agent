@@ -3,10 +3,10 @@ import {
   buildStockChartDataResponse,
   createRateLimiter,
   getSharedBarRepository,
-  getSnapshotCached,
   STOCK_CHART_UPSTREAM_CALLS_PER_MINUTE,
   type StockChartDataDeps,
 } from "../data/stock/index.ts";
+import { realtimeSnapshotLoader } from "../data/stock/realtime/snapshotLoader.ts";
 
 export {
   barsForRangeDays,
@@ -29,7 +29,7 @@ const allowUpstreamCall = createRateLimiter(STOCK_CHART_UPSTREAM_CALLS_PER_MINUT
 async function defaultDeps(): Promise<StockChartDataDeps> {
   return {
     repository: await getSharedBarRepository(),
-    loadSnapshot: getSnapshotCached,
+    loadSnapshot: realtimeSnapshotLoader(),
     now: () => new Date(),
     allowUpstreamCall,
   };

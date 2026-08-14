@@ -1,4 +1,4 @@
-import { resolveModelMap, type LlmMessage, type LlmProvider, type LlmToolCall, type GenerateOptions, type GenerateResult, type ModelClass } from "./provider.ts";
+import { MalformedResponseError, resolveModelMap, type LlmMessage, type LlmProvider, type LlmToolCall, type GenerateOptions, type GenerateResult, type ModelClass } from "./provider.ts";
 import type { JsonObject } from "../../framework/types.ts";
 
 // Override with DEEPSEEK_MODEL_{SMALL,MEDIUM,LARGE}. DeepSeek serves two models,
@@ -122,6 +122,7 @@ export class DeepSeekProvider implements LlmProvider {
     let tokensIn = 0;
     let tokensOut = 0;
     let finishReason = "?";
+    let droppedFrames = 0;
     // Arguments stream as fragments keyed by the call's position in the reply; the
     // accumulated string is complete JSON only once the stream ends.
     const toolBlocks = new Map<number, { name: string; args: string }>();
@@ -162,19 +163,31 @@ export class DeepSeekProvider implements LlmProvider {
             tokensOut = chunk.usage.completion_tokens ?? tokensOut;
           }
         } catch {
-          // skip malformed SSE lines
+          // A frame we cannot read is not harmless: if it carried a tool-argument fragment,
+          // the accumulated string loses those bytes and only fails much later, as a JSON
+          // syntax error at an offset that points at perfectly good text. Count them so the
+          // failure below can name this as the cause instead of blaming the model.
+          droppedFrames += 1;
         }
       }
     }
 
     const toolCalls: LlmToolCall[] = [...toolBlocks.entries()]
       .sort(([a], [b]) => a - b)
-      .map(([, block]) => ({ name: block.name, input: block.args.trim() === "" ? {} : JSON.parse(block.args) as JsonObject }));
+      .map(([, block]) => ({
+        name: block.name,
+        input: parseToolArguments(block, { model, finishReason, droppedFrames, tokensOut, maxTokens: this.maxTokens }),
+      }));
 
     if (text === "" && toolCalls.length === 0) {
       // Callers parse `text` as JSON, so an empty reply would otherwise surface as their own
-      // "did not return JSON" — name the real cause here instead.
-      throw new Error(`DeepSeek returned no content (model=${model} finish_reason=${finishReason} max_tokens=${this.maxTokens} output_tokens=${tokensOut})`);
+      // "did not return JSON" — name the real cause here instead. An empty reply that did not
+      // hit the cap is a bad draw and worth re-drawing; one that did is the cap, and resending
+      // buys another cap-length generation with the same ending.
+      throw new MalformedResponseError(
+        `DeepSeek returned no content (model=${model} finish_reason=${finishReason}`
+        + ` max_tokens=${this.maxTokens} output_tokens=${tokensOut} dropped_frames=${droppedFrames})`,
+        { retryable: finishReason !== "length" });
     }
 
     return {
@@ -188,5 +201,39 @@ export class DeepSeekProvider implements LlmProvider {
         provider: this.name,
       },
     };
+  }
+}
+
+/**
+ * Turns one tool call's accumulated argument string into its object, or fails with an error
+ * that says what actually went wrong.
+ *
+ * `JSON.parse` alone reports "Expected double-quoted property name at position 1854", which
+ * names neither the tool, nor the stream, nor the two ways this string gets damaged — a frame
+ * dropped mid-argument, or the reply cut off at the output cap. Both look identical at the
+ * parse site and want opposite responses, so the diagnosis is assembled here where the stream
+ * state is still in scope, and the retry decision is handed to the router as a flag.
+ */
+function parseToolArguments(
+  block: { name: string; args: string },
+  stream: { model: string; finishReason: string; droppedFrames: number; tokensOut: number; maxTokens: number },
+): JsonObject {
+  if (block.args.trim() === "") return {};
+  try {
+    return JSON.parse(block.args) as JsonObject;
+  } catch (error) {
+    const truncated = stream.finishReason === "length";
+    const at = Number(/position (\d+)/.exec(String((error as Error).message))?.[1] ?? NaN);
+    // The bytes around the offset are the one piece a reader cannot reconstruct from the log,
+    // and the offset alone sends them looking at the wrong part of a 40KB argument string.
+    const near = Number.isFinite(at)
+      ? ` near ${JSON.stringify(block.args.slice(Math.max(0, at - 60), at + 60))}`
+      : "";
+    throw new MalformedResponseError(
+      `DeepSeek returned unparseable arguments for tool "${block.name}"`
+      + ` (${(error as Error).message}; model=${stream.model} finish_reason=${stream.finishReason}`
+      + ` arg_chars=${block.args.length} dropped_frames=${stream.droppedFrames}`
+      + ` output_tokens=${stream.tokensOut} max_tokens=${stream.maxTokens})${near}`,
+      { retryable: !truncated, cause: error });
   }
 }

@@ -179,3 +179,27 @@ test("chat history carries retrieved sources so citations can be rendered inline
     publishedDate: "2026-07-27",
   });
 });
+
+test("answering a card produces no chat bubble — the card itself is the record", () => {
+  const state = new SessionState("room-input", "2026-08-14T00:00:00.000Z");
+  state.beginTurn("Should I buy RKLB?");
+  state.recordUserInputRequest({
+    request_id: "input_1",
+    questions: [{
+      id: "entry",
+      question: "Entry?",
+      options: [{ id: "market", label: "Buy at market now" }, { id: "limit", label: "Limit order" }],
+      min_selections: 1,
+      max_selections: 1,
+    }],
+  }, "orchestrator");
+  state.beginTurn("Entry?: Buy at market now", {
+    request_id: "input_1",
+    answers: [{ question_id: "entry", selected_option_ids: ["market"] }],
+  });
+  state.recordReply("Placing it.", true);
+
+  const messages = projectChatHistory(state.allEvents());
+
+  assert.deepEqual(messages.map((message) => message.text), ["Should I buy RKLB?", "Placing it."]);
+});

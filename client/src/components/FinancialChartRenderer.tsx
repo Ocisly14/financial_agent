@@ -9,9 +9,13 @@ import { StockChartView } from "./StockChart";
 // StockChartView's quote row, status text, range controls, padding, and gaps
 // live outside the canvas. Reserve their height so the canvas cannot make the
 // measured workspace taller and trigger a ResizeObserver growth loop.
-const STOCK_CHART_CHROME_HEIGHT = 112;
+// Includes the surrounding card's own p-4 padding: leaving those 32px out made the
+// card taller than its scroll container, which is what put the x-axis below the fold.
+const STOCK_CHART_CHROME_HEIGHT = 144;
 const OVERLAY_LEGEND_HEIGHT = 28;
 const STUDY_PANE_HEIGHT = 204; // legend row + 145px plot + x-axis tick row + padding + border
+/** Below this a candlestick plot stops being readable; above it the pane simply follows its container. */
+const MIN_PRICE_PANE_HEIGHT = 160;
 
 function formatValue(value: number): string {
     if (Math.abs(value) >= 1_000_000) return value.toLocaleString(undefined, { maximumFractionDigits: 0 });
@@ -351,7 +355,7 @@ export function FinancialChartRenderer({
         STOCK_CHART_CHROME_HEIGHT
         + (overlayStudies.length > 0 ? OVERLAY_LEGEND_HEIGHT : 0)
         + Math.min(paneStudies.length, 1) * STUDY_PANE_HEIGHT;
-    const priceHeight = Math.max(280, height - reservedHeight);
+    const priceHeight = Math.max(MIN_PRICE_PANE_HEIGHT, height - reservedHeight);
 
     return (
         <div className="space-y-2">

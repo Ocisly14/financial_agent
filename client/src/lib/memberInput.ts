@@ -15,19 +15,27 @@ export type MemberInputCard = {
 };
 
 /**
- * The human-readable message that accompanies a structured answer. It becomes
- * the `user_message` on that member's timeline, so it reads as prose rather
- * than as a payload dump.
+ * The human-readable rendering of a structured answer, sent as the request's
+ * message text.
+ *
+ * It is NOT what the agent reads: the server recomputes the same text from the
+ * validated answers (`validateUserInputAnswers`) and injects it as its own
+ * labelled block, and no chat bubble is rendered for it either. This copy only
+ * keeps the request self-describing — hence the deliberately identical wording.
  */
 export function answerText(request: UserInputRequestView, answers: UserInputAnswer[]): string {
-  const byQuestion = new Map(answers.map((answer) => [answer.question_id, answer.selected_option_ids]));
+  const byQuestion = new Map(answers.map((answer) => [answer.question_id, answer]));
   return request.questions
     .map((question) => {
-      const selected = new Set(byQuestion.get(question.id) ?? []);
+      const answer = byQuestion.get(question.id);
+      const selected = new Set(answer?.selected_option_ids ?? []);
       // Iterate the options, not the answer ids: the line then reads in the
       // order the user saw, regardless of the order they clicked.
-      const labels = question.options.filter((option) => selected.has(option.id)).map((option) => option.label);
-      return `${question.question}: ${labels.join(", ")}`;
+      const parts = question.options.filter((option) => selected.has(option.id)).map((option) => option.label);
+      // Same wording as `validateUserInputAnswers` on the server, so the text
+      // the agent reads does not depend on which path delivered the answer.
+      if (answer?.free_text) parts.push(`Other — "${answer.free_text}"`);
+      return `${question.question}: ${parts.join(", ")}`;
     })
     .join("\n");
 }

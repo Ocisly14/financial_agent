@@ -2,7 +2,6 @@ import { z } from "zod";
 import { ema, macd, rsi, sma } from "../../technical/indicators.ts";
 import { parseTechnicalTimeframe } from "../../technical/stockTechnicalData.ts";
 
-const confirmations = z.number().int().min(1).default(2);
 const timeframe = z.string().default("1Day").refine(
   (value) => parseTechnicalTimeframe(value) !== undefined,
   "use 1Day or a 1-390 minute/hour timeframe such as 15Min, 1h, or 4Hour",
@@ -13,14 +12,12 @@ const rollingChangeTriggerSchema = z.object({
   direction: z.enum(["up", "down"]),
   pct: z.number().positive(),
   window_minutes: z.number().int().min(1).max(10080),
-  confirm_samples: confirmations,
 });
 
 const absoluteThresholdTriggerSchema = z.object({
   type: z.literal("absolute_threshold"),
   direction: z.enum(["up", "down"]),
   price: z.number().positive(),
-  confirm_samples: confirmations,
 });
 
 const trailingStopTriggerSchema = z.object({
@@ -28,7 +25,6 @@ const trailingStopTriggerSchema = z.object({
   direction: z.enum(["up", "down"]),
   pct: z.number().positive(),
   reference_price: z.number().positive().optional(),
-  confirm_samples: confirmations,
 });
 
 const relativeChangeTriggerSchema = z.object({
@@ -36,7 +32,6 @@ const relativeChangeTriggerSchema = z.object({
   direction: z.enum(["up", "down"]),
   pct: z.number().positive(),
   reference_price: z.number().positive().optional(),
-  confirm_samples: confirmations,
 });
 
 const rsiThresholdTriggerSchema = z.object({
@@ -45,7 +40,6 @@ const rsiThresholdTriggerSchema = z.object({
   threshold: z.number().min(0).max(100),
   period: z.number().int().min(2).max(100).default(14),
   timeframe,
-  confirm_samples: confirmations,
 });
 
 const macdCrossTriggerSchema = z.object({
@@ -55,7 +49,6 @@ const macdCrossTriggerSchema = z.object({
   slow_period: z.number().int().min(3).max(500).default(26),
   signal_period: z.number().int().min(2).max(100).default(9),
   timeframe,
-  confirm_samples: confirmations,
 }).superRefine((trigger, context) => {
   if (trigger.fast_period >= trigger.slow_period) {
     context.addIssue({
@@ -73,7 +66,6 @@ const movingAverageCrossTriggerSchema = z.object({
   fast_period: z.number().int().min(2).max(200).default(20),
   slow_period: z.number().int().min(3).max(500).default(50),
   timeframe,
-  confirm_samples: confirmations,
 }).superRefine((trigger, context) => {
   if (trigger.fast_period >= trigger.slow_period) {
     context.addIssue({

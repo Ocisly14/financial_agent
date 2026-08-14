@@ -179,6 +179,40 @@ export function foldUserInputRequest(event: SessionEvent, events: readonly Sessi
   return { ...request, asked_by, status: "skipped" };
 }
 
+/** Heading for a turn the user opened by answering an `ask_user` card. */
+export const ANSWER_BLOCK_HEADING = "[ANSWERED YOUR QUESTIONS]";
+
+/**
+ * The block that opens the current turn in the prompt, heading included.
+ *
+ * The heading is part of the value rather than part of the template because it
+ * states what kind of turn this is: a request to respond to, or the user
+ * closing a question the agent itself asked. Labelling an answer as the
+ * "latest message" invited the agent to reply to its own echoed question text.
+ */
+export function formatLatestInput(userMessage: string, isAnswer: boolean): string {
+  return isAnswer
+    ? `[THE USER ANSWERED YOUR QUESTIONS — CONTINUE FROM HERE]\n${userMessage}`
+    : `[THE USER'S LATEST MESSAGE — RESPOND TO THIS]\n${userMessage}`;
+}
+
+/**
+ * A turn's opening line in the prompt.
+ *
+ * Answering a card is not the user speaking — it is a structured reply to
+ * something the agent asked, so it arrives as its own labelled block instead of
+ * as `User: …`. Rendering it as speech made the agent treat its own question
+ * text, echoed back, as a fresh request.
+ *
+ * The discriminator is `input_response`, which `beginTurn` writes on exactly
+ * these events. `researchRuntime.renderEventLine` renders the same shape, so
+ * the two runtimes' transcripts agree.
+ */
+export function formatUserMessageLine(event: SessionEvent): string {
+  const content = event.payload.content as string;
+  return event.payload.input_response ? `${ANSWER_BLOCK_HEADING}\n${content}` : `User: ${content}`;
+}
+
 /**
  * One compacted task index as a line rather than as raw JSON — the same facts
  * at roughly a third of the tokens, and readable.
@@ -794,7 +828,7 @@ export class SessionState {
     const priorArtifacts: ArtifactRef[] = [];
     const priorLines: string[] = [];
     for (const e of visible.filter((e) => e.turn < turn && e.turn > compactedThrough)) {
-      if (e.kind === "user_message") priorLines.push(`User: ${e.payload.content as string}`);
+      if (e.kind === "user_message") priorLines.push(formatUserMessageLine(e));
       else if (e.kind === "reply" && e.payload.final === true) priorLines.push(`You: ${e.payload.content as string}`);
       else if (e.kind === "dispatch") priorLines.push(this.formatDispatchLine(e));
       else if (e.kind === "approval_required" && this.isApprovalPendingEvent(e)) priorLines.push(this.formatApprovalRequiredLine(e));

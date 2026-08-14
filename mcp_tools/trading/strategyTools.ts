@@ -96,7 +96,6 @@ export function createCreateStrategyTool(): RegisteredTool {
                   signal_period: { type: "integer", description: "MACD signal period; defaults to 9" },
                   average_type: { type: "string", enum: ["sma", "ema"], description: "moving-average type; defaults to sma" },
                   timeframe: { type: "string", description: "1Day or any 1-390 minute/hour interval such as 15Min, 1h, or 4Hour; defaults to 1Day" },
-                  confirm_samples: { type: "integer", description: "default 2" },
                 },
               },
               action: {

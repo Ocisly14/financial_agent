@@ -177,3 +177,121 @@ export function pollIntervalForSession(session: MarketSession): number | false {
 export function stripIncompleteTrailingTag(text: string): string {
   return text.replace(/<[^>]*$/, "");
 }
+
+
+/**
+ * How often to re-pull the REST quote once the price itself arrives over the push stream.
+ *
+ * Its remaining job is the data the stream does not carry — `session`, the daily aggregates,
+ * the staleness banner — none of which moves on a five-second scale. Polling it at the old
+ * cadence would spend requests re-fetching a price the stream already delivered.
+ */
+export function backstopIntervalForSession(session: MarketSession): number | false {
+  return session === "closed" ? false : 30_000;
+}
+
+/**
+ * The subset of a quote payload that a streamed price can update. Structurally a subset of
+ * `<StockChart />`'s `StockQuoteResponse`, redeclared here for the same reason `MarketSession`
+ * is: this file does not reach across into the component layer.
+ */
+export interface StreamablePriceQuote {
+  quote: {
+    price: number | null;
+    prevClose: number | null;
+    changePercent: number | null;
+    dayHigh: number | null;
+    dayLow: number | null;
+    quoteTimestamp: string;
+  } | null;
+}
+
+/**
+ * Fold a pushed price into the last REST payload.
+ *
+ * Only the fields a quote actually carries are touched. `dayOpen`, `volume`, `session` and the
+ * rest exist solely in the REST snapshot, so overwriting or clearing them here would make the
+ * header flicker between two sources. The day's high and low are the exception: they are
+ * derived, and leaving them stale would show a price above a "day high" it just passed.
+ */
+export function applyStreamedPrice<T extends StreamablePriceQuote>(
+  payload: T | undefined,
+  price: number,
+  tsMs: number,
+): T | undefined {
+  if (!payload?.quote) return payload;
+  const { prevClose, dayHigh, dayLow } = payload.quote;
+  return {
+    ...payload,
+    quote: {
+      ...payload.quote,
+      price,
+      changePercent: prevClose !== null && prevClose !== 0 ? ((price - prevClose) / prevClose) * 100 : null,
+      dayHigh: dayHigh === null ? price : Math.max(dayHigh, price),
+      dayLow: dayLow === null ? price : Math.min(dayLow, price),
+      quoteTimestamp: new Date(tsMs).toISOString(),
+    },
+  };
+}
+
+/** The candle shape this file needs; structurally a subset of `<StockChart />`'s StockCandle. */
+export interface LiveCandle {
+  t: string;
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+  v: number;
+}
+
+/** How wide one candle is, per timeframe. Daily is absent on purpose — see below. */
+const BUCKET_MS: Record<string, number> = { "1Min": 60_000, "5Min": 300_000 };
+
+/**
+ * Fold the pushed price into the candle that is still forming.
+ *
+ * Without this the header price moves twice a second while the last candle sits still until the
+ * next poll, so the two disagree by up to a minute — the chart says the bar closed at 101.80
+ * while the number above it reads 102.50.
+ *
+ * Two deliberate limits:
+ *
+ *  - The synthesized candle carries `v: 0`. A quote has no size, so any volume here would be
+ *    invented; it is corrected the moment the real bar arrives from the server.
+ *  - On a daily chart the forming candle is updated but a new one is never opened. Deciding that
+ *    a new session has begun needs a market calendar, and guessing from a timestamp would draw a
+ *    phantom bar on every weekend and holiday. The server owns that call.
+ *
+ * Returns the input array unchanged (same reference) whenever there is nothing to apply, so a
+ * caller memoising on the result does not re-render for free.
+ */
+export function withLiveCandle<T extends LiveCandle>(
+  candles: readonly T[],
+  price: number | null,
+  tsMs: number | null,
+  timeframe: string | undefined,
+): readonly T[] {
+  if (price === null || tsMs === null || candles.length === 0) return candles;
+  const last = candles[candles.length - 1]!;
+
+  const lastStart = last.t.length === 10 ? Date.parse(`${last.t}T00:00:00Z`) : Date.parse(last.t);
+  if (!Number.isFinite(lastStart) || tsMs < lastStart) return candles;
+
+  const extend = (): readonly T[] => [
+    ...candles.slice(0, -1),
+    { ...last, c: price, h: Math.max(last.h, price), l: Math.min(last.l, price) },
+  ];
+
+  if (timeframe === "1Day") return extend();
+
+  const bucketMs = timeframe === undefined ? undefined : BUCKET_MS[timeframe];
+  if (bucketMs === undefined) return candles;
+
+  if (tsMs < lastStart + bucketMs) return extend();
+
+  const openedAt = Math.floor(tsMs / bucketMs) * bucketMs;
+  return [
+    ...candles,
+    { ...last, t: new Date(openedAt).toISOString(), o: price, h: price, l: price, c: price, v: 0 },
+  ];
+}

@@ -67,7 +67,7 @@ export type GoldPhase = {
   id?: string; depends_on?: string[]; activate_on?: string; price_anchor_phase_id?: string; cancel_group?: string;
   trigger_type: string; direction: string; pct?: number; price?: number; window_minutes?: number;
   side: string; sizing_kind: string; sizing_value: number;
-  order_type?: string; max_slippage_bps?: number; confirm_samples?: number;
+  order_type?: string; max_slippage_bps?: number;
   recurrence_mode: string; max_triggers?: number; cooldown_minutes?: number; reanchor?: boolean;
 };
 export type GoldMultiDsl = {
@@ -108,7 +108,6 @@ function phaseFullyMatches(gen: Record<string, unknown>, gold: GoldPhase): boole
   if (Number(size["value"] ?? 0) !== gold.sizing_value) return false;
   if (gold.order_type !== undefined && String(action["order_type"] ?? "") !== gold.order_type) return false;
   if (gold.max_slippage_bps !== undefined && Number(action["max_slippage_bps"]) !== gold.max_slippage_bps) return false;
-  if (gold.confirm_samples !== undefined && Number(trigger["confirm_samples"]) !== gold.confirm_samples) return false;
   if (String(recurrence["mode"] ?? "") !== gold.recurrence_mode) return false;
   if (gold.max_triggers !== undefined && Number(recurrence["max_triggers"]) !== gold.max_triggers) return false;
   if (gold.cooldown_minutes !== undefined && Number(recurrence["cooldown_minutes"]) !== gold.cooldown_minutes) return false;

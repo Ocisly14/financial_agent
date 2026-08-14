@@ -51,7 +51,6 @@ for (const [i, line] of lines.entries()) {
     if (p.trigger_type === "relative_change" && typeof p.pct !== "number") issues.push(`${tag}: relative_change missing pct`);
     if (p.depends_on) for (const dependency of p.depends_on) if (!phaseIds.has(dependency)) issues.push(`${tag}: unknown dependency '${dependency}'`);
     if (p.price_anchor_phase_id && !p.depends_on?.includes(p.price_anchor_phase_id)) issues.push(`${tag}: price anchor is not a dependency`);
-    if (p.confirm_samples !== undefined && !Number.isInteger(p.confirm_samples)) issues.push(`${tag}: bad confirm_samples`);
     if (p.max_triggers !== undefined && !Number.isInteger(p.max_triggers)) issues.push(`${tag}: bad max_triggers`);
     if (p.cooldown_minutes !== undefined && !Number.isInteger(p.cooldown_minutes)) issues.push(`${tag}: bad cooldown_minutes`);
   }

@@ -186,6 +186,11 @@ const en = {
             title: "Questions from the agent",
             questionNumber: "Question {{number}}",
             selectionRange: "Select {{min}}–{{max}}",
+            // The free-text field is one of the choices, not a note attached to
+            // one, so its label says so.
+            freeTextLabel: "Something else",
+            freeTextPlaceholder: "Type your own answer",
+            nothingChosen: "Nothing chosen",
             recommended: "Recommended",
             submit: "Submit choices",
             submitting: "Submitting…",

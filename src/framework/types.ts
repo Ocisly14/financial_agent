@@ -68,6 +68,14 @@ export type UserInputRequest = {
 export type UserInputAnswer = {
   question_id: string;
   selected_option_ids: string[];
+  /**
+   * What the user typed into the question's free-text field, trimmed. Every
+   * question carries one, so the offered options are never the whole answer
+   * space. Present only when non-empty, and when present it counts as one
+   * selection against `min_selections`/`max_selections` — an unlisted answer
+   * displaces a listed one rather than riding along beside it.
+   */
+  free_text?: string;
 };
 
 export type UserInputResponse = {

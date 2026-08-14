@@ -38,6 +38,7 @@
 
 import { formatList, PromptRenderer, type PromptTemplate } from "../../framework/prompt.ts";
 import { maybeCompact } from "../../framework/contextCompaction.ts";
+import { formatLatestInput, formatUserMessageLine } from "../../framework/sessionState.ts";
 import type { SessionEvent, SessionRegistry, SessionState } from "../../framework/sessionState.ts";
 import type { JsonObject, UserInputRequest, UserInputResponse } from "../../framework/types.ts";
 import type { ModelRouter } from "../../infra/llm/provider.ts";
@@ -260,7 +261,7 @@ export class ResearchRuntime {
       await maybeCompact(state, this.modelRouter, turn);
       const rendered = this.renderer.render(this.prompt, {
         currentDate: new Date().toISOString().slice(0, 10),
-        userMessage: input.userMessage,
+        latestInput: formatLatestInput(input.userMessage, Boolean(input.inputResponse)),
         history: this.renderHistory(state, turn),
         roster,
         externalDelta,
@@ -501,7 +502,9 @@ export class ResearchRuntime {
     const payload = event.payload;
     switch (event.kind) {
       case "user_message":
-        return `User: ${String(payload.content ?? "")}`;
+        // Shared with `projectForPrompt` so an answered card reads the same in
+        // both runtimes' transcripts.
+        return formatUserMessageLine(event);
       case "reply":
         if (payload.final !== true && !isCurrent) return null; // status lines of past turns are noise
         return `You: ${String(payload.content ?? "")}`;

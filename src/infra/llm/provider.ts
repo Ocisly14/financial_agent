@@ -65,6 +65,26 @@ export type LlmProvider = {
 };
 
 /**
+ * A reply the provider could not turn into a usable result — malformed tool-call arguments,
+ * a truncated stream, a body that is not the documented shape.
+ *
+ * `retryable` says whether the *same request* is worth sending again. A sample that came back
+ * corrupt is: generation is nondeterministic, so the next one is usually clean. A reply cut off
+ * because it hit the output cap is not — the retry reproduces the truncation and burns another
+ * full generation to do it. Getting this wrong in either direction is expensive, so providers
+ * must decide it from `finish_reason`, never from the parse error alone.
+ */
+export class MalformedResponseError extends Error {
+  readonly retryable: boolean;
+
+  constructor(message: string, options: { retryable: boolean; cause?: unknown }) {
+    super(message, options.cause === undefined ? undefined : { cause: options.cause });
+    this.name = "MalformedResponseError";
+    this.retryable = options.retryable;
+  }
+}
+
+/**
  * Per-class model ids for one provider, read from `<PREFIX>_MODEL_{SMALL,MEDIUM,LARGE}`.
  *
  * Overrides are namespaced per provider rather than shared: a single global override
@@ -142,15 +162,7 @@ export class ModelRouter {
       ? `subagent:${meta.agent ?? "?"}`
       : String(meta.mode ?? "llm");
     const start = Date.now();
-    let result: GenerateResult;
-    try {
-      result = await this.provider.generate(messages, options);
-    } catch (error) {
-      // Callers see only `error.message` — for ai-sdk that is a bare "Invalid JSON response",
-      // which hides the status code and provider body needed to tell a 429 from a 400.
-      log.error(`[${label}] failed after ${Date.now() - start}ms | ${JSON.stringify(describeProviderError(error))}`);
-      throw error;
-    }
+    const result = await this.generateWithRetries(messages, options, label, start);
     const ms = Date.now() - start;
     const preview = result.toolCalls?.length
       ? `tool_calls=[${result.toolCalls.map((c) => c.name).join(",")}]`
@@ -170,7 +182,45 @@ export class ModelRouter {
     log.info(`[${label}] ${ms}ms | in=${result.metrics.tokens_in}${cache} out=${result.metrics.tokens_out} | ${preview}`);
     return result;
   }
+
+  /**
+   * Sends the request, re-sending it when the provider returns a corrupt sample.
+   *
+   * A malformed reply used to be fatal: one bad byte in a streamed tool-call argument threw a
+   * bare `SyntaxError` out of the provider, past the subagent loop, and ended a 40-minute DCF
+   * run with nine revisions of committed work still on the floor. The reply is a draw from a
+   * distribution, so re-drawing it is the whole fix — but only for faults that are properties
+   * of the sample. `MalformedResponseError.retryable` is what carries that distinction; every
+   * other error (auth, rate limits, a 400 on the request itself) is the caller's to handle and
+   * passes straight through, because re-sending it just pays for the same failure twice.
+   */
+  private async generateWithRetries(
+    messages: LlmMessage[],
+    options: GenerateOptions,
+    label: string,
+    start: number,
+  ): Promise<GenerateResult> {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await this.provider.generate(messages, options);
+      } catch (error) {
+        const retryable = error instanceof MalformedResponseError && error.retryable
+          && attempt < MAX_MALFORMED_ATTEMPTS && options.signal?.aborted !== true;
+        if (!retryable) {
+          // Callers see only `error.message` — for ai-sdk that is a bare "Invalid JSON response",
+          // which hides the status code and provider body needed to tell a 429 from a 400.
+          log.error(`[${label}] failed after ${Date.now() - start}ms | ${JSON.stringify(describeProviderError(error))}`);
+          throw error;
+        }
+        log.warn(`[${label}] malformed reply on attempt ${attempt}/${MAX_MALFORMED_ATTEMPTS}, resending`
+          + ` | ${(error as Error).message}`);
+      }
+    }
+  }
 }
+
+/** Attempts spent on one call before a corrupt reply is allowed to fail it. */
+const MAX_MALFORMED_ATTEMPTS = 3;
 
 /** Flattens a provider error (ai-sdk, fetch, or ours) into the fields that identify the failure. */
 export function describeProviderError(error: unknown): Record<string, unknown> {
