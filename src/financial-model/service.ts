@@ -1032,46 +1032,58 @@ function sortDiagnostics(diagnostics: readonly Diagnostic[]): Diagnostic[] {
 }
 
 /**
- * Records, on every failed check, which unified statement rows produced the canonical values it
- * compared. spine_mapping stamps each committed fact with the unified rows it summed
- * (`provenance.concept`), so a broken identity can name its own inputs — the agent follows the
- * rowIds into get_unified_rows instead of guessing which disclosure went wrong.
+ * Records, on every check that failed or could not complete, which unified statement rows produced
+ * the canonical values it compared. spine_mapping stamps each committed fact with the unified rows
+ * it summed (`provenance.concept`), so a broken identity can name its own inputs — the agent follows
+ * the rowIds into get_unified_rows instead of guessing which disclosure went wrong.
+ *
+ * Every ref gets an entry, including the ones with no rows behind them. A ref dropped for having no
+ * evidence leaves a short trail that reads as "the others are fine", and `unmapped` — the case that
+ * says the mapping is simply missing a row — is usually the defect itself.
  */
 function attachUnifiedTrail(snapshot: FinancialModelSnapshot): void {
-  const spineByCell = new Map<string, Fact>();
+  const unifiedByCell = new Map<string, Fact>();
   for (const fact of snapshot.facts) {
     if (fact.status !== "committed" || fact.lineItemId === undefined) continue;
     if (fact.provenance.sourceType !== "unified_statements") continue;
-    if (!factBacksCurrentCell(snapshot, fact)) continue;
-    spineByCell.set(cellKey(fact.lineItemId, fact.periodId), fact);
+    unifiedByCell.set(cellKey(fact.lineItemId, fact.periodId), fact);
   }
-  if (spineByCell.size === 0) return;
+  if (unifiedByCell.size === 0) return;
   snapshot.reconciliationResults = snapshot.reconciliationResults.map((result) => {
-    if (result.status !== "failed") return result;
-    const unifiedTrail = result.refs.flatMap((ref) => {
-      const concept = spineByCell.get(ref)?.provenance.concept;
-      return concept === undefined || concept === ""
-        ? []
-        : [{ lineItemId: splitCellKey(ref as CellKey).lineItemId, rowIds: concept.split("+") }];
+    // insufficient_data earns a trail as much as failed does: the check stalled because some ref has
+    // no value, and the trail is what says whether that ref was never mapped or was taken over.
+    if (result.status !== "failed" && result.status !== "insufficient_data") return result;
+    const unifiedTrail = result.refs.map((ref) => {
+      const { lineItemId, periodId } = splitCellKey(ref as CellKey);
+      const concept = unifiedByCell.get(ref)?.provenance.concept;
+      const mapped = concept !== undefined && concept !== "";
+      const agentDriven = cellIsAgentDriven(snapshot, lineItemId, periodId);
+      if (mapped && !agentDriven) return { lineItemId, rowIds: concept.split("+") };
+      // A ref the agent cannot follow still has to say which of the three cases it is, because the
+      // repair differs: re-map it, leave it alone, or go read the formula that took the cell over.
+      const absent = agentDriven
+        ? (mapped ? "superseded" as const : "derived" as const)
+        : "unmapped" as const;
+      return { lineItemId, rowIds: [], absent };
     });
-    return unifiedTrail.length > 0 ? { ...result, unifiedTrail } : result;
+    return { ...result, unifiedTrail };
   });
 }
 
-/** Reconciliation results compare final cells, not the raw fact ledger. A formula or assumption
- * can deliberately supersede a mapped fact for one period, so attaching that fact's unified row to
- * a failed check would send the agent to evidence that no longer drives the number. */
-function factBacksCurrentCell(snapshot: FinancialModelSnapshot, fact: Fact): boolean {
-  if (fact.lineItemId === undefined) return false;
-  const period = snapshot.periods.find((candidate) => candidate.id === fact.periodId);
-  if (!period) return false;
+/** Reconciliation results compare final cells, not the raw fact ledger. A formula or assumption can
+ * deliberately supersede a mapped fact for one period, and pointing the agent at that fact's unified
+ * row would send it to evidence that no longer drives the number — hence `superseded` on the trail
+ * rather than the rowIds. */
+function cellIsAgentDriven(snapshot: FinancialModelSnapshot, lineItemId: string, periodId: string): boolean {
+  const period = snapshot.periods.find((candidate) => candidate.id === periodId);
+  if (!period) return true;
   const appliesTo = period.cls === "forecast" ? "forecast" : "historical";
-  const formulaCoversCell = snapshot.formulas.some((formula) => formula.lineItemId === fact.lineItemId
+  const formulaCoversCell = snapshot.formulas.some((formula) => formula.lineItemId === lineItemId
     && formula.appliesTo === appliesTo
-    && (formula.periodIds === undefined || formula.periodIds.includes(fact.periodId)));
-  if (formulaCoversCell) return false;
-  return !snapshot.assumptions.some((assumption) => assumption.lineItemId === fact.lineItemId
-    && assumption.periods.includes(fact.periodId));
+    && (formula.periodIds === undefined || formula.periodIds.includes(periodId)));
+  if (formulaCoversCell) return true;
+  return snapshot.assumptions.some((assumption) => assumption.lineItemId === lineItemId
+    && assumption.periods.includes(periodId));
 }
 
 function commitResult(

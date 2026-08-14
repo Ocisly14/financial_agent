@@ -255,7 +255,7 @@ test("a failed required DCF category reconciliation keeps the model reading as d
   assert.equal(store.getRevision("model-1")?.revision, 2);
 });
 
-test("reconciliation trail excludes a unified fact superseded by an agent formula", () => {
+test("reconciliation trail marks a unified fact superseded by an agent formula rather than dropping it", () => {
   const { store, service } = setup();
   service.createModel(CREATE_INPUT);
   const fact = (lineItemId: string, periodId: string, value: number, rowId: string): Fact => ({
@@ -276,10 +276,33 @@ test("reconciliation trail excludes a unified fact superseded by an agent formul
   const failed = current(store).reconciliationResults.find((result) =>
     result.ruleId === "accounting_identity:gross_profit" && result.periodId === "FY2024");
   assert.equal(failed?.status, "failed");
+  // The superseded row must not point at evidence that no longer drives the number, but dropping it
+  // silently leaves a short list the agent reads as "everything else is fine".
   assert.deepEqual(failed?.unifiedTrail, [
+    { lineItemId: "revenue.total", rowIds: [], absent: "superseded" },
     { lineItemId: "cost_of_revenue", rowIds: ["cost-row"] },
     { lineItemId: "gross_profit", rowIds: ["gross-profit-row"] },
   ]);
+});
+
+test("a reconciliation ref with no unified fact at all is distinguished from a superseded one", () => {
+  const { store, service } = setup();
+  service.createModel(CREATE_INPUT);
+  const fact = (lineItemId: string, periodId: string, value: number, rowId: string): Fact => ({
+    ...spineFact(lineItemId, periodId, value),
+    provenance: { ...spineFact(lineItemId, periodId, value).provenance, concept: rowId },
+  });
+  // cost_of_revenue is never mapped: 100 - undefined != 40 fails, and the agent needs to see which
+  // of the three refs is the one carrying no evidence.
+  service.commitSpineFacts("model-1", 0, { facts: [
+    fact("revenue.total", "FY2024", 100, "revenue-row"),
+    fact("gross_profit", "FY2024", 40, "gross-profit-row"),
+  ], historicalPeriodIds: ["FY2024"] });
+
+  const failed = current(store).reconciliationResults.find((result) =>
+    result.ruleId === "accounting_identity:gross_profit" && result.periodId === "FY2024");
+  assert.equal(failed?.unifiedTrail?.find((step) => step.lineItemId === "cost_of_revenue")?.absent,
+    "unmapped");
 });
 
 test("readCells and targeted getModel reads are workbook slices and never commit", () => {

@@ -39,7 +39,7 @@ type AccountingRule = {
         calculate?: (values: readonly number[]) => number;
         requireSameUnit?: boolean;
       }
-    | { kind: "not_applicable"; refs: string[] };
+    | { kind: "not_applicable"; refs: string[]; reason: "no_prior_period" };
 };
 
 const term = (lineItemId: string, sign: 1 | -1 = 1): SignedTerm => ({ lineItemId, sign });
@@ -142,7 +142,7 @@ const ACCOUNTING_RULES: readonly AccountingRule[] = [
     terms: (periodIndex, actualPeriods) => {
       const prior = actualPeriods[periodIndex - 1];
       if (prior === undefined) {
-        return { kind: "not_applicable", refs: ["operating_working_capital"] };
+        return { kind: "not_applicable", refs: ["operating_working_capital"], reason: "no_prior_period" };
       }
       return {
         kind: "terms",
@@ -221,15 +221,18 @@ export function reconcileDcf(input: ReconciliationInput): ReconciliationResult[]
     for (const rule of ACCOUNTING_RULES) {
       const resolved = rule.terms(periodIndex, actualPeriods);
       const common = resolved.kind === "not_applicable"
-        ? notApplicable(
-            period.id,
-            rule.parentLineItemId,
-            [
-              cellKey(rule.parentLineItemId, period.id),
-              ...resolved.refs.map((ref) => coordinate(ref, period.id)),
-            ],
-            input.cells,
-          )
+        ? {
+            ...notApplicable(
+              period.id,
+              rule.parentLineItemId,
+              [
+                cellKey(rule.parentLineItemId, period.id),
+                ...resolved.refs.map((ref) => coordinate(ref, period.id)),
+              ],
+              input.cells,
+            ),
+            skipReason: { kind: resolved.reason, refs: [cellKey(rule.parentLineItemId, period.id)] },
+          }
         : reconcileTerms(
             period.id,
             rule.parentLineItemId,
@@ -267,10 +270,20 @@ function reconcileTerms(
   const parentItem = usableItem(itemById.get(parentLineItemId));
   const memberItems = terms.map((candidate) => usableItem(itemById.get(baseLineItemId(candidate.lineItemId))));
   if (parentItem === undefined || terms.length === 0 || memberItems.some((item) => item === undefined)) {
-    return notApplicable(periodId, parentLineItemId, refs, cells);
+    const absent = [
+      ...(parentItem === undefined ? [parentRef as string] : []),
+      ...termRefs.filter((_, index) => memberItems[index] === undefined),
+    ];
+    return { ...notApplicable(periodId, parentLineItemId, refs, cells),
+      ...(absent.length > 0 ? { skipReason: { kind: "missing_line_item" as const, refs: absent } } : {}) };
   }
-  if (requireSameUnit && memberItems.some((item) => !sameUnit(parentItem.unit, item!.unit))) {
-    return notApplicable(periodId, parentLineItemId, refs, cells);
+  if (requireSameUnit) {
+    const mismatched = terms.flatMap((candidate, index) =>
+      sameUnit(parentItem.unit, memberItems[index]!.unit) ? [] : [termRefs[index]!]);
+    if (mismatched.length > 0) {
+      return { ...notApplicable(periodId, parentLineItemId, refs, cells),
+        skipReason: { kind: "unit_mismatch", refs: mismatched } };
+    }
   }
 
   const actual = finiteValue(cells.get(parentRef));
@@ -285,6 +298,10 @@ function reconcileTerms(
       difference: null,
       tolerance: comparisonTolerance(actual, null),
       refs,
+      skipReason: { kind: "missing_values", refs: [
+        ...(actual === null ? [parentRef as string] : []),
+        ...termRefs.filter((_, index) => values[index] === null),
+      ] },
     };
   }
 
