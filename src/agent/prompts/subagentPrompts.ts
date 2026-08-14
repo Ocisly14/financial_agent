@@ -14,7 +14,7 @@ Rules:
 - Every stock data or indicator call MUST include an explicit symbol, except get_sector_analysis: omit sector_symbols for a full market-sector overview, pass one supported sector ETF for a single-sector question, or pass the explicit subset the user asks to compare. Never default an ordinary stock tool to a ticker. Pass timeframe, period, and history_bars only when the task requires non-default values.
 - The "task" string is sent automatically; pass the structured arguments required by each tool.
 
-With every step, first write ONE short line of text — what this step is doing and what you concluded from the last results — then make your tool calls. That line is your note: it is carried into [PROGRESS SO FAR] as step_notes and is your only memory of your own reasoning between steps. Call independent tools together in one step to run them in parallel. When done, call finish with a one-line summary of what you gathered — never alongside other calls.`,
+With every step, first write ONE short line of text — what this step is doing, what you concluded from the last results, and in a few words what you expect to do next. If it turns out to be wrong, say so in one clause and move on. That line is your note: it is carried into [PROGRESS SO FAR] as step_notes and is your only memory of your own reasoning between steps. Call independent tools together in one step to run them in parallel. When done, call finish with a one-line summary of what you gathered — never alongside other calls.`,
   prompt: `<task>
 {{task}}
 </task>
@@ -41,7 +41,7 @@ Rules:
 - Use financial_search for narrative business descriptions, investor-relations materials, management commentary, company-specific KPIs, news, macro evidence, and attributed expectations that the SEC tools do not provide. Never replace an available SEC fact with an unattributed search snippet.
 - For other tool arguments, pass what the task specifies. The "task" string is sent automatically.
 
-With every step, first write ONE short line of text — what this step is doing and what you concluded from the last results — then make your tool calls. That line is your note: it is carried into [PROGRESS SO FAR] as step_notes and is your only memory of your own reasoning between steps. Call independent tools together in one step to run them in parallel. When done, call finish with a one-line summary of what you gathered — never alongside other calls.`,
+With every step, first write ONE short line of text — what this step is doing, what you concluded from the last results, and in a few words what you expect to do next — then make your tool calls. The expectation is not a plan to justify; it is what lets the next step see whether it did what it meant to. If it turns out to be wrong, say so in one clause and move on. That line is your note: it is carried into [PROGRESS SO FAR] as step_notes and is your only memory of your own reasoning between steps. Call independent tools together in one step to run them in parallel. When done, call finish with a one-line summary of what you gathered — never alongside other calls.`,
   prompt: `<task>
 {{task}}
 </task>
@@ -82,7 +82,7 @@ ASKING THE USER. ask_user is your only channel to them. It PAUSES you — it doe
 
 BUDGET. You run for at most 30 tool steps, then the framework returns a resumable pause with model/revision/stage — do not restart an existing model. A mutation batch carries at most 10 operations and must be the only call in its step; split larger changes into consecutive batches (each commits its own revision, so splitting never changes the outcome). Do not spend steps re-reading state you already hold.
 
-With every step, first write ONE short line of text — what this step is doing and what you concluded from the last results — then make your tool calls. That line is your note: it is carried into [PROGRESS SO FAR] as step_notes and is your only memory of your own reasoning between steps. Never repeat a step whose note and result you already see. Independent reads may run together in one step; revision mutations must be serial — one mutation, alone in its step. When done, call finish with a grounded one-line summary including model id/revision/stage — never alongside other calls.`,
+With every step, first write ONE short line of text — what this step is doing, what you concluded from the last results, and in a few words what you expect to do next — then make your tool calls. The expectation is not a plan to justify; it is what lets the next step see whether it did what it meant to. If it turns out to be wrong, say so in one clause and move on. That line is your note: it is carried into [PROGRESS SO FAR] as step_notes and is your only memory of your own reasoning between steps. Never repeat a step whose note and result you already see. Independent reads may run together in one step; revision mutations must be serial — one mutation, alone in its step. When done, call finish with a grounded one-line summary including model id/revision/stage — never alongside other calls.`,
   prompt: `<task>
 {{task}}
 </task>
@@ -132,7 +132,7 @@ Strategy creation requirements:
 - Use recurrence.mode one_shot unless the user asks to repeat/recur; for recurring include max_triggers when specified and cooldown_minutes when specified. Always set trigger_count to 0 for each phase.
 - If create_strategy reports threshold_already_met, do not force it unless the user's task explicitly confirms forcing; finish with the tool's warning.
 
-With every step, first write ONE short line of text — what this step is doing and what you concluded from the last results — then make your tool calls. That line is your note: it is carried into [PROGRESS SO FAR] as step_notes and is your only memory of your own reasoning between steps. Call independent tools together in one step to run them in parallel. When done, call finish with a one-line summary of what you prepared — never alongside other calls.`,
+With every step, first write ONE short line of text — what this step is doing, what you concluded from the last results, and in a few words what you expect to do next — then make your tool calls. The expectation is not a plan to justify; it is what lets the next step see whether it did what it meant to. If it turns out to be wrong, say so in one clause and move on. That line is your note: it is carried into [PROGRESS SO FAR] as step_notes and is your only memory of your own reasoning between steps. Call independent tools together in one step to run them in parallel. When done, call finish with a one-line summary of what you prepared — never alongside other calls.`,
   prompt: `<task>
 {{task}}
 </task>
@@ -242,7 +242,7 @@ FINISHING. Drafting is not finishing. validate_unification_decision answers with
 
 Then call finish. Its summary is your report to financial_modeling, which does NOT see your rows — it is the only thing about your work that reaches it, and calling finish is you declaring the task done. At most 120 words of plain prose: what you did, the judgment calls that were not obvious, and anything it should check. Do not list ids or repeat counts — the host reports those. No JSON, no markdown.
 
-With every step, first write ONE short line of text — what this step is doing and what you concluded from the last results — then make your tool calls. That line is your note: it is carried into [PROGRESS SO FAR] and is your only memory of your own reasoning between steps.`,
+With every step, first write ONE short line of text — what this step is doing, what you concluded from the last results, and in a few words what you expect to do next — then make your tool calls. The expectation is not a plan to justify; it is what lets the next step see whether it did what it meant to. If it turns out to be wrong, say so in one clause and move on. That line is your note: it is carried into [PROGRESS SO FAR] and is your only memory of your own reasoning between steps.`,
   prompt: `<task>
 {{task}}
 </task>
@@ -310,7 +310,7 @@ FINISHING. Submitting is not finishing. submit_spine_decision answers with the h
 
 Then call finish. Its summary is your report to financial_modeling, which does NOT see your mapping — it is the only thing about your work that reaches it, and calling finish is you declaring the task done. At most 120 words of plain prose: what you did, the judgment calls that were not obvious, and anything it should check. Do not list ids or repeat counts — the host reports those. No JSON, no markdown.
 
-With every step, first write ONE short line of text — what this step is doing and what you concluded from the last results — then make your tool calls. That line is your note: it is carried into [PROGRESS SO FAR] and is your only memory of your own reasoning between steps.`,
+With every step, first write ONE short line of text — what this step is doing, what you concluded from the last results, and in a few words what you expect to do next — then make your tool calls. The expectation is not a plan to justify; it is what lets the next step see whether it did what it meant to. If it turns out to be wrong, say so in one clause and move on. That line is your note: it is carried into [PROGRESS SO FAR] and is your only memory of your own reasoning between steps.`,
   prompt: `<task>
 {{task}}
 </task>

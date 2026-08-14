@@ -194,3 +194,23 @@ for (const agent of ["financial_modeling", "statement_unification", "spine_mappi
       "the same work rendered differently twice — something per-run or per-step is inside the region");
   });
 }
+
+/**
+ * The step note is the only thing that survives between steps — a subagent's own reasoning does not,
+ * and on DeepSeek the reasoning stream is discarded outright. A note that only says where the run
+ * stands lets the next step re-derive the same standing and act on none of it: one AMZN run wrote
+ * six consecutive notes all saying "resuming at revision 3, the blocker is gross_profit" and issued
+ * six reads without a single write. An expectation makes the drift visible to the agent itself.
+ */
+test("every subagent's note contract asks for the next step, not just this one", async () => {
+  const prompts = await import("../../agent/prompts/subagentPrompts.ts");
+  const templates = Object.values(prompts).filter((value) =>
+    typeof value === "object" && value !== null && "system" in value);
+
+  assert.ok(templates.length >= 6, `only found ${templates.length} prompt templates`);
+  for (const template of templates) {
+    if (!template.system.includes("ONE short line of text")) continue;
+    assert.match(template.system, /what you expect to do next/,
+      "a note that never states an intention cannot show the next step that it drifted");
+  }
+});

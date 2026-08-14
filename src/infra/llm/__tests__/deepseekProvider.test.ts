@@ -11,10 +11,16 @@ function sseResponse(chunks: unknown[]): Response {
 
 type Captured = { url: string; init: RequestInit; body: JsonObject };
 
-/** Runs `body` with the DEEPSEEK_MODEL_* overrides cleared, so assertions about the
- * built-in defaults hold whatever the developer has in their own .env. */
-async function withoutModelOverrides(body: () => Promise<void>): Promise<void> {
-  const names = ["DEEPSEEK_MODEL_SMALL", "DEEPSEEK_MODEL_MEDIUM", "DEEPSEEK_MODEL_LARGE"];
+/**
+ * Runs `body` with `names` cleared from the environment, restoring them afterwards.
+ *
+ * The suite runs under `--env-file=.env`, so any variable the provider reads is whatever the
+ * developer happens to have configured. A test asserting a built-in default has to own that
+ * variable for its duration, or it is really asserting the contents of someone's .env — and it
+ * fails on their machine and passes on a bare CI runner for reasons that have nothing to do
+ * with the code.
+ */
+async function withoutEnv(names: readonly string[], body: () => Promise<void>): Promise<void> {
   const saved = names.map((name) => [name, process.env[name]] as const);
   for (const name of names) delete process.env[name];
   try {
@@ -26,6 +32,9 @@ async function withoutModelOverrides(body: () => Promise<void>): Promise<void> {
     }
   }
 }
+
+const withoutModelOverrides = (body: () => Promise<void>): Promise<void> =>
+  withoutEnv(["DEEPSEEK_MODEL_SMALL", "DEEPSEEK_MODEL_MEDIUM", "DEEPSEEK_MODEL_LARGE"], body);
 
 /** Swaps in a fetch that records the request and replies with `response`. */
 async function withStubbedFetch(
@@ -122,43 +131,35 @@ test("turns thinking off when DEEPSEEK_THINKING says disabled", async () => {
 });
 
 test("passes reasoning_effort through when set, and omits it otherwise", async () => {
-  await withStubbedFetch(
-    () => sseResponse([{ choices: [{ delta: { content: "ok" } }] }]),
-    async (captured) => {
-      await new DeepSeekProvider("sk-test").generate([{ role: "user", content: "hi" }], { modelClass: "MEDIUM" });
-      assert.ok(!("reasoning_effort" in captured[0]!.body));
+  await withoutEnv(["DEEPSEEK_REASONING_EFFORT"], async () => {
+    await withStubbedFetch(
+      () => sseResponse([{ choices: [{ delta: { content: "ok" } }] }]),
+      async (captured) => {
+        await new DeepSeekProvider("sk-test").generate([{ role: "user", content: "hi" }], { modelClass: "MEDIUM" });
+        assert.ok(!("reasoning_effort" in captured[0]!.body));
 
-      const original = process.env["DEEPSEEK_REASONING_EFFORT"];
-      process.env["DEEPSEEK_REASONING_EFFORT"] = "medium";
-      try {
+        process.env["DEEPSEEK_REASONING_EFFORT"] = "medium";
         await new DeepSeekProvider("sk-test").generate([{ role: "user", content: "hi" }], { modelClass: "MEDIUM" });
         assert.equal(captured[1]!.body["reasoning_effort"], "medium");
-      } finally {
-        if (original === undefined) delete process.env["DEEPSEEK_REASONING_EFFORT"];
-        else process.env["DEEPSEEK_REASONING_EFFORT"] = original;
-      }
-    },
-  );
+      },
+    );
+  });
 });
 
 test("budgets max_tokens for thinking plus the reply, overridable by env", async () => {
-  await withStubbedFetch(
-    () => sseResponse([{ choices: [{ delta: { content: "ok" } }] }]),
-    async (captured) => {
-      await new DeepSeekProvider("sk-test").generate([{ role: "user", content: "hi" }], { modelClass: "MEDIUM" });
-      assert.equal(captured[0]!.body["max_tokens"], 64_000);
+  await withoutEnv(["DEEPSEEK_MAX_TOKENS"], async () => {
+    await withStubbedFetch(
+      () => sseResponse([{ choices: [{ delta: { content: "ok" } }] }]),
+      async (captured) => {
+        await new DeepSeekProvider("sk-test").generate([{ role: "user", content: "hi" }], { modelClass: "MEDIUM" });
+        assert.equal(captured[0]!.body["max_tokens"], 64_000);
 
-      const original = process.env["DEEPSEEK_MAX_TOKENS"];
-      process.env["DEEPSEEK_MAX_TOKENS"] = "1234";
-      try {
+        process.env["DEEPSEEK_MAX_TOKENS"] = "1234";
         await new DeepSeekProvider("sk-test").generate([{ role: "user", content: "hi" }], { modelClass: "MEDIUM" });
         assert.equal(captured[1]!.body["max_tokens"], 1234);
-      } finally {
-        if (original === undefined) delete process.env["DEEPSEEK_MAX_TOKENS"];
-        else process.env["DEEPSEEK_MAX_TOKENS"] = original;
-      }
-    },
-  );
+      },
+    );
+  });
 });
 
 test("keeps reasoning_content out of the reply text and the token stream", async () => {

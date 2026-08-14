@@ -1019,3 +1019,26 @@ test("filling risk_free_rate and equity_risk_premium resolves the wacc row once 
   assert.equal(filled.status, "draft");
   assert.equal(filled.currentWorkbook.valuation ?? null, null);
 });
+
+/**
+ * A formula naming a row that does not exist is the same failure as a selector naming one, and has
+ * to carry the same `unknownName` — the tool boundary searches on that field alone to attach near
+ * misses. An AMZN run wrote `unified.is_total_operating_expenses` (a unified rowId it had not
+ * imported) and got back a bare "unknown line item", while the identical mistake made through a
+ * selector came back with candidates and the one call that fetches them.
+ */
+test("a formula naming an unknown row reports which name was rejected", () => {
+  const { service } = setup();
+  service.createModel(CREATE_INPUT);
+
+  assert.throws(() => service.applyOperations("model-1", 0, [
+    { kind: "set_formula", formula: { lineItemId: "margin.operating", appliesTo: "historical",
+      source: "unified.is_total_operating_expenses - revenue.total", periodIds: ["FY2024"] } },
+  ]), (error: unknown) => {
+    assert.ok(error instanceof FinancialModelError, "engine rejects the formula");
+    assert.equal(error.code, "invalid_formula");
+    assert.equal(error.details?.["unknownName"], "unified.is_total_operating_expenses",
+      "and names the rejected id so the tool boundary can search for near misses");
+    return true;
+  });
+});

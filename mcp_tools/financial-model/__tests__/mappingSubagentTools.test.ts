@@ -251,3 +251,31 @@ test("dimension tools are absent without a tableStore", async () => {
   assert.equal(byName(tools, "list_dimension_axes"), undefined);
   assert.equal(byName(tools, "get_axis_breakdown"), undefined);
 });
+
+/**
+ * A spine target used to arrive as a bare id. Amazon's income statement carries a line labelled
+ * "Total operating expenses" that INCLUDES cost of sales, so mapping it onto `operating_expenses` is
+ * the obvious move from the label alone — and it double-counts COGS, because the engine checks
+ * `operating_income = gross_profit - operating_expenses` and gross_profit has already netted it. The
+ * mapper could not have known: that identity lives in reconciliation.ts, which it never sees. The
+ * cost landed downstream, where financial_modeling spent most of a round diagnosing five failed
+ * reconciliations and overriding the row with a formula.
+ */
+test("spine targets carry the identities that decide whether a mapping is right", async () => {
+  const { sourceReviewStore, modelIds, deps } = setup(["TSLA"]);
+  sourceReviewStore.save(modelIds[0]!, review({ unifiedStatements: { periods: [], rows: [] } as never }));
+  const loader = createSpineMappingTools(deps);
+
+  const loaded = await data<{ spineTargets: { required: string[]; optional: string[];
+    semantics: Record<string, string> } }>(byName(loader.tools, "load_unified_statements"), { symbol: "TSLA" });
+
+  const opex = loaded.spineTargets.semantics["operating_expenses"];
+  assert.ok(opex, "the target most often mis-mapped has to say what it means");
+  assert.match(opex, /operating_income = gross_profit - operating_expenses/,
+    "the identity that judges the mapping travels with the target");
+  assert.match(opex, /exclud/i, "and the scope that the issuer's same-named line does not share");
+
+  assert.match(loaded.spineTargets.semantics["gross_profit"] ?? "", /revenue\.total = cost_of_revenue \+ gross_profit/);
+  // Ids that no identity reads carry no note rather than a filler one.
+  assert.equal(loaded.spineTargets.semantics["diluted_shares"], undefined);
+});

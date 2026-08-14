@@ -5,6 +5,7 @@ import type { ModelStore } from "../../src/financial-model/store.ts";
 import type { FinancialModelSnapshot } from "../../src/financial-model/operations.ts";
 import type { RevisionChangeSummary } from "../../src/financial-model/service.ts";
 import { CANONICAL_MAPPING_IDS, REQUIRED_MAPPING_IDS } from "../../src/financial-model/skeleton.ts";
+import { identitiesByLineItem } from "../../src/financial-model/reconciliation.ts";
 import { buildConceptInventory } from "../../src/infra/xbrl/conceptInventory.ts";
 import { buildAxisCatalog, buildAxisBreakdown } from "../../src/infra/xbrl/dimensionInventory.ts";
 import type { SourceReviewStore } from "../../src/infra/xbrl/sourceReviewStore.ts";
@@ -170,9 +171,40 @@ export function createStatementUnificationTools(deps: MappingSubagentDeps): {
  * only ask once. Required ids come first because they are the ones it owes an answer for — mapped,
  * or written up as a spine gap.
  */
-function spineTargets(): { required: string[]; optional: string[] } {
+/**
+ * Scope notes for targets an issuer's own statement names the same way but means differently. The
+ * identities below say what the engine checks; these say what the id covers, which is the half the
+ * label cannot carry. Amazon prints "Total operating expenses" INCLUDING cost of sales, and mapping
+ * that onto `operating_expenses` double-counts COGS against the operating_income identity.
+ */
+const TARGET_SCOPE: Record<string, string> = {
+  operating_expenses: "Operating costs EXCLUDING cost_of_revenue. An issuer line named \"total operating "
+    + "expenses\" usually includes cost of sales and is NOT this row — map the non-COGS components, or a "
+    + "total net of them.",
+  cost_of_revenue: "Cost of sales / cost of revenue only. Everything else operating belongs to operating_expenses.",
+  gross_profit: "Revenue less cost_of_revenue. Derive it when the issuer presents no gross profit line.",
+  cash_available_for_bridge: "Cash the equity bridge may net against debt — not every balance labelled cash.",
+};
+
+/**
+ * The canonical targets, each with the identity that will judge the mapping.
+ *
+ * The ids used to travel alone. A mapper reading `operating_expenses` next to an issuer line labelled
+ * "Total operating expenses" maps them together, and only downstream — when the engine checks
+ * `operating_income = gross_profit - operating_expenses` — does the double-counted COGS surface, as
+ * five failed reconciliations for someone else to diagnose. The rule that decides correctness has to
+ * travel with the thing being decided.
+ */
+function spineTargets(): { required: string[]; optional: string[]; semantics: Record<string, string> } {
   const required = [...CANONICAL_MAPPING_IDS].filter((id) => REQUIRED_MAPPING_IDS.has(id));
-  return { required, optional: [...CANONICAL_MAPPING_IDS].filter((id) => !REQUIRED_MAPPING_IDS.has(id)) };
+  const identities = identitiesByLineItem();
+  const semantics: Record<string, string> = {};
+  for (const id of CANONICAL_MAPPING_IDS) {
+    const parts = [TARGET_SCOPE[id], ...(identities.get(id) ?? []).map((equation) => `The engine checks: ${equation}.`)]
+      .filter((part): part is string => part !== undefined && part.length > 0);
+    if (parts.length > 0) semantics[id] = parts.join(" ");
+  }
+  return { required, optional: [...CANONICAL_MAPPING_IDS].filter((id) => !REQUIRED_MAPPING_IDS.has(id)), semantics };
 }
 
 /** The spine_mapping subagent's initialization tool: the unified statements the previous stage stored. */

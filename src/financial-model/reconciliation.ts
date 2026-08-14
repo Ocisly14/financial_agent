@@ -414,6 +414,31 @@ function compareText(left: string, right: string): number {
  * genuinely income in some years, so flipping on the sign of the value would corrupt those years;
  * only the author of the mapping knows which convention the row was meant to carry.
  */
+/**
+ * Each canonical row's accounting identities, rendered as the equation the engine will check.
+ *
+ * Derived from ACCOUNTING_RULES rather than written out again, because the whole point is that the
+ * mapper is judged by these exact rules: a hand-copied list would drift from them silently, which is
+ * the failure this is meant to prevent one level up. Only the fixed-term identities render — the
+ * period-relative ones say nothing useful about a single row.
+ */
+export function identitiesByLineItem(): Map<string, string[]> {
+  const byItem = new Map<string, string[]>();
+  for (const rule of ACCOUNTING_RULES) {
+    const built = rule.terms(1, []);
+    if (built.kind !== "terms") continue;
+    const equation = `${rule.parentLineItemId} = ` + built.terms
+      .map((entry, index) => index === 0
+        ? (entry.sign === 1 ? entry.lineItemId : `-${entry.lineItemId}`)
+        : `${entry.sign === 1 ? "+" : "-"} ${entry.lineItemId}`)
+      .join(" ");
+    for (const id of [rule.parentLineItemId, ...built.terms.map((entry) => entry.lineItemId)]) {
+      byItem.set(id, [...(byItem.get(id) ?? []), equation]);
+    }
+  }
+  return byItem;
+}
+
 export function explainFailedIdentity(
   failure: { residual: number; tolerance: number },
   components: readonly { lineItemId: string; value: number }[],
