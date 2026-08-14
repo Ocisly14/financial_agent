@@ -1,9 +1,8 @@
 /**
  * The WACC sheet: a fixed 12-row skeleton, structurally the same idea as the DCF workbook — the
- * engine fills what it can measure, the agent fills what it cannot (`risk_free_rate`,
- * `equity_risk_premium`, and an optional override of `cost_of_debt`), and the locked formula rows
- * (`cost_of_equity`, `net_debt`, `e_over_v`, `d_over_v`, `wacc`) derive from those. `wacc` is the
- * only official discount rate; there is no second, black-box path to it.
+ * the engine may offer measured starting values, but the agent owns every non-derived input and
+ * the locked formula rows (`cost_of_equity`, `net_debt`, `e_over_v`, `d_over_v`, `wacc`) derive
+ * from those. `wacc` is the only official discount rate; there is no second, black-box path to it.
  *
  * The sheet is a single-column scalar environment anchored at one as-of date (the model's creation
  * date) — no period grid. Formulas reuse the DSL parser but evaluate over this 13-row namespace
@@ -75,12 +74,25 @@ export type SetWaccInput = {
   asOfDate: string;
 };
 
-/** Rows the agent may write via `setWaccInput`. Everything else — computed rows and the five
- * locked-formula rows — rejects the operation. */
+/** These two rows are economic choices, not merely mechanical calculations. A measured Treasury
+ * point is a candidate until the agent selects the duration it intends to discount with; ERP has
+ * no observable value at all. The other direct rows may be populated from final workbook cells or
+ * market data, while the relationship rows remain locked formulas. */
+export const WACC_AGENT_JUDGMENT_ROW_IDS = [
+  "risk_free_rate",
+  "equity_risk_premium",
+] as const;
+
+/** Rows the agent may write via `setWaccInput`. The agent may replace any measured starting value
+ * after checking the final workbook calculation; only the five relationship rows stay locked. */
 const AGENT_WRITABLE_ROW_IDS: ReadonlySet<WaccSheetRowId> = new Set([
+  "beta",
   "risk_free_rate",
   "equity_risk_premium",
   "cost_of_debt",
+  "equity_value",
+  "total_debt",
+  "effective_tax_rate",
 ]);
 
 const REPORTING_CURRENCY = "USD";
@@ -196,6 +208,13 @@ export function applyComputedWaccInputs(
     row.missingInputs = [];
   }
   return next;
+}
+
+/** A resolved arithmetic WACC is not yet an approved discount rate until the agent has recorded
+ * its two irreducible economic judgments. */
+export function missingWaccAgentJudgments(sheet: WaccSheet): typeof WACC_AGENT_JUDGMENT_ROW_IDS[number][] {
+  const byId = rowMap(sheet);
+  return WACC_AGENT_JUDGMENT_ROW_IDS.filter((rowId) => byId.get(rowId)?.source !== "agent");
 }
 
 export function setWaccInput(sheet: WaccSheet, input: SetWaccInput): WaccSheet {

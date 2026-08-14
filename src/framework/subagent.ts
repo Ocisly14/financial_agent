@@ -214,35 +214,56 @@ function commonPrefixLength(current: string, previous: string): number {
   return index;
 }
 
+/** What a step has to remember for the next one: the region it sent, and where it cut it. */
+export type ProgressCache = { progress: string; cuts: readonly number[] };
+
 /**
- * `previousProgress` is the progress region as it was rendered for the step before, and it earns a
- * third breakpoint: the static prefix stops growing after step one, while the progress region holds
- * everything the run has learned — tens of thousands of characters of playbook text among them —
- * and re-sending all of it at full price every step is most of what a long dispatch costs.
+ * The progress region holds everything the run has learned — tens of thousands of characters of
+ * playbook text among them — and re-sending it at full price every step is most of what a long
+ * dispatch costs. So it is cut into blocks and the newest boundaries carry cache breakpoints.
+ *
+ * The cuts are APPEND-ONLY, and that is the load-bearing part. Cutting at a freshly computed offset
+ * every step shipped once, and it was worse than no caching at all: the block that ended at the
+ * previous step's boundary was no longer sent as its own block, nothing matched, and every step
+ * wrote a fresh full-region entry it never read back — moving 39k tokens from the 1.0x full price
+ * to the 1.25x write price. A cut, once made, therefore stays a cut; a step only adds a new one
+ * after it, and only once enough has accrued to be worth its own write.
  */
-export function splitForPromptCache(system: string, prompt: string, previousProgress?: string): LlmMessage[] {
+export function splitForPromptCache(system: string, prompt: string, previous?: ProgressCache):
+{ messages: LlmMessage[]; cuts: number[] } {
   const index = prompt.indexOf(PROGRESS_MARKER);
   if (index <= 0) {
-    return [{ role: "system", content: system, cache: true }, { role: "user", content: prompt }];
+    return { messages: [{ role: "system", content: system, cache: true }, { role: "user", content: prompt }], cuts: [] };
   }
   const head = { role: "system" as const, content: system, cache: true };
   const staticPrefix = { role: "user" as const, content: prompt.slice(0, index), cache: true };
   const progress = prompt.slice(index);
 
-  const shared = previousProgress === undefined ? 0 : commonPrefixLength(progress, previousProgress);
-  if (shared < MIN_ROLLING_CACHE_CHARS) {
-    return [head, staticPrefix, { role: "user", content: progress }];
+  const shared = previous === undefined ? 0 : commonPrefixLength(progress, previous.progress);
+  // A cut past the shared prefix names an offset whose block content has since changed, so its
+  // entry is unreachable however we slice this request — drop it rather than carry it forward.
+  const kept = (previous?.cuts ?? []).filter((cut) => cut <= shared);
+  const newest = kept[kept.length - 1] ?? 0;
+  const cuts = shared - newest >= MIN_ROLLING_CACHE_CHARS ? [...kept, shared] : [...kept];
+  if (cuts.length === 0) return { messages: [head, staticPrefix, { role: "user", content: progress }], cuts };
+
+  const blocks: LlmMessage[] = [];
+  let start = 0;
+  for (const cut of cuts) {
+    blocks.push({ role: "user", content: progress.slice(start, cut) });
+    start = cut;
   }
-  // Nothing new since the last step — a retry on identical state. Cache the whole region rather than
-  // splitting it: an empty trailing block is not a text block a provider will accept.
-  if (shared >= progress.length) {
-    return [head, staticPrefix, { role: "user", content: progress, cache: true }];
-  }
-  return [
-    head, staticPrefix,
-    { role: "user", content: progress.slice(0, shared), cache: true },
-    { role: "user", content: progress.slice(shared) },
-  ];
+  // An empty trailing block is not a text block a provider will accept, so a step whose region is
+  // byte-identical to the last one ends on its final cut instead.
+  const tail = progress.slice(start);
+  if (tail.length > 0) blocks.push({ role: "user", content: tail });
+
+  // Anthropic allows four breakpoints and system + static prefix take two. Spend the rest on the
+  // two newest cuts: the older of them is what the previous step wrote and this one reads back,
+  // the newer is what this step writes for the next.
+  const atACut = tail.length > 0 ? blocks.length - 1 : blocks.length;
+  for (let i = Math.max(0, atACut - 2); i < atACut; i += 1) blocks[i]!.cache = true;
+  return { messages: [head, staticPrefix, ...blocks], cuts };
 }
 
 /** The progress region of a rendered prompt, or undefined when it carries none. */
@@ -274,13 +295,22 @@ export function formatAllowedTools(tools: ToolDefinition[]): string {
   return tools.map((tool) => `- ${tool.name}: ${tool.description}${formatToolArgs(tool.inputSchema)}`).join("\n");
 }
 
+/**
+ * A tool declares failure with its `error` field, and nothing else counts.
+ *
+ * This used to also sniff the summary for "failed", "error", "missing" and friends, on the theory
+ * that a tool might report trouble in prose alone. No tool ever did — but plenty report a standing
+ * condition in a summary that succeeded, and those were reclassified as failures. The reference case
+ * is `get_financial_model`: "Loaded financial model fm_X revision 7 (draft); required DCF
+ * reconciliation checks failed." is a successful read whose last clause names what still blocks the
+ * lifecycle. Marked as an error, it was then dropped by `subagentToolOutputs` — which skips errored
+ * results — so the overview the agent had just asked for never reached its context. It read again,
+ * and again: ten identical reads in one AMZN run, ~580KB of answers discarded before delivery.
+ *
+ * Guessing was never the more reliable signal, only the more eager one.
+ */
 function normalizeToolError(output: { summary: string; error?: { code: string; message: string } }): { code: string; message: string } | undefined {
-  if (output.error) return output.error;
-  const summary = output.summary.trim();
-  if (/^(.*\bfailed\b|failed\b|.*\berror\b|error\b|missing\b|invalid\b|unable\b|no token found\b)/i.test(summary)) {
-    return { code: "tool_failed", message: summary };
-  }
-  return undefined;
+  return output.error;
 }
 
 export type RunSubagentInput = {
@@ -421,8 +451,9 @@ export class SubagentRuntime {
     let exhausted = true;
     /** Set only by the provider call below, which is the one failure that ends the loop outright. */
     let llmFailure: { code: string; message: string } | undefined;
-    /** Last step's progress region, so this step can mark how much of it held still and cache it. */
-    let previousProgress: string | undefined;
+    /** Last step's progress region and the cuts it made in it, so this step can re-send those blocks
+     *  byte-identically — which is what makes the entry the last step wrote readable now. */
+    let previousCache: ProgressCache | undefined;
     for (let step = 1; step <= maxToolSteps; step++) {
       // Compact only completed earlier rounds before every prompt. The current
       // dispatch remains verbatim, even if it is itself large.
@@ -435,7 +466,11 @@ export class SubagentRuntime {
         modelContext: input.request.model_id
           ? `The user is currently viewing model ${input.request.model_id}. Prefer continuing it: refresh it before any mutation and keep your work in that model unless the task or evidence gives a concrete reason to select or create another model.`
           : "No existing model handle was supplied.",
-        progress: `(you are at step ${step} of your ${maxToolSteps}-step budget)\n` + (definition.name === "financial_modeling"
+        // The step counter belongs BELOW the progress region, never inside it. It changes every
+        // step, and a provider matches a cached prefix by bytes — at the head of the region it
+        // moved the divergence point to the first digit and made the rolling breakpoint unreachable.
+        stepBudget: `(you are at step ${step} of your ${maxToolSteps}-step budget)`,
+        progress: (definition.name === "financial_modeling"
           // Thread scope, not task scope: continuing a thread means the agent
           // comes back to everything it has done here, not just this round.
           ? projectFinancialModelProgress(state.subagentToolOutputs({ thread: threadId }), state.subagentToolErrors({ thread: threadId }),
@@ -448,9 +483,10 @@ export class SubagentRuntime {
       // Recorded before the call, not after: a step that throws still told the next one what it sent,
       // and a retry that re-renders the same progress should read it from cache rather than re-pay.
       const progressSent = progressRegion(rendered.prompt);
+      const split = splitForPromptCache(rendered.system, rendered.prompt, previousCache);
       try {
         const completion = await this.modelRouter.generate(
-          splitForPromptCache(rendered.system, rendered.prompt, previousProgress),
+          split.messages,
           // Built from the live set, so a skill's grant reaches the model. This is
           // the one thing that can change the cached request prefix mid-run; an
           // invoke_skill therefore costs one cache miss, and only one.
@@ -460,7 +496,7 @@ export class SubagentRuntime {
         completionText = completion.text;
         completionToolCalls = completion.toolCalls;
         llmCalls++;
-        previousProgress = progressSent;
+        previousCache = progressSent === undefined ? undefined : { progress: progressSent, cuts: split.cuts };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         log.error(`[${definition.name}] LLM call failed at step ${step}`, { error: message });

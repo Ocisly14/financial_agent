@@ -184,6 +184,25 @@ test("workbook slices validate selectors, preserve order, and do not mutate snap
     periodClass: "actual" }), /FY2025 \(forecast\)/);
 });
 
+/**
+ * `history` is a structural section — a group of rows — but it reads like a time range, and an agent
+ * that wants one row's historical numbers reaches for it by name. That collision cost ten identical
+ * rejections in a single AMZN run: the error said which section the row was in, which is true and
+ * useless, because the agent did not want a section at all. Name the trap where it is hit.
+ */
+test("asking for a named row under section history is told that section is structural, not temporal", () => {
+  const model = snapshot(true);
+
+  assert.throws(() => buildWorkbookSlice("m", 1, model, { lineItemIds: ["revenue.total"], section: "history" }),
+    (error: unknown) => {
+      assert.ok(error instanceof FinancialModelError && error.code === "invalid_model_query");
+      assert.match(error.message, /revenue\.total \(section revenue\)/, "still says where the row actually lives");
+      assert.match(error.message, /not a time range|periodClass/,
+        "and points at the filter that does select history");
+      return true;
+    });
+});
+
 test("selectors fully intersect exact cells, row filters, period filters, and preserve coordinate order", () => {
   const model = snapshot(true);
   const exact = buildWorkbookSlice("m", 1, model, {

@@ -405,7 +405,8 @@ function buildCells(snapshot: FinancialModelSnapshot, lineItemId: string, period
   };
   const cells: Record<string, WorkbookCellView> = {};
   for (const period of periods) {
-    const source = period.cls === "forecast" ? item.forecast : item.historical;
+    const source = sourceForCell(snapshot, lineItemId, period.id,
+      period.cls === "forecast" ? item.forecast : item.historical);
     const key = cellKey(lineItemId, period.id);
     const cell = snapshot.cells.get(key);
     if (source === "none") {
@@ -420,6 +421,32 @@ function buildCells(snapshot: FinancialModelSnapshot, lineItemId: string, period
     };
   }
   return cells;
+}
+
+/** A row's range declaration is a compact summary, not sufficient provenance for a partially
+ * formula-covered range. Resolve the source at the cell level so FY2024 may honestly show a formula
+ * while FY2025 on the same row still shows its committed fact. */
+function sourceForCell(
+  snapshot: FinancialModelSnapshot,
+  lineItemId: string,
+  periodId: string,
+  declared: CellSource,
+): CellSource {
+  if (declared === "calculated") return "calculated";
+  const appliesTo = snapshot.periods.find((period) => period.id === periodId)?.cls === "forecast"
+    ? "forecast"
+    : "historical";
+  if (snapshot.formulas.some((formula) => formula.lineItemId === lineItemId
+    && formula.appliesTo === appliesTo
+    && coverage(snapshot, formula.appliesTo, formula.periodIds).includes(periodId))) return "formula";
+  if (snapshot.assumptions.some((assumption) => assumption.lineItemId === lineItemId
+    && assumption.periods.includes(periodId))) return "assumption";
+  if (snapshot.facts.some((fact) => fact.status === "committed"
+    && fact.lineItemId === lineItemId && fact.periodId === periodId)) return "actual";
+  // Preserve the declared channel for an intentionally modeled-but-currently-missing cell. This
+  // matters for diagnostics (formula vs not_modelled) while still letting a fact win a partially
+  // formula-covered range above.
+  return declared;
 }
 
 function formulaDependencies(
@@ -482,14 +509,14 @@ function coverage(snapshot: FinancialModelSnapshot, appliesTo: "historical" | "f
 function validateSelector(snapshot: FinancialModelSnapshot, selector: ModelSelector): void {
   const itemIds = new Set(snapshot.lineItems.map((item) => item.id));
   const periodIds = new Set(snapshot.periods.map((period) => period.id));
-  for (const id of selector.lineItemIds ?? []) if (!itemIds.has(id)) queryError(`unknown line item: ${id}`);
+  for (const id of selector.lineItemIds ?? []) if (!itemIds.has(id)) queryError(`unknown line item: ${id}`, id);
   for (const id of selector.periodIds ?? []) if (!periodIds.has(id)) queryError(`unknown period: ${id}`);
   for (const ref of selector.cellRefs ?? []) {
-    if (!itemIds.has(ref.lineItemId)) queryError(`unknown line item: ${ref.lineItemId}`);
+    if (!itemIds.has(ref.lineItemId)) queryError(`unknown line item: ${ref.lineItemId}`, ref.lineItemId);
     if (!periodIds.has(ref.periodId)) queryError(`unknown period: ${ref.periodId}`);
   }
   if (selector.parentId !== undefined && !itemIds.has(selector.parentId)) {
-    queryError(`unknown parent line item: ${selector.parentId}`);
+    queryError(`unknown parent line item: ${selector.parentId}`, selector.parentId);
   }
   const sections = new Set<string>(MODEL_READ_SECTIONS);
   if (selector.section !== undefined && !sections.has(selector.section)) {
@@ -505,8 +532,17 @@ function validateSelector(snapshot: FinancialModelSnapshot, selector: ModelSelec
   if (selector.section !== undefined) {
     const mismatches = requestedItems.filter((item) => item.section !== selector.section)
       .map((item) => `${item.id} (section ${item.section})`);
-    if (mismatches.length > 0) queryError(`requested row(s) are outside section ${selector.section}: ${mismatches.join(", ")}. `
-      + "Read their named section(s), or omit section when reading rows across sections.");
+    if (mismatches.length > 0) {
+      // `history` is a section of rows, but it reads like a time range, so an agent after one row's
+      // historical numbers reaches for it by name and is told only which section the row is in —
+      // true, and no help, because it did not want a section at all. Say what it actually wanted.
+      const temporalTrap = selector.section === "history"
+        ? " `section` groups rows structurally and is not a time range: to read a row's history, "
+          + "name the row and filter with periodClass \"actual\" or explicit periodIds, without section."
+        : "";
+      queryError(`requested row(s) are outside section ${selector.section}: ${mismatches.join(", ")}. `
+        + "Read their named section(s), or omit section when reading rows across sections." + temporalTrap);
+    }
   }
   if (selector.parentId !== undefined) {
     const mismatches = requestedItems.filter((item) => item.parentId !== selector.parentId)
@@ -585,7 +621,13 @@ function toRevisionSummary(header: RevisionHeader<RevisionChangeSummary>): Revis
 }
 
 function compareText(a: string, b: string): number { return a < b ? -1 : a > b ? 1 : 0; }
-function queryError(message: string): never { throw new FinancialModelError("invalid_model_query", message); }
+/** `unknownName` is the name the caller wrote that does not exist. The engine only names it; the
+ *  tool boundary is what searches for near misses, because only it can reach the other namespaces
+ *  (unified rows, source review) that the guess may actually belong to. */
+function queryError(message: string, unknownName?: string): never {
+  throw new FinancialModelError("invalid_model_query", message,
+    unknownName === undefined ? undefined : { unknownName });
+}
 
 function itemOrder(snapshot: FinancialModelSnapshot, id: string): number {
   return snapshot.lineItems.find((item) => item.id === id)?.order ?? Number.MAX_SAFE_INTEGER;

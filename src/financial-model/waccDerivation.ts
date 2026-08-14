@@ -8,8 +8,9 @@
  * the agent supplies it deliberately rather than inheriting a number nobody chose.
  */
 import { computeBeta, type PriceBar } from "../infra/market/beta.ts";
+import { cellKey, type CellKey } from "./dsl/graph.ts";
 import { effectiveTaxRates } from "./wacc.ts";
-import type { Fact, LineItem, Period } from "./types.ts";
+import type { Cell, Fact, LineItem, Period } from "./types.ts";
 
 /** The seven CAPM/capital-structure terms this module can derive. */
 export type WaccParameterName =
@@ -63,7 +64,13 @@ export type DerivationDeps = {
 /** The WACC sheet's hidden `cash_and_equivalents_value` row is not one of the seven `WaccParameterName`
  * terms — it exists only so the sheet's locked `net_debt` formula has a value to subtract — so it is
  * kept out of `derived`/`WACC_PARAMETER_NAMES` entirely and reported through this narrower field. */
-export type CashDerivation = { value: number; sourceRefs: string[]; rationale: string; derivation: Record<string, unknown> };
+export type CashDerivation = {
+  value: number;
+  sourceType: WaccParameterSource;
+  sourceRefs: string[];
+  rationale: string;
+  derivation: Record<string, unknown>;
+};
 
 export type DerivedParameters = {
   derived: WaccParameterInput[];
@@ -89,6 +96,9 @@ export async function deriveWaccParameters(input: {
   facts: readonly Fact[];
   lineItems: readonly LineItem[];
   periods: readonly Period[];
+  /** The recalculated workbook is authoritative. It incorporates an agent-authored formula (for
+   * example, debt = borrowings + finance leases) instead of bypassing it for raw mapped facts. */
+  cells?: ReadonlyMap<CellKey, Cell>;
   deps: DerivationDeps;
   beta?: BetaOptions;
 }): Promise<DerivedParameters> {
@@ -99,15 +109,34 @@ export async function deriveWaccParameters(input: {
   const latest = actuals.at(-1);
   const base = { sourceRefs: [] as string[], asOfDate: input.asOfDate };
 
+  const sourceTypeOf = (lineItemId: string): WaccParameterSource => {
+    const item = input.lineItems.find((candidate) => candidate.id === lineItemId);
+    if (input.cells === undefined || item?.historical === "actual") return "filing";
+    return item?.historical === "assumption" ? "agent_estimate" : "computed";
+  };
+  const sourceRefOf = (lineItemId: string, periodId: string): string => {
+    if (input.cells !== undefined) return `model:${cellKey(lineItemId, periodId)}`;
+    return committed(input.facts, lineItemId, periodId)?.factId ?? `model:${cellKey(lineItemId, periodId)}`;
+  };
+  const valueAt = (lineItemId: string, periodId: string): number | undefined => {
+    if (input.cells !== undefined) {
+      const value = input.cells.get(cellKey(lineItemId, periodId))?.value;
+      return value !== null && value !== undefined && Number.isFinite(value) ? value : undefined;
+    }
+    return committed(input.facts, lineItemId, periodId)?.value;
+  };
   const seriesOf = (lineItemId: string): Record<string, number | null> =>
-    Object.fromEntries(actuals.map((periodId) => [periodId, committed(input.facts, lineItemId, periodId)?.value ?? null]));
+    Object.fromEntries(actuals.map((periodId) => [periodId, valueAt(lineItemId, periodId) ?? null]));
 
   // --- Effective tax rate: averaged, so one year's one-off charge cannot set every forecast period.
   try {
     const history = effectiveTaxRates({ periods: actuals,
       incomeTaxExpense: seriesOf("income_tax_expense"), pretaxIncome: seriesOf("pretax_income") });
     derived.push({ ...base, name: "taxRate", value: history.average, sourceType: "computed",
-      sourceRefs: history.perPeriod.map((entry) => `spine.income_tax_expense.${entry.periodId}`),
+      sourceRefs: history.perPeriod.flatMap((entry) => [
+        sourceRefOf("income_tax_expense", entry.periodId),
+        sourceRefOf("pretax_income", entry.periodId),
+      ]),
       derivation: { method: "mean of income_tax_expense / pretax_income", perPeriod: history.perPeriod },
       rationale: `Average effective rate over ${history.perPeriod.length} period(s).` });
   } catch (error) {
@@ -116,38 +145,39 @@ export async function deriveWaccParameters(input: {
 
   // --- Total debt, at book. NOT net of cash: the weights describe how the firm is financed, and the
   // cash adjustment belongs in the enterprise-to-equity bridge instead.
-  const debt = latest === undefined ? undefined : committed(input.facts, "debt", latest);
-  if (debt) {
-    derived.push({ ...base, name: "totalDebt", value: debt.value, sourceType: "filing",
-      sourceRefs: [debt.factId], derivation: { periodId: latest, basis: "book value, gross of cash" },
+  const debt = latest === undefined ? undefined : valueAt("debt", latest);
+  if (debt !== undefined && latest !== undefined) {
+    derived.push({ ...base, name: "totalDebt", value: debt, sourceType: sourceTypeOf("debt"),
+      sourceRefs: [sourceRefOf("debt", latest)], derivation: { periodId: latest, basis: "book value, gross of cash" },
       rationale: `Total debt at ${latest}.` });
   } else {
-    unreachable.push({ name: "totalDebt", reason: "no committed value for spine target `debt`; map it in spine_mapping" });
+    unreachable.push({ name: "totalDebt", reason: "no final workbook value for `debt`; map it or author its historical formula" });
   }
 
   // --- Cash and equivalents, at the latest committed period — feeds the sheet's locked `net_debt`
   // formula (total_debt - cash_and_equivalents_value); it is not one of the seven CAPM/WACC terms.
-  const cash = latest === undefined ? undefined : committed(input.facts, "cash_and_equivalents", latest);
-  if (cash) {
-    cashAndEquivalents = { value: cash.value, sourceRefs: [cash.factId],
+  const cash = latest === undefined ? undefined : valueAt("cash_and_equivalents", latest);
+  if (cash !== undefined && latest !== undefined) {
+    cashAndEquivalents = { value: cash, sourceType: sourceTypeOf("cash_and_equivalents"),
+      sourceRefs: [sourceRefOf("cash_and_equivalents", latest)],
       derivation: { periodId: latest }, rationale: `Cash and equivalents at ${latest}.` };
   } else {
     unreachable.push({ name: "cash_and_equivalents_value",
-      reason: "no committed value for spine target `cash_and_equivalents`; map it in spine_mapping" });
+      reason: "no final workbook value for `cash_and_equivalents`; map it or author its historical formula" });
   }
 
   // --- Market value of equity: diluted shares times the last close.
-  const shares = latest === undefined ? undefined : committed(input.facts, "diluted_shares", latest);
-  if (!shares) {
-    unreachable.push({ name: "equityValue", reason: "no committed value for spine target `diluted_shares`; map it in spine_mapping" });
+  const shares = latest === undefined ? undefined : valueAt("diluted_shares", latest);
+  if (shares === undefined) {
+    unreachable.push({ name: "equityValue", reason: "no final workbook value for `diluted_shares`; map it or author its historical formula" });
   } else {
     const close = await lastClose(input.deps, input.symbol, input.asOfDate);
     if (close === undefined) {
       unreachable.push({ name: "equityValue", reason: `no cached price for ${input.symbol}` });
     } else {
-      derived.push({ ...base, name: "equityValue", value: shares.value * close.c, sourceType: "market",
-        sourceRefs: [shares.factId, `bars:${input.symbol}/1Day/${close.t}`],
-        derivation: { dilutedShares: shares.value, close: close.c, closeDate: close.t, periodId: latest },
+      derived.push({ ...base, name: "equityValue", value: shares * close.c, sourceType: "market",
+        sourceRefs: [sourceRefOf("diluted_shares", latest!), `bars:${input.symbol}/1Day/${close.t}`],
+        derivation: { dilutedShares: shares, close: close.c, closeDate: close.t, periodId: latest },
         rationale: `${input.symbol} close on ${close.t} times diluted shares at ${latest}.` });
     }
   }
@@ -176,17 +206,18 @@ export async function deriveWaccParameters(input: {
   // backward-looking average of debt the issuer already carries, so it lags a repricing; the agent
   // overrides it with a current bond yield when it has one.
   const priorPeriod = actuals.at(-2);
-  const interest = latest === undefined ? undefined : committed(input.facts, "interest_expense", latest);
-  const priorDebt = priorPeriod === undefined ? undefined : committed(input.facts, "debt", priorPeriod);
-  if (interest && debt && priorDebt && debt.value + priorDebt.value > 0) {
-    const averageDebt = (debt.value + priorDebt.value) / 2;
-    derived.push({ ...base, name: "costOfDebt", value: Math.abs(interest.value) / averageDebt, sourceType: "filing",
-      sourceRefs: [interest.factId, debt.factId, priorDebt.factId],
+  const interest = latest === undefined ? undefined : valueAt("interest_expense", latest);
+  const priorDebt = priorPeriod === undefined ? undefined : valueAt("debt", priorPeriod);
+  if (interest !== undefined && debt !== undefined && priorDebt !== undefined && latest !== undefined && debt + priorDebt > 0) {
+    const averageDebt = (debt + priorDebt) / 2;
+    derived.push({ ...base, name: "costOfDebt", value: Math.abs(interest) / averageDebt,
+      sourceType: sourceTypeOf("interest_expense") === "filing" && sourceTypeOf("debt") === "filing" ? "filing" : "computed",
+      sourceRefs: [sourceRefOf("interest_expense", latest), sourceRefOf("debt", latest), sourceRefOf("debt", priorPeriod!)],
       derivation: { method: "interest expense / average total debt", averageDebt, periodId: latest },
       rationale: "Backward-looking; override with a current bond yield when one is available." });
   } else {
     unreachable.push({ name: "costOfDebt",
-      reason: "needs committed `interest_expense` and `debt` in the two latest periods; otherwise search the issuer's bond yield and pass it as an override" });
+      reason: "needs final workbook values for `interest_expense` and `debt` in the two latest periods; otherwise search the issuer's bond yield and pass it as an override" });
   }
 
   // --- Risk-free rate: the 30-year Treasury constant-maturity yield, straight off treasury.gov's own

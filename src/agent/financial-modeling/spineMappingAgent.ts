@@ -3,7 +3,7 @@ import { McpToolRegistry, type RegisteredTool } from "../../../mcp_tools/toolReg
 import { createLogger } from "../../infra/logger/logger.ts";
 import type { SubagentDefinition, SubagentRuntime } from "../../framework/subagent.ts";
 import type { SessionState } from "../../framework/sessionState.ts";
-import type { Fact } from "../../financial-model/types.ts";
+import type { Fact, ReconciliationResult } from "../../financial-model/types.ts";
 import { CANONICAL_MAPPING_IDS, REQUIRED_MAPPING_IDS } from "../../financial-model/skeleton.ts";
 import type { SpineDecision } from "../../infra/xbrl/spineFromUnified.ts";
 import type { UnifiedStatementsArtifact } from "../../infra/xbrl/unifiedStatements.ts";
@@ -19,9 +19,14 @@ export type SpineMappingRun = {
    */
   summary: string;
   facts: Fact[];
+  /** Missing required history only. */
   coverageGaps: Array<{ targetId: string; periodId: string }>;
+  /** Mapped optional rows absent in one or more periods; informational only. */
+  optionalCoverageGaps: Array<{ targetId: string; periodId: string }>;
   /** Empty on a clean run. Never silently empty on a dirty one. */
   unresolvedFindings: string[];
+  /** Present only when this run was asked to commit its verified mapping. */
+  committedRevision?: number;
 };
 
 /**
@@ -40,10 +45,15 @@ export async function runSpineMappingAgent(input: {
   readTools: RegisteredTool[];
   unified: UnifiedStatementsArtifact;
   spineIds?: readonly string[];
+  previewReconciliations?: (facts: readonly Fact[]) => readonly ReconciliationResult[];
+  /** The host supplies persistence, but mapping owns when it is invoked: after its final clean preview. */
+  commit?: (candidate: { decision: SpineDecision; facts: readonly Fact[] }) =>
+    { revision: number } | Promise<{ revision: number }>;
 }): Promise<SpineMappingRun> {
   const spineIds: ReadonlySet<string> = new Set(input.spineIds ?? [...CANONICAL_MAPPING_IDS]);
   const requiredIds: ReadonlySet<string> = new Set([...REQUIRED_MAPPING_IDS].filter((id) => spineIds.has(id)));
-  const delivery = createSpineDeliveryTools({ unified: input.unified, spineIds, requiredIds });
+  const delivery = createSpineDeliveryTools({ unified: input.unified, spineIds, requiredIds,
+    ...(input.previewReconciliations ? { previewReconciliations: input.previewReconciliations } : {}) });
 
   const runTools = [...input.readTools, ...delivery.tools];
   const registry = new McpToolRegistry();
@@ -59,8 +69,16 @@ export async function runSpineMappingAgent(input: {
   });
 
   const delivered = delivery.delivered();
-  if (!delivered) throw new Error(`spine_mapping finished without submitting a mapping: ${input.task}`);
-  log.info(`mapping produced ${delivered.facts.length} facts, ${delivered.coverageGaps.length} coverage gaps, ${delivered.findings.length} unresolved findings`);
+  if (!delivered) {
+    const lastEvaluation = delivery.lastEvaluation();
+    if (lastEvaluation) {
+      throw new Error(`spine_mapping finished with ${lastEvaluation.findings.length} unresolved finding(s); no facts were committed: ${lastEvaluation.findings.slice(0, 3).join("; ")}`);
+    }
+    throw new Error(`spine_mapping finished without submitting a mapping: ${input.task}`);
+  }
+  const committed = input.commit ? await input.commit({ decision: delivered.decision, facts: delivered.facts }) : undefined;
+  log.info(`mapping produced ${delivered.facts.length} facts, ${delivered.coverageGaps.length} required coverage gaps, ${delivered.optionalCoverageGaps.length} optional coverage gaps; verified${committed ? ` and committed at revision ${committed.revision}` : ""}`);
   return { decision: delivered.decision, summary: task?.summary ?? "", facts: delivered.facts,
-    coverageGaps: delivered.coverageGaps, unresolvedFindings: delivered.findings };
+    coverageGaps: delivered.coverageGaps, optionalCoverageGaps: delivered.optionalCoverageGaps,
+    unresolvedFindings: delivered.findings, ...(committed ? { committedRevision: committed.revision } : {}) };
 }

@@ -8,6 +8,7 @@ import { McpToolRegistry, type RegisteredTool } from "../../../../mcp_tools/tool
 import { SessionState } from "../../../framework/sessionState.ts";
 import { SubagentRuntime, type SubagentDefinition } from "../../../framework/subagent.ts";
 import { runSpineMappingAgent } from "../spineMappingAgent.ts";
+import type { ReconciliationResult } from "../../../financial-model/types.ts";
 
 // Fixture through the real ① → ②/③ pipeline: d_and_a is FY2025-only, so its FY2024 cell is null.
 // depreciation_amortization is a REQUIRED spine id, so that gap is worth a finding.
@@ -65,6 +66,27 @@ async function run(runtime: SubagentRuntime, counter = { calls: 0 }) {
     task, readTools: [loadTool(counter)], unified, spineIds });
 }
 
+test("a post-mapping reconciliation failure is returned to the mapping agent and cannot be finished or committed", async () => {
+  const runtime = scripted([
+    call("submit_spine_decision", { decision: goodDecision }),
+    call("finish", { summary: "incorrectly finished" }),
+  ]);
+  const state = new SessionState("s", new Date().toISOString());
+  state.beginTurn("go");
+  const failed: ReconciliationResult = {
+    kind: "accounting_identity", identity: "operating_income", parentLineItemId: "operating_income",
+    ruleId: "accounting_identity:operating_income", periodId: "FY2025", status: "failed", required: true,
+    actual: 100, calculated: 110, residual: -10, difference: 10, tolerance: 0.1,
+    refs: ["operating_income@FY2025"], unifiedTrail: [{ lineItemId: "other_operating_expenses", rowIds: ["other_opex"] }],
+  };
+  let commits = 0;
+  await assert.rejects(() => runSpineMappingAgent({ subagentRuntime: runtime, definition, state, sessionId: "s", agentId: "a",
+    task, readTools: [loadTool({ calls: 0 })], unified, spineIds,
+    previewReconciliations: () => [failed], commit: () => { commits += 1; return { revision: 2 }; } }),
+  /finished with 1 unresolved finding\(s\); no facts were committed/);
+  assert.equal(commits, 0);
+});
+
 test("a submitted mapping builds spine facts and returns with no unresolved findings", async () => {
   const counter = { calls: 0 };
   const runtime = scripted([
@@ -79,6 +101,22 @@ test("a submitted mapping builds spine facts and returns with no unresolved find
   assert.deepEqual(result.unresolvedFindings, []);
   assert.equal(result.facts.length, 2, "revenue.total over both periods");
   assert.ok(result.decision.spineGaps.some((gap) => gap.targetId === "depreciation_amortization"));
+});
+
+test("a clean mapping invokes its commit callback exactly once after verification", async () => {
+  const runtime = scripted([
+    call("submit_spine_decision", { decision: goodDecision }),
+    call("finish", { summary: "done" }),
+  ]);
+  const state = new SessionState("s", new Date().toISOString());
+  state.beginTurn("go");
+  let commits = 0;
+  const result = await runSpineMappingAgent({ subagentRuntime: runtime, definition, state, sessionId: "s", agentId: "a",
+    task, readTools: [loadTool({ calls: 0 })], unified, spineIds,
+    commit: (candidate) => { commits += 1; assert.equal(candidate.facts.length, 2); return { revision: 7 }; } });
+
+  assert.equal(commits, 1);
+  assert.equal(result.committedRevision, 7);
 });
 
 test("findings come back on the submission, and a patch corrects what was submitted", async () => {

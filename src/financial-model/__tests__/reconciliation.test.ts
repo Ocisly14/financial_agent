@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { cellKey, type CellKey } from "../dsl/graph.ts";
-import { reconcileDcf, type ReconciliationResult } from "../reconciliation.ts";
+import { explainFailedIdentity, reconcileDcf, type ReconciliationResult } from "../reconciliation.ts";
 import { addRevenueStream, addSourceStatementRows, createSkeleton } from "../skeleton.ts";
 import type { Cell, DcfCategoryGroup, Period, Unit } from "../types.ts";
 
@@ -382,4 +382,48 @@ test("result order is authoritative period then stable category and rule order",
     "FY2024:identity:gross_profit",
   ]);
   assert.equal(first[12]?.periodId, "FY2025");
+});
+
+/**
+ * A failed identity says the parent and the sum disagree, and nothing about which component is
+ * wrong — so an agent goes reading the workbook to find out, which is where an AMZN run spent ten
+ * consecutive steps and never got there. The whole diagnosis is already available at read time: a
+ * component carrying the wrong polarity moves the sum by exactly twice its own value, so the
+ * residual names it.
+ */
+test("a failed identity names the component whose sign would explain the residual", () => {
+  const children = [
+    { lineItemId: "operating_expenses.fulfillment", value: 75_111_000_000 },
+    { lineItemId: "operating_expenses.marketing", value: 32_551_000_000 },
+    // Stored income-positive from XBRL while its siblings are expense-positive: the whole defect.
+    { lineItemId: "operating_expenses.other_operating_expense_income_net", value: -62_000_000 },
+  ];
+
+  const explained = explainFailedIdentity({ residual: -124_000_000, tolerance: 25 }, children);
+
+  assert.deepEqual(explained.polaritySuspects, ["operating_expenses.other_operating_expense_income_net"]);
+  assert.equal(explained.components.length, 3, "and every component's value ships, suspect or not");
+});
+
+test("a residual that matches no component's sign flip accuses nobody", () => {
+  const children = [
+    { lineItemId: "operating_expenses.fulfillment", value: 75_111_000_000 },
+    { lineItemId: "operating_expenses.marketing", value: 32_551_000_000 },
+  ];
+
+  const explained = explainFailedIdentity({ residual: -124_000_000, tolerance: 25 }, children);
+
+  assert.deepEqual(explained.polaritySuspects, [],
+    "a wrong guess sends the agent chasing a component that is fine");
+});
+
+test("two components that would each explain the residual are both named", () => {
+  const children = [
+    { lineItemId: "a", value: -62_000_000 },
+    { lineItemId: "b", value: -62_000_000 },
+  ];
+
+  const explained = explainFailedIdentity({ residual: -124_000_000, tolerance: 25 }, children);
+
+  assert.deepEqual(explained.polaritySuspects, ["a", "b"], "ambiguity is reported, not resolved");
 });

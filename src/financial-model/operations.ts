@@ -337,6 +337,20 @@ function replacePlan<T extends { periodIds: string[] }>(
   return [...retained, structuredClone(incoming)];
 }
 
+/**
+ * The id an extensible row actually gets, from the id the caller wrote.
+ *
+ * `revenue` and `custom_metrics` are namespaces, and a caller may name a row either way — bare slug
+ * or fully qualified. One function rather than one rule per call site: the change summary derived
+ * the same id separately and the two spellings drifted the moment this branch learned to prefix,
+ * which surfaced as "malformed line_item_added change" rather than as anything about naming.
+ */
+export function resolveExtensibleLineItemId(parentId: string, id: string): string {
+  if (parentId === "revenue") return `revenue.${id.replace(/^revenue\./, "")}`;
+  if (parentId === "custom_metrics") return `metric.custom.${id.replace(/^metric\.custom\./, "")}`;
+  return id;
+}
+
 function addExtensibleLineItem(snapshot: FinancialModelSnapshot, input: NewExtensibleLineItem): void {
   if (input.parentId === "revenue") {
     const slug = input.id.startsWith("revenue.") ? input.id.slice("revenue.".length) : input.id;
@@ -354,14 +368,22 @@ function addExtensibleLineItem(snapshot: FinancialModelSnapshot, input: NewExten
     }));
     return;
   }
-  if (!/^metric\.custom\.[a-z][a-z0-9_.]*$/.test(input.id)) {
-    operationError(`custom metric id must use metric.custom.*: ${input.id}`);
+  // Accept the bare slug as well as the qualified id, exactly as the `revenue` branch above does.
+  // Demanding the prefix here and prefixing there is a difference with no reason behind it, and it
+  // cost a run a whole batch over `margin.operating.aws` — a fine name for an agent-owned metric.
+  // The namespace still does its job: whichever spelling arrives, the row lands under
+  // metric.custom.*, which is what makes it redefinable while registry metrics stay locked.
+  const id = resolveExtensibleLineItemId("custom_metrics", input.id);
+  const slug = id.slice("metric.custom.".length);
+  if (!/^[a-z][a-z0-9_.]*$/.test(slug)) {
+    operationError(`invalid custom metric id: ${input.id}. Use a lowercase slug such as "margin_aws" `
+      + "(it becomes metric.custom.margin_aws), or the fully qualified metric.custom.* id.");
   }
   if (input.unit === undefined) operationError("custom metric requires a declared unit");
-  if (snapshot.lineItems.some((item) => item.id === input.id)) operationError(`line item already exists: ${input.id}`);
+  if (snapshot.lineItems.some((item) => item.id === id)) operationError(`line item already exists: ${id}`);
   const order = Math.max(699, ...snapshot.lineItems.map((item) => item.order)) + 1;
   snapshot.lineItems.push({
-    id: input.id,
+    id,
     label: input.label,
     role: "none",
     unit: structuredClone(input.unit),
@@ -556,6 +578,22 @@ export function applyModelOperations(
         const group = normalizeCategoryGroup(next, operation.group);
         const groups = replaceCategoryGroup(next, group);
         acceptSkeleton(next, applyDcfCategoryGroups(skeletonOf(next), [group]));
+        // Historical category formulas are useful while constructing a bare skeleton, but a live
+        // model treats the same category as a reconciliation assertion against reported parent
+        // facts. Do not let that generated formula overwrite the evidence it is meant to check.
+        // Agent-authored historical calculations are added through set_formula, not a category
+        // declaration; a row cannot simultaneously be the historical category check and a
+        // category-owned historical calculation over the same cells.
+        const historicalPeriods = new Set(group.periodIds.filter((periodId) =>
+          period(next, periodId).cls !== "forecast"));
+        if (historicalPeriods.size > 0) {
+          next.formulas = next.formulas.flatMap((formula) => {
+            if (formula.lineItemId !== group.parentLineItemId || formula.appliesTo !== "historical") return [formula];
+            const retained = (formula.periodIds ?? periodIdsForRange(next, "historical"))
+              .filter((periodId) => !historicalPeriods.has(periodId));
+            return retained.length === 0 ? [] : [{ ...formula, periodIds: retained }];
+          });
+        }
         next.categoryGroups = groups;
         break;
       }

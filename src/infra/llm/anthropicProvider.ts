@@ -111,6 +111,10 @@ export class AnthropicProvider implements LlmProvider {
     let text = "";
     let tokensIn = 0;
     let tokensOut = 0;
+    // `input_tokens` counts only what missed the cache, so these two are the rest of the prompt —
+    // without them a cached step looks like it sent almost nothing.
+    let cacheWrite = 0;
+    let cacheRead = 0;
     const toolCalls: LlmToolCall[] = [];
 
     if (response.body) {
@@ -163,6 +167,8 @@ export class AnthropicProvider implements LlmProvider {
             } else if (event.type === "message_start") {
               const usage = (event.message as Record<string, unknown>)?.usage as Record<string, number> | undefined;
               tokensIn = usage?.input_tokens ?? 0;
+              cacheWrite = usage?.cache_creation_input_tokens ?? 0;
+              cacheRead = usage?.cache_read_input_tokens ?? 0;
             } else if (event.type === "message_delta") {
               const usage = (event.usage as Record<string, number> | undefined);
               tokensOut = usage?.output_tokens ?? 0;
@@ -184,7 +190,8 @@ export class AnthropicProvider implements LlmProvider {
       const json = (await response.json()) as {
         content: Array<{ type: string; text?: string; name?: string; input?: JsonObject }>;
         stop_reason?: string;
-        usage?: { input_tokens?: number; output_tokens?: number };
+        usage?: { input_tokens?: number; output_tokens?: number;
+          cache_creation_input_tokens?: number; cache_read_input_tokens?: number };
       };
       text = json.content.filter((b) => b.type === "text").map((b) => b.text ?? "").join("");
       for (const block of json.content) {
@@ -192,6 +199,8 @@ export class AnthropicProvider implements LlmProvider {
       }
       tokensIn = json.usage?.input_tokens ?? 0;
       tokensOut = json.usage?.output_tokens ?? 0;
+      cacheWrite = json.usage?.cache_creation_input_tokens ?? 0;
+      cacheRead = json.usage?.cache_read_input_tokens ?? 0;
       if (text === "" && toolCalls.length === 0) {
         // Claude 5 thinks adaptively, and thinking blocks draw from the same max_tokens budget.
         // Callers parse `text` as JSON, so an all-thinking reply would surface as their own
@@ -206,6 +215,8 @@ export class AnthropicProvider implements LlmProvider {
       metrics: {
         tokens_in: tokensIn,
         tokens_out: tokensOut,
+        cache_read: cacheRead,
+        cache_write: cacheWrite,
         ms: Date.now() - start,
         model_class: options.modelClass,
         provider: this.name,

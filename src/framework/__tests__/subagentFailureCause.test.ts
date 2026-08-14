@@ -107,3 +107,73 @@ test("a clean finish after a recovered tool error is still a success", async () 
   assert.equal(result.summary, "valued AAPL at $210/share");
   assert.equal(result.error, undefined);
 });
+
+/**
+ * A tool declares failure with its `error` field. Guessing from the summary text — which is what
+ * `normalizeToolError` used to do — reclassified successful reads whose summary honestly reported
+ * the model's standing state: "Loaded financial model … (draft); required DCF reconciliation checks
+ * failed." matched /failed/ and became a tool error.
+ *
+ * The count was the least of it. `subagentToolOutputs` drops errored results, so the whole overview
+ * — 580KB of it across one AMZN run — never reached the agent's progress region. The agent saw only
+ * "get_financial_model failed", read again, and looped: ten consecutive identical reads, each one
+ * answered correctly and then discarded before it could be read.
+ */
+test("a successful tool result is not reclassified as an error because its summary says 'failed'", async () => {
+  const provider: LlmProvider = {
+    name: "stub",
+    async generate(): Promise<GenerateResult> {
+      return { text: "", toolCalls: [{ name: "read_model", input: {} }],
+        metrics: { tokens_in: 1, tokens_out: 1, ms: 0, model_class: "MEDIUM", provider: "stub" } };
+    },
+  };
+  const tools = new McpToolRegistry();
+  tools.register({ name: "read_model", description: "d", category: "non_trading", inputSchema: { type: "object" },
+    // Exactly the shape that broke: a success whose summary reports a standing model condition.
+    execute: async () => ({ summary: "Loaded financial model fm_1 revision 7 (draft); required DCF reconciliation checks failed.",
+      generation_context: { data: { model_id: "fm_1", revision: 7, model_overview: { blocker: "unresolved_reconciliation" } } } }) });
+
+  const state = new SessionState("s", new Date().toISOString());
+  state.beginTurn("go");
+  const thread = state.openThread("financial_modeling");
+  const dispatch = state.recordDispatch("financial_modeling", "value AMZN", thread);
+  const { execute: _execute, ...definition } = tools.get("read_model")!;
+
+  await new SubagentRuntime(new ModelRouter(provider), tools).run(
+    { ...agent, defaultTools: ["read_model"] } as never,
+    { sessionId: "s", agentId: "a", taskId: dispatch.event_id,
+      request: { agent: "financial_modeling", task: "value AMZN" },
+      allowedTools: [definition], state, threadId: thread });
+
+  assert.deepEqual(state.subagentToolErrors({ thread }), [], "the tool reported no error, so neither should the log");
+  const outputs = state.subagentToolOutputs({ thread });
+  assert.ok(outputs.length > 0, "and the result survives into the agent's own context");
+  assert.equal(outputs[0]!.generation_context?.data?.["revision"], 7, "with the data it was read for");
+});
+
+test("a tool that declares an error is still recorded as one", async () => {
+  const provider: LlmProvider = {
+    name: "stub",
+    async generate(): Promise<GenerateResult> {
+      return { text: "", toolCalls: [{ name: "read_model", input: {} }],
+        metrics: { tokens_in: 1, tokens_out: 1, ms: 0, model_class: "MEDIUM", provider: "stub" } };
+    },
+  };
+  const tools = new McpToolRegistry();
+  tools.register({ name: "read_model", description: "d", category: "non_trading", inputSchema: { type: "object" },
+    execute: async () => ({ summary: "model not found", error: { code: "financial_model_not_found", message: "model not found" } }) });
+
+  const state = new SessionState("s", new Date().toISOString());
+  state.beginTurn("go");
+  const thread = state.openThread("financial_modeling");
+  const dispatch = state.recordDispatch("financial_modeling", "value AMZN", thread);
+  const { execute: _execute, ...definition } = tools.get("read_model")!;
+
+  await new SubagentRuntime(new ModelRouter(provider), tools).run(
+    { ...agent, defaultTools: ["read_model"] } as never,
+    { sessionId: "s", agentId: "a", taskId: dispatch.event_id,
+      request: { agent: "financial_modeling", task: "value AMZN" },
+      allowedTools: [definition], state, threadId: thread });
+
+  assert.equal(state.subagentToolErrors({ thread })[0]?.code, "financial_model_not_found");
+});

@@ -74,6 +74,7 @@ process.env["SESSION_DB_PATH"] = join(outputDirectory, "sessions.sqlite");
 process.env["FINANCIAL_MODEL_DB_PATH"] = modelDatabasePath;
 
 const { createFinancialAgentApp, resolveLlmProvider } = await import("../../../src/agent/createApp.ts");
+const { llmCostReport } = await import("../../../src/infra/llm/provider.ts");
 const { getDefaultFinancialModelToolDeps } = await import("../../../mcp_tools/financial-model/financialModelTools.ts");
 // A snapshot's `cells` is a Map, which JSON.stringify writes as `{}` — the one field a reader most
 // needs from the dump would go missing silently. The codec's wire form is what the store persists,
@@ -267,8 +268,19 @@ if (model) {
     assumptionCount: assumptions.length, customRowCount: customRows.length });
 }
 
+// The cost table is a first-class result, not a log line to be grepped afterwards. Reading
+// `tokens_in` alone once made a change that cost 23% MORE look like a 93% saving, so the weighted
+// total and the read/write ratio ship next to the verdict where the next run can diff them.
+const cost = llmCostReport();
 write("summary.json", { ...verdict, symbol, sessionId, threadId, provider: providerName,
-  toolCalls: stepSeq, rounds, finalSummary: lastResult?.summary ?? null, finishedAt: new Date().toISOString() });
+  toolCalls: stepSeq, rounds, cost, finalSummary: lastResult?.summary ?? null, finishedAt: new Date().toISOString() });
+
+console.log("\n# prompt cost by agent (equivalent input tokens; ratio below 1 means writes are never read back)");
+for (const [label, row] of Object.entries(cost)) {
+  console.log(`  ${label.padEnd(32)} calls=${String(row.calls).padEnd(4)} in=${row.tokens_in} `
+    + `cache_r=${row.cache_read} cache_w=${row.cache_write} out=${row.tokens_out} `
+    + `equiv=${row.equivalent_input_tokens} r/w=${row.cache_read_write_ratio ?? "-"}`);
+}
 
 console.log(`\nArtifacts: ${outputDirectory}`);
 if (verdict["pass"]) {

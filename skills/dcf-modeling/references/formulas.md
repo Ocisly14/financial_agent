@@ -48,7 +48,7 @@ change_nwc                = operating_working_capital - LAG(operating_working_ca
 fcff                      = nopat + depreciation_amortization - capital_expenditures - change_nwc
 ```
 
-Adjust the working-capital composition to the issuer's mapped facts; do not add a component merely because a generic template names it. Formula rows such as margin, growth, returns, per-share measures, and custom metrics are also authored as needed. The WACC table (beta, rates, weights) remains host-computed — never recreate it as a formula row.
+Adjust the working-capital composition to the issuer's mapped facts; do not add a component merely because a generic template names it. Formula rows such as margin, growth, returns, per-share measures, and custom metrics are also authored as needed. The WACC table's relationship rows remain locked, but its filing-derived inputs read the final workbook cells: write the calculation on the canonical skeleton item (for example `debt` or `lease_liabilities`) rather than recreating it in prose or bypassing it with a hard-coded WACC value.
 
 ## §1 Decompose profit sources (Move 1)
 

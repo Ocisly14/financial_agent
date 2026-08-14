@@ -17,6 +17,7 @@ import { SubagentRuntime } from "../../../src/framework/subagent.ts";
 import { createSubagentRegistry } from "../../../src/agent/subagents/registerSubagents.ts";
 import { createDcfSubagentTool } from "../dcfSubagentTool.ts";
 import type { FinancialModelToolDeps } from "../financialModelTools.ts";
+import { REQUIRED_MAPPING_IDS } from "../../../src/financial-model/skeleton.ts";
 
 function scripted(responses: string[]): ModelRouter {
   let call = 0;
@@ -142,10 +143,7 @@ test("statement_unification behaves as before when deps has no tableStore", asyn
 const loadUnifiedCall = JSON.stringify({ tool: "load_unified_statements", input: { symbol: "TEST" } });
 // Every REQUIRED spine id besides revenue.total must be mapped or gap-declared for the decision to be
 // clean in one round; their content is irrelevant to this test.
-const OTHER_REQUIRED_IDS = ["operating_income", "pretax_income", "income_tax_expense",
-  "depreciation_amortization", "capital_expenditures", "accounts_receivable", "inventory",
-  "other_operating_current_assets", "accounts_payable", "deferred_revenue",
-  "accrued_operating_liabilities", "other_operating_current_liabilities"];
+const OTHER_REQUIRED_IDS = [...REQUIRED_MAPPING_IDS].filter((targetId) => targetId !== "revenue.total");
 const spineDecisionWithBreakdownDetail = JSON.stringify({
   mappings: [{ targetId: "revenue.total", rowIds: ["net_sales"], rationale: "top line" }],
   detailRows: [{ parentTargetId: "revenue.total", rowId: "net_sales.seg.products", rationale: "product mix" }],

@@ -378,3 +378,31 @@ function categoryRuleId(group: DcfCategoryGroup): string {
 function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
+
+/**
+ * Why a required identity failed, in the terms the fix is made in.
+ *
+ * A failed check reports that a parent and the sum of its components disagree. That is enough to
+ * know something is wrong and nothing about WHICH component is wrong, so an agent goes reading the
+ * workbook component by component to find out — ten consecutive reads in one AMZN run, and it never
+ * got there, because the values it needed sat behind a section filter it kept getting wrong.
+ *
+ * The diagnosis is already computable here. A component stored under the opposite polarity to its
+ * siblings — an income-positive XBRL concept like `OtherOperatingIncomeExpenseNet` landing among
+ * expense-positive rows — does not merely perturb the sum: it moves it by exactly TWICE its own
+ * value, because the term is added where it should have been subtracted. So a residual that equals
+ * 2x a component names that component, and the fix is a sign, not a search.
+ *
+ * This accuses rather than corrects, deliberately. "Other operating expense (income), net" is
+ * genuinely income in some years, so flipping on the sign of the value would corrupt those years;
+ * only the author of the mapping knows which convention the row was meant to carry.
+ */
+export function explainFailedIdentity(
+  failure: { residual: number; tolerance: number },
+  components: readonly { lineItemId: string; value: number }[],
+): { components: readonly { lineItemId: string; value: number }[]; polaritySuspects: string[] } {
+  const polaritySuspects = components
+    .filter((component) => Math.abs(failure.residual - 2 * component.value) <= failure.tolerance)
+    .map((component) => component.lineItemId);
+  return { components, polaritySuspects };
+}

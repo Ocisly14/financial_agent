@@ -88,6 +88,25 @@ test("findings come back on the submission itself, and a patch corrects what was
   assert.match(seen()[1]!, /incomplete/);
 });
 
+test("a dirty unification preview never crosses the agent boundary", async () => {
+  const { runtime } = scripted([
+    call("submit_unification_decision", { decision: { rows: [] } }),
+    call("finish", { summary: "shipping despite the finding" }),
+  ]);
+
+  await assert.rejects(() => run(runtime), /finished with 1 unresolved finding\(s\); no unified statements were committed/);
+});
+
+test("a later dirty patch revokes an earlier accepted preview", async () => {
+  const { runtime } = scripted([
+    call("submit_unification_decision", { decision: { rows: [revenueRow] } }),
+    call("patch_unification_decision", { patch: { deleteRowIds: ["revenues"] } }),
+    call("finish", { summary: "done" }),
+  ]);
+
+  await assert.rejects(() => run(runtime), /finished with 1 unresolved finding\(s\); no unified statements were committed/);
+});
+
 test("a large decision can be drafted in batches, then validated and corrected incrementally", async () => {
   const { runtime, seen } = scripted([
     call("start_unification_draft", {}),
@@ -101,6 +120,20 @@ test("a large decision can be drafted in batches, then validated and corrected i
   assert.deepEqual(result.artifact.unresolvedFindings, []);
   assert.equal(result.decision.rows.length, 1);
   assert.match(seen()[2]!, /draft_updated/, "the batch is recorded without triggering full findings");
+});
+
+test("the first batch opens the draft on its own, with no start_unification_draft round", async () => {
+  const { runtime, seen } = scripted([
+    call("patch_unification_decision", { patch: { upsertRows: [revenueRow] } }),
+    call("validate_unification_decision", {}),
+    call("finish", { summary: "done" }),
+  ]);
+
+  const result = await run(runtime);
+
+  assert.deepEqual(result.artifact.unresolvedFindings, []);
+  assert.equal(result.decision.rows.length, 1);
+  assert.match(seen()[1]!, /draft_updated/, "patching an unopened draft starts it rather than failing");
 });
 
 test("the summary the agent writes at finish is what comes back to the DCF orchestrator", async () => {

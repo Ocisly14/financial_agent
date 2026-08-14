@@ -2,9 +2,10 @@ import { cellKey, splitCellKey, type CellKey } from "./dsl/graph.ts";
 import { parseFormula } from "./dsl/parser.ts";
 import { ENGINE_VERSION, evaluate } from "./engine.ts";
 import { FinancialModelError } from "./errors.ts";
-import { resolveActiveFacts, stageFacts as stageFactCandidates } from "./factLifecycle.ts";
+import { applyFactReview, resolveActiveFacts, stageFacts as stageFactCandidates } from "./factLifecycle.ts";
 import {
   applyModelOperations,
+  resolveExtensibleLineItemId,
   type FinancialModelSnapshot,
   type ModelOperation,
   type ModelQuery,
@@ -32,13 +33,20 @@ import type {
   Assumption,
   Diagnostic,
   Fact,
+  FactReviewDecision,
   LifecycleStage,
   Period,
   PreparedStatementRow,
   ValuationConfig,
 } from "./types.ts";
 import { calculateValuation, validateValuationConfig } from "./valuation.ts";
-import { applyComputedWaccInputs, createWaccSheet, recalculateWaccSheet, type WaccSheetComputedInput } from "./waccSheet.ts";
+import {
+  applyComputedWaccInputs,
+  createWaccSheet,
+  missingWaccAgentJudgments,
+  recalculateWaccSheet,
+  type WaccSheetComputedInput,
+} from "./waccSheet.ts";
 import type { JsonObject } from "../framework/types.ts";
 import type { UnifiedStatementsArtifact } from "../infra/xbrl/unifiedStatements.ts";
 import {
@@ -244,41 +252,7 @@ export class FinancialModelService {
    */
   commitSpineFacts(modelId: string, expectedRevision: number, input: StageSpineFactsInput): CommitResult {
     const parent = this.loadForMutation(modelId, expectedRevision);
-    const working = structuredClone(parent.snapshot);
-    if (working.selectedHistoricalPeriodIds.length === 0) {
-      working.selectedHistoricalPeriodIds = normalizeSelectedPeriods(
-        working.periods,
-        [...input.historicalPeriodIds],
-      );
-    }
-    const knownPeriods = new Set(working.periods.map((period) => period.id));
-    let skeleton = skeletonOf(working);
-    const present = () => new Set(skeleton.lineItems.map((item) => item.id));
-    // Parents before children: a nested stream batch may list revenue.product.iphone ahead of
-    // revenue.product, and the child can only install once its parent stream exists.
-    const newLineItemIds = [...new Set(input.facts.map((fact) => fact.lineItemId))]
-      .filter((id): id is string => id !== undefined)
-      .sort((a, b) => a.split(".").length - b.split(".").length || a.localeCompare(b));
-    for (const lineItemId of newLineItemIds) {
-      if (present().has(lineItemId)) continue;
-      const separator = lineItemId.lastIndexOf(".");
-      const parentId = separator < 0 ? "" : lineItemId.slice(0, separator);
-      const slug = lineItemId.slice(separator + 1);
-      try {
-        skeleton = parentId === "revenue"
-          ? addRevenueStream(skeleton, { id: slug, label: input.labels?.[lineItemId] ?? slug })
-          : addDcfDetailLineItem(skeleton, { id: slug, label: input.labels?.[lineItemId] ?? slug, parentLineItemId: parentId });
-      } catch { /* supplementary by definition: a parent that refuses children costs one detail row, not the spine */ }
-    }
-    acceptSkeleton(working, skeleton);
-
-    const installed = new Set(working.lineItems.map((item) => item.id));
-    const existingFactIds = new Set(working.facts.map((fact) => fact.factId));
-    const candidates = input.facts.filter((fact) => fact.lineItemId !== undefined
-      && installed.has(fact.lineItemId)
-      && knownPeriods.has(fact.periodId)
-      && !existingFactIds.has(fact.factId));
-    working.facts = [...working.facts, ...candidates.map((fact) => ({ ...structuredClone(fact), status: "committed" as const }))];
+    const { working, candidates } = materializeSpineFacts(parent.snapshot, expectedRevision, input);
     const calculated = recalculate(working);
     const factChange = factsStagedChange(calculated, candidates);
     return this.commit(modelId, expectedRevision, calculated, makeSummary(calculated, [{
@@ -288,6 +262,17 @@ export class FinancialModelService {
       mappedLineItemIds: factChange.mappedLineItemIds,
       periodIds: factChange.periodIds,
     }]));
+  }
+
+  /**
+   * Evaluates a proposed spine mapping against the current ledger without writing a revision.
+   * The mapping subagent uses this to receive accounting-identity failures on submit/patch, rather
+   * than learning about them only after it has finished and the outer DCF agent commits the facts.
+   */
+  previewSpineFacts(modelId: string, input: StageSpineFactsInput): ReturnType<typeof reconcileDcf> {
+    const parent = this.requireRevision(modelId);
+    const { working } = materializeSpineFacts(parent.snapshot, parent.revision, input);
+    return recalculate(working).reconciliationResults;
   }
 
   applyOperations(
@@ -472,6 +457,81 @@ export class FinancialModelService {
   }
 }
 
+/** Applies a proposed spine batch to an in-memory snapshot for both preview and commit. */
+function materializeSpineFacts(
+  snapshot: FinancialModelSnapshot,
+  expectedRevision: number,
+  input: StageSpineFactsInput,
+): { working: FinancialModelSnapshot; candidates: Fact[] } {
+  const working = structuredClone(snapshot);
+  if (working.selectedHistoricalPeriodIds.length === 0) {
+    working.selectedHistoricalPeriodIds = normalizeSelectedPeriods(working.periods, [...input.historicalPeriodIds]);
+  }
+  const knownPeriods = new Set(working.periods.map((period) => period.id));
+  let skeleton = skeletonOf(working);
+  const present = () => new Set(skeleton.lineItems.map((item) => item.id));
+  const newLineItemIds = [...new Set(input.facts.map((fact) => fact.lineItemId))]
+    .filter((id): id is string => id !== undefined)
+    .sort((a, b) => a.split(".").length - b.split(".").length || a.localeCompare(b));
+  for (const lineItemId of newLineItemIds) {
+    if (present().has(lineItemId)) continue;
+    const separator = lineItemId.lastIndexOf(".");
+    const parentId = separator < 0 ? "" : lineItemId.slice(0, separator);
+    const slug = lineItemId.slice(separator + 1);
+    try {
+      skeleton = parentId === "revenue"
+        ? addRevenueStream(skeleton, { id: slug, label: input.labels?.[lineItemId] ?? slug })
+        : addDcfDetailLineItem(skeleton, { id: slug, label: input.labels?.[lineItemId] ?? slug, parentLineItemId: parentId });
+    } catch { /* supplementary detail rows never block a canonical spine batch */ }
+  }
+  acceptSkeleton(working, skeleton);
+
+  const installed = new Set(working.lineItems.map((item) => item.id));
+  const existingFactIds = new Set(working.facts.map((fact) => fact.factId));
+  const activeByCell = new Map(resolveActiveFacts(working.facts, working.lineItems, working.periods)
+    .map((fact) => [cellKey(fact.lineItemId, fact.periodId), fact]));
+  const fresh: Fact[] = [];
+  const replacements: Fact[] = [];
+  const nextFactId = (base: string): string => {
+    let attempt = 0;
+    let candidate = `${base}.r${expectedRevision + 1}`;
+    while (existingFactIds.has(candidate)) candidate = `${base}.r${expectedRevision + 1}.${++attempt}`;
+    existingFactIds.add(candidate);
+    return candidate;
+  };
+  for (const fact of input.facts) {
+    if (fact.lineItemId === undefined || !installed.has(fact.lineItemId) || !knownPeriods.has(fact.periodId)) continue;
+    const incoming = { ...structuredClone(fact), status: "staged" as const };
+    const active = activeByCell.get(cellKey(incoming.lineItemId!, incoming.periodId));
+    if (active === undefined) {
+      if (existingFactIds.has(incoming.factId)) incoming.factId = nextFactId(incoming.factId);
+      else existingFactIds.add(incoming.factId);
+      fresh.push(incoming);
+      continue;
+    }
+    if (sameSpineFact(active, incoming)) continue;
+    incoming.factId = nextFactId(incoming.factId);
+    incoming.supersedesFactId = active.factId;
+    replacements.push(incoming);
+  }
+  const candidates = [...fresh, ...replacements];
+  working.facts = [...working.facts, ...fresh.map((fact) => ({ ...fact, status: "committed" as const })), ...replacements];
+  if (replacements.length > 0) {
+    const reviewedAt = new Date().toISOString();
+    const decisions: FactReviewDecision[] = replacements.flatMap((replacement) => [
+      { decisionId: `spine-supersede:${replacement.supersedesFactId}:${replacement.factId}`,
+        factId: replacement.supersedesFactId!, action: "supersede" as const,
+        replacementFactId: replacement.factId, rationale: "refreshed spine mapping from unified statements",
+        reviewedBy: "spine_mapping", reviewedAt },
+      { decisionId: `spine-commit:${replacement.factId}`, factId: replacement.factId,
+        action: "commit" as const, mappedLineItemId: replacement.lineItemId!,
+        rationale: "refreshed spine mapping from unified statements", reviewedBy: "spine_mapping", reviewedAt },
+    ]);
+    working.facts = applyFactReview(working.facts, decisions);
+  }
+  return { working, candidates };
+}
+
 function recalculate(snapshot: FinancialModelSnapshot): FinancialModelSnapshot {
   const next = structuredClone(snapshot);
   buildGrid(next.periods);
@@ -515,8 +575,10 @@ function recalculate(snapshot: FinancialModelSnapshot): FinancialModelSnapshot {
 /**
  * The one authority for a row's source declaration.  Skeleton creation intentionally leaves both
  * ranges as `none`; after each fill/mutation this function derives them from the channel that
- * actually supplied values.  A committed fact wins over an earlier provisional formula or
- * assumption in the same range, because it is the issuer data the computation was standing in for.
+ * actually supplied values. An explicit model operation can deliberately replace a fact-backed
+ * line with a formula or assumption (for example, finance leases plus borrowings into `debt`), so
+ * those authored calculations take precedence. Facts remain the default where no calculation has
+ * been authored.
  */
 function reconcileSourceDeclarations(
   snapshot: FinancialModelSnapshot,
@@ -535,22 +597,6 @@ function reconcileSourceDeclarations(
     if (fact.lineItemId === undefined) continue;
     const range = rangeOfPeriodId.get(fact.periodId);
     if (range) actual.get(range)!.add(fact.lineItemId);
-  }
-
-  // Facts replace provisional values for their whole source range.  The public operation API has
-  // the same one-source-per-range rule; doing it here also covers facts committed by the mapping
-  // pipeline, which bypasses operations.
-  for (const range of ["historical", "forecast"] as const) {
-    const factBacked = actual.get(range)!;
-    if (factBacked.size === 0) continue;
-    snapshot.formulas = snapshot.formulas.filter((formula) =>
-      formula.appliesTo !== range || !factBacked.has(formula.lineItemId));
-    const periodIds = new Set(snapshot.periods
-      .filter((period) => (period.cls === "forecast" ? "forecast" : "historical") === range)
-      .map((period) => period.id));
-    snapshot.assumptions = snapshot.assumptions.filter((assumption) =>
-      !factBacked.has(assumption.lineItemId)
-      || !assumption.periods.some((periodId) => periodIds.has(periodId)));
   }
 
   const formulas = new Map<Range, Set<string>>([
@@ -572,9 +618,9 @@ function reconcileSourceDeclarations(
   snapshot.lineItems = snapshot.lineItems.map((item) => {
     const source = (range: Range) => {
       if (item.id === "wacc" && range === "forecast" && waccCalculated) return "calculated" as const;
-      if (actual.get(range)!.has(item.id)) return "actual" as const;
       if (formulas.get(range)!.has(item.id)) return "formula" as const;
       if (assumptions.get(range)!.has(item.id)) return "assumption" as const;
+      if (actual.get(range)!.has(item.id)) return "actual" as const;
       return "none" as const;
     };
     return { ...item, historical: source("historical"), forecast: source("forecast") };
@@ -685,19 +731,31 @@ function materializedWaccAssumptions(snapshot: FinancialModelSnapshot): Assumpti
 
 /**
  * Fails fast, before recalculate() ever attempts the valuation, when the WACC sheet's wacc row has
- * not resolved — naming exactly the rows still blocking it instead of surfacing as a generic missing
- * cell once calculateValuation runs.
+ * not resolved or its two irreducible economic judgments have not been recorded by the agent.
+ * Mechanically-derived rows (including E/V, D/V, cost of equity and net debt) never require a
+ * separate agent write.
  */
 function requireWaccResolved(snapshot: FinancialModelSnapshot): void {
   const row = snapshot.waccSheet?.rows.find((entry) => entry.rowId === "wacc");
-  if (row?.value != null) return;
-  const missing = row && row.missingInputs.length > 0
-    ? row.missingInputs.join(", ")
-    : "the WACC sheet has not derived or been given any of its inputs yet";
-  throw new FinancialModelError(
-    "missing_formula_input",
-    `valued stage requires the WACC sheet's wacc row to resolve; still missing: ${missing}`,
-  );
+  if (row?.value == null) {
+    const missing = row && row.missingInputs.length > 0
+      ? row.missingInputs.join(", ")
+      : "the WACC sheet has not derived or been given any of its inputs yet";
+    throw new FinancialModelError(
+      "missing_formula_input",
+      `valued stage requires the WACC sheet's wacc row to resolve; still missing: ${missing}`,
+    );
+  }
+  const sheet = snapshot.waccSheet;
+  if (sheet === null) return;
+  const unconfirmed = missingWaccAgentJudgments(sheet);
+  if (unconfirmed.length > 0) {
+    throw new FinancialModelError(
+      "missing_formula_input",
+      `valued stage requires agent-confirmed WACC judgments: ${unconfirmed.join(", ")}`,
+      { refs: unconfirmed.map((rowId) => `wacc_sheet:${rowId}`) },
+    );
+  }
 }
 
 function historyGate(snapshot: FinancialModelSnapshot): void {
@@ -843,6 +901,14 @@ function factsStagedChange(
   };
 }
 
+function sameSpineFact(left: Fact, right: Fact): boolean {
+  return left.lineItemId === right.lineItemId
+    && left.periodId === right.periodId
+    && left.value === right.value
+    && JSON.stringify(left.unit) === JSON.stringify(right.unit)
+    && JSON.stringify(left.provenance) === JSON.stringify(right.provenance);
+}
+
 function operationChanges(
   parent: FinancialModelSnapshot,
   next: FinancialModelSnapshot,
@@ -872,9 +938,7 @@ function operationChanges(
       case "add_line_item":
         return {
           kind: "line_item_added",
-          lineItemId: operation.lineItem.parentId === "revenue"
-            ? `revenue.${operation.lineItem.id.replace(/^revenue\./, "")}`
-            : operation.lineItem.id,
+          lineItemId: resolveExtensibleLineItemId(operation.lineItem.parentId, operation.lineItem.id),
           // "custom_metrics" is a virtual bucket, not a real line item — it has no backing parent row.
           ...(operation.lineItem.parentId !== "custom_metrics"
             ? { parentId: operation.lineItem.parentId }
@@ -978,6 +1042,7 @@ function attachUnifiedTrail(snapshot: FinancialModelSnapshot): void {
   for (const fact of snapshot.facts) {
     if (fact.status !== "committed" || fact.lineItemId === undefined) continue;
     if (fact.provenance.sourceType !== "unified_statements") continue;
+    if (!factBacksCurrentCell(snapshot, fact)) continue;
     spineByCell.set(cellKey(fact.lineItemId, fact.periodId), fact);
   }
   if (spineByCell.size === 0) return;
@@ -991,6 +1056,22 @@ function attachUnifiedTrail(snapshot: FinancialModelSnapshot): void {
     });
     return unifiedTrail.length > 0 ? { ...result, unifiedTrail } : result;
   });
+}
+
+/** Reconciliation results compare final cells, not the raw fact ledger. A formula or assumption
+ * can deliberately supersede a mapped fact for one period, so attaching that fact's unified row to
+ * a failed check would send the agent to evidence that no longer drives the number. */
+function factBacksCurrentCell(snapshot: FinancialModelSnapshot, fact: Fact): boolean {
+  if (fact.lineItemId === undefined) return false;
+  const period = snapshot.periods.find((candidate) => candidate.id === fact.periodId);
+  if (!period) return false;
+  const appliesTo = period.cls === "forecast" ? "forecast" : "historical";
+  const formulaCoversCell = snapshot.formulas.some((formula) => formula.lineItemId === fact.lineItemId
+    && formula.appliesTo === appliesTo
+    && (formula.periodIds === undefined || formula.periodIds.includes(fact.periodId)));
+  if (formulaCoversCell) return false;
+  return !snapshot.assumptions.some((assumption) => assumption.lineItemId === fact.lineItemId
+    && assumption.periods.includes(fact.periodId));
 }
 
 function commitResult(

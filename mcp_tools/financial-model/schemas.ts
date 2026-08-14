@@ -1,4 +1,7 @@
 import type { JsonObject, JsonSchema, JsonValue } from "../../src/framework/types.ts";
+import { suggestCandidates, suggestionClause } from "../../src/framework/suggest.ts";
+
+export { suggestCandidates, suggestionClause };
 import type { ModelOperation } from "../../src/financial-model/operations.ts";
 import { WACC_SHEET_ROW_IDS } from "../../src/financial-model/waccSheet.ts";
 
@@ -56,7 +59,10 @@ const operationVariants: JsonSchema[] = [
   object({ kind: { type: "string", enum: ["set_assumption"] }, assumption }, ["kind", "assumption"]),
   object({ kind: { type: "string", enum: ["set_line_item_source"] }, lineItemId: string(), range: { type: "string", enum: ["historical", "forecast"] },
     source: { type: "string", enum: ["actual", "assumption", "formula", "none"] } }, ["kind", "lineItemId", "range", "source"]),
-  object({ kind: { type: "string", enum: ["add_line_item"] }, lineItem: object({ id: string(), label: string(),
+  object({ kind: { type: "string", enum: ["add_line_item"] }, lineItem: object({
+    id: string("A lowercase slug. Under `revenue` and `custom_metrics` the namespace prefix is added "
+      + "for you — \"margin_aws\" becomes metric.custom.margin_aws — and a fully qualified id is "
+      + "accepted unchanged. Elsewhere it is the id verbatim."), label: string(),
     // Parent eligibility is semantic, not a fixed enum: a committed revenue stream may safely own
     // its disclosed economics (for example Product Revenue → Product Gross Profit). The engine
     // validates the supplied id against the skeleton, so do not make the tool schema narrower.
@@ -84,6 +90,18 @@ export function parseOperations(input: JsonObject): ModelOperation[] {
     // A bare "does not match exactly one allowed variant" hides WHICH operation failed and whether
     // its kind even exists — append the offending op's kind so the fix direction is obvious.
     const message = error instanceof Error ? error.message : String(error);
+    // A top-level shape error ends the walk before any operation is read, so this one line is all the
+    // agent gets — and "must be an array" alone does not say what it actually sent. A batch rejected
+    // here costs the whole generation, so spend a few words naming the mistake.
+    if (/^\$\.operations must be an array$/.test(message)) {
+      const sent = input["operations"];
+      const arrived = typeof sent === "string"
+        ? "received a string — send real JSON, not JSON serialized into text"
+        : sent && typeof sent === "object"
+          ? "received a single object — wrap it in an array, even for one operation"
+          : `received ${sent === null ? "null" : typeof sent}`;
+      throw new Error(`${message} (${arrived}).`);
+    }
     const match = /\$\.operations\[(\d+)\]/.exec(message);
     const rawOps = Array.isArray(input["operations"]) ? input["operations"] as JsonObject[] : [];
     if (match && rawOps[Number(match[1])]) {
@@ -118,7 +136,33 @@ export function parseOperations(input: JsonObject): ModelOperation[] {
   });
 }
 
+/** Faults past this are dropped from the message. The list exists so ONE retry can fix everything;
+ *  beyond a couple of dozen the batch is malformed in kind, and the rest is just context budget. */
+const MAX_REPORTED_FAULTS = 20;
+
+/**
+ * A rejected batch costs the agent the whole batch — on a real issuer, minutes of generation and
+ * tens of thousands of output tokens. Reporting the first fault only turned one bad batch into one
+ * retry per fault, so every fault is collected and raised together.
+ *
+ * The single-fault message is deliberately unchanged: it is what the agents have been prompted
+ * against, and what `parseOperations` matches on to append its kind hint.
+ */
 export function validate(value: JsonValue, schema: JsonSchema, path: string, root = false): void {
+  const faults: string[] = [];
+  collect(value, schema, path, root, faults);
+  if (faults.length === 0) return;
+  if (faults.length === 1) throw new Error(faults[0]!);
+  const shown = faults.slice(0, MAX_REPORTED_FAULTS);
+  const more = faults.length - shown.length;
+  throw new Error(`${faults.length} validation errors — fix all of them before resending:\n`
+    + shown.map((fault) => `- ${fault}`).join("\n")
+    + (more > 0 ? `\n- ... and ${more} more` : ""));
+}
+
+/** Walks `value` against `schema`, appending every fault to `faults` instead of stopping at the
+ *  first. Recursion continues past a fault wherever the value's shape still allows it. */
+function collect(value: JsonValue, schema: JsonSchema, path: string, root: boolean, faults: string[]): void {
   if (schema.oneOf) {
     // Most tool unions are explicitly discriminated by `kind` (operations and assumption
     // payloads). Once the caller declares that discriminator, validate its matching contract
@@ -134,42 +178,59 @@ export function validate(value: JsonValue, schema: JsonSchema, path: string, roo
       // discriminator before attempting every branch, whose aggregate failure
       // otherwise hides the field the caller must change.
       if (allowedKinds.length > 0 && kind === undefined) {
-        throw new Error(`${path}.kind is required; allowed values: ${allowedKinds.join(", ")}`);
+        faults.push(`${path}.kind is required; allowed values: ${allowedKinds.join(", ")}`); return;
       }
       if (allowedKinds.length > 0 && typeof kind !== "string") {
-        throw new Error(`${path}.kind must be a string; allowed values: ${allowedKinds.join(", ")}`);
+        faults.push(`${path}.kind must be a string; allowed values: ${allowedKinds.join(", ")}`); return;
       }
       if (typeof kind === "string") {
         const matching = schema.oneOf.filter((candidate) =>
           candidate.properties?.["kind"]?.enum?.includes(kind));
-        if (matching.length === 1) return validate(value, matching[0]!, path, root);
+        // The discriminator picked the contract, so its own faults are the real ones — collect them
+        // all rather than collapsing the branch into "does not match a variant".
+        if (matching.length === 1) return collect(value, matching[0]!, path, root, faults);
         if (allowedKinds.length > 0 && matching.length === 0) {
-          throw new Error(`${path}.kind must be one of ${allowedKinds.join(", ")}; received ${JSON.stringify(kind)}`);
+          faults.push(`${path}.kind must be one of ${allowedKinds.join(", ")}; received ${JSON.stringify(kind)}`); return;
         }
       }
     }
-    const errors = schema.oneOf.map((candidate) => { try { validate(value, candidate, path); return null; } catch (error) { return error; } });
-    if (errors.filter((error) => error === null).length !== 1) throw new Error(`${path} does not match exactly one allowed variant`);
+    // Undiscriminated union: a branch's faults say nothing on their own, since failing the other
+    // branches is the normal case. Only the count of clean branches is meaningful.
+    const clean = schema.oneOf.filter((candidate) => {
+      const branch: string[] = [];
+      collect(value, candidate, path, false, branch);
+      return branch.length === 0;
+    }).length;
+    if (clean !== 1) faults.push(`${path} does not match exactly one allowed variant`);
     return;
   }
   if (schema.type === "object") {
-    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${path} must be an object`);
+    // A value of the wrong shape ends this branch: there is nothing to descend into, and guessing
+    // at its fields would bury the one fault that matters under noise.
+    if (!value || typeof value !== "object" || Array.isArray(value)) { faults.push(`${path} must be an object`); return; }
     const record = value as JsonObject; const properties = schema.properties ?? {};
-    for (const key of schema.required ?? []) if (!(key in record)) throw new Error(`${path}.${key} is required`);
+    for (const key of schema.required ?? []) if (!(key in record)) faults.push(`${path}.${key} is required`);
     if (schema.additionalProperties === false) for (const key of Object.keys(record)) {
-      if (!(key in properties) && !(root && key === "task")) throw new Error(`${path}.${key} is not allowed`);
+      if (!(key in properties) && !(root && key === "task")) faults.push(`${path}.${key} is not allowed`);
     }
-    for (const [key, child] of Object.entries(properties)) if (record[key] !== undefined) validate(record[key]!, child, `${path}.${key}`);
+    for (const [key, child] of Object.entries(properties)) {
+      if (record[key] !== undefined) collect(record[key]!, child, `${path}.${key}`, false, faults);
+    }
     return;
   }
   if (schema.type === "array") {
-    if (!Array.isArray(value)) throw new Error(`${path} must be an array`);
-    value.forEach((entry, index) => validate(entry, schema.items ?? { type: "any" }, `${path}[${index}]`)); return;
+    if (!Array.isArray(value)) { faults.push(`${path} must be an array`); return; }
+    value.forEach((entry, index) => collect(entry, schema.items ?? { type: "any" }, `${path}[${index}]`, false, faults));
+    return;
   }
-  if (schema.type === "string" && typeof value !== "string") throw new Error(`${path} must be a string`);
-  if (schema.type === "number" && (typeof value !== "number" || !Number.isFinite(value))) throw new Error(`${path} must be a number`);
-  if (schema.type === "boolean" && typeof value !== "boolean") throw new Error(`${path} must be a boolean`);
+  if (schema.type === "string" && typeof value !== "string") { faults.push(`${path} must be a string`); return; }
+  if (schema.type === "number" && (typeof value !== "number" || !Number.isFinite(value))) { faults.push(`${path} must be a number`); return; }
+  if (schema.type === "boolean" && typeof value !== "boolean") { faults.push(`${path} must be a boolean`); return; }
   if (schema.enum && !schema.enum.includes(value as string)) {
-    throw new Error(`${path} must be one of ${schema.enum.join(", ")}; received ${JSON.stringify(value)}`);
+    const allowed = schema.enum.filter((entry): entry is string => typeof entry === "string");
+    faults.push(`${path} must be one of ${schema.enum.join(", ")}; received ${JSON.stringify(value)}.`
+      + (typeof value === "string"
+        ? suggestionClause(value, [{ kind: "allowed value", how: "this field", names: allowed }])
+        : ""));
   }
 }

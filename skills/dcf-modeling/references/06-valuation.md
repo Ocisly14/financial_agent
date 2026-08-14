@@ -44,6 +44,15 @@ The equity bridge demands a numeric value at the anchor for every bridge row (ca
 
 The valuation output carries: enterprise value, the terminal value and its share of EV (a terminal share above ~80% means your explicit years barely matter — say so), the equity bridge line by line, per-share value against diluted shares, and the sensitivity grid over your deltas.
 
+## Failure modes in the terminal and the bridge
+
+Each of these produces a valuation the engine computes without complaint:
+
+- **Terminal inputs defensible one by one, incoherent together.** Perpetual growth has to be funded: it needs reinvestment, and reinvestment at the terminal return is what the steady state can afford. A terminal_growth argued from GDP, a margin argued from the final forecast year and a capex ratio argued from the current build cycle can each hold up alone while jointly describing a company that grows forever on someone else's capital. Read the three together as one claim about steady-state economics.
+- **A terminal year that is still a growth year.** The last explicit period often carries the whole forecast's momentum — margin at its peak, capex still elevated or still suppressed, working capital still moving. Terminal value capitalizes that year into perpetuity. Ask whether the year you are capitalizing is the steady state you mean, and if it is not, say which of its features the terminal case drops.
+- **A bridge assembled from convenient values.** Every bridge row should stand at the same anchor period, and "cash" should mean cash this equity can actually claim — not balances committed to buybacks already announced, held against near-term maturities, or trapped where repatriation costs something. A bridge row taken from a different period, or read as a face balance without checking what the caption aggregates, moves per-share value silently because nothing downstream recomputes it.
+- **A grid that cannot move.** Sensitivity deltas narrow enough to leave every cell on the same side of the reader's decision confirm the central case instead of testing it. Choose deltas wide enough that the grid could have changed your mind, then report what it actually did.
+
 ## The trial before the verdict
 
 Put the forecast on trial against your own Move-2 sentences (toolbox §4 has the formula for each):

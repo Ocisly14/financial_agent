@@ -205,13 +205,22 @@ function formatThreads(threads: LiveThread[]): string {
   }).join("\n");
 }
 
+/**
+ * A tool declares failure with its `error` field, and nothing else counts.
+ *
+ * This used to also sniff the summary for "failed", "error", "missing" and friends, on the theory
+ * that a tool might report trouble in prose alone. No tool ever did — but plenty report a standing
+ * condition in a summary that succeeded, and those were reclassified as failures. The reference case
+ * is `get_financial_model`: "Loaded financial model fm_X revision 7 (draft); required DCF
+ * reconciliation checks failed." is a successful read whose last clause names what still blocks the
+ * lifecycle. Marked as an error, it was then dropped by `subagentToolOutputs` — which skips errored
+ * results — so the overview the agent had just asked for never reached its context. It read again,
+ * and again: ten identical reads in one AMZN run, ~580KB of answers discarded before delivery.
+ *
+ * Guessing was never the more reliable signal, only the more eager one.
+ */
 function normalizeToolError(output: { summary: string; error?: { code: string; message: string } }): { code: string; message: string } | undefined {
-  if (output.error) return output.error;
-  const summary = output.summary.trim();
-  if (/^(.*\bfailed\b|failed\b|.*\berror\b|error\b|missing\b|invalid\b|unable\b|no token found\b)/i.test(summary)) {
-    return { code: "tool_failed", message: summary };
-  }
-  return undefined;
+  return output.error;
 }
 
 export class OrchestratorRuntime {

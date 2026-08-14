@@ -62,7 +62,13 @@ export function normalizeLabel(label: string): string {
  * normalized label plus the dimension signature.
  */
 function sourceId(statement: StatementKind, normalizedLabel: string, signature: string): string {
-  const readable = normalizedLabel.replace(/ /g, "_").slice(0, 72) || "row";
+  // The label is carried whole. It was capped at 72 characters once, which on a US balance sheet cuts
+  // mid-number: GAAP puts the par value and the issued/outstanding share counts inside the caption,
+  // and those counts are the only thing telling one year's common-stock row from another's. The cap
+  // bought nothing measurable — on a five-year AMZN filing set the longest uncapped id is 145
+  // characters against a median of 50, and the ids that coincide coincide on the whole label,
+  // differing only in unit, which is what the suffix below is for.
+  const readable = normalizedLabel.replace(/ /g, "_") || "row";
   const suffix = createHash("sha256").update(`${statement}|${normalizedLabel}|${signature}`).digest("hex").slice(0, 12);
   return `source.${statement}.${readable}.${suffix}`;
 }

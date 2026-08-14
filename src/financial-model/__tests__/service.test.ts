@@ -150,8 +150,24 @@ test("source declarations are reconciled from each row's filled channel", () => 
     spineFact("cash_available_for_bridge", "FY2025", 95),
   ], historicalPeriodIds: ["FY2024", "FY2025"] });
   snapshot = store.getRevision("model-1")!.snapshot;
-  assert.equal(row("cash_available_for_bridge").historical, "actual");
-  assert.equal(snapshot.formulas.some((formula) => formula.lineItemId === "cash_available_for_bridge"), false);
+  // A later fact must not silently erase an explicit formula. This lets the agent replace an
+  // over-broad mapped line (for example, all leases) with a model calculation (finance leases).
+  assert.equal(row("cash_available_for_bridge").historical, "formula");
+  assert.equal(snapshot.formulas.some((formula) => formula.lineItemId === "cash_available_for_bridge"), true);
+  assert.equal(snapshot.cells.get(cellKey("cash_available_for_bridge", "FY2024"))?.value, 100);
+  assert.equal(snapshot.cells.get(cellKey("cash_available_for_bridge", "FY2025"))?.value, 95);
+
+  const view = service.getModel("model-1");
+  assert.ok("currentWorkbook" in view);
+  const bridge = view.currentWorkbook.sections.dcf.find((candidate) =>
+    "lineItemId" in candidate && candidate.lineItemId === "cash_available_for_bridge");
+  assert.ok(bridge && "cells" in bridge);
+  // Row-level source stays formula because it has a formula in the historical range, but cell-level
+  // provenance must retain the FY2025 fact rather than reporting it as an unbacked formula cell.
+  assert.equal(bridge.cells["FY2024"]?.source.kind, "formula");
+  assert.deepEqual(bridge.cells["FY2025"]?.source, {
+    kind: "fact", factId: "cash_available_for_bridge@FY2025",
+  });
 });
 
 test("createModel commits a deterministic value-free model-created summary", () => {
@@ -237,6 +253,33 @@ test("a failed required DCF category reconciliation keeps the model reading as d
   // Lifecycle is derived: unresolved reconciliation keeps the model reading as draft.
   assert.equal(snapshot.lifecycleStage, "draft");
   assert.equal(store.getRevision("model-1")?.revision, 2);
+});
+
+test("reconciliation trail excludes a unified fact superseded by an agent formula", () => {
+  const { store, service } = setup();
+  service.createModel(CREATE_INPUT);
+  const fact = (lineItemId: string, periodId: string, value: number, rowId: string): Fact => ({
+    ...spineFact(lineItemId, periodId, value),
+    provenance: { ...spineFact(lineItemId, periodId, value).provenance, concept: rowId },
+  });
+  service.commitSpineFacts("model-1", 0, { facts: [
+    fact("revenue.total", "FY2024", 100, "revenue-row"),
+    fact("cost_of_revenue", "FY2024", 20, "cost-row"),
+    fact("gross_profit", "FY2024", 40, "gross-profit-row"),
+  ], historicalPeriodIds: ["FY2024"] });
+  service.applyOperations("model-1", 1, [
+    { kind: "set_line_item_source", lineItemId: "revenue.total", range: "historical", source: "formula" },
+    { kind: "set_formula", formula: {
+      lineItemId: "revenue.total", appliesTo: "historical", periodIds: ["FY2024"], source: "gross_profit",
+    } },
+  ]);
+  const failed = current(store).reconciliationResults.find((result) =>
+    result.ruleId === "accounting_identity:gross_profit" && result.periodId === "FY2024");
+  assert.equal(failed?.status, "failed");
+  assert.deepEqual(failed?.unifiedTrail, [
+    { lineItemId: "cost_of_revenue", rowIds: ["cost-row"] },
+    { lineItemId: "gross_profit", rowIds: ["gross-profit-row"] },
+  ]);
 });
 
 test("readCells and targeted getModel reads are workbook slices and never commit", () => {
@@ -442,6 +485,29 @@ test("commitSpineFacts commits onto canonical targets and selects the actual per
   assert.ok(landed.every((fact) => fact.status === "committed"), JSON.stringify(landed.map((f) => f.status)));
 });
 
+test("a later spine mapping supersedes active evidence instead of silently retaining the old mapping", () => {
+  const { store, service } = setup();
+  service.createModel(CREATE_INPUT);
+  service.commitSpineFacts("model-1", 0, {
+    facts: [spineFact("non_operating_income_expense", "FY2024", 12)], historicalPeriodIds: ["FY2024"],
+  });
+  const corrected = spineFact("non_operating_income_expense", "FY2024", 7);
+  corrected.provenance.sourceRefs = ["unified.income_statement.other_income_expense_net.FY2024"];
+  const result = service.commitSpineFacts("model-1", 1, { facts: [corrected], historicalPeriodIds: ["FY2024"] });
+  assert.equal(result.revision, 2);
+
+  const facts = current(store).facts.filter((fact) => fact.lineItemId === "non_operating_income_expense" && fact.periodId === "FY2024");
+  assert.equal(facts.length, 2);
+  const old = facts.find((fact) => fact.status === "superseded");
+  const replacement = facts.find((fact) => fact.status === "committed");
+  assert.ok(old);
+  assert.ok(replacement);
+  assert.equal(replacement.value, 7);
+  assert.equal(replacement.supersedesFactId, old.factId);
+  assert.deepEqual(replacement.provenance.sourceRefs, ["unified.income_statement.other_income_expense_net.FY2024"]);
+  assert.equal(current(store).cells.get(cellKey("non_operating_income_expense", "FY2024"))?.value, 7);
+});
+
 test("a revenue detail row is installed as a revenue stream and carries its label", () => {
   const { service } = setup();
   service.createModel(CREATE_INPUT);
@@ -574,6 +640,54 @@ test("a custom metric row carries its description into the workbook view and sur
   const snapshot = store.getRevision("model-1")!.snapshot;
   const decoded = financialModelSnapshotCodec.decode(financialModelSnapshotCodec.encode(snapshot));
   assert.equal(decoded.lineItems.find((i) => i.id === "metric.custom.opex_ratio")?.description, "Operating expense intensity");
+});
+
+/**
+ * `custom_metrics` used to be the one branch of addExtensibleLineItem that demanded the fully
+ * qualified id, while its sibling `revenue` branch had always accepted a bare slug and prefixed it.
+ * An AMZN run lost a batch to that asymmetry, naming a segment margin `margin.operating.aws` — a
+ * reasonable id, rejected for a prefix the tool never asked for. Both spellings now land in the
+ * same agent-owned namespace, so the boundary that makes a row redefinable is still by construction.
+ */
+test("a custom metric may be named with a bare slug or its full id, and both land in metric.custom", () => {
+  const { service } = setup();
+  service.createModel(CREATE_INPUT);
+
+  service.applyOperations("model-1", 0, [
+    { kind: "add_line_item", lineItem: { id: "margin.operating.aws", label: "AWS operating margin",
+      parentId: "custom_metrics", unit: { kind: "ratio" } } },
+    { kind: "add_line_item", lineItem: { id: "metric.custom.spelled_out", label: "Spelled out",
+      parentId: "custom_metrics", unit: { kind: "ratio" } } },
+  ]);
+
+  const view = service.getModel("model-1");
+  assert.ok("currentWorkbook" in view);
+  const ids = view.currentWorkbook.sections.metrics.map((row) => row.lineItemId);
+  assert.ok(ids.includes("metric.custom.margin.operating.aws"), `bare slug was not prefixed: ${ids.join(", ")}`);
+  assert.ok(ids.includes("metric.custom.spelled_out"), "the full id still works unchanged");
+});
+
+test("a slug that could not be a line item id is still refused", () => {
+  const { service } = setup();
+  service.createModel(CREATE_INPUT);
+
+  assert.throws(() => service.applyOperations("model-1", 0, [
+    { kind: "add_line_item", lineItem: { id: "AWS Margin!", label: "x", parentId: "custom_metrics",
+      unit: { kind: "ratio" } } },
+  ]), invalidCode("invalid_model_operation"));
+});
+
+test("the same custom metric named both ways collides rather than silently duplicating", () => {
+  const { service } = setup();
+  service.createModel(CREATE_INPUT);
+  service.applyOperations("model-1", 0, [
+    { kind: "add_line_item", lineItem: { id: "gm", label: "GM", parentId: "custom_metrics", unit: { kind: "ratio" } } },
+  ]);
+
+  assert.throws(() => service.applyOperations("model-1", 1, [
+    { kind: "add_line_item", lineItem: { id: "metric.custom.gm", label: "GM again",
+      parentId: "custom_metrics", unit: { kind: "ratio" } } },
+  ]), invalidCode("invalid_model_operation"));
 });
 
 test("metric.custom rows and fixed drivers accept agent-authored formulas", () => {

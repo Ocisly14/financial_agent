@@ -13,6 +13,9 @@ import { SqliteSourceReviewStore, type FilingIngestionStore, type SourceReviewSt
 import { SqliteFilingTableStore, type FilingTableStore } from "../../src/infra/xbrl/filingTableStore.ts";
 import type { RegisteredTool, ToolExecutionContext } from "../toolRegistry.ts";
 import { operationsInputSchema, parseOperations, validate } from "./schemas.ts";
+import { explainFailedIdentity } from "../../src/financial-model/reconciliation.ts";
+import { splitCellKey, type CellKey } from "../../src/financial-model/dsl/graph.ts";
+import { suggestionClause, type NameSpace } from "../../src/framework/suggest.ts";
 import { deriveWaccParameters, type DerivationDeps, type WaccParameterName } from "../../src/financial-model/waccDerivation.ts";
 import type { WaccSheet, WaccSheetComputedInput } from "../../src/financial-model/waccSheet.ts";
 import { getSharedBarRepository, type BarRepository } from "../../src/data/stock/index.ts";
@@ -81,6 +84,9 @@ export function createFinancialModelTools(injected?: FinancialModelToolDeps): Re
         modelId: { type: "string" }, revision: { type: "number" },
         section: { type: "string", enum: [...MODEL_READ_SECTIONS],
           description: "One section's rows, with values. `source_*` are the as-filed statements. "
+            + "Sections group rows structurally, NOT by time — `history` is the section of historical "
+            + "input rows, not a filter for any row's historical periods. For one row's history, name "
+            + "the row and use selector.periodClass \"actual\" (or explicit periodIds) with no section. "
             + "Do not combine it with named rows from another section; the error names their section." },
         selector: { type: "object", additionalProperties: false, description:
           "Narrow to named rows or cells. Combined filters intersect; omit to select the whole section. "
@@ -260,7 +266,8 @@ export async function refreshWaccSheetFromSpine(deps: FinancialModelToolDeps, se
     // refresh years later still derives against the same anchor the skeleton was built with.
     const { derived, cashAndEquivalents, unreachable } = await deriveWaccParameters({
       symbol: meta.symbol, asOfDate: waccSheet.asOfDate, facts: stored.snapshot.facts,
-      lineItems: stored.snapshot.lineItems, periods: stored.snapshot.periods, deps: derivationDeps });
+      lineItems: stored.snapshot.lineItems, periods: stored.snapshot.periods, cells: stored.snapshot.cells,
+      deps: derivationDeps });
     const inputs: WaccSheetComputedInput[] = [];
     for (const parameter of derived) {
       const rowId = WACC_SHEET_ROW_BY_PARAMETER_NAME[parameter.name];
@@ -270,7 +277,7 @@ export async function refreshWaccSheetFromSpine(deps: FinancialModelToolDeps, se
     }
     if (cashAndEquivalents) {
       inputs.push({ rowId: "cash_and_equivalents_value", value: cashAndEquivalents.value,
-        provenance: { sourceType: "filing", sourceRefs: cashAndEquivalents.sourceRefs,
+        provenance: { sourceType: cashAndEquivalents.sourceType, sourceRefs: cashAndEquivalents.sourceRefs,
           asOfDate: waccSheet.asOfDate, rationale: cashAndEquivalents.rationale } });
     }
     if (inputs.length === 0) {
@@ -317,7 +324,10 @@ async function getModel(deps: FinancialModelToolDeps, input: JsonObject, context
     }
     return success(`Loaded financial model ${id} revision ${view.revision}.`, { model_id: id, revision: view.revision,
       filing_insights: insightContext(deps, stored.snapshot.filingInsightSetId ?? null), workbook_slice: view });
-  } catch (error) { return toolError(error); }
+  } catch (error) {
+    const modelId = typeof input["modelId"] === "string" ? input["modelId"] : undefined;
+    return toolError(error, modelId === undefined ? undefined : () => nameSpacesFor(deps, modelId));
+  }
 }
 
 async function listModels(deps: FinancialModelToolDeps, input: JsonObject, context: ToolExecutionContext): Promise<ToolExecutionResult> {
@@ -386,7 +396,27 @@ function overview(view: ModelContextView, completeness: HistoricalDcfCompletenes
     ...(refs.length > 12 ? { more: refs.length - 12 } : {}) }));
 
   const reconciliations = workbook.reconciliationResults;
-  const failed = reconciliations.filter((result) => result.status === "failed");
+  // A failed identity without its components' values sends the agent reading the workbook to find
+  // them, which is exactly the search that stalls a run. Ship them with the failure, and name the
+  // component whose polarity would account for the residual — see explainFailedIdentity.
+  const rowsByLineItemId = new Map(Object.values(workbook.sections).flat()
+    .flatMap((row) => "lineItemId" in row ? [[row.lineItemId as string, row] as const] : []));
+  const failed = reconciliations.filter((result) => result.status === "failed").map((result) => {
+    if (result.residual === null) return result;
+    const components = result.refs.flatMap((ref) => {
+      const { lineItemId, periodId } = splitCellKey(ref as CellKey);
+      // The parent's own children are where a polarity error hides; the parent cell only carries
+      // their total, which is the number that already failed.
+      return [...rowsByLineItemId.entries()]
+        .filter(([id, row]) => id !== lineItemId && (row as { parentId?: string }).parentId === lineItemId)
+        .flatMap(([id, row]) => {
+          const value = (row as { cells: Record<string, { value: number | null }> }).cells[periodId]?.value;
+          return typeof value === "number" ? [{ lineItemId: id, value }] : [];
+        });
+    });
+    if (components.length === 0) return result;
+    return { ...result, ...explainFailedIdentity({ residual: result.residual, tolerance: result.tolerance }, components) };
+  });
 
   // model_id / revision / lifecycle_stage / revision_history / filing_insights stay at the top
   // level: projectFinancialModelData reads those by name to build the agent's active model context.
@@ -469,8 +499,44 @@ function summarizeDiagnostics(warnings: { code: string; refs: string[] }[]): Jso
 
 function success(summary: string, data: JsonObject): ToolExecutionResult { return { summary, generation_context: { data } }; }
 export function failure(code: string, message: string, data: JsonObject = {}): ToolExecutionResult { return { summary: message, error: { code, message }, generation_context: { data: { ...data, error: code } } }; }
-export function toolError(error: unknown): ToolExecutionResult {
-  if (error instanceof FinancialModelError) return failure(error.code, error.message, error.details ?? {});
+/**
+ * Every namespace a rejected name might really belong to, with the one call that reads each.
+ *
+ * Gathered here rather than declared per validation point: the engine that rejects an id knows only
+ * its own line items, while the guess is as likely to be a unified rowId — an AMZN run asked for
+ * `marketable_securities`, which is not a line item but is a source row and a unified row. Only the
+ * tool boundary can see all three, so this is where the search belongs.
+ */
+function nameSpacesFor(deps: FinancialModelToolDeps, modelId: string): NameSpace[] {
+  const spaces: NameSpace[] = [];
+  const snapshot = deps.modelStore.getRevision(modelId)?.snapshot;
+  if (snapshot) {
+    spaces.push({ kind: "line item", how: "get_financial_model { selector: { lineItemIds } }",
+      names: snapshot.lineItems.map((item) => item.id) });
+    spaces.push({ kind: "period", how: "get_financial_model { selector: { periodIds } }",
+      names: snapshot.periods.map((period) => period.id) });
+  }
+  const unified = deps.sourceReviewStore.get(modelId)?.unifiedStatements;
+  if (unified) {
+    spaces.push({ kind: "unified row", how: "get_unified_rows { rowIds }",
+      names: unified.rows.map((row) => row.rowId) });
+  }
+  spaces.push({ kind: "section", how: "get_financial_model { section }", names: [...MODEL_READ_SECTIONS] });
+  return spaces;
+}
+
+/**
+ * `spaces` is looked at only when the error names the input it rejected (`details.unknownName`), so
+ * the search costs nothing on the errors that already say what to do.
+ */
+export function toolError(error: unknown, spaces?: () => NameSpace[]): ToolExecutionResult {
+  if (error instanceof FinancialModelError) {
+    const unknownName = error.details?.["unknownName"];
+    const clause = typeof unknownName === "string" && spaces
+      ? suggestionClause(unknownName, spaces())
+      : "";
+    return failure(error.code, error.message + clause, error.details ?? {});
+  }
   return failure("financial_model_error", error instanceof Error ? error.message : String(error));
 }
 function requireString(input: JsonObject, key: string): string { const value = input[key]; if (typeof value !== "string" || !value.trim()) throw new Error(`${key} is required`); return value.trim(); }

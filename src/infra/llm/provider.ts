@@ -44,8 +44,15 @@ export type GenerateResult = {
   /** Present when `options.tools` was set and the provider returned tool calls. */
   toolCalls?: LlmToolCall[];
   metrics: {
+    /** Prompt tokens billed at full price. With prompt caching this is only the UNCACHED
+     *  remainder — the whole prompt is tokens_in + cache_write + cache_read. */
     tokens_in: number;
     tokens_out: number;
+    /** Prompt tokens read from cache, and written to it. Optional because only providers
+     *  that do prefix caching report them; absent is "this provider does not say", while
+     *  0 is "nothing was cached". */
+    cache_read?: number;
+    cache_write?: number;
     ms: number;
     model_class: ModelClass;
     provider: string;
@@ -83,6 +90,45 @@ export function resolveModelMap(
   return { SMALL: resolve("SMALL"), MEDIUM: resolve("MEDIUM"), LARGE: resolve("LARGE") };
 }
 
+/**
+ * A cached prompt is billed in three tiers, and reading only one of them misleads. Anthropic bills a
+ * cache read at ~0.1x the input price and a cache WRITE at ~1.25x — above full price — so a change
+ * that moves tokens out of `tokens_in` can still cost more. Weighting them here gives one number an
+ * optimization can be judged on; `tokens_in` alone cannot.
+ */
+const CACHE_READ_PRICE = 0.1;
+const CACHE_WRITE_PRICE = 1.25;
+
+export type LlmCostRow = {
+  calls: number; tokens_in: number; cache_read: number; cache_write: number; tokens_out: number;
+};
+
+/** Per-label prompt totals for this process, accumulated by every ModelRouter. */
+const costByLabel = new Map<string, LlmCostRow>();
+
+/**
+ * What each agent's prompts cost so far, with the weighted input total that says whether a caching
+ * change actually paid. `cache_read_write_ratio` is the health signal: below 1 the run is writing
+ * entries it never reads back, which is the failure mode that looks like a win in `tokens_in`.
+ */
+export function llmCostReport(): Record<string, LlmCostRow & {
+  equivalent_input_tokens: number; cache_read_write_ratio: number | null;
+}> {
+  const report: Record<string, LlmCostRow & { equivalent_input_tokens: number; cache_read_write_ratio: number | null }> = {};
+  for (const [label, row] of costByLabel) {
+    report[label] = { ...row,
+      equivalent_input_tokens: Math.round(
+        row.tokens_in + row.cache_read * CACHE_READ_PRICE + row.cache_write * CACHE_WRITE_PRICE),
+      cache_read_write_ratio: row.cache_write === 0 ? null : Number((row.cache_read / row.cache_write).toFixed(2)) };
+  }
+  return report;
+}
+
+/** Clears the totals. For tests, and for a harness that reports per run rather than per process. */
+export function resetLlmCostReport(): void {
+  costByLabel.clear();
+}
+
 export class ModelRouter {
   private readonly provider: LlmProvider;
 
@@ -109,7 +155,19 @@ export class ModelRouter {
     const preview = result.toolCalls?.length
       ? `tool_calls=[${result.toolCalls.map((c) => c.name).join(",")}]`
       : (result.text.length > 200 ? result.text.slice(0, 200) + "…" : result.text);
-    log.info(`[${label}] ${ms}ms | in=${result.metrics.tokens_in} out=${result.metrics.tokens_out} | ${preview}`);
+    // `in=` is the uncached remainder, so on a caching provider it reads far below the real prompt.
+    // Print the cache halves next to it or the line invites exactly that misreading.
+    const { cache_read: cacheRead, cache_write: cacheWrite } = result.metrics;
+    const row = costByLabel.get(label)
+      ?? { calls: 0, tokens_in: 0, cache_read: 0, cache_write: 0, tokens_out: 0 };
+    costByLabel.set(label, { calls: row.calls + 1,
+      tokens_in: row.tokens_in + result.metrics.tokens_in,
+      cache_read: row.cache_read + (cacheRead ?? 0),
+      cache_write: row.cache_write + (cacheWrite ?? 0),
+      tokens_out: row.tokens_out + result.metrics.tokens_out });
+    const cache = cacheRead === undefined && cacheWrite === undefined
+      ? "" : ` cache_r=${cacheRead ?? 0} cache_w=${cacheWrite ?? 0}`;
+    log.info(`[${label}] ${ms}ms | in=${result.metrics.tokens_in}${cache} out=${result.metrics.tokens_out} | ${preview}`);
     return result;
   }
 }

@@ -89,6 +89,12 @@ export async function runStatementUnificationAgent(input: {
 
   const delivered = delivery.delivered();
   if (!delivered) {
+    const lastEvaluation = delivery.lastEvaluation();
+    if (lastEvaluation) {
+      // A dirty candidate is useful only to the agent while it is correcting it. Letting it escape
+      // would make downstream mapping reason over data the unification checks already rejected.
+      throw new Error(`statement_unification finished with ${lastEvaluation.findings.length} unresolved finding(s); no unified statements were committed: ${lastEvaluation.findings.slice(0, 3).join("; ")}`);
+    }
     // Nothing was submitted: there is no partial artifact to salvage, and shipping an empty one would
     // read downstream as "this issuer has no statements" rather than "the agent never delivered".
     throw new Error(`statement_unification finished without submitting a decision: ${input.task}`);
