@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { AnthropicProvider } from "../anthropicProvider.ts";
 import { llmCostReport, ModelRouter, resetLlmCostReport } from "../provider.ts";
 import type { GenerateResult } from "../provider.ts";
+import type { JsonObject } from "../../../framework/types.ts";
 
 /** Builds an SSE Response body from the events an Anthropic stream would emit. */
 function sseResponse(events: { type: string; [key: string]: unknown }[]): Response {
@@ -11,11 +12,20 @@ function sseResponse(events: { type: string; [key: string]: unknown }[]): Respon
 }
 
 /** Swaps in a fetch that replies with `response`, restoring the real one afterwards. */
-async function withStubbedFetch(response: () => Response, run: () => Promise<void>): Promise<void> {
+type CapturedRequest = { body: JsonObject };
+
+async function withStubbedFetch(
+  response: () => Response,
+  run: (captured: CapturedRequest[]) => Promise<void>,
+): Promise<void> {
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async () => response()) as typeof fetch;
+  const captured: CapturedRequest[] = [];
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    captured.push({ body: JSON.parse(String(init?.body)) as JsonObject });
+    return response();
+  }) as typeof fetch;
   try {
-    await run();
+    await run(captured);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -47,6 +57,25 @@ test("reports the cache read and write token counts alongside the uncached input
       assert.equal(result.metrics.tokens_out, 7);
       assert.equal(result.metrics.cache_write, 1200);
       assert.equal(result.metrics.cache_read, 36000);
+    },
+  );
+});
+
+test("keeps tool_use and tool_result linked in Anthropic's native message blocks", async () => {
+  await withStubbedFetch(
+    () => sseResponse(textStream({ input_tokens: 1 })),
+    async (captured) => {
+      await new AnthropicProvider("sk-test").generate([
+        { role: "user", content: "look up MSFT" },
+        { role: "assistant", content: "", toolCalls: [{ id: "toolu_1", name: "get_price", input: { ticker: "MSFT" } }] },
+        { role: "tool", content: '{"price":123}', toolCallId: "toolu_1", toolName: "get_price" },
+      ], { modelClass: "MEDIUM" });
+
+      assert.deepEqual(captured[0]!.body["messages"], [
+        { role: "user", content: [{ type: "text", text: "look up MSFT" }] },
+        { role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "get_price", input: { ticker: "MSFT" } }] },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: '{"price":123}' }] },
+      ]);
     },
   );
 });

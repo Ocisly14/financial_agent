@@ -65,18 +65,7 @@ export class GoogleVertexProvider implements LlmProvider {
       .map((m) => m.content)
       .join("\n\n");
 
-    const coreMessages: CoreMessage[] = [];
-    for (const m of messages.filter((entry) => entry.role !== "system")) {
-      // Gemini knows user/assistant. Map tool → user input. Consecutive
-      // same-role messages (e.g. a cacheable prefix split) merge into one turn.
-      const role = m.role === "assistant" ? "assistant" as const : "user" as const;
-      const last = coreMessages[coreMessages.length - 1];
-      if (last && last.role === role && typeof last.content === "string") {
-        last.content = `${last.content}\n\n${m.content}`;
-      } else {
-        coreMessages.push({ role, content: m.content });
-      }
-    }
+    const coreMessages = toVertexMessages(messages);
 
     const streaming = typeof options.onToken === "function";
 
@@ -109,7 +98,7 @@ export class GoogleVertexProvider implements LlmProvider {
         options.onToken!(delta);
       }
       const usage = await result.usage;
-      const calls = (await result.toolCalls).map((c): LlmToolCall => ({ name: c.toolName, input: c.args as JsonObject }));
+      const calls = (await result.toolCalls).map((c): LlmToolCall => ({ id: c.toolCallId, name: c.toolName, input: c.args as JsonObject }));
 
       return this.toResult(text, calls, usage, options, start);
     }
@@ -124,7 +113,7 @@ export class GoogleVertexProvider implements LlmProvider {
       ...toolParams,
     });
 
-    const calls = result.toolCalls.map((c): LlmToolCall => ({ name: c.toolName, input: c.args as JsonObject }));
+    const calls = result.toolCalls.map((c): LlmToolCall => ({ id: c.toolCallId, name: c.toolName, input: c.args as JsonObject }));
     return this.toResult(result.text, calls, result.usage, options, start);
   }
 
@@ -147,4 +136,38 @@ export class GoogleVertexProvider implements LlmProvider {
       },
     };
   }
+}
+
+/** Convert the framework transcript without flattening function calls into ordinary prose. */
+export function toVertexMessages(messages: LlmMessage[]): CoreMessage[] {
+  const coreMessages: CoreMessage[] = [];
+  for (const m of messages.filter((entry) => entry.role !== "system")) {
+    if (m.role === "tool") {
+      coreMessages.push({ role: "tool", content: [{ type: "tool-result", toolCallId: m.toolCallId ?? m.toolName ?? "tool",
+        toolName: m.toolName ?? "tool", result: toolResult(m.content), ...(m.toolResultIsError ? { isError: true } : {}) }] });
+      continue;
+    }
+    if (m.role === "assistant" && m.toolCalls?.length) {
+      coreMessages.push({ role: "assistant", content: [
+        ...(m.content === "" ? [] : [{ type: "text" as const, text: m.content }]),
+        ...m.toolCalls.map((call, index) => ({ type: "tool-call" as const, toolCallId: call.id ?? `toolcall_${index}`,
+          toolName: call.name, args: call.input })),
+      ] });
+      continue;
+    }
+    // Gemini knows user/assistant. Consecutive same-role messages (e.g. a cacheable prefix split) merge into one turn.
+    const role = m.role === "assistant" ? "assistant" as const : "user" as const;
+    const last = coreMessages[coreMessages.length - 1];
+    if (last && last.role === role && typeof last.content === "string") {
+      last.content = `${last.content}\n\n${m.content}`;
+    } else {
+      coreMessages.push({ role, content: m.content });
+    }
+  }
+  return coreMessages;
+}
+
+function toolResult(content: string): unknown {
+  try { return JSON.parse(content); }
+  catch { return content; }
 }

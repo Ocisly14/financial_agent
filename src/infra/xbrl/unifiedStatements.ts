@@ -204,7 +204,7 @@ export function checkUnificationCompleteness(input: { inventory: readonly Invent
   }
 
   const coveringOf = (conceptQName: string, signature: string, opening: boolean, periodId: string) =>
-    (inventoryByRef.get(cellRef(conceptQName, signature, opening)) ?? []).filter((inv) => inv.periodCoverage.includes(periodId));
+    (inventoryByRef.get(cellRef(conceptQName, signature, opening)) ?? []).filter((inv) => inv.values[periodId] !== undefined);
 
   // Concepts routed away from the face statements. Both kinds answer `dangling`; only `excluded`
   // forfeits its values, so they stay separate rather than one bucket with a flag.
@@ -237,6 +237,19 @@ export function checkUnificationCompleteness(input: { inventory: readonly Invent
     }
     if (seenRowIds.has(row.rowId)) findings.push(`duplicate rowId "${row.rowId}"`);
     seenRowIds.add(row.rowId);
+    // `resolveRowComponents` deliberately drops a shared component in periods it does not cover —
+    // that is how a single row spans a re-tag. But an invented component covers *no* period, so it
+    // was previously dropped everywhere and silently became an all-null row. Check its tag family
+    // once before applying that per-period coverage filter. One known tag is enough: older tags
+    // outside the requested window may be legitimate alternates.
+    for (const component of row.components) {
+      const signature = component.dimensionSignature ?? "";
+      const opening = component.openingBalance === true;
+      const tags = componentTags(component);
+      if (!tags.some((tag) => inventoryByRef.has(cellRef(tag.conceptQName, signature, opening)))) {
+        findings.push(`row "${row.rowId}" references ${tags.map((tag) => refOf(tag.conceptQName, signature, opening)).join(" / ")}, which is not in the inventory`);
+      }
+    }
     for (const override of row.perYearOverrides ?? []) {
       if (!requested.has(override.periodId)) findings.push(`row "${row.rowId}" overrides ${override.periodId}, which is not a requested period`);
     }
@@ -279,7 +292,7 @@ export function checkUnificationCompleteness(input: { inventory: readonly Invent
   for (const inv of input.inventory) {
     const ref = cellRef(inv.conceptQName, inv.dimensionSignature, inv.openingBalance);
     if (heldOut.has(ref)) continue;
-    for (const periodId of inv.periodCoverage) {
+    for (const periodId of Object.keys(inv.values)) {
       if (!requested.has(periodId)) continue;
       if (!uses.has(`${inv.statement}|${ref}|${periodId}`)) {
         findings.push(`dangling: inventory row ${refOf(inv.conceptQName, inv.dimensionSignature, inv.openingBalance)} (${inv.statement}) is not consumed by any unified row in ${periodId}, and is not listed as excluded or supplemental`);
@@ -338,7 +351,7 @@ export function buildUnifiedStatements(input: { decision: UnificationDecision;
     cellRef(tag, component.dimensionSignature ?? "", component.openingBalance);
   const coveredTags = (component: UnifiedComponent, periodId: string) => componentTags(component)
     .filter((tag) => (inventoryByRef.get(refOfComponent(component, tag.conceptQName)) ?? [])
-      .some((inv) => inv.periodCoverage.includes(periodId))
+      .some((inv) => inv.values[periodId] !== undefined)
       && !heldOut.has(refOfComponent(component, tag.conceptQName)));
 
   for (const row of input.decision.rows) {

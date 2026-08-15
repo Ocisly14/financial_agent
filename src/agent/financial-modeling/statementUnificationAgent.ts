@@ -65,6 +65,8 @@ export async function runStatementUnificationAgent(input: {
   task: string;
   /** From createStatementUnificationTools: the read side, pinned to this run's model. */
   readTools: RegisteredTool[];
+  /** Optional overall deadline, propagated to every LLM request made by the subagent. */
+  signal?: AbortSignal;
   filings: readonly PresentationExtract[];
   requestedPeriods: readonly Period[];
   tables?: readonly FilingTable[];
@@ -84,11 +86,16 @@ export async function runStatementUnificationAgent(input: {
     sessionId: input.sessionId, agentId: input.agentId, taskId, threadId, state: input.state,
     request: { agent: "statement_unification", task: input.task },
     allowedTools: runTools.map(({ execute: _execute, ...definition }) => definition),
+    ...(input.signal ? { signal: input.signal } : {}),
     toolRegistry: registry,
   });
 
   const delivered = delivery.delivered();
   if (!delivered) {
+    if (input.signal?.aborted) {
+      const reason = input.signal.reason instanceof Error ? input.signal.reason.message : "deadline expired";
+      throw new Error(`statement_unification timed out: ${reason}`);
+    }
     const lastEvaluation = delivery.lastEvaluation();
     if (lastEvaluation) {
       // A dirty candidate is useful only to the agent while it is correcting it. Letting it escape

@@ -8,7 +8,8 @@ const MODEL_MAP = resolveModelMap({
   LARGE: "gemini-2.5-pro",
 }, ["GOOGLE"]);
 
-type GeminiPart = { text?: string; functionCall?: { name: string; args?: JsonObject } };
+type GeminiPart = { text?: string; functionCall?: { id?: string; name: string; args?: JsonObject };
+  functionResponse?: { id?: string; name: string; response: JsonObject } };
 type GeminiContent = { role: "user" | "model"; parts: GeminiPart[] };
 
 type GeminiResponse = {
@@ -18,6 +19,18 @@ type GeminiResponse = {
   }>;
   usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
 };
+
+function toolResponse(content: string, isError = false): JsonObject {
+  try {
+    const parsed = JSON.parse(content);
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return isError ? { error: parsed } : parsed as JsonObject;
+    }
+    return isError ? { error: parsed } : { result: parsed };
+  } catch {
+    return isError ? { error: content } : { result: content };
+  }
+}
 
 /**
  * Gemini provider via the Google AI Studio (Generative Language) REST API.
@@ -42,13 +55,22 @@ export class GoogleProvider implements LlmProvider {
     const systemMsg = messages.find((m) => m.role === "system");
     const contents: GeminiContent[] = [];
     for (const m of messages.filter((entry) => entry.role !== "system")) {
-      // Gemini only knows "user" and "model". Map assistant→model; everything
-      // else (user, tool) is presented as user input. Consecutive same-role
-      // messages (e.g. a cacheable prefix split) merge into one turn.
+      // Gemini represents a tool result as a user functionResponse. The function name (and id on
+      // models that emit one) preserves the association instead of making the response prose.
       const role = m.role === "assistant" ? "model" : "user";
+      const parts: GeminiPart[] = m.role === "tool"
+        ? [{ functionResponse: { ...(m.toolCallId ? { id: m.toolCallId } : {}),
+          name: m.toolName ?? "tool", response: toolResponse(m.content, m.toolResultIsError) } }]
+        : [
+          ...(m.content === "" ? [] : [{ text: m.content }]),
+          ...(m.toolCalls ?? []).map((call, index) => ({ functionCall: {
+            ...(call.id ? { id: call.id } : {}), name: call.name, args: call.input,
+          } })),
+        ];
+      if (parts.length === 0) continue;
       const last = contents[contents.length - 1];
-      if (last && last.role === role) last.parts.push({ text: m.content });
-      else contents.push({ role, parts: [{ text: m.content }] });
+      if (last && last.role === role) last.parts.push(...parts);
+      else contents.push({ role, parts });
     }
 
     const body = {
@@ -115,7 +137,8 @@ export class GoogleProvider implements LlmProvider {
               options.onToken!(delta);
             }
             for (const part of parts) {
-              if (part.functionCall) toolCalls.push({ name: part.functionCall.name, input: part.functionCall.args ?? {} });
+              if (part.functionCall) toolCalls.push({ ...(part.functionCall.id ? { id: part.functionCall.id } : {}),
+                name: part.functionCall.name, input: part.functionCall.args ?? {} });
             }
             if (event.usageMetadata) {
               tokensIn = event.usageMetadata.promptTokenCount ?? tokensIn;
@@ -131,7 +154,8 @@ export class GoogleProvider implements LlmProvider {
       const parts = json.candidates?.[0]?.content?.parts ?? [];
       text = parts.map((p) => p.text ?? "").join("");
       for (const part of parts) {
-        if (part.functionCall) toolCalls.push({ name: part.functionCall.name, input: part.functionCall.args ?? {} });
+        if (part.functionCall) toolCalls.push({ ...(part.functionCall.id ? { id: part.functionCall.id } : {}),
+          name: part.functionCall.name, input: part.functionCall.args ?? {} });
       }
       tokensIn = json.usageMetadata?.promptTokenCount ?? 0;
       tokensOut = json.usageMetadata?.candidatesTokenCount ?? 0;

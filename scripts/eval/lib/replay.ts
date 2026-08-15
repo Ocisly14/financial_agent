@@ -31,6 +31,7 @@ export function replay(fixture: ReplayFixture): {
   const buffer: OhlcSample[] = [];
   let anchor = fixture.trigger.reference_price;
   let filtered = 0;
+  const windowMs = fixture.trigger.type === "rolling_change" ? fixture.trigger.window_minutes * 60_000 : 0;
 
   for (let i = 0; i < fixture.candles.length; i++) {
     const candle = fixture.candles[i]!;
@@ -45,8 +46,20 @@ export function replay(fixture: ReplayFixture): {
     }
     buffer.push(candle);
 
+    // `evaluatePriceTrigger` takes the extreme of whatever buffer it is handed and never reads a
+    // timestamp, so the window is the caller's job. strategyMonitor does it in two parts, and both
+    // matter on US equities: it will not evaluate a rolling_change until the buffer spans the whole
+    // window (`feed.isArmed`), and it then passes only the samples inside it (`feed.window`).
+    // Without the first, a strategy fires on its first three prints of the day; without the second,
+    // a 5% move measured across an overnight close satisfies a 30-minute window.
+    if (windowMs > 0) {
+      const oldest = buffer[0]!.ts;
+      if (candle.ts - oldest < windowMs) continue;
+    }
+    const samples = windowMs > 0 ? buffer.filter((sample) => candle.ts - sample.ts <= windowMs) : buffer;
+
     const trigger: PriceTrigger = anchor !== undefined ? { ...fixture.trigger, reference_price: anchor } : fixture.trigger;
-    const result = evaluatePriceTrigger(trigger, buffer, candle.close);
+    const result = evaluatePriceTrigger(trigger, samples, candle.close);
     if (result.nextReferencePrice !== undefined) anchor = result.nextReferencePrice;
     if (result.conditionMet) return { fired: true, fireIndex: i, filtered };
   }

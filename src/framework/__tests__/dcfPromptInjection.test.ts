@@ -79,8 +79,10 @@ async function drive(agent: AgentKind, script: Step[]): Promise<LlmMessage[][]> 
   return sent;
 }
 
-/** Everything below the system block, as the model reads it. */
-const promptOf = (messages: LlmMessage[]) => messages.slice(1).map((message) => message.content).join("");
+/** Everything below the system block, excluding the one-turn native tool transcript. */
+const promptMessages = (messages: LlmMessage[]) => messages.filter((message) =>
+  message.role !== "tool" && !(message.role === "assistant" && message.toolCalls?.length));
+const promptOf = (messages: LlmMessage[]) => promptMessages(messages).slice(1).map((message) => message.content).join("");
 const cachedBlocks = (messages: LlmMessage[]) => messages.filter((message) => message.cache === true);
 
 /**
@@ -94,8 +96,8 @@ const cachedBlocks = (messages: LlmMessage[]) => messages.filter((message) => me
  * — not a boundary that moved on its own.
  */
 function assertStableInjection(sent: LlmMessage[][], step: number, needle: RegExp): void {
-  const current = sent[step]!;
-  const previous = sent[step - 1]!;
+  const current = promptMessages(sent[step]!);
+  const previous = promptMessages(sent[step - 1]!);
   assert.match(promptOf(current), needle, "the earlier step's tool data reached this prompt");
   // The step counter is volatile; anything above it in the region must not be.
   const region = promptOf(current);
@@ -165,11 +167,27 @@ test("by the last step, the bulk of the region is in blocks the previous step al
     { tool: "patch_unification_decision", data: bulk("patched", 150) },
   ]);
 
-  const last = sent[3]!;
+  const last = promptMessages(sent[3]!);
   const carried = last.slice(2, -1).reduce((sum, message) => sum + message.content.length, 0);
   const fresh = last.at(-1)!.content.length;
   assert.ok(carried > fresh,
     `only ${carried} carried bytes against ${fresh} fresh ones — the region is being re-cut, not appended to`);
+});
+
+test("subagents retain the preceding native tool exchange alongside rendered progress", async () => {
+  const sent = await drive("statement_unification", [
+    { tool: "load_concept_inventory", data: { ticker: "MSFT", concepts: [] } },
+  ]);
+
+  const exchange = sent[1]!;
+  const assistant = exchange.find((message) => message.role === "assistant" && message.toolCalls?.length);
+  const result = exchange.find((message) => message.role === "tool");
+  assert.equal(assistant?.toolCalls?.length, 1);
+  assert.equal(assistant?.toolCalls?.[0]?.name, "load_concept_inventory");
+  assert.match(assistant?.toolCalls?.[0]?.id ?? "", /^toolcall_/);
+  assert.equal(result?.toolCallId, assistant?.toolCalls?.[0]?.id);
+  assert.equal(result?.toolName, "load_concept_inventory");
+  assert.equal(result?.content, JSON.stringify({ ticker: "MSFT", concepts: [] }));
 });
 
 /**

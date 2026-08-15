@@ -1,62 +1,205 @@
 {
   "id": "trailing-stop-retrace",
-  "symbol": "AAPL",
-  "expectedFire": true,
-  "label": "trailing stop fires after a 10% retrace from anchor, sustained",
+  "symbol": "NVDA",
+  "label": "a run to 182.00 then a retrace through the 5% trailing level at 172.90",
   "trigger": {
     "type": "trailing_stop",
     "direction": "down",
-    "pct": 10,
-    "reference_price": 150
+    "pct": 5
   },
+  "expectedFire": true,
   "candles": [
     {
       "ts": 0,
-      "high": 150,
-      "low": 150,
-      "close": 150
+      "high": 168.0,
+      "low": 168.0,
+      "close": 168.0
     },
     {
       "ts": 60000,
-      "high": 150,
-      "low": 150,
-      "close": 150
+      "high": 168.74,
+      "low": 168.74,
+      "close": 168.74
     },
     {
       "ts": 120000,
-      "high": 150,
-      "low": 150,
-      "close": 150
+      "high": 169.47,
+      "low": 169.47,
+      "close": 169.47
     },
     {
       "ts": 180000,
-      "high": 150,
-      "low": 150,
-      "close": 150
+      "high": 170.21,
+      "low": 170.21,
+      "close": 170.21
     },
     {
       "ts": 240000,
-      "high": 150,
-      "low": 150,
-      "close": 150
+      "high": 170.95,
+      "low": 170.95,
+      "close": 170.95
     },
     {
       "ts": 300000,
-      "high": 134,
-      "low": 134,
-      "close": 134
+      "high": 171.68,
+      "low": 171.68,
+      "close": 171.68
     },
     {
       "ts": 360000,
-      "high": 133,
-      "low": 133,
-      "close": 133
+      "high": 172.42,
+      "low": 172.42,
+      "close": 172.42
     },
     {
       "ts": 420000,
-      "high": 132,
-      "low": 132,
-      "close": 132
+      "high": 173.16,
+      "low": 173.16,
+      "close": 173.16
+    },
+    {
+      "ts": 480000,
+      "high": 173.89,
+      "low": 173.89,
+      "close": 173.89
+    },
+    {
+      "ts": 540000,
+      "high": 174.63,
+      "low": 174.63,
+      "close": 174.63
+    },
+    {
+      "ts": 600000,
+      "high": 175.37,
+      "low": 175.37,
+      "close": 175.37
+    },
+    {
+      "ts": 660000,
+      "high": 176.11,
+      "low": 176.11,
+      "close": 176.11
+    },
+    {
+      "ts": 720000,
+      "high": 176.84,
+      "low": 176.84,
+      "close": 176.84
+    },
+    {
+      "ts": 780000,
+      "high": 177.58,
+      "low": 177.58,
+      "close": 177.58
+    },
+    {
+      "ts": 840000,
+      "high": 178.32,
+      "low": 178.32,
+      "close": 178.32
+    },
+    {
+      "ts": 900000,
+      "high": 179.05,
+      "low": 179.05,
+      "close": 179.05
+    },
+    {
+      "ts": 960000,
+      "high": 179.79,
+      "low": 179.79,
+      "close": 179.79
+    },
+    {
+      "ts": 1020000,
+      "high": 180.53,
+      "low": 180.53,
+      "close": 180.53
+    },
+    {
+      "ts": 1080000,
+      "high": 181.26,
+      "low": 181.26,
+      "close": 181.26
+    },
+    {
+      "ts": 1140000,
+      "high": 182.0,
+      "low": 182.0,
+      "close": 182.0
+    },
+    {
+      "ts": 1200000,
+      "high": 181.5,
+      "low": 181.5,
+      "close": 181.5
+    },
+    {
+      "ts": 1260000,
+      "high": 180.55,
+      "low": 180.55,
+      "close": 180.55
+    },
+    {
+      "ts": 1320000,
+      "high": 179.59,
+      "low": 179.59,
+      "close": 179.59
+    },
+    {
+      "ts": 1380000,
+      "high": 178.64,
+      "low": 178.64,
+      "close": 178.64
+    },
+    {
+      "ts": 1440000,
+      "high": 177.68,
+      "low": 177.68,
+      "close": 177.68
+    },
+    {
+      "ts": 1500000,
+      "high": 176.73,
+      "low": 176.73,
+      "close": 176.73
+    },
+    {
+      "ts": 1560000,
+      "high": 175.77,
+      "low": 175.77,
+      "close": 175.77
+    },
+    {
+      "ts": 1620000,
+      "high": 174.82,
+      "low": 174.82,
+      "close": 174.82
+    },
+    {
+      "ts": 1680000,
+      "high": 173.86,
+      "low": 173.86,
+      "close": 173.86
+    },
+    {
+      "ts": 1740000,
+      "high": 172.91,
+      "low": 172.91,
+      "close": 172.91
+    },
+    {
+      "ts": 1800000,
+      "high": 171.95,
+      "low": 171.95,
+      "close": 171.95
+    },
+    {
+      "ts": 1860000,
+      "high": 171.0,
+      "low": 171.0,
+      "close": 171.0
     }
   ]
 }

@@ -11,7 +11,11 @@ const DEFAULT_MODELS = {
   LARGE: "deepseek-v4-flash",
 } as const;
 
-type DeepSeekMessage = { role: "system" | "user" | "assistant"; content: string };
+type DeepSeekMessage =
+  | { role: "system" | "user"; content: string }
+  | { role: "assistant"; content: string | null;
+    tool_calls?: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }> }
+  | { role: "tool"; tool_call_id: string; content: string };
 
 type ToolCallDelta = {
   index: number;
@@ -68,13 +72,19 @@ export class DeepSeekProvider implements LlmProvider {
     const start = Date.now();
     const model = this.models[options.modelClass] ?? this.models.MEDIUM;
 
-    // The OpenAI schema reserves `tool` for replies carrying a tool_call_id. Our tool
-    // results are plain transcript text, so they are presented as user turns — the same
-    // mapping the Anthropic and Google providers use.
-    const conversation: DeepSeekMessage[] = messages.map((message) => ({
-      role: message.role === "system" ? "system" : message.role === "assistant" ? "assistant" : "user",
-      content: message.content,
-    }));
+    const conversation: DeepSeekMessage[] = messages.map((message) => {
+      if (message.role === "tool") {
+        return { role: "tool", tool_call_id: message.toolCallId ?? message.toolName ?? "tool",
+          content: message.content };
+      }
+      if (message.role === "assistant") {
+        const calls = message.toolCalls?.map((call, index) => ({ id: call.id ?? `toolcall_${index}`,
+          type: "function" as const, function: { name: call.name, arguments: JSON.stringify(call.input) } }));
+        return { role: "assistant", content: message.content || null,
+          ...(calls?.length ? { tool_calls: calls } : {}) };
+      }
+      return { role: message.role, content: message.content };
+    });
 
     const response = await fetch(`${this.baseUrl}/chat/completions`, {
       method: "POST",
@@ -125,7 +135,7 @@ export class DeepSeekProvider implements LlmProvider {
     let droppedFrames = 0;
     // Arguments stream as fragments keyed by the call's position in the reply; the
     // accumulated string is complete JSON only once the stream ends.
-    const toolBlocks = new Map<number, { name: string; args: string }>();
+    const toolBlocks = new Map<number, { id?: string; name: string; args: string }>();
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -153,6 +163,7 @@ export class DeepSeekProvider implements LlmProvider {
           }
           for (const call of choice?.delta?.tool_calls ?? []) {
             const block = toolBlocks.get(call.index) ?? { name: "", args: "" };
+            if (call.id) block.id = call.id;
             if (call.function?.name) block.name = call.function.name;
             if (call.function?.arguments) block.args += call.function.arguments;
             toolBlocks.set(call.index, block);
@@ -175,6 +186,7 @@ export class DeepSeekProvider implements LlmProvider {
     const toolCalls: LlmToolCall[] = [...toolBlocks.entries()]
       .sort(([a], [b]) => a - b)
       .map(([, block]) => ({
+        ...(block.id ? { id: block.id } : {}),
         name: block.name,
         input: parseToolArguments(block, { model, finishReason, droppedFrames, tokensOut, maxTokens: this.maxTokens }),
       }));

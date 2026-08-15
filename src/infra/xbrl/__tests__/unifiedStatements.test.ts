@@ -57,12 +57,17 @@ test("completeness flags dangling inventory cells, unknown components, and doubl
     // An override naming a concept the period does not carry.
     { ...decisionRow("bogus", "us-gaap:Revenues"),
       perYearOverrides: [{ periodId: "FY2025", components: [{ conceptQName: "us-gaap:DoesNotExist", weight: 1 }], reason: "x" }] },
+    // A shared component that exists in no period used to be silently filtered away, yielding an
+    // accepted all-null row. It must be rejected before the coverage filter runs.
+    decisionRow("shared_bogus", "us-gaap:SharedDoesNotExist"),
     // Revenues consumed a second time within the same statement.
     decisionRow("revenues_again", "us-gaap:Revenues"),
   ] };
   const findings = checkUnificationCompleteness({ inventory, decision, requestedPeriods: periods });
   assert.ok(findings.some((f) => f.includes("dangling") && f.includes("us-gaap:CostOfRevenue") && f.includes("FY2024")), findings.join("\n"));
   assert.ok(findings.some((f) => f.includes("us-gaap:DoesNotExist") && f.includes("not in the inventory")), findings.join("\n"));
+  assert.ok(findings.some((f) => f.includes('"shared_bogus"') && f.includes("us-gaap:SharedDoesNotExist")
+    && f.includes("not in the inventory")), findings.join("\n"));
   assert.ok(findings.some((f) => f.includes("double-count") && f.includes("us-gaap:Revenues") && f.includes("FY2025")), findings.join("\n"));
 });
 

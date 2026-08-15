@@ -184,7 +184,7 @@ test("keeps reasoning_content out of the reply text and the token stream", async
   );
 });
 
-test("presents tool-result messages as user turns", async () => {
+test("preserves assistant tool calls and their results as native OpenAI messages", async () => {
   await withStubbedFetch(
     () => sseResponse([{ choices: [{ delta: { content: "ok" } }] }]),
     async (captured) => {
@@ -192,16 +192,18 @@ test("presents tool-result messages as user turns", async () => {
       await provider.generate(
         [
           { role: "user", content: "run it" },
-          { role: "assistant", content: "calling tool" },
-          { role: "tool", content: "tool output" },
+          { role: "assistant", content: "calling tool", toolCalls: [{ id: "call_1", name: "get_price", input: { ticker: "MSFT" } }] },
+          { role: "tool", content: "tool output", toolCallId: "call_1", toolName: "get_price" },
         ],
         { modelClass: "MEDIUM" },
       );
 
       assert.deepEqual(captured[0]!.body["messages"], [
         { role: "user", content: "run it" },
-        { role: "assistant", content: "calling tool" },
-        { role: "user", content: "tool output" },
+        { role: "assistant", content: "calling tool", tool_calls: [{
+          id: "call_1", type: "function", function: { name: "get_price", arguments: "{\"ticker\":\"MSFT\"}" },
+        }] },
+        { role: "tool", tool_call_id: "call_1", content: "tool output" },
       ]);
     },
   );
@@ -285,7 +287,7 @@ test("joins tool-call arguments split across stream chunks into one parsed call"
       const provider = new DeepSeekProvider("sk-test");
       const result = await provider.generate([{ role: "user", content: "price?" }], { modelClass: "MEDIUM" });
 
-      assert.deepEqual(result.toolCalls, [{ name: "get_price", input: { ticker: "AAPL" } }]);
+      assert.deepEqual(result.toolCalls, [{ id: "call_1", name: "get_price", input: { ticker: "AAPL" } }]);
       assert.equal(result.text, "");
     },
   );
@@ -308,8 +310,8 @@ test("keeps parallel tool calls separate by stream index", async () => {
       const result = await provider.generate([{ role: "user", content: "both" }], { modelClass: "MEDIUM" });
 
       assert.deepEqual(result.toolCalls, [
-        { name: "get_price", input: { ticker: "AAPL" } },
-        { name: "get_news", input: { ticker: "MSFT" } },
+        { id: "a", name: "get_price", input: { ticker: "AAPL" } },
+        { id: "b", name: "get_news", input: { ticker: "MSFT" } },
       ]);
     },
   );

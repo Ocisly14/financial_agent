@@ -12,6 +12,15 @@ export type LlmMessage = {
    * message is stable across calls and worth a provider-side cache breakpoint.
    * Providers without prompt caching ignore it. */
   cache?: boolean;
+  /** Native tool calls emitted by the preceding assistant turn. Providers that support tool
+   * transcripts preserve these instead of flattening the later result into ordinary user text. */
+  toolCalls?: LlmToolCall[];
+  /** Correlates a native tool result with the assistant call that requested it. */
+  toolCallId?: string;
+  /** The tool name is redundant for OpenAI-compatible APIs, but required by Gemini's function response. */
+  toolName?: string;
+  /** Lets providers mark a native tool result as failed without losing the structured payload. */
+  toolResultIsError?: boolean;
 };
 
 /** Native function-calling tool spec: schema-constrained decoding makes the
@@ -24,6 +33,8 @@ export type LlmToolSpec = {
 };
 
 export type LlmToolCall = {
+  /** Provider-generated id when available; the runtime supplies one for providers that omit it. */
+  id?: string;
   name: string;
   input: JsonObject;
 };

@@ -68,7 +68,7 @@ function extractJsonObject(text: string): string | null {
   return null;
 }
 
-type ToolCall = { tool: string; input: JsonObject };
+type ToolCall = { id: string; tool: string; input: JsonObject };
 type SubagentStep =
   | { action: "call_tool"; calls: ToolCall[] }
   | { action: "finish"; summary: string };
@@ -79,7 +79,7 @@ function toToolCall(value: unknown): ToolCall | null {
   const tool = typeof o.tool === "string" ? o.tool.trim() : "";
   if (!tool) return null;
   const input = o.input && typeof o.input === "object" ? (o.input as JsonObject) : {};
-  return { tool, input };
+  return { id: newId("toolcall"), tool, input };
 }
 
 /**
@@ -283,7 +283,7 @@ export function stepFromToolCalls(calls: LlmToolCall[]): SubagentStep {
   }
   const toolCalls = calls
     .filter((call) => call.name !== FINISH_TOOL.name)
-    .map((call): ToolCall => ({ tool: call.name, input: call.input }));
+    .map((call): ToolCall => ({ id: call.id ?? newId("toolcall"), tool: call.name, input: call.input }));
   return { action: "call_tool", calls: toolCalls };
 }
 
@@ -313,6 +313,15 @@ function normalizeToolError(output: { summary: string; error?: { code: string; m
   return output.error;
 }
 
+/** Keep the provider-visible result identical to the structured evidence the next prompt renders,
+ * while retaining the native call id required by OpenAI, Anthropic, and Gemini tool protocols. */
+function nativeToolResult(call: ToolCall, toolName: string, data: unknown, isError: boolean): LlmMessage {
+  let content: string;
+  try { content = JSON.stringify(data); }
+  catch { content = JSON.stringify({ summary: "tool returned unserializable data" }); }
+  return { role: "tool", content, toolCallId: call.id, toolName, ...(isError ? { toolResultIsError: true } : {}) };
+}
+
 export type RunSubagentInput = {
   sessionId: string;
   agentId: string;
@@ -320,6 +329,8 @@ export type RunSubagentInput = {
   taskId: string;
   request: TaskRequest;
   allowedTools: ToolDefinition[];
+  /** Cancels every provider request in this run when the caller's overall deadline expires. */
+  signal?: AbortSignal;
   /**
    * Tools scoped to this run, resolved before the shared registry. The DCF mapping agents need it:
    * their tools close over the model they were pinned to and the decision they have submitted so
@@ -444,7 +455,7 @@ export class SubagentRuntime {
     await maybeCompactThread(state, this.modelRouter, definition.name, threadId, input.taskId);
 
     if (definition.name === "financial_modeling" && input.request.model_id && allowed.has("get_financial_model")) {
-      await this.runToolCall(definition, input, { tool: "get_financial_model", input: { modelId: input.request.model_id } }, allowed);
+      await this.runToolCall(definition, input, { id: newId("toolcall"), tool: "get_financial_model", input: { modelId: input.request.model_id } }, allowed);
     }
 
     const maxToolSteps = definition.maxToolSteps ?? DEFAULT_MAX_TOOL_STEPS;
@@ -454,6 +465,9 @@ export class SubagentRuntime {
     /** Last step's progress region and the cuts it made in it, so this step can re-send those blocks
      *  byte-identically — which is what makes the entry the last step wrote readable now. */
     let previousCache: ProgressCache | undefined;
+    /** The immediately preceding native tool exchange. It is appended after the rendered evidence
+     * so providers can associate a result with the call that caused it. */
+    let nativeToolTranscript: LlmMessage[] = [];
     for (let step = 1; step <= maxToolSteps; step++) {
       // Compact only completed earlier rounds before every prompt. The current
       // dispatch remains verbatim, even if it is itself large.
@@ -486,12 +500,12 @@ export class SubagentRuntime {
       const split = splitForPromptCache(rendered.system, rendered.prompt, previousCache);
       try {
         const completion = await this.modelRouter.generate(
-          split.messages,
+          nativeToolTranscript.length > 0 ? [...split.messages, ...nativeToolTranscript] : split.messages,
           // Built from the live set, so a skill's grant reaches the model. This is
           // the one thing that can change the cached request prefix mid-run; an
           // invoke_skill therefore costs one cache miss, and only one.
           { modelClass: definition.modelClass, temperature: 0.1, metadata: { mode: "subagent", agent: definition.name },
-            tools: buildLoopToolSpecs([...allowed.values()]) },
+            tools: buildLoopToolSpecs([...allowed.values()]), ...(input.signal ? { signal: input.signal } : {}) },
         );
         completionText = completion.text;
         completionToolCalls = completion.toolCalls;
@@ -582,13 +596,16 @@ export class SubagentRuntime {
       // Run this step's tool calls in parallel — they are independent (any tool
       // whose choice depends on a prior result is issued in a later iteration).
       const toolResults = await Promise.all(stepObj.calls.map((call) => this.runToolCall(definition, input, call, allowed, step)));
+      nativeToolTranscript = [{ role: "assistant", content: completionText,
+        toolCalls: stepObj.calls.map((call) => ({ id: call.id, name: call.tool, input: call.input })) },
+      ...toolResults.map((result) => result.nativeToolResult).filter((message): message is LlmMessage => message !== undefined)];
       if (definition.name === "financial_modeling" && allowed.has("get_financial_model")) {
         const stepConflict = toolResults.some((result) => result.errorCode === "revision_conflict");
         const modelId = stepConflict
           ? latestFinancialModelState(state.subagentToolOutputs({ thread: threadId })).model_id ?? input.request.model_id
           : undefined;
         if (modelId) {
-          const refresh = await this.runToolCall(definition, input, { tool: "get_financial_model", input: { modelId } }, allowed);
+          const refresh = await this.runToolCall(definition, input, { id: newId("toolcall"), tool: "get_financial_model", input: { modelId } }, allowed);
           recoveredRevisionConflict = refresh.errorCode === undefined;
         }
       }
@@ -700,7 +717,8 @@ export class SubagentRuntime {
     call: ToolCall,
     allowed: Map<string, ToolDefinition>,
     step?: number,
-  ): Promise<{ awaitingApproval: boolean; approvalId?: string; errorCode?: string; userInputRequest?: UserInputRequest }> {
+  ): Promise<{ awaitingApproval: boolean; approvalId?: string; errorCode?: string;
+    userInputRequest?: UserInputRequest; nativeToolResult?: LlmMessage }> {
     const { state, threadId } = input;
     const tool = allowed.get(call.tool);
     if (!tool) {
@@ -712,7 +730,8 @@ export class SubagentRuntime {
         { task_id: input.taskId, name: call.tool, error: { code: "invalid_tool", message: `"${call.tool}" is not an allowed tool — choose from the allowed list or finish.` } },
         { threadId, parent: input.taskId },
       );
-      return { awaitingApproval: false, errorCode: "invalid_tool" };
+      return { awaitingApproval: false, errorCode: "invalid_tool",
+        nativeToolResult: nativeToolResult(call, call.tool, { error: "invalid_tool", message: `"${call.tool}" is not an allowed tool — choose from the allowed list or finish.` }, true) };
     }
 
     // Ownership lives here rather than in the tool: `execute` is a pure
@@ -731,7 +750,8 @@ export class SubagentRuntime {
           { task_id: input.taskId, name: tool.name, error: { code: "skill_not_allowed", message } },
           { threadId, parent: input.taskId },
         );
-        return { awaitingApproval: false, errorCode: "skill_not_allowed" };
+        return { awaitingApproval: false, errorCode: "skill_not_allowed",
+          nativeToolResult: nativeToolResult(call, tool.name, { error: "skill_not_allowed", message }, true) };
       }
     }
 
@@ -764,7 +784,8 @@ export class SubagentRuntime {
         { tool_use_id: toolUseId, task_id: input.taskId, name: tool.name, error: { code: "tool_error", message: error instanceof Error ? error.message : String(error) } },
         { threadId, parent: useEv.event_id },
       );
-      return { awaitingApproval: false, errorCode: "tool_error" };
+      return { awaitingApproval: false, errorCode: "tool_error",
+        nativeToolResult: nativeToolResult(call, tool.name, { error: "tool_error", message: error instanceof Error ? error.message : String(error) }, true) };
     }
 
     log.info(`[${definition.name}] tool result: ${tool.name}`, { summary: output.summary });
@@ -796,14 +817,20 @@ export class SubagentRuntime {
         { approval_id: output.approval.approval_id, payload: output.approval.payload, from_thread: threadId },
         { parent: input.taskId },
       );
-      return { awaitingApproval: true, approvalId: output.approval.approval_id };
+      return { awaitingApproval: true, approvalId: output.approval.approval_id,
+        nativeToolResult: nativeToolResult(call, tool.name, output.generation_context?.data ?? { summary: output.summary }, Boolean(normalizedError)) };
     }
 
     if (output.user_input_request) {
-      return { awaitingApproval: false, userInputRequest: output.user_input_request };
+      return { awaitingApproval: false, userInputRequest: output.user_input_request,
+        nativeToolResult: nativeToolResult(call, tool.name, output.generation_context?.data ?? { summary: output.summary }, Boolean(normalizedError)) };
     }
 
-    return normalizedError ? { awaitingApproval: false, errorCode: normalizedError.code } : { awaitingApproval: false };
+    return normalizedError
+      ? { awaitingApproval: false, errorCode: normalizedError.code,
+        nativeToolResult: nativeToolResult(call, tool.name, output.generation_context?.data ?? { summary: output.summary }, true) }
+      : { awaitingApproval: false,
+        nativeToolResult: nativeToolResult(call, tool.name, output.generation_context?.data ?? { summary: output.summary }, false) };
   }
 }
 

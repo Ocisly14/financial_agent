@@ -36,3 +36,9 @@ memory/
 # Python bytecode cache
 __pycache__/
 *.pyc
+
+# Local SQLite databases (runtime artifacts)
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm

@@ -206,8 +206,10 @@ async function stepsOf(batches: string[]): Promise<LlmMessage[][]> {
   return sent;
 }
 
-/** Everything below the system block, as the model reads it. */
-const promptOf = (messages: LlmMessage[]) => messages.slice(1).map((message) => message.content).join("");
+/** Everything below the system block, excluding the one-turn native tool transcript. */
+const promptMessages = (messages: LlmMessage[]) => messages.filter((message) =>
+  message.role !== "tool" && !(message.role === "assistant" && message.toolCalls?.length));
+const promptOf = (messages: LlmMessage[]) => promptMessages(messages).slice(1).map((message) => message.content).join("");
 
 test("what a step returns is injected into the next step's prompt, below the region's stable bytes", async () => {
   const sent = await stepsOf(["alpha", "beta", "gamma"]);
@@ -227,8 +229,8 @@ test("the injected region holds still across steps, so the rolling breakpoint fi
   // Four batches: the first cut can only open once a step has a full earlier region to share with,
   // so the second cut — the one that proves boundaries are append-only — appears at step four.
   const sent = await stepsOf(["alpha", "beta", "gamma", "delta"]);
-  const third = sent[2]!;
-  const fourth = sent[3]!;
+  const third = promptMessages(sent[2]!);
+  const fourth = promptMessages(sent[3]!);
 
   assert.equal(fourth.length, 5, "system + static prefix + two cut blocks + the new tail");
   assert.equal(fourth.filter((message) => message.cache === true).length, 4);
