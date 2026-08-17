@@ -4,6 +4,7 @@ import { FinancialModelError } from "../errors.ts";
 import {
   applyComputedWaccInputs,
   createWaccSheet,
+  missingWaccAgentJudgments,
   recalculateWaccSheet,
   setWaccInput,
   WACC_SHEET_ROW_IDS,
@@ -108,6 +109,28 @@ test("recalculateWaccSheet names missing direct inputs without expanding the cha
   assert.ok(!wacc.missingInputs.includes("beta"));
 });
 
+test("only the irreducible WACC judgments require agent confirmation", () => {
+  let sheet = createWaccSheet(AS_OF);
+  sheet = applyComputedWaccInputs(sheet, [
+    { rowId: "risk_free_rate", value: 0.04, provenance: provenance({ rationale: "Treasury candidate" }) },
+    { rowId: "beta", value: 1.1, provenance: provenance() },
+    { rowId: "equity_value", value: 100, provenance: provenance() },
+    { rowId: "total_debt", value: 20, provenance: provenance() },
+    { rowId: "cost_of_debt", value: 0.05, provenance: provenance() },
+    { rowId: "effective_tax_rate", value: 0.21, provenance: provenance() },
+  ]);
+  assert.deepEqual(missingWaccAgentJudgments(sheet), ["risk_free_rate", "equity_risk_premium"]);
+  sheet = setWaccInput(sheet, {
+    rowId: "risk_free_rate", value: 0.04, sourceType: "market", sourceRefs: ["treasury:30y"],
+    rationale: "Selected 30-year rate for the forecast duration.", asOfDate: AS_OF,
+  });
+  sheet = setWaccInput(sheet, {
+    rowId: "equity_risk_premium", value: 0.05, sourceType: "agent_estimate", sourceRefs: [],
+    rationale: "Long-run ERP judgment.", asOfDate: AS_OF,
+  });
+  assert.deepEqual(missingWaccAgentJudgments(sheet), []);
+});
+
 test("applyComputedWaccInputs fills engine-measured rows but never overwrites an agent-authored row", () => {
   let sheet = createWaccSheet(AS_OF);
   sheet = setWaccInput(sheet, {
@@ -154,12 +177,22 @@ test("applyComputedWaccInputs fills engine-measured rows but never overwrites an
   assert.equal(row(sheet, "risk_free_rate").source, "agent");
 });
 
-test("setWaccInput rejects rows outside the agent-writable set", () => {
+test("setWaccInput accepts agent overrides for measured inputs and rejects locked rows", () => {
   const sheet = createWaccSheet(AS_OF);
+  const overridden = setWaccInput(sheet, {
+    rowId: "total_debt",
+    formula: "100 + 25",
+    sourceType: "filing_calculation",
+    sourceRefs: ["model:debt@FY2025"],
+    rationale: "Use the agent-authored total-debt calculation in the final workbook.",
+    asOfDate: AS_OF,
+  });
+  assert.equal(row(overridden, "total_debt").source, "agent");
+  assert.equal(row(overridden, "total_debt").formulaSource, "100 + 25");
   assert.throws(
     () =>
       setWaccInput(sheet, {
-        rowId: "beta",
+        rowId: "wacc",
         value: 1,
         sourceType: "user",
         sourceRefs: [],

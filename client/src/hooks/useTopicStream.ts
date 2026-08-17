@@ -115,9 +115,15 @@ export function useTopicStream(
             const trimmed = text.trim();
             if (!trimmed || isProcessing || isHistoryLoading) return false;
             const now = Date.now();
-            appendMessages([
-                { id: `user-${now}`, user: "user", text: trimmed, createdAt: now } as unknown as ContentWithUser,
-            ]);
+            // An answered card is not a user message: the server records the turn
+            // but `projectChatHistory` renders no bubble for it, so appending one
+            // here would show a message that vanishes on the next reload. The
+            // answer stays visible on the card itself.
+            if (!inputResponse) {
+                appendMessages([
+                    { id: `user-${now}`, user: "user", text: trimmed, createdAt: now } as unknown as ContentWithUser,
+                ]);
+            }
             setIsProcessing(true);
             setStreamingText("");
             tasksRef.current = new Map();
@@ -306,6 +312,7 @@ export function useTopicStream(
                 answers: answers.map((answer) => ({
                     questionId: answer.question_id,
                     selectedOptionIds: answer.selected_option_ids,
+                    ...(answer.free_text ? { freeText: answer.free_text } : {}),
                 })),
             };
             const ok = await runTurn(text, inputResponse);
@@ -341,6 +348,7 @@ export function useTopicStream(
                 answers: answers.map((answer) => ({
                     questionId: answer.question_id,
                     selectedOptionIds: answer.selected_option_ids,
+                    ...(answer.free_text ? { freeText: answer.free_text } : {}),
                 })),
             };
 

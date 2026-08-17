@@ -128,9 +128,10 @@ test("an undeclared empty period on a required target is a coverage gap; a decla
   assert.deepEqual(result.findings, ["coverage_gap: required cost_of_revenue has no value in FY2024 and is not declared a spine gap"]);
   assert.ok(!result.facts.some((f) => f.lineItemId === "cost_of_revenue" && f.periodId === "FY2024"));
 
-  // The same gap on an OPTIONAL target the decision DID claim is still recorded, but raises nothing.
+  // The same gap on an OPTIONAL target the decision DID claim is informational, not blocking.
   const optional = buildSpineFromUnified({ decision, unified, spineIds, requiredIds: new Set(["revenue.total"]) });
-  assert.deepEqual(optional.coverageGaps, [{ targetId: "cost_of_revenue", periodId: "FY2024" }]);
+  assert.deepEqual(optional.coverageGaps, []);
+  assert.deepEqual(optional.optionalCoverageGaps, [{ targetId: "cost_of_revenue", periodId: "FY2024" }]);
   assert.deepEqual(optional.findings, []);
 });
 

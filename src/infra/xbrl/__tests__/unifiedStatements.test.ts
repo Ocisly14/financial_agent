@@ -57,12 +57,17 @@ test("completeness flags dangling inventory cells, unknown components, and doubl
     // An override naming a concept the period does not carry.
     { ...decisionRow("bogus", "us-gaap:Revenues"),
       perYearOverrides: [{ periodId: "FY2025", components: [{ conceptQName: "us-gaap:DoesNotExist", weight: 1 }], reason: "x" }] },
+    // A shared component that exists in no period used to be silently filtered away, yielding an
+    // accepted all-null row. It must be rejected before the coverage filter runs.
+    decisionRow("shared_bogus", "us-gaap:SharedDoesNotExist"),
     // Revenues consumed a second time within the same statement.
     decisionRow("revenues_again", "us-gaap:Revenues"),
   ] };
   const findings = checkUnificationCompleteness({ inventory, decision, requestedPeriods: periods });
   assert.ok(findings.some((f) => f.includes("dangling") && f.includes("us-gaap:CostOfRevenue") && f.includes("FY2024")), findings.join("\n"));
   assert.ok(findings.some((f) => f.includes("us-gaap:DoesNotExist") && f.includes("not in the inventory")), findings.join("\n"));
+  assert.ok(findings.some((f) => f.includes('"shared_bogus"') && f.includes("us-gaap:SharedDoesNotExist")
+    && f.includes("not in the inventory")), findings.join("\n"));
   assert.ok(findings.some((f) => f.includes("double-count") && f.includes("us-gaap:Revenues") && f.includes("FY2025")), findings.join("\n"));
 });
 
@@ -307,6 +312,21 @@ test("a patch that includes a held-out list replaces that list wholesale", () =>
   assert.deepEqual(patched.supplemental, base.supplemental);
 });
 
+test("a patch can incrementally upsert and delete held-out entries", () => {
+  const base: UnificationDecision = { rows: [decisionRow("a", "us-gaap:A")],
+    excluded: [{ conceptQName: "us-gaap:Abstract", reason: "abstract" }],
+    supplemental: [{ conceptQName: "us-gaap:Shares", label: "Shares", reason: "not a face line" }] };
+  const patched = applyUnificationPatch(base, {
+    upsertExcluded: [{ conceptQName: "us-gaap:Old", reason: "superseded" }],
+    deleteSupplemental: [{ conceptQName: "us-gaap:Shares" }],
+  });
+  assert.deepEqual(patched.excluded, [
+    { conceptQName: "us-gaap:Abstract", reason: "abstract" },
+    { conceptQName: "us-gaap:Old", reason: "superseded" },
+  ]);
+  assert.deepEqual(patched.supplemental, []);
+});
+
 test("a merged row sums its components by weight", () => {
   const filings = simpleFilings();
   const inventory = buildConceptInventory({ filings, requestedPeriods: periods });
@@ -501,4 +521,42 @@ test("a genuine restatement beyond tolerance is recorded with orientation-normal
   const olderCandidate = restatement.candidates.find((c) => c.accession === "acc-2024")!;
   assert.equal(olderCandidate.value, 96_000e6); // normalized, not the raw -96e9
   assert.equal(artifact.rows[0]!.values["FY2024"], 100_000e6);
+});
+
+test("a concept absorbed into another line stops resolving in the periods that restated it", () => {
+  // Tesla's real shape. Customer deposits was its own balance-sheet line through the FY2022 10-K,
+  // and the FY2023 10-K folded it into accrued liabilities — restating the FY2022 comparative from
+  // 7,142 to 8,205, a difference of exactly the 1,063 deposits line. The deposits fact still exists
+  // in the older filing for FY2022, so resolving "newest filing that carries THIS CONCEPT" keeps
+  // paying it out and the same 1,063 lands in the statements twice. The authority for a period is
+  // the newest filing that reports that period at all: for FY2022 that is the FY2023 10-K, which
+  // does not carry the line. FY2021's authority is still the FY2022 10-K, which does — so FY2021
+  // must keep its value. That contrast is the whole rule.
+  const twoPeriods = [period("FY2021", 2021), period("FY2022", 2022)];
+  const deposits = "tsla:CustomerDepositsLiabilitiesCurrent";
+  const accrued = "tsla:AccruedAndOtherCurrentLiabilities";
+  const older = filing("acc-2022", "2023-01-31", [statement("balance_sheet", [
+    node(0, null, accrued, "Accrued liabilities and other", [fact("FY2022", 7_142e6), fact("FY2021", 5_719e6)]),
+    node(1, null, deposits, "Customer deposits", [fact("FY2022", 1_063e6), fact("FY2021", 925e6)]),
+  ])]);
+  const latest = filing("acc-2023", "2024-01-29", [statement("balance_sheet", [
+    node(0, null, accrued, "Accrued liabilities and other", [fact("FY2022", 8_205e6)]),
+  ])]);
+  const filings = [older, latest];
+  const inventory = buildConceptInventory({ filings, requestedPeriods: twoPeriods });
+  const decision: UnificationDecision = { rows: [
+    { rowId: "accrued", statement: "balance_sheet", label: "Accrued", rationale: "",
+      components: [{ conceptQName: accrued, weight: 1 }] },
+    { rowId: "customer_deposits", statement: "balance_sheet", label: "Customer deposits", rationale: "",
+      components: [{ conceptQName: deposits, weight: 1 }] },
+  ] };
+  const built = buildUnifiedStatements({ decision, filings, requestedPeriods: twoPeriods, inventory });
+  const row = built.rows.find((r) => r.rowId === "customer_deposits")!;
+
+  assert.equal(row.values["FY2021"], 925e6, "FY2021's authority still reports the line — keep it");
+  assert.equal(row.values["FY2022"], null, "FY2022 was restated to fold this line in — it must not be paid out twice");
+  assert.equal(built.rows.find((r) => r.rowId === "accrued")!.values["FY2022"], 8_205e6);
+  // The drop has to be legible as a restatement, not as a hole in the extraction.
+  const finding = built.findings.find((f) => f.includes("customer_deposits") && f.includes("FY2022"));
+  assert.ok(finding !== undefined && finding.includes("acc-2023"), built.findings.join("\n"));
 });

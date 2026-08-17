@@ -183,8 +183,7 @@ Rules:
 [CONVERSATION SO FAR]
 {{history}}
 
-[USER'S LATEST MESSAGE — RESPOND TO THIS]
-{{userMessage}}
+{{latestInput}}
 
 Output the next step now, as a single JSON object.`,
 };

@@ -25,6 +25,9 @@ const HELD_OUT = (extra: Record<string, JsonSchema>, required: string[]): JsonSc
     properties: { conceptQName: { type: "string" }, dimensionSignature: { type: "string" },
       openingBalance: { type: "boolean" }, reason: { type: "string" }, ...extra } } });
 
+const HELD_OUT_REF: JsonSchema = { type: "object", additionalProperties: false, required: ["conceptQName"],
+  properties: { conceptQName: { type: "string" }, dimensionSignature: { type: "string" }, openingBalance: { type: "boolean" } } };
+
 const ROW: JsonSchema = { type: "object", additionalProperties: false,
   required: ["rowId", "statement", "label", "components", "rationale"],
   properties: { rowId: { type: "string" }, statement: { type: "string" }, label: { type: "string" },
@@ -34,7 +37,10 @@ const ROW: JsonSchema = { type: "object", additionalProperties: false,
       properties: { axisQName: { type: "string" }, conceptQName: { type: "string" }, rationale: { type: "string" },
         members: { type: "array", items: { type: "object", additionalProperties: false, required: ["memberQName"],
           properties: { memberQName: { type: "string" }, parentMemberQName: { type: "string" } } } } } } },
-    rationale: { type: "string" } } };
+    // Required on every row, not only on merges — spelled out here because the prompt once said
+    // "whenever a row merges >1 component", and a decision that followed that lost the whole batch.
+    rationale: { type: "string",
+      description: "Why this row is composed the way it is. Required on EVERY row: for a single-component row, \"one concept, reported directly\" is enough." } } };
 
 export const UNIFICATION_DECISION_SCHEMA: JsonSchema = { type: "object", additionalProperties: false,
   required: ["decision"], properties: { decision: { type: "object", additionalProperties: false, required: ["rows"],
@@ -44,15 +50,20 @@ export const UNIFICATION_DECISION_SCHEMA: JsonSchema = { type: "object", additio
 export const UNIFICATION_PATCH_SCHEMA: JsonSchema = { type: "object", additionalProperties: false,
   required: ["patch"], properties: { patch: { type: "object", additionalProperties: false, required: [],
     properties: { upsertRows: { type: "array", items: ROW }, deleteRowIds: { type: "array", items: { type: "string" } },
-      excluded: HELD_OUT({}, []), supplemental: HELD_OUT({ label: { type: "string" } }, ["label"]) } } } };
+      excluded: HELD_OUT({}, []), supplemental: HELD_OUT({ label: { type: "string" } }, ["label"]),
+      upsertExcluded: HELD_OUT({}, []), deleteExcluded: { type: "array", items: HELD_OUT_REF },
+      upsertSupplemental: HELD_OUT({ label: { type: "string" } }, ["label"]),
+      deleteSupplemental: { type: "array", items: HELD_OUT_REF } } } } };
+
+const EMPTY_OBJECT_SCHEMA: JsonSchema = { type: "object", additionalProperties: false, properties: {} };
 
 export type UnificationDelivery = { decision: UnificationDecision; artifact: UnifiedStatementsArtifact; findings: string[] };
 
 /**
- * The subagent's delivery surface. Submitting is where the host's three checks run — completeness
- * against its OWN inventory, the statement build, and the breakdown partition — and their findings
- * come back as the tool's result. That is the whole point: correction stops being a `for` loop the
- * host drives and becomes something the subagent can see and answer, one step at a time.
+ * The subagent's delivery surface. Submitting is a dry run: completeness against its OWN inventory,
+ * the statement build, and the breakdown partition all run before anything can leave the agent.
+ * Findings come back to the same agent that authored the candidate, so correction is a local loop
+ * rather than a problem passed to mapping or the DCF orchestrator.
  *
  * Patching exists because a hundred-row decision costs minutes to regenerate and drifts between
  * attempts, while the fix for a handful of findings is a few rows long.
@@ -62,8 +73,14 @@ export function createUnificationDeliveryTools(context: {
   requestedPeriods: readonly Period[];
   inventory: readonly InventoryRow[];
   tables: readonly FilingTable[];
-}): { tools: RegisteredTool[]; delivered: () => UnificationDelivery | undefined } {
+}): { tools: RegisteredTool[]; delivered: () => UnificationDelivery | undefined;
+  lastEvaluation: () => UnificationDelivery | undefined } {
   let delivered: UnificationDelivery | undefined;
+  let lastEvaluation: UnificationDelivery | undefined;
+  let hasEvaluation = false;
+  // A draft lets the agent put a large issuer on file a statement at a time. Only a validated
+  // decision may escape this run to downstream mapping.
+  let draft: UnificationDecision | undefined;
 
   const evaluate = (decision: UnificationDecision): JsonValue => {
     const completeness = checkUnificationCompleteness({ inventory: context.inventory, decision,
@@ -74,10 +91,13 @@ export function createUnificationDeliveryTools(context: {
       requestedPeriods: context.requestedPeriods,
       parentValues: Object.fromEntries(artifact.rows.map((row) => [row.rowId, row.values])) });
     const findings = [...completeness, ...artifact.findings, ...breakdowns.findings];
-    // Held even when dirty: a decision carrying findings beats discarding minutes of work, and the
-    // host ships the last one if the step budget runs out mid-correction.
-    delivered = { decision, findings,
+    const candidate: UnificationDelivery = { decision, findings,
       artifact: { ...artifact, breakdownRows: breakdowns.breakdownRows, unresolvedFindings: findings } };
+    hasEvaluation = true;
+    lastEvaluation = candidate;
+    // Only a clean, fully verified candidate is allowed to cross the agent boundary. In particular,
+    // do not leave a previously accepted draft live after a later patch made it invalid.
+    delivered = findings.length === 0 ? candidate : undefined;
     return { status: findings.length === 0 ? "accepted" : "incomplete",
       rows: artifact.rows.length, breakdownRows: breakdowns.breakdownRows.length,
       // Findings run to hundreds of lines on a bad decision; the tail is no more informative than
@@ -91,18 +111,49 @@ export function createUnificationDeliveryTools(context: {
     inputSchema: UNIFICATION_DECISION_SCHEMA,
   }, (raw: JsonObject) => {
     validate(raw, UNIFICATION_DECISION_SCHEMA, "$", true);
-    return evaluate(raw["decision"] as unknown as UnificationDecision);
+    draft = raw["decision"] as unknown as UnificationDecision;
+    return evaluate(draft);
+  });
+
+  const startDraft = subagentTool({
+    name: "start_unification_draft", category: "non_trading",
+    description: "Discard the decision on file and start over from an empty draft. You do not need this to begin: the first patch_unification_decision opens a draft on its own. Use it only to abandon a decision you no longer want to patch.",
+    inputSchema: EMPTY_OBJECT_SCHEMA,
+  }, (raw: JsonObject) => {
+    validate(raw, EMPTY_OBJECT_SCHEMA, "$", true);
+    draft = { rows: [] };
+    delivered = undefined;
+    lastEvaluation = undefined;
+    hasEvaluation = false;
+    return { status: "draft_started", rows: 0 } as unknown as JsonValue;
   });
 
   const patch = subagentTool({
     name: "patch_unification_decision", category: "non_trading",
-    description: "Correct the decision you already submitted, without restating it whole. rows are patched by rowId — upsert or delete only the ones at fault, and any row you do not name is left as it is. excluded and supplemental are not keyed: each REPLACES its list wholesale, so send the complete list or omit the key. Returns the host's findings against the patched decision, so you can patch again without resubmitting.",
+    description: "Update a decision without restating it whole. Rows are patched by rowId; excluded and supplemental can be patched by concept/dimension/opening-balance identity with upsertExcluded/deleteExcluded and upsertSupplemental/deleteSupplemental. The legacy excluded and supplemental fields replace their lists wholesale. Returns findings after validation, or just draft progress before first validation.",
     inputSchema: UNIFICATION_PATCH_SCHEMA,
   }, (raw: JsonObject) => {
-    if (!delivered) throw new Error("no decision submitted yet — call submit_unification_decision first");
+    // The first batch opens the draft itself. An explicit start_unification_draft would cost a whole
+    // round to send `{}`, and `draft` is only ever unset before the first write, so there is no
+    // earlier state for a lazy start to lose.
+    draft ??= { rows: [] };
     validate(raw, UNIFICATION_PATCH_SCHEMA, "$", true);
-    return evaluate(applyUnificationPatch(delivered.decision, raw["patch"] as unknown as UnificationPatch));
+    draft = applyUnificationPatch(draft, raw["patch"] as unknown as UnificationPatch);
+    // Preserve the existing submit → patch → findings workflow. Before the first validation, a
+    // batch only updates the draft so the model is not flooded with premature completeness findings.
+    return hasEvaluation ? evaluate(draft) : { status: "draft_updated", rows: draft.rows.length } as unknown as JsonValue;
   });
 
-  return { tools: [submit, patch], delivered: () => delivered };
+  const validateDraft = subagentTool({
+    name: "validate_unification_decision", category: "non_trading",
+    description: "Validate the completed draft. Returns findings; patch only the named rows, then validate again until accepted.",
+    inputSchema: EMPTY_OBJECT_SCHEMA,
+  }, (raw: JsonObject) => {
+    if (!draft) throw new Error("no draft on file — add your first batch with patch_unification_decision first");
+    validate(raw, EMPTY_OBJECT_SCHEMA, "$", true);
+    return evaluate(draft);
+  });
+
+  return { tools: [submit, startDraft, patch, validateDraft], delivered: () => delivered,
+    lastEvaluation: () => lastEvaluation };
 }

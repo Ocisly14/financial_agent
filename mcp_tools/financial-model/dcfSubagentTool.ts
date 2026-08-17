@@ -86,52 +86,60 @@ export function createDcfSubagentTool(deps: {
         }
         if (!sourceReview.unifiedStatements) return { summary: "Unified statements unavailable.",
           error: { code: "unified_statements_unavailable", message: "spine_mapping needs unifiedStatements; run statement_unification first" } };
+        const service = new FinancialModelService(deps.financial.modelStore, context.sessionId);
+        const current = service.getModel(modelId);
+        if (!("currentWorkbook" in current)) throw new Error("default model context expected");
         const loader = createSpineMappingTools({ modelStore: deps.financial.modelStore,
           sourceReviewStore: deps.financial.sourceReviewStore, ownerAgentId: context.agentId, modelId });
+        // The persistence implementation belongs at this boundary, but its invocation belongs to
+        // spine_mapping: runSpineMappingAgent calls it only after the agent's last candidate is
+        // structurally complete and reconciliation-clean.
+        const unified = sourceReview.unifiedStatements;
+        const labelByRowId = new Map([...unified.rows, ...(unified.breakdownRows ?? [])].map((row) => [row.rowId, row.label]));
+        const historicalPeriodIds = current.currentWorkbook.periods.filter((period) => period.cls === "actual").map((period) => period.id);
         const run = await runSpineMappingAgent({
           subagentRuntime: deps.subagentRuntime, definition: deps.subagents.get("spine_mapping"),
           state: deps.sessions.getExisting(context.sessionId),
           sessionId: context.sessionId, agentId: context.agentId,
           task: requiredString(input, "task"), readTools: loader.tools,
-          unified: sourceReview.unifiedStatements });
+          unified,
+          previewReconciliations: (facts) => service.previewSpineFacts(modelId, {
+            facts,
+            historicalPeriodIds,
+            labels: Object.fromEntries((unified.breakdownRows ?? []).map((row) => [row.rowId, row.label])),
+          }),
+          commit: async (candidate) => {
+            const mismatch = wrongIssuer(loader.loaded(), modelId);
+            if (mismatch) throw new Error(mismatch);
+            const detailIds = resolveDetailLineItemIds(candidate.decision, unified);
+            const labels = Object.fromEntries(candidate.decision.detailRows.map((detail) => [
+              detailIds[detail.rowId]!, labelByRowId.get(detail.rowId) ?? detail.rowId,
+            ]));
+            if (candidate.facts.length === 0) return { revision: current.currentWorkbook.revision };
+            const commit = service.commitSpineFacts(modelId, current.currentWorkbook.revision, {
+              facts: [...candidate.facts], labels, historicalPeriodIds,
+            });
+            // Committed facts make WACC terms derivable; refresh as the mapping's final commit step.
+            const waccOutcome = await refreshWaccSheetFromSpine(deps.financial, service, modelId, commit.revision);
+            return { revision: waccOutcome.kind === "refreshed" ? waccOutcome.result.currentWorkbook.revision : commit.revision };
+          },
+        });
         const mismatch = wrongIssuer(loader.loaded(), modelId);
         if (mismatch) return { summary: mismatch, error: { code: "subagent_loaded_wrong_issuer", message: mismatch } };
-        // Facts commit directly — no staged intermediate: the pipeline verified roll-ups upstream,
-        // the engine re-validates via reconciliation on this commit, and the revision chain is the
-        // audit record. Corrections happen on later revisions (replace_fact / set_formula).
-        const service = new FinancialModelService(deps.financial.modelStore, context.sessionId);
-        const current = service.getModel(modelId);
-        if (!("currentWorkbook" in current)) throw new Error("default model context expected");
-        // Breakdown rows (segment/product/geography members) live in breakdownRows, not rows — a
-        // detail row can point at either, so the label lookup has to search both.
-        const unified = sourceReview.unifiedStatements!;
-        const labelByRowId = new Map([...unified.rows, ...(unified.breakdownRows ?? [])].map((row) => [row.rowId, row.label]));
-        // The same resolver the fact builder used, so a nested stream's label lands on the same id.
-        const detailIds = resolveDetailLineItemIds(run.decision, unified);
-        const labels = Object.fromEntries(run.decision.detailRows.map((detail) => [
-          detailIds[detail.rowId]!,
-          labelByRowId.get(detail.rowId) ?? detail.rowId,
-        ]));
-        let committed = current.currentWorkbook;
-        if (run.facts.length > 0) {
-          const commit = service.commitSpineFacts(modelId, current.currentWorkbook.revision, { facts: run.facts, labels,
-            historicalPeriodIds: current.currentWorkbook.periods.filter((period) => period.cls === "actual").map((period) => period.id),
-          });
-          // Committed facts are what make WACC terms derivable — derive them now, as their own
-          // revision, instead of waiting to be asked.
-          const waccOutcome = await refreshWaccSheetFromSpine(deps.financial, service, modelId, commit.revision);
-          committed = waccOutcome.kind === "refreshed" ? waccOutcome.result.currentWorkbook : commit.currentWorkbook;
-        }
-        return { summary: composeSubagentReport(`spine_mapping committed ${run.facts.length} fact(s) at revision ${committed.revision} across `
+        const revision = run.committedRevision ?? current.currentWorkbook.revision;
+        const detailLineItemIds = Object.values(resolveDetailLineItemIds(run.decision, unified));
+        return { summary: composeSubagentReport(`spine_mapping committed ${run.facts.length} fact(s) at revision ${revision} across `
           + `${run.decision.mappings.length} spine mapping(s) and ${run.decision.detailRows.length} detail row(s)`
           + `${run.decision.spineGaps.length === 0 ? "" : `, ${run.decision.spineGaps.length} declared spine gap(s)`}`
           + `${run.coverageGaps.length === 0 ? "" : `, ${run.coverageGaps.length} coverage gap(s)`}`
+          + `${run.optionalCoverageGaps.length === 0 ? "" : `, ${run.optionalCoverageGaps.length} informational optional coverage gap(s)`}`
           + `${run.unresolvedFindings.length === 0 ? ""
             : ` — SHIPPED WITH ${run.unresolvedFindings.length} unresolved finding(s).`}`, run.summary),
-        generation_context: { data: { spineMapping: { revision: committed.revision,
+        generation_context: { data: { spineMapping: { revision,
           mappedTargetIds: run.decision.mappings.map((mapping) => mapping.targetId),
-          detailLineItemIds: Object.keys(labels),
+          detailLineItemIds,
           spineGaps: run.decision.spineGaps, coverageGaps: run.coverageGaps,
+          optionalCoverageGaps: run.optionalCoverageGaps,
           unresolvedFindings: run.unresolvedFindings } as unknown as JsonObject } } };
       }
       return { summary: `Unknown DCF subagent: ${subagent}`, error: { code: "invalid_dcf_subagent", message: `Unknown DCF subagent: ${subagent}` } };

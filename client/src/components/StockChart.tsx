@@ -3,9 +3,12 @@ import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { API_BASE_URL } from "@/lib/api";
+import { useQuoteStream } from "@/hooks/useQuoteStream";
 import { cn } from "@/lib/utils";
 import {
+    backstopIntervalForSession,
     isPresetStockRange,
+    withLiveCandle,
     parseStockChartProps,
     pollIntervalForSession,
     shouldPollCandles,
@@ -248,13 +251,17 @@ function StockChartLive({
 
     useEffect(() => setRange(initialRange), [initialRange, symbol]);
 
+    // The pushed price drives the header; this query is the backstop that still owns `session`,
+    // the daily aggregates and the staleness banner, so it polls far more slowly than it used to.
+    useQuoteStream(symbol, isVisible);
+
     const quoteQuery = useQuery({
         queryKey: ["stock-quote", symbol],
         queryFn: () => fetchStockQuote(symbol, "none"),
         enabled: isVisible,
         refetchInterval: (query) => {
             const session = query.state.data?.session;
-            return session ? pollIntervalForSession(session) : false;
+            return session ? backstopIntervalForSession(session) : false;
         },
         refetchIntervalInBackground: false,
         refetchOnWindowFocus: true,
@@ -280,13 +287,24 @@ function StockChartLive({
     const headerData = quoteQuery.data ?? candlesQuery.data;
     const quote = quoteQuery.data?.quote ?? candlesQuery.data?.quote ?? null;
     const rawCandles = candlesQuery.data?.candles ?? [];
-    const candles = useMemo<Candle[]>(() => rawCandles.map((item) => ({
+    // The pushed price already lives in `quote`; folding it into the forming candle here — rather
+    // than writing it into the candles cache — means the next real bar from the server simply
+    // replaces it, with nothing to reconcile.
+    const streamedPrice = quoteQuery.data?.quote?.price ?? null;
+    const streamedAtMs = quoteQuery.data?.quote?.quoteTimestamp
+        ? Date.parse(quoteQuery.data.quote.quoteTimestamp)
+        : null;
+    const liveCandles = useMemo(
+        () => withLiveCandle(rawCandles, streamedPrice, streamedAtMs, candlesQuery.data?.timeframe),
+        [rawCandles, streamedPrice, streamedAtMs, candlesQuery.data?.timeframe],
+    );
+    const candles = useMemo<Candle[]>(() => liveCandles.map((item) => ({
         t: new Date(item.t.length === 10 ? `${item.t}T00:00:00Z` : item.t).getTime(),
         o: item.o,
         h: item.h,
         l: item.l,
         c: item.c,
-    })).filter((item) => Number.isFinite(item.t)), [rawCandles]);
+    })).filter((item) => Number.isFinite(item.t)), [liveCandles]);
     const session = headerData?.session ?? "closed";
     const prevClose = quote?.prevClose ?? null;
     const price = quote?.price ?? rawCandles.at(-1)?.c ?? null;

@@ -20,16 +20,11 @@ const PERIODS: Period[] = [
  * hand in the dispatch task.
  *
  * The skeleton is source-free, so it can no longer be used as a proxy for the mapping decision.
- * Instead this test makes the hand-off explicit: rows that the history gate cannot derive from
- * another history-gated row must be mapping targets; the remaining rows are formulas the modeler
- * (or the working-capital compiler) writes after data is present.
+ * This test makes the hand-off explicit: every history-gated row must be a mapping target. Derived
+ * DCF rows are deliberately outside the gate and are authored by the modeler when needed.
  */
-test("every non-derived required-history row is a required spine mapping target", () => {
-  const derived = new Set([
-    "ebitda", "nopat", "operating_working_capital", "change_nwc", "fcff",
-  ]);
-  const mustBeMapped = REQUIRED_HISTORY_LINE_ITEMS.filter((id) => !derived.has(id));
-  const missing = mustBeMapped.filter((id) => !REQUIRED_MAPPING_IDS.has(id));
+test("every required-history row is a required spine mapping target", () => {
+  const missing = REQUIRED_HISTORY_LINE_ITEMS.filter((id) => !REQUIRED_MAPPING_IDS.has(id));
 
   assert.deepEqual(missing, [],
     `historyGate requires these but spine_mapping is never asked to cover them: ${missing.join(", ")}`);

@@ -32,6 +32,17 @@ test("answerText renders one line per question with the chosen labels", () => {
   assert.equal(text, "Which fiscal year?: FY26\nInclude guidance?: Yes");
 });
 
+test("answerText appends free text after the labels, matching the server's wording", () => {
+  const text = answerText(request, [
+    { question_id: "q1", selected_option_ids: ["fy25"], free_text: "FY24 restated" },
+    { question_id: "q2", selected_option_ids: [], free_text: "only the segment guidance" },
+  ]);
+  assert.equal(
+    text,
+    'Which fiscal year?: FY25, Other — "FY24 restated"\nInclude guidance?: Other — "only the segment guidance"',
+  );
+});
+
 test("answerText joins multiple selections in option order, not click order", () => {
   const text = answerText(request, [
     { question_id: "q1", selected_option_ids: ["fy26", "fy25"] },

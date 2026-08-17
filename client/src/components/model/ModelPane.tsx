@@ -6,7 +6,6 @@ import { DcfSheet } from "./DcfSheet";
 import { RevenueSheet } from "./RevenueSheet";
 import { RevisionDrawer } from "./RevisionDrawer";
 import { SourceStatementSheet } from "./SourceStatementSheet";
-import { SummarySheet } from "./SummarySheet";
 import { WaccSheetView } from "./WaccSheetView";
 
 export function ModelPane({
@@ -56,9 +55,6 @@ export function ModelPane({
             </div>
 
             <div className="min-h-0 flex-1">
-                {active?.kind === "summary" && (
-                    <SummarySheet workbook={workbook} isCellChanged={isCellChanged} scrollToLineItemId={scrollToLineItemId} />
-                )}
                 {active?.kind === "source" && (
                     <SourceStatementSheet
                         workbook={workbook}

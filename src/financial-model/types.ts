@@ -226,11 +226,30 @@ type ReconciliationValues = {
   /** Parent and included DCF cell coordinates in calculation order. */
   refs: string[];
   /**
+   * Only when the check could not run: why. `not_applicable` and `insufficient_data` otherwise read
+   * as "nothing to see here", which is right for `no_prior_period` and wrong for the rest —
+   * a unit mismatch or a missing row is a mapping error wearing a non-failed status.
+   */
+  skipReason?: {
+    kind: "unit_mismatch" | "missing_line_item" | "no_prior_period" | "missing_values";
+    /** The coordinates at fault: the mismatched members, the absent rows, or the empty cells. */
+    refs: string[];
+  };
+  /**
    * Only on a failed check: for each canonical cell in `refs`, the unified statement rows its
    * committed spine fact was summed from, read off that fact's provenance. This is the repair
    * trail — feed the rowIds to get_unified_rows to see the inputs behind a broken identity.
    */
-  unifiedTrail?: Array<{ lineItemId: string; rowIds: string[] }>;
+  unifiedTrail?: Array<{
+    lineItemId: string;
+    rowIds: string[];
+    /**
+     * Only when `rowIds` is empty: why this ref has no unified evidence. Dropping such a ref would
+     * leave a short trail the agent reads as "the rest are fine" — `unmapped` in particular is
+     * usually the defect itself, not an absence of information about it.
+     */
+    absent?: "superseded" | "derived" | "unmapped";
+  }>;
 };
 
 export type ReconciliationResult =

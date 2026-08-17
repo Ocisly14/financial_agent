@@ -85,8 +85,10 @@ if (resuming) {
       : (await repository.getBarsBetween(sym, "1Day", from, to)).map((bar) => ({ t: bar.t, c: bar.c })),
     treasury30y: (asOf) => fetchTreasury30y(asOf),
   };
+  const derivationSnapshot = modelStore.getRevision(modelId)!.snapshot;
   const derivation = await deriveWaccParameters({ symbol, asOfDate: sheet.asOfDate,
-    facts: modelStore.getRevision(modelId)!.snapshot.facts, periods, deps: derivationDeps });
+    facts: derivationSnapshot.facts, lineItems: derivationSnapshot.lineItems, periods,
+    cells: derivationSnapshot.cells, deps: derivationDeps });
   const computed: WaccSheetComputedInput[] = [
     ...derivation.derived.flatMap((entry) => {
       const rowId = ({ beta: "beta", costOfDebt: "cost_of_debt", equityValue: "equity_value", totalDebt: "total_debt",
@@ -96,7 +98,7 @@ if (resuming) {
     }),
     ...(derivation.cashAndEquivalents ? [{ rowId: "cash_and_equivalents_value",
       value: derivation.cashAndEquivalents.value,
-      provenance: { sourceType: "filing", sourceRefs: derivation.cashAndEquivalents.sourceRefs,
+      provenance: { sourceType: derivation.cashAndEquivalents.sourceType, sourceRefs: derivation.cashAndEquivalents.sourceRefs,
         asOfDate: sheet.asOfDate, rationale: derivation.cashAndEquivalents.rationale } } as WaccSheetComputedInput] : []),
   ];
   current = service.refreshWaccSheet(modelId, current.revision, computed);

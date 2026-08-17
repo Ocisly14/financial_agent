@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { cellKey, type CellKey } from "../dsl/graph.ts";
-import { reconcileDcf, type ReconciliationResult } from "../reconciliation.ts";
+import { explainFailedIdentity, reconcileDcf, type ReconciliationResult } from "../reconciliation.ts";
 import { addRevenueStream, addSourceStatementRows, createSkeleton } from "../skeleton.ts";
 import type { Cell, DcfCategoryGroup, Period, Unit } from "../types.ts";
 
@@ -382,4 +382,133 @@ test("result order is authoritative period then stable category and rule order",
     "FY2024:identity:gross_profit",
   ]);
   assert.equal(first[12]?.periodId, "FY2025");
+});
+
+/**
+ * A failed identity says the parent and the sum disagree, and nothing about which component is
+ * wrong — so an agent goes reading the workbook to find out, which is where an AMZN run spent ten
+ * consecutive steps and never got there. The whole diagnosis is already available at read time: a
+ * component carrying the wrong polarity moves the sum by exactly twice its own value, so the
+ * residual names it.
+ */
+test("a failed identity names the component whose sign would explain the residual", () => {
+  const children = [
+    { lineItemId: "operating_expenses.fulfillment", value: 75_111_000_000 },
+    { lineItemId: "operating_expenses.marketing", value: 32_551_000_000 },
+    // Stored income-positive from XBRL while its siblings are expense-positive: the whole defect.
+    { lineItemId: "operating_expenses.other_operating_expense_income_net", value: -62_000_000 },
+  ];
+
+  const explained = explainFailedIdentity({ residual: -124_000_000, tolerance: 25 }, children);
+
+  assert.deepEqual(explained.polaritySuspects, ["operating_expenses.other_operating_expense_income_net"]);
+  assert.equal(explained.components.length, 3, "and every component's value ships, suspect or not");
+});
+
+test("a residual that matches no component's sign flip accuses nobody", () => {
+  const children = [
+    { lineItemId: "operating_expenses.fulfillment", value: 75_111_000_000 },
+    { lineItemId: "operating_expenses.marketing", value: 32_551_000_000 },
+  ];
+
+  const explained = explainFailedIdentity({ residual: -124_000_000, tolerance: 25 }, children);
+
+  assert.deepEqual(explained.polaritySuspects, [],
+    "a wrong guess sends the agent chasing a component that is fine");
+});
+
+test("two components that would each explain the residual are both named", () => {
+  const children = [
+    { lineItemId: "a", value: -62_000_000 },
+    { lineItemId: "b", value: -62_000_000 },
+  ];
+
+  const explained = explainFailedIdentity({ residual: -124_000_000, tolerance: 25 }, children);
+
+  assert.deepEqual(explained.polaritySuspects, ["a", "b"], "ambiguity is reported, not resolved");
+});
+
+test("a unit mismatch names itself instead of hiding as a bare not_applicable", () => {
+  const skeleton = disclosureSkeleton();
+  // A foreign-currency row summed into a USD parent is a mapping error. The check cannot run, but
+  // the reason it cannot run is the finding — a bare not_applicable reads as "rule does not apply".
+  const lineItems = skeleton.lineItems.map((item) =>
+    item.id === "revenue.products" ? { ...item, unit: { kind: "currency", code: "EUR" } as Unit } : item);
+  const cells = new Map<CellKey, Cell>();
+  put(cells, "FY2024", { "revenue.total": 100, "revenue.products": 70, "revenue.services": 30 });
+
+  const results = categoryResults(reconcileDcf({
+    periods: PERIODS,
+    lineItems,
+    cells,
+    categoryGroups: [{
+      parentLineItemId: "revenue.total",
+      category: "mixed units",
+      periodIds: ["FY2024"],
+      members: [
+        { lineItemId: "revenue.products", treatment: "add" },
+        { lineItemId: "revenue.services", treatment: "add" },
+      ],
+      reviewDecisionId: "unit-review",
+    }],
+  }));
+
+  assert.equal(results[0]?.status, "not_applicable");
+  assert.deepEqual(results[0]?.skipReason, {
+    kind: "unit_mismatch",
+    refs: [cellKey("revenue.products", "FY2024")],
+  });
+});
+
+test("insufficient_data names the empty cells rather than leaving the agent to diff refs", () => {
+  const skeleton = disclosureSkeleton();
+  const cells = new Map<CellKey, Cell>();
+  put(cells, "FY2024", { "revenue.total": 100, "revenue.products": 70 });
+
+  const results = categoryResults(reconcileDcf({
+    periods: PERIODS,
+    lineItems: skeleton.lineItems,
+    cells,
+    categoryGroups: [{
+      parentLineItemId: "revenue.total",
+      category: "partial data",
+      periodIds: ["FY2024"],
+      members: [
+        { lineItemId: "revenue.products", treatment: "add" },
+        { lineItemId: "revenue.services", treatment: "add" },
+      ],
+      reviewDecisionId: "partial-review",
+    }],
+  }));
+
+  assert.equal(results[0]?.status, "insufficient_data");
+  assert.deepEqual(results[0]?.skipReason, {
+    kind: "missing_values",
+    refs: [cellKey("revenue.services", "FY2024")],
+  });
+});
+
+test("a rule with no prior period marks itself expected, not suspect", () => {
+  const skeleton = disclosureSkeleton();
+  const cells = new Map<CellKey, Cell>();
+  put(cells, "FY2024", { operating_working_capital: 50, change_nwc: 0 });
+
+  const results = reconcileDcf({ periods: PERIODS, lineItems: skeleton.lineItems, cells, categoryGroups: [] });
+
+  assert.equal(identity(results, "FY2024", "change_nwc").skipReason?.kind, "no_prior_period",
+    "the first actual period has nothing to difference against — that is not a mapping error");
+});
+
+test("an identity whose row is absent from the skeleton says so", () => {
+  const skeleton = disclosureSkeleton();
+  const lineItems = skeleton.lineItems.filter((item) => item.id !== "depreciation_amortization");
+  const cells = new Map<CellKey, Cell>();
+  put(cells, "FY2024", { ebitda: 120, operating_income: 100 });
+
+  const results = reconcileDcf({ periods: PERIODS, lineItems, cells, categoryGroups: [] });
+
+  assert.deepEqual(identity(results, "FY2024", "ebitda").skipReason, {
+    kind: "missing_line_item",
+    refs: [cellKey("depreciation_amortization", "FY2024")],
+  });
 });

@@ -95,6 +95,7 @@ export function createAskUserTool(): RegisteredTool {
       "Ask the user 1-3 structured questions when their input is required before proceeding. " +
       'Input: {"questions":[{"id":"stable_id","header":"optional short label","question":"text","options":[{"id":"stable_id","label":"short title","description":"optional tradeoff","recommended":false}],"min_selections":1,"max_selections":2}]}. ' +
       "Each question has 2-8 selectable options and may allow multiple selections; all questions submit together. This must be the only action in the step. " +
+      "Every question also carries a free-text field, so treat your options as the likely answers rather than the only ones: an answer may come back as an unlisted line of the user's own words, which counts against the same selection limits. " +
       "Set reply to a concise introduction to the questions. Do not use this when you can proceed safely without user input.",
     category: "main",
     inputSchema: {

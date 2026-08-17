@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  buildDcfRows, buildRowTree, buildSummaryRows, columnScaleLabel, deriveSheets,
+  buildDcfRows, buildRowTree, columnScaleLabel, deriveSheets,
   formatCellValue, isCellChanged, sheetsTouchedBy,
 } from "../workbook.ts";
 import type {
@@ -159,10 +159,10 @@ test("the sheet strip orders model, source, then derived groups", () => {
   }));
 
   assert.deepEqual(sheets.map((sheet) => sheet.id), [
-    "summary", "source:income_statement", "revenue", "wacc", "dcf",
+    "source:income_statement", "revenue", "wacc", "dcf",
   ]);
   assert.deepEqual(sheets.map((sheet) => sheet.group), [
-    "model", "source", "model", "derived", "derived",
+    "source", "model", "derived", "derived",
   ]);
 });
 
@@ -183,26 +183,6 @@ test("each category group becomes its own segment sheet alongside the revenue fa
 
   assert.deepEqual(sheets.map((sheet) => sheet.id), ["revenue", "segment:Product line"]);
   assert.equal(sheets[1]?.label, "Segment: Product line");
-});
-
-test("the summary sheet picks whitelisted rows across four sections in Excel order", () => {
-  const rows = buildSummaryRows(workbook({
-    sections: {
-      history: [row("net_income", { section: "history" }), row("gross_profit", { section: "history" })],
-      metrics: [row("metric.net_margin", { section: "metrics" }), row("metric.gross_margin", { section: "metrics" })],
-      revenue: [row("revenue.total", { section: "revenue" })],
-      operations: [row("ebitda"), row("operating_income")],
-      dcf: [],
-    },
-  }));
-
-  // growth.revenue.total, metric.ebitda_margin and margin.operating are absent
-  // from this fixture — a whitelist row that does not exist is skipped, not
-  // rendered as an empty row.
-  assert.deepEqual(rows.map((r) => r.lineItemId), [
-    "revenue.total", "gross_profit", "metric.gross_margin",
-    "ebitda", "operating_income", "net_income", "metric.net_margin",
-  ]);
 });
 
 test("the DCF sheet gathers its auditable valuation chain across sections", () => {
@@ -305,7 +285,6 @@ test("a revenue change lands on the segment sheet that owns the line item", () =
 });
 
 test("a section-level change with no matching line item still marks the sheet", () => {
-  // `line_item_added` outside the summary whitelist would otherwise be silent.
   const book = workbook({
     sections: { history: [], metrics: [], revenue: [], operations: [row("ebitda")], dcf: [] },
   });
@@ -317,8 +296,7 @@ test("a section-level change with no matching line item still marks the sheet", 
   assert.deepEqual(touched, ["dcf"]);
 });
 
-test("one change may mark two sheets and they are not collapsed into one", () => {
-  // `ebitda` is both a summary whitelist row and part of the DCF operations block.
+test("an operations change marks the DCF sheet", () => {
   const book = workbook({
     sections: {
       history: [row("gross_profit", { section: "history" })],
@@ -331,7 +309,7 @@ test("one change may mark two sheets and they are not collapsed into one", () =>
     deriveSheets(book),
     book,
   );
-  assert.deepEqual(touched, ["summary", "dcf"]);
+  assert.deepEqual(touched, ["dcf"]);
 });
 
 test("changed cells are the cross product of the changed ids", () => {

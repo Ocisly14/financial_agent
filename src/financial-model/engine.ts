@@ -285,9 +285,15 @@ function unitOf(
     case "ref": {
       const item = itemById.get(ast.id);
       if (item === undefined) {
+        // `unknownName` is what the tool boundary searches on to attach near misses. A formula
+        // naming a row that does not exist is the same failure as a selector naming one — an AMZN
+        // run wrote `unified.is_total_operating_expenses`, which is a unified rowId that had not
+        // been imported — so it has to carry the same field, or only one of the two throw sites
+        // gets the candidates.
         throw new FinancialModelError(
           "invalid_formula",
           `unknown line item: ${ast.id} in formula: ${source}`,
+          { unknownName: ast.id },
         );
       }
       return { unit: item.unit };

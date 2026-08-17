@@ -302,3 +302,32 @@ test("a stray instant fact does not let a filing claim a period its columns neve
     ["FY2024", 100, "new"], ["FY2025", 120, "new"], ["FY2023", 80, "old"],
   ]);
 });
+
+/**
+ * The readable half of a source id used to stop at 72 characters, which on a US balance sheet lands
+ * mid-number: GAAP requires the par value and the issued/outstanding share counts inside the line
+ * caption, and those counts — the only thing separating one year's common-stock row from another's —
+ * sit at the far end of the label. An AMZN run produced
+ * `..._100_000_shares_authorized_11_108_and_11_246_` and `..._100_000_shares_authorized_10_757_and_`:
+ * two rows whose ids differ only in digits cut off mid-token.
+ *
+ * The cap bought nothing. Uncapped, the longest id in that run was 145 characters and the median 50,
+ * and the collision count did not change — the rows that share an id share a whole label and differ
+ * only in unit, which is what the hash is for.
+ */
+test("a long line caption keeps its distinguishing tail rather than being cut mid-number", () => {
+  const caption = "Common stock ($0.01 par value; 100,000 shares authorized; "
+    + "11,108 and 11,246 shares issued; 10,593 and 10,731 shares outstanding)";
+  // filler supplies the balance sheet and cash flow; this run's own table is the income statement,
+  // because mergeCuratedTables refuses a set that is missing any of the three faces.
+  const only = table({ id: "is", accession: "a", filedAt: "2026-03-01", periodIds: ["FY2025"],
+    rows: [{ label: caption, values: { FY2025: 111 } }] });
+  const merged = merge([
+    { tables: [only], curations: [curation("is", "income_statement", "face")] },
+    filler("a", "2026-03-01"),
+  ], [identity("a", "2026-03-01")]);
+
+  const row = merged.rows.find((candidate) => candidate.label === caption)!;
+  assert.match(row.sourceLineItemId, /10_593_and_10_731_shares_outstanding\.[0-9a-f]{12}$/,
+    `the tail that identifies this row was truncated away: ${row.sourceLineItemId}`);
+});

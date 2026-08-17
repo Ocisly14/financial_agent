@@ -9,6 +9,7 @@ import type { TopicChartPreferenceRow, TopicCategory } from "../infra/db/sqliteE
 import { asTopicCategory, TOPIC_CATEGORIES } from "../infra/db/sqliteEventStore.ts";
 import type { TaskResult, UserInputAnswer, UserInputRequest, UserInputResponse } from "../framework/types.ts";
 import { handleStockQuote, parseRangeDays } from "./stockMarketRoutes.ts";
+import { handleStockQuoteStream } from "./quoteStreamRoute.ts";
 import { handleLinkPreview } from "./linkPreview.ts";
 import { projectChatHistory } from "./chatHistory.ts";
 import { getModelContext, listTopicModels } from "./financialModelRoutes.ts";
@@ -113,18 +114,22 @@ type ChatBody = {
   };
 };
 
+/** Long enough for a sentence or two of "none of these, I meant…", short enough
+ *  that a pasted document cannot enter the turn through the answer card. */
+const MAX_FREE_TEXT = 500;
+
 export function validateUserInputAnswers(
   request: UserInputRequest,
   rawAnswers: unknown,
 ): { response: UserInputResponse; message: string } | { error: string } {
   if (!Array.isArray(rawAnswers)) return { error: "inputResponse.answers must be an array" };
 
-  const byQuestion = new Map<string, string[]>();
+  const byQuestion = new Map<string, { selected: string[]; freeText?: string }>();
   for (const raw of rawAnswers) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
       return { error: "each input response answer must be an object" };
     }
-    const answer = raw as { questionId?: unknown; selectedOptionIds?: unknown };
+    const answer = raw as { questionId?: unknown; selectedOptionIds?: unknown; freeText?: unknown };
     if (typeof answer.questionId !== "string" || !Array.isArray(answer.selectedOptionIds)) {
       return { error: "each answer requires questionId and selectedOptionIds" };
     }
@@ -135,7 +140,16 @@ export function validateUserInputAnswers(
     if (new Set(answer.selectedOptionIds).size !== answer.selectedOptionIds.length) {
       return { error: `selectedOptionIds for '${answer.questionId}' must be unique` };
     }
-    byQuestion.set(answer.questionId, answer.selectedOptionIds);
+    if (answer.freeText !== undefined && typeof answer.freeText !== "string") {
+      return { error: `freeText for '${answer.questionId}' must be a string` };
+    }
+    // Whitespace-only is the same as never having typed: it must not consume a
+    // selection slot, and it must not reach the agent as an empty quotation.
+    const freeText = typeof answer.freeText === "string" ? answer.freeText.trim() : "";
+    if (freeText.length > MAX_FREE_TEXT) {
+      return { error: `freeText for '${answer.questionId}' must be at most ${MAX_FREE_TEXT} characters` };
+    }
+    byQuestion.set(answer.questionId, { selected: answer.selectedOptionIds, ...(freeText ? { freeText } : {}) });
   }
 
   if (byQuestion.size !== request.questions.length) {
@@ -145,9 +159,13 @@ export function validateUserInputAnswers(
   const answers: UserInputAnswer[] = [];
   const lines: string[] = [];
   for (const question of request.questions) {
-    const selected = byQuestion.get(question.id);
-    if (!selected) return { error: `missing answer for question '${question.id}'` };
-    if (selected.length < question.min_selections || selected.length > question.max_selections) {
+    const answer = byQuestion.get(question.id);
+    if (!answer) return { error: `missing answer for question '${question.id}'` };
+    const { selected, freeText } = answer;
+    // Free text is a selection, not an annotation on one: on a single-select
+    // question typing an unlisted answer replaces the listed one.
+    const count = selected.length + (freeText ? 1 : 0);
+    if (count < question.min_selections || count > question.max_selections) {
       return {
         error: `question '${question.id}' requires ${question.min_selections}-${question.max_selections} selections`,
       };
@@ -155,8 +173,16 @@ export function validateUserInputAnswers(
     const options = new Map(question.options.map((option) => [option.id, option]));
     const unknown = selected.find((id) => !options.has(id));
     if (unknown) return { error: `unknown option '${unknown}' for question '${question.id}'` };
-    answers.push({ question_id: question.id, selected_option_ids: selected });
-    lines.push(`${question.question}: ${selected.map((id) => options.get(id)!.label).join(", ")}`);
+    answers.push({
+      question_id: question.id,
+      selected_option_ids: selected,
+      ...(freeText ? { free_text: freeText } : {}),
+    });
+    const parts = selected.map((id) => options.get(id)!.label);
+    // Quoted and labelled so the agent can tell the user's own words from a
+    // label it wrote itself.
+    if (freeText) parts.push(`Other — "${freeText}"`);
+    lines.push(`${question.question}: ${parts.join(", ")}`);
   }
 
   return {
@@ -790,6 +816,11 @@ export function createHttpServer(app: FinancialAgentApp): http.Server {
       }
 
       if (method === "GET" && pathname === "/health") return jsonOk(res, { status: "ok" });
+
+      const stockStreamMatch = pathname.match(/^\/market\/stocks\/([^/?]+)\/stream$/);
+      if (method === "GET" && stockStreamMatch) {
+        return handleStockQuoteStream(stockStreamMatch[1]!, res);
+      }
 
       const stockQuoteMatch = pathname.match(/^\/market\/stocks\/([^/?]+)$/);
       if (method === "GET" && stockQuoteMatch) {

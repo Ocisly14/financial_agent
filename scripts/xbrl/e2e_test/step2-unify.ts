@@ -24,11 +24,18 @@ import type { ResolvedFinancialModelSource } from "../../../src/infra/xbrl/prepa
 import { buildAxisBreakdown, buildAxisCatalog } from "../../../src/infra/xbrl/dimensionInventory.ts";
 import { fileLoader, outputDirectory, readStep, symbol, writeStep } from "./common.ts";
 
+const DEFAULT_STEP_TIMEOUT_MS = 10 * 60_000;
+const configuredTimeoutMs = Number(process.env["E2E_TIMEOUT_MS"] ?? DEFAULT_STEP_TIMEOUT_MS);
+const stepTimeoutMs = Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0
+  ? configuredTimeoutMs
+  : DEFAULT_STEP_TIMEOUT_MS;
+
 const source = readStep<ResolvedFinancialModelSource>("step1-source.json");
 const extraction = readStep<ArelleExtractionResponse>("step1-extraction.json");
 const requestedPeriods: Period[] = source.periods.filter((p) => p.cls === "actual");
 
 console.log(`# Step 2 — statement unification for ${symbol} (${requestedPeriods.map((p) => p.id).join(", ")}) → ${outputDirectory}`);
+console.log(`Step timeout: ${(stepTimeoutMs / 60_000).toFixed(1)} minute(s)`);
 
 const inventory = buildConceptInventory({ filings: extraction.filings, requestedPeriods });
 const inventoryPath = writeStep("step2-concept-inventory.json", inventory);
@@ -41,7 +48,11 @@ console.log(`\nConcept inventory: ${inventory.length} rows (${inventoryPath})`);
 // (FilingExtraction carries every table), so this run exercises the exploration loop for real.
 const tables = extraction.filings.flatMap((filing) => filing.tables ?? []);
 console.log(`Dimension exploration over ${tables.length} table(s)`);
-const readTools = fileLoader("load_concept_inventory", { symbol, requestedPeriods: requestedPeriods.map((p) => p.id) });
+// Mirror production's loader payload exactly. The delivery host independently rebuilds the inventory
+// for validation, but the agent's read tool is its only view of the rows it must classify.
+const readTools = fileLoader("load_concept_inventory", {
+  symbol, requestedPeriods: requestedPeriods.map((p) => p.id), inventory,
+});
 const dimensionTool = (name: string, body: (input: JsonObject) => JsonValue): void => {
   readTools.push(subagentTool({ name, category: "non_trading", description: name,
     inputSchema: { type: "object", properties: {}, additionalProperties: true } },
@@ -62,16 +73,24 @@ const subagents = createSubagentRegistry();
 const state = new SessionState("e2e-unify", new Date().toISOString());
 state.beginTurn("step2");
 
-const run = await runStatementUnificationAgent({
-  subagentRuntime: new SubagentRuntime(new ModelRouter(resolveLlmProvider()), new McpToolRegistry(), skills),
-  definition: subagents.get("statement_unification"),
-  state, sessionId: "e2e-unify", agentId: "e2e-agent",
-  task: `Unify ${symbol}'s extracted filings into multi-year statements.`,
-  readTools,
-  filings: extraction.filings,
-  requestedPeriods,
-  tables,
-});
+const abort = new AbortController();
+const deadline = setTimeout(() => abort.abort(new Error(`Step 2 exceeded ${stepTimeoutMs}ms`)), stepTimeoutMs);
+let run;
+try {
+  run = await runStatementUnificationAgent({
+    subagentRuntime: new SubagentRuntime(new ModelRouter(resolveLlmProvider()), new McpToolRegistry(), skills),
+    definition: subagents.get("statement_unification"),
+    state, sessionId: "e2e-unify", agentId: "e2e-agent",
+    task: `Unify ${symbol}'s extracted filings into multi-year statements.`,
+    readTools,
+    filings: extraction.filings,
+    requestedPeriods,
+    tables,
+    signal: abort.signal,
+  });
+} finally {
+  clearTimeout(deadline);
+}
 const unified = run.artifact;
 
 const money = (value: number) => value.toLocaleString("en-US");

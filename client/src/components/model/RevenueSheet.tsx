@@ -3,8 +3,7 @@ import type { SheetDescriptor } from "@/lib/workbook";
 import { WorkbookGrid } from "./WorkbookGrid";
 
 /** Either one category group's members, or — with no group, or for rows no
- *  group claimed — the whole revenue section. The revenue section must always
- *  have a home: the summary only whitelists the total and its growth. */
+ *  group claimed — the whole revenue section. */
 export function RevenueSheet({
     workbook,
     sheet,

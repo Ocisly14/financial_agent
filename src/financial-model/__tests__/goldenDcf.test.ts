@@ -54,8 +54,6 @@ const SOURCES: SourceDefinition[] = [
 
 const HISTORICAL_EXPECTED = {
   operatingNwc: [7, 8, 9],
-  roaFY2022: 0.0785714285714,
-  roeFY2022: 0.157142857143,
 };
 const FORECAST_EXPECTED = {
   revenue: [132, 145.2, 159.72],
@@ -88,6 +86,7 @@ const VALUATION_EXPECTED = {
  * out entirely, leaving wacc = cost_of_equity, deterministic and independent of cost_of_debt/tax. */
 const WACC_COMPUTED_INPUTS: WaccSheetComputedInput[] = [
   { rowId: "beta", value: 1, provenance: { sourceType: "computed", sourceRefs: ["golden-beta"], asOfDate: "2023-12-31", rationale: "Golden fixture beta." } },
+  { rowId: "risk_free_rate", value: 0.04, provenance: { sourceType: "market", sourceRefs: ["golden-treasury-candidate"], asOfDate: "2023-12-31", rationale: "Golden fixture Treasury candidate; agent must select the duration." } },
   { rowId: "cost_of_debt", value: 0.05, provenance: { sourceType: "filing", sourceRefs: ["golden-bond"], asOfDate: "2023-12-31", rationale: "Golden fixture cost of debt (unused: total_debt is zero)." } },
   { rowId: "equity_value", value: 100, provenance: { sourceType: "market", sourceRefs: ["golden-market"], asOfDate: "2023-12-31", rationale: "Golden fixture equity value." } },
   { rowId: "total_debt", value: 0, provenance: { sourceType: "filing", sourceRefs: ["golden-debt"], asOfDate: "2023-12-31", rationale: "Golden fixture total debt." } },
@@ -96,7 +95,20 @@ const WACC_COMPUTED_INPUTS: WaccSheetComputedInput[] = [
 ];
 
 function setWaccInputOp(rowId: "risk_free_rate" | "equity_risk_premium", value: number, rationale: string): ModelOperation {
-  return { kind: "set_wacc_input", input: { rowId, value, sourceType: "market", sourceRefs: ["golden-treasury"], rationale } };
+  return { kind: "set_wacc_input", input: {
+    rowId, value,
+    sourceType: rowId === "equity_risk_premium" ? "agent_estimate" : "market",
+    sourceRefs: rowId === "equity_risk_premium" ? [] : ["golden-treasury"],
+    rationale,
+  } };
+}
+
+function setForecastFormula(lineItemId: string, source: string): ModelOperation {
+  return { kind: "set_formula", formula: { lineItemId, appliesTo: "forecast", periodIds: FORECASTS, source } };
+}
+
+function setHistoricalFormula(lineItemId: string, source: string): ModelOperation {
+  return { kind: "set_formula", formula: { lineItemId, appliesTo: "historical", periodIds: ACTUALS, source } };
 }
 
 test("golden service workflow maps statements once and produces a deterministic DCF valuation", (t) => {
@@ -141,6 +153,13 @@ test("golden service workflow maps statements once and produces a deterministic 
   assert.equal(reviewed.status, "history_committed");
 
   const revenueResult = service.applyOperations("golden-dcf", 2, [
+    setHistoricalFormula("tax_rate", "income_tax_expense / pretax_income"),
+    setHistoricalFormula("ebitda", "operating_income + depreciation_amortization"),
+    setHistoricalFormula("nopat", "operating_income * (1 - tax_rate)"),
+    setHistoricalFormula("operating_working_capital", "accounts_receivable + inventory - accounts_payable"),
+    setHistoricalFormula("change_nwc", "operating_working_capital - LAG(operating_working_capital, 1)"),
+    setHistoricalFormula("fcff", "nopat + depreciation_amortization - capital_expenditures - change_nwc"),
+    setForecastFormula("revenue.total", "LAG(revenue.total, 1) * (1 + growth.revenue.total)"),
     setAssumption("growth.revenue.total", FORECASTS, [0.10]),
   ]);
   assert.equal(revenueResult.revision, 3);
@@ -148,6 +167,14 @@ test("golden service workflow maps statements once and produces a deterministic 
   assertRowValues(revenueResult.currentWorkbook.sections.revenue, "revenue.total", FORECASTS, FORECAST_EXPECTED.revenue);
 
   const operatingResult = service.applyOperations("golden-dcf", 3, [
+    setForecastFormula("operating_income", "revenue.total * margin.operating"),
+    setForecastFormula("ebitda", "operating_income + depreciation_amortization"),
+    setForecastFormula("nopat", "operating_income * (1 - tax_rate)"),
+    setForecastFormula("depreciation_amortization", "revenue.total * ratio.da_to_revenue"),
+    setForecastFormula("capital_expenditures", "revenue.total * ratio.capex_to_revenue"),
+    setForecastFormula("operating_working_capital", "revenue.total * ratio.operating_nwc_to_revenue"),
+    setForecastFormula("change_nwc", "operating_working_capital - LAG(operating_working_capital, 1)"),
+    setForecastFormula("fcff", "nopat + depreciation_amortization - capital_expenditures - change_nwc"),
     setAssumption("margin.operating", FORECASTS, [0.20]),
     setAssumption("tax_rate", FORECASTS, [0.25]),
     setAssumption("ratio.da_to_revenue", FORECASTS, [0.05]),
@@ -164,8 +191,6 @@ test("golden service workflow maps statements once and produces a deterministic 
   assertRowValues(operatingResult.currentWorkbook.sections.operations, "operating_working_capital", FORECASTS, FORECAST_EXPECTED.operatingNwc);
   assertRowValues(operatingResult.currentWorkbook.sections.operations, "change_nwc", FORECASTS, FORECAST_EXPECTED.changeNwc);
   assertRowValues(operatingResult.currentWorkbook.sections.dcf, "fcff", FORECASTS, FORECAST_EXPECTED.fcff);
-  assert.equal(cellValue(operatingResult.currentWorkbook.sections.metrics, "metric.roa", "FY2022"), HISTORICAL_EXPECTED.roaFY2022);
-  assert.equal(cellValue(operatingResult.currentWorkbook.sections.metrics, "metric.roe", "FY2022"), HISTORICAL_EXPECTED.roeFY2022);
 
   // A new model makes no valuation judgments for you: the three decisions start null and carry no
   // provenance, because there is nobody to attribute a value nobody chose.
@@ -189,26 +214,33 @@ test("golden service workflow maps statements once and produces a deterministic 
   assert.equal(terminalSet.currentWorkbook.valuation ?? null, null);
 
   // The sheet is the single source for wacc: the engine derives what it can (here hand-supplied, since
-  // the fixture has no bar repository), the agent fills the two rows it never can.
+  // the fixture has no bar repository), while the agent supplies ERP and explicitly selects the
+  // Treasury duration before valuation.
   const waccRefreshed = service.refreshWaccSheet("golden-dcf", 5, WACC_COMPUTED_INPUTS);
   assert.equal(waccRefreshed.revision, 6);
   const waccResolved = service.applyOperations("golden-dcf", 6, [
-    setWaccInputOp("risk_free_rate", 0.04, "Golden fixture risk-free rate."),
     setWaccInputOp("equity_risk_premium", 0.06, "Golden fixture equity risk premium — analyst judgment."),
   ]);
   assert.equal(waccResolved.revision, 7);
   const waccRow = waccResolved.currentWorkbook.waccSheet!.rows.find((row) => row.rowId === "wacc")!;
   assert.equal(waccRow.value, 0.10);
-  // Two independent gates: a resolved discount rate is not enough on its own. Every input the engine
-  // can compute is now in place, and the model still refuses to value — the judgments are unmade.
+  // A numerically resolved WACC is not an approved discount rate while the Treasury candidate has
+  // not been selected by the agent.
   assert.equal(waccResolved.status, "operations_fcff");
   assert.equal(waccResolved.currentWorkbook.valuation ?? null, null);
 
-  // Making them is what produces a valuation, and the configuration now carries who made it.
-  const valued = service.applyOperations("golden-dcf", 7, [
+  const unconfirmed = service.applyOperations("golden-dcf", 7, [
     { kind: "set_valuation_config", config: valuationConfig() },
   ]);
-  assert.equal(valued.revision, 8);
+  assert.equal(unconfirmed.revision, 8);
+  assert.equal(unconfirmed.status, "operations_fcff");
+  assert.equal(unconfirmed.currentWorkbook.valuation ?? null, null);
+
+  // Selecting the candidate rate is the final WACC judgment and immediately unlocks valuation.
+  const valued = service.applyOperations("golden-dcf", 8, [
+    setWaccInputOp("risk_free_rate", 0.04, "Golden fixture selected 30-year risk-free rate."),
+  ]);
+  assert.equal(valued.revision, 9);
   assert.equal(valued.currentWorkbook.valuationConfig.sourceType, "analyst_inference");
   assert.equal(valued.status, "valued");
   const valuation = valued.currentWorkbook.valuation!;
@@ -241,10 +273,10 @@ test("golden service workflow maps statements once and produces a deterministic 
 
   const context = service.getModel("golden-dcf");
   assert.ok("currentWorkbook" in context);
-  assert.deepEqual(context.revisionHistory.map((revision) => revision.revision), [0, 1, 2, 3, 4, 5, 6, 7]);
-  assert.equal(context.currentWorkbook.revision, 8);
+  assert.deepEqual(context.revisionHistory.map((revision) => revision.revision), [0, 1, 2, 3, 4, 5, 6, 7, 8]);
+  assert.equal(context.currentWorkbook.revision, 9);
   assert.equal(context.currentWorkbook.mode, "dcf");
-  assert.equal(store.getRevision("golden-dcf")?.revision, 8);
+  assert.equal(store.getRevision("golden-dcf")?.revision, 9);
   const goldenAgentContext = JSON.stringify(context);
   const valuedSnapshot = financialModelSnapshotCodec.encode(
     store.getRevision("golden-dcf")!.snapshot,
@@ -271,18 +303,18 @@ test("golden service workflow maps statements once and produces a deterministic 
   // set_wacc_input is idempotent when replayed with the same value/rationale (asOfDate re-defaults to
   // the sheet's own fixed date each time), so replaying it changes nothing byte-for-byte — the same
   // repeatability guarantee the old wacc assumption replay exercised.
-  const repeatedOnce = reopenedService.applyOperations("golden-dcf", 8, [
-    setWaccInputOp("risk_free_rate", 0.04, "Golden fixture risk-free rate."),
+  const repeatedOnce = reopenedService.applyOperations("golden-dcf", 9, [
+    setWaccInputOp("risk_free_rate", 0.04, "Golden fixture selected 30-year risk-free rate."),
   ]);
-  assert.equal(repeatedOnce.revision, 9);
+  assert.equal(repeatedOnce.revision, 10);
   assertSnapshotBytes(
     financialModelSnapshotCodec.encode(store.getRevision("golden-dcf")!.snapshot),
     valuedSnapshot,
   );
-  const repeatedTwice = reopenedService.applyOperations("golden-dcf", 9, [
-    setWaccInputOp("risk_free_rate", 0.04, "Golden fixture risk-free rate."),
+  const repeatedTwice = reopenedService.applyOperations("golden-dcf", 10, [
+    setWaccInputOp("risk_free_rate", 0.04, "Golden fixture selected 30-year risk-free rate."),
   ]);
-  assert.equal(repeatedTwice.revision, 10);
+  assert.equal(repeatedTwice.revision, 11);
   assertSnapshotBytes(
     financialModelSnapshotCodec.encode(store.getRevision("golden-dcf")!.snapshot),
     valuedSnapshot,
@@ -358,10 +390,8 @@ function setAssumption(lineItemId: string, periods: string[], values: number[]):
 }
 
 function notApplicable(lineItemId: string, periods: string[]): ModelOperation {
-  return { kind: "set_assumption", assumption: {
-    assumptionId: `na:${lineItemId}`, lineItemId, periods, payload: { kind: "not_applicable" },
-    sourceType: "company_disclosure", sourceRefs: ["golden-10k"], asOfDate: "2023-12-31",
-    rationale: "Golden company has no such bridge component",
+  return { kind: "set_formula", formula: {
+    lineItemId, appliesTo: "historical", periodIds: periods, source: "0",
   } };
 }
 

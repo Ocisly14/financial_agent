@@ -135,6 +135,29 @@ test("tool schemas expose nested operation contracts and reject unknown or malfo
   const invalidOperation = await tools.get("apply_financial_model_operations")!.execute({ modelId: "m", expectedRevision: 1,
     operations: [{ kind: "invented_operation" }] }, { agentId: "owner-1", sessionId: "s" });
   assert.equal(invalidOperation.error?.code, "invalid_tool_input");
+  assert.match(invalidOperation.summary, /operations\[0\]\.kind/);
+  assert.match(invalidOperation.summary, /invented_operation/);
+  assert.match(invalidOperation.summary, /set_assumption/);
+  const missingOperationKind = await tools.get("apply_financial_model_operations")!.execute({ modelId: "m", expectedRevision: 1,
+    operations: [{}] }, { agentId: "owner-1", sessionId: "s" });
+  assert.equal(missingOperationKind.error?.code, "invalid_tool_input");
+  assert.match(missingOperationKind.summary, /operations\[0\]\.kind is required/);
+
+  const missingCurrencyCode = await tools.get("apply_financial_model_operations")!.execute({ modelId: "m", expectedRevision: 1,
+    operations: [{ kind: "add_line_item", lineItem: { id: "custom.revenue", label: "Custom revenue", parentId: "custom_metrics",
+      unit: { kind: "currency" } } }] }, { agentId: "owner-1", sessionId: "s" });
+  assert.equal(missingCurrencyCode.error?.code, "invalid_tool_input");
+  assert.match(missingCurrencyCode.summary, /unit\.code is required/);
+
+  const invalidAssumptionSource = await tools.get("apply_financial_model_operations")!.execute({ modelId: "m", expectedRevision: 1,
+    operations: [{ kind: "set_assumption", assumption: { assumptionId: "terminal", lineItemId: "terminal_growth",
+      periods: ["FY2025"], payload: { kind: "values", values: [0.03], unit: { kind: "percent" } },
+      sourceType: "search", sourceRefs: ["financial_search:peer-multiples"], asOfDate: "2026-08-13", rationale: "test" } }],
+  }, { agentId: "owner-1", sessionId: "s" });
+  assert.equal(invalidAssumptionSource.error?.code, "invalid_tool_input");
+  assert.match(invalidAssumptionSource.summary, /operations\[0\]\.assumption\.sourceType/);
+  assert.match(invalidAssumptionSource.summary, /received "search"/);
+  assert.match(invalidAssumptionSource.summary, /analyst_inference/);
 });
 
 test("apply_financial_model_operations writes set_wacc_input end to end, and rejects a payload missing rationale", async () => {

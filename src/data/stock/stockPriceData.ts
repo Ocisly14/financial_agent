@@ -1,10 +1,10 @@
 import {
   fetchDailyBars,
   fetchIntradayBars,
-  getSnapshotCached,
   type DailyBar,
   type Snapshot,
 } from "./alpacaClient.ts";
+import { realtimeSnapshotLoader } from "./realtime/snapshotLoader.ts";
 import type { BarRepository } from "./barRepository.ts";
 import { etDateString, marketSession, type MarketSession } from "./marketHours.ts";
 import { getSharedBarRepository } from "./sharedRepository.ts";
@@ -121,7 +121,7 @@ export async function loadStockPriceData(
   deps: StockPriceDataDeps = {},
 ): Promise<StockPriceDataResult> {
   const current = deps.now?.() ?? new Date();
-  const loadSnapshot = deps.snapshot ?? getSnapshotCached;
+  const loadSnapshot = deps.snapshot ?? realtimeSnapshotLoader();
   const loadDailyBars = deps.dailyBars ?? fetchDailyBars;
   const loadIntradayBars = deps.intradayBars ?? fetchIntradayBars;
 

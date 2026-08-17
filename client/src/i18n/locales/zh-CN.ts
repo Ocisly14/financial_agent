@@ -180,6 +180,10 @@ const zhCN = {
             title: "智能体提问",
             questionNumber: "问题 {{number}}",
             selectionRange: "请选择 {{min}}–{{max}} 项",
+            // 自由输入本身就是一个选项，不是给某个选项加的备注，标签要写清楚。
+            freeTextLabel: "其他",
+            freeTextPlaceholder: "自己填一个答案",
+            nothingChosen: "未选择",
             recommended: "推荐",
             submit: "提交选择",
             submitting: "提交中…",

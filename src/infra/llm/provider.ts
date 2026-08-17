@@ -12,6 +12,15 @@ export type LlmMessage = {
    * message is stable across calls and worth a provider-side cache breakpoint.
    * Providers without prompt caching ignore it. */
   cache?: boolean;
+  /** Native tool calls emitted by the preceding assistant turn. Providers that support tool
+   * transcripts preserve these instead of flattening the later result into ordinary user text. */
+  toolCalls?: LlmToolCall[];
+  /** Correlates a native tool result with the assistant call that requested it. */
+  toolCallId?: string;
+  /** The tool name is redundant for OpenAI-compatible APIs, but required by Gemini's function response. */
+  toolName?: string;
+  /** Lets providers mark a native tool result as failed without losing the structured payload. */
+  toolResultIsError?: boolean;
 };
 
 /** Native function-calling tool spec: schema-constrained decoding makes the
@@ -24,8 +33,15 @@ export type LlmToolSpec = {
 };
 
 export type LlmToolCall = {
+  /** Provider-generated id when available; the runtime supplies one for providers that omit it. */
+  id?: string;
   name: string;
   input: JsonObject;
+  /** Opaque provider token that must be handed back verbatim with this call on later turns.
+   *  Gemini 3.x mints a `thoughtSignature` per function call and rejects (400) any subsequent
+   *  request whose functionCall parts lack it, so the loop has to carry it, not just the args.
+   *  Providers that mint no such token leave it unset and it never reaches the wire. */
+  signature?: string;
 };
 
 export type GenerateOptions = {
@@ -44,8 +60,15 @@ export type GenerateResult = {
   /** Present when `options.tools` was set and the provider returned tool calls. */
   toolCalls?: LlmToolCall[];
   metrics: {
+    /** Prompt tokens billed at full price. With prompt caching this is only the UNCACHED
+     *  remainder — the whole prompt is tokens_in + cache_write + cache_read. */
     tokens_in: number;
     tokens_out: number;
+    /** Prompt tokens read from cache, and written to it. Optional because only providers
+     *  that do prefix caching report them; absent is "this provider does not say", while
+     *  0 is "nothing was cached". */
+    cache_read?: number;
+    cache_write?: number;
     ms: number;
     model_class: ModelClass;
     provider: string;
@@ -56,6 +79,91 @@ export type LlmProvider = {
   name: string;
   generate(messages: LlmMessage[], options: GenerateOptions): Promise<GenerateResult>;
 };
+
+/**
+ * A reply the provider could not turn into a usable result — malformed tool-call arguments,
+ * a truncated stream, a body that is not the documented shape.
+ *
+ * `retryable` says whether the *same request* is worth sending again. A sample that came back
+ * corrupt is: generation is nondeterministic, so the next one is usually clean. A reply cut off
+ * because it hit the output cap is not — the retry reproduces the truncation and burns another
+ * full generation to do it. Getting this wrong in either direction is expensive, so providers
+ * must decide it from `finish_reason`, never from the parse error alone.
+ */
+export class MalformedResponseError extends Error {
+  readonly retryable: boolean;
+
+  constructor(message: string, options: { retryable: boolean; cause?: unknown }) {
+    super(message, options.cause === undefined ? undefined : { cause: options.cause });
+    this.name = "MalformedResponseError";
+    this.retryable = options.retryable;
+  }
+}
+
+/**
+ * Per-class model ids for one provider, read from `<PREFIX>_MODEL_{SMALL,MEDIUM,LARGE}`.
+ *
+ * Overrides are namespaced per provider rather than shared: a single global override
+ * would hand whichever provider is selected another vendor's model ids, which they
+ * reject outright. `prefixes` is tried in order, so a provider can accept a family-wide
+ * fallback (Vertex reads VERTEX_MODEL_*, then GOOGLE_MODEL_*).
+ *
+ * A declared-but-empty variable counts as unset — `.env` files carry blank placeholders,
+ * and forwarding "" as a model id fails at the API.
+ */
+export function resolveModelMap(
+  defaults: Record<ModelClass, string>,
+  prefixes: string[],
+  env: Record<string, string | undefined> = process.env,
+): Record<ModelClass, string> {
+  const resolve = (modelClass: ModelClass): string => {
+    for (const prefix of prefixes) {
+      const value = env[`${prefix}_MODEL_${modelClass}`];
+      if (value) return value;
+    }
+    return defaults[modelClass];
+  };
+  return { SMALL: resolve("SMALL"), MEDIUM: resolve("MEDIUM"), LARGE: resolve("LARGE") };
+}
+
+/**
+ * A cached prompt is billed in three tiers, and reading only one of them misleads. Anthropic bills a
+ * cache read at ~0.1x the input price and a cache WRITE at ~1.25x — above full price — so a change
+ * that moves tokens out of `tokens_in` can still cost more. Weighting them here gives one number an
+ * optimization can be judged on; `tokens_in` alone cannot.
+ */
+const CACHE_READ_PRICE = 0.1;
+const CACHE_WRITE_PRICE = 1.25;
+
+export type LlmCostRow = {
+  calls: number; tokens_in: number; cache_read: number; cache_write: number; tokens_out: number;
+};
+
+/** Per-label prompt totals for this process, accumulated by every ModelRouter. */
+const costByLabel = new Map<string, LlmCostRow>();
+
+/**
+ * What each agent's prompts cost so far, with the weighted input total that says whether a caching
+ * change actually paid. `cache_read_write_ratio` is the health signal: below 1 the run is writing
+ * entries it never reads back, which is the failure mode that looks like a win in `tokens_in`.
+ */
+export function llmCostReport(): Record<string, LlmCostRow & {
+  equivalent_input_tokens: number; cache_read_write_ratio: number | null;
+}> {
+  const report: Record<string, LlmCostRow & { equivalent_input_tokens: number; cache_read_write_ratio: number | null }> = {};
+  for (const [label, row] of costByLabel) {
+    report[label] = { ...row,
+      equivalent_input_tokens: Math.round(
+        row.tokens_in + row.cache_read * CACHE_READ_PRICE + row.cache_write * CACHE_WRITE_PRICE),
+      cache_read_write_ratio: row.cache_write === 0 ? null : Number((row.cache_read / row.cache_write).toFixed(2)) };
+  }
+  return report;
+}
+
+/** Clears the totals. For tests, and for a harness that reports per run rather than per process. */
+export function resetLlmCostReport(): void {
+  costByLabel.clear();
+}
 
 export class ModelRouter {
   private readonly provider: LlmProvider;
@@ -70,23 +178,65 @@ export class ModelRouter {
       ? `subagent:${meta.agent ?? "?"}`
       : String(meta.mode ?? "llm");
     const start = Date.now();
-    let result: GenerateResult;
-    try {
-      result = await this.provider.generate(messages, options);
-    } catch (error) {
-      // Callers see only `error.message` — for ai-sdk that is a bare "Invalid JSON response",
-      // which hides the status code and provider body needed to tell a 429 from a 400.
-      log.error(`[${label}] failed after ${Date.now() - start}ms | ${JSON.stringify(describeProviderError(error))}`);
-      throw error;
-    }
+    const result = await this.generateWithRetries(messages, options, label, start);
     const ms = Date.now() - start;
     const preview = result.toolCalls?.length
       ? `tool_calls=[${result.toolCalls.map((c) => c.name).join(",")}]`
       : (result.text.length > 200 ? result.text.slice(0, 200) + "…" : result.text);
-    log.info(`[${label}] ${ms}ms | in=${result.metrics.tokens_in} out=${result.metrics.tokens_out} | ${preview}`);
+    // `in=` is the uncached remainder, so on a caching provider it reads far below the real prompt.
+    // Print the cache halves next to it or the line invites exactly that misreading.
+    const { cache_read: cacheRead, cache_write: cacheWrite } = result.metrics;
+    const row = costByLabel.get(label)
+      ?? { calls: 0, tokens_in: 0, cache_read: 0, cache_write: 0, tokens_out: 0 };
+    costByLabel.set(label, { calls: row.calls + 1,
+      tokens_in: row.tokens_in + result.metrics.tokens_in,
+      cache_read: row.cache_read + (cacheRead ?? 0),
+      cache_write: row.cache_write + (cacheWrite ?? 0),
+      tokens_out: row.tokens_out + result.metrics.tokens_out });
+    const cache = cacheRead === undefined && cacheWrite === undefined
+      ? "" : ` cache_r=${cacheRead ?? 0} cache_w=${cacheWrite ?? 0}`;
+    log.info(`[${label}] ${ms}ms | in=${result.metrics.tokens_in}${cache} out=${result.metrics.tokens_out} | ${preview}`);
     return result;
   }
+
+  /**
+   * Sends the request, re-sending it when the provider returns a corrupt sample.
+   *
+   * A malformed reply used to be fatal: one bad byte in a streamed tool-call argument threw a
+   * bare `SyntaxError` out of the provider, past the subagent loop, and ended a 40-minute DCF
+   * run with nine revisions of committed work still on the floor. The reply is a draw from a
+   * distribution, so re-drawing it is the whole fix — but only for faults that are properties
+   * of the sample. `MalformedResponseError.retryable` is what carries that distinction; every
+   * other error (auth, rate limits, a 400 on the request itself) is the caller's to handle and
+   * passes straight through, because re-sending it just pays for the same failure twice.
+   */
+  private async generateWithRetries(
+    messages: LlmMessage[],
+    options: GenerateOptions,
+    label: string,
+    start: number,
+  ): Promise<GenerateResult> {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await this.provider.generate(messages, options);
+      } catch (error) {
+        const retryable = error instanceof MalformedResponseError && error.retryable
+          && attempt < MAX_MALFORMED_ATTEMPTS && options.signal?.aborted !== true;
+        if (!retryable) {
+          // Callers see only `error.message` — for ai-sdk that is a bare "Invalid JSON response",
+          // which hides the status code and provider body needed to tell a 429 from a 400.
+          log.error(`[${label}] failed after ${Date.now() - start}ms | ${JSON.stringify(describeProviderError(error))}`);
+          throw error;
+        }
+        log.warn(`[${label}] malformed reply on attempt ${attempt}/${MAX_MALFORMED_ATTEMPTS}, resending`
+          + ` | ${(error as Error).message}`);
+      }
+    }
+  }
 }
+
+/** Attempts spent on one call before a corrupt reply is allowed to fail it. */
+const MAX_MALFORMED_ATTEMPTS = 3;
 
 /** Flattens a provider error (ai-sdk, fetch, or ours) into the fields that identify the failure. */
 export function describeProviderError(error: unknown): Record<string, unknown> {

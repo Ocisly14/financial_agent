@@ -1,14 +1,15 @@
 import { listStrategies, saveStrategy, type StoredStrategy } from "./persistence/strategyStore.ts";
+import type { RealtimeFeed } from "../data/stock/realtime/index.ts";
+import type { ExecutionOutcome } from "./strategyExecutor.ts";
 import {
   evaluatePriceTrigger,
   isTechnicalTrigger,
   technicalTriggerHistoryBars,
 } from "../../mcp_tools/trading/strategy/priceTrigger.ts";
 import type { StrategyPhase } from "../../mcp_tools/trading/strategy/priceStrategy.ts";
-import { backfill, pollPrice, windowSamples, isArmed } from "./priceHistory.ts";
+import { getRealtimeFeed } from "../data/stock/realtime/sharedFeed.ts";
 import { executeTrigger } from "./strategyExecutor.ts";
-import { stepConfirmation } from "./confirmation.ts";
-import { fetchStockTechnicalStrategySamples } from "./stockStrategyMarketData.ts";
+import { fetchStockStrategyPrice, fetchStockTechnicalStrategySamples } from "./stockStrategyMarketData.ts";
 import {
   activateEligiblePhases,
   cancelOcoPeers,
@@ -23,8 +24,24 @@ import {
  * Self-scheduling (setTimeout after completion) to avoid overlapping ticks.
  */
 
-/** Cadence while at least one strategy is active. */
-export const ACTIVE_INTERVAL_MS = 7_000;
+/**
+ * Cadence while at least one strategy is active.
+ *
+ * This matches the realtime buffer's bucket width, and it is affordable only because a tick no
+ * longer performs any network call: prices are read out of the in-process buffer the quote stream
+ * writes into. When the stream is unavailable the REST fallback below keeps its own, far slower
+ * cadence, so a degraded feed cannot turn this interval into 120 requests a minute per symbol.
+ */
+export const ACTIVE_INTERVAL_MS = 500;
+
+/**
+ * How often the REST fallback may be used for one symbol.
+ *
+ * Only reached when the stream has nothing buffered — no credentials, a degraded connection, or
+ * a symbol that lost its subscription slot. The free plan allows 200 requests a minute in total,
+ * so this stays at the cadence the monitor polled at before the stream existed.
+ */
+export const REST_FALLBACK_INTERVAL_MS = 7_000;
 
 /**
  * Cadence while nothing is active. A pass over zero strategies still costs a
@@ -47,10 +64,45 @@ let timer: ReturnType<typeof setTimeout> | undefined;
 let active = false;
 let fastIntervalMs = ACTIVE_INTERVAL_MS;
 
-/** consecutive samples where the condition was met, per strategy id */
-const confirmCounts = new Map<string, number>();
 /** last fire time (ms) per strategy id, for recurring cooldown */
 const lastFireMs = new Map<string, number>();
+/** last REST fallback fetch (ms) per symbol, so a dead stream cannot burn the request budget */
+const lastRestPollMs = new Map<string, number>();
+
+/**
+ * Everything a tick touches outside itself. Production passes nothing; tests pass a fake feed and
+ * an in-memory strategy list, which is what makes the trigger path testable without a data
+ * directory or a network.
+ */
+export interface MonitorDeps {
+  feed: RealtimeFeed;
+  listActive: () => Promise<StoredStrategy[]>;
+  save: (strategy: StoredStrategy) => Promise<void>;
+  execute: (
+    strategy: StoredStrategy,
+    phase: StrategyPhase,
+    price: number,
+    now: Date,
+    observed?: Record<string, number | string>,
+  ) => Promise<ExecutionOutcome>;
+  fetchPrice: (symbol: string) => Promise<number>;
+}
+
+function resolveDeps(overrides: Partial<MonitorDeps> = {}): MonitorDeps {
+  return {
+    feed: overrides.feed ?? getRealtimeFeed(),
+    listActive: overrides.listActive ?? (() => listStrategies("active")),
+    save: overrides.save ?? saveStrategy,
+    execute: overrides.execute ?? executeTrigger,
+    fetchPrice: overrides.fetchPrice ?? fetchStockStrategyPrice,
+  };
+}
+
+/** Test-only: clears the cooldown and REST-throttle bookkeeping held across ticks. */
+export function resetMonitorState(): void {
+  lastFireMs.clear();
+  lastRestPollMs.clear();
+}
 
 export function startMonitor(intervalMs: number = ACTIVE_INTERVAL_MS): void {
   if (active) return;
@@ -105,8 +157,9 @@ function schedule(delayMs: number, tick: () => Promise<void>): void {
  * One evaluation pass over all active strategies. Returns how many were active,
  * which is what decides the next interval. Exposed for tests.
  */
-export async function runOnce(now: Date): Promise<number> {
-  const strategies = await listStrategies("active");
+export async function runOnce(now: Date, overrides: Partial<MonitorDeps> = {}): Promise<number> {
+  const deps = resolveDeps(overrides);
+  const strategies = await deps.listActive();
   const nowMs = now.getTime();
 
   // Group by symbol so each symbol is polled once and its strategies run serially.
@@ -117,40 +170,63 @@ export async function runOnce(now: Date): Promise<number> {
     bySymbol.set(s.symbol, list);
   }
 
+  // The stream's subscription set is driven from here rather than from the three places that can
+  // change a strategy's status: reconciling against the active set converges no matter which of
+  // them ran, and cannot leave a pin behind.
+  deps.feed.reconcileStrategySymbols([...bySymbol.keys()], nowMs);
+  deps.feed.sweep(nowMs);
+
   for (const [symbol, group] of bySymbol) {
-    let price: number;
-    try {
-      price = await pollPrice(symbol, nowMs);
-    } catch (err) {
-      console.warn(`[strategyMonitor] price poll failed for ${symbol}:`, err);
-      continue;
+    let price = deps.feed.currentPrice(symbol, nowMs);
+    if (price === undefined || price <= 0) {
+      price = await restFallbackPrice(symbol, nowMs, deps);
+      if (price === undefined) continue;
     }
-    if (price <= 0) continue;
     // Serial per symbol: one trigger evaluation and simulated action completes before the next.
     for (const strategy of group) {
-      await evaluateStrategy(strategy, price, now);
+      await evaluateStrategy(strategy, price, now, deps);
     }
   }
 
   return strategies.length;
 }
 
-async function evaluateStrategy(strategy: StoredStrategy, price: number, now: Date): Promise<void> {
-  if ((strategy.dsl.mode as string) === "live") {
-    strategy.status = "paused";
-    strategy.failure_reason = "Live stock broker execution is not configured; use paper or shadow mode.";
-    await saveStrategy(strategy);
-    return;
-  }
-  if (activateEligiblePhases(strategy).length > 0) await saveStrategy(strategy);
-  for (const phase of strategy.dsl.phases) {
-    if (strategy.status !== "active") return;
-    if (phase.status !== "active") continue;
-    await evaluatePhase(strategy, phase, price, now);
+/**
+ * Fetch one price over REST, at most once per REST_FALLBACK_INTERVAL_MS per symbol, and write it
+ * into the same buffer the stream feeds. Downstream evaluation cannot tell the two apart; the
+ * window simply becomes sparse while the stream is down.
+ */
+async function restFallbackPrice(symbol: string, nowMs: number, deps: MonitorDeps): Promise<number | undefined> {
+  const last = lastRestPollMs.get(symbol);
+  if (last !== undefined && nowMs - last < REST_FALLBACK_INTERVAL_MS) return undefined;
+  lastRestPollMs.set(symbol, nowMs);
+  try {
+    const price = await deps.fetchPrice(symbol);
+    if (price <= 0) return undefined;
+    deps.feed.recordPrice(symbol, price, nowMs);
+    return price;
+  } catch (err) {
+    console.warn(`[strategyMonitor] REST price fallback failed for ${symbol}:`, err);
+    return undefined;
   }
 }
 
-async function evaluatePhase(strategy: StoredStrategy, phase: StrategyPhase, price: number, now: Date): Promise<void> {
+async function evaluateStrategy(strategy: StoredStrategy, price: number, now: Date, deps: MonitorDeps): Promise<void> {
+  if ((strategy.dsl.mode as string) === "live") {
+    strategy.status = "paused";
+    strategy.failure_reason = "Live stock broker execution is not configured; use paper or shadow mode.";
+    await deps.save(strategy);
+    return;
+  }
+  if (activateEligiblePhases(strategy).length > 0) await deps.save(strategy);
+  for (const phase of strategy.dsl.phases) {
+    if (strategy.status !== "active") return;
+    if (phase.status !== "active") continue;
+    await evaluatePhase(strategy, phase, price, now, deps);
+  }
+}
+
+async function evaluatePhase(strategy: StoredStrategy, phase: StrategyPhase, price: number, now: Date, deps: MonitorDeps): Promise<void> {
   const trigger = phase.price_trigger;
   const nowMs = now.getTime();
   const phaseKey = `${strategy.id}:${phase.id}`;
@@ -162,18 +238,10 @@ async function evaluatePhase(strategy: StoredStrategy, phase: StrategyPhase, pri
     if (last !== undefined && nowMs - last < recurrence.cooldown_minutes * 60_000) return;
   }
 
-  // Arming: rolling_change needs a full window. Backfill once, then require armed.
+  // Arming: rolling_change is meaningless until the buffer spans its window. Backfill is kicked
+  // off when the symbol is subscribed, so there is nothing to await here — just wait a tick.
   if (trigger.type === "rolling_change") {
-    const win = trigger.window_minutes ?? 0;
-    if (!isArmed(strategy.symbol, win, nowMs)) {
-      try {
-        await backfill(strategy.symbol, win);
-      } catch (err) {
-        console.warn(`[strategyMonitor] backfill failed for ${strategy.symbol}:`, err);
-        return;
-      }
-      if (!isArmed(strategy.symbol, win, nowMs)) return;
-    }
+    if (!deps.feed.isArmed(strategy.symbol, (trigger.window_minutes ?? 0) * 60_000, nowMs)) return;
   }
 
   let samples;
@@ -191,7 +259,7 @@ async function evaluatePhase(strategy: StoredStrategy, phase: StrategyPhase, pri
     }
   } else {
     const windowMinutes = trigger.type === "rolling_change" ? trigger.window_minutes : 0;
-    samples = windowSamples(strategy.symbol, windowMinutes, nowMs);
+    samples = deps.feed.window(strategy.symbol, windowMinutes * 60_000, nowMs);
   }
   const result = evaluatePriceTrigger(trigger, samples, price);
 
@@ -202,18 +270,13 @@ async function evaluatePhase(strategy: StoredStrategy, phase: StrategyPhase, pri
     result.nextReferencePrice !== trigger.reference_price
   ) {
     trigger.reference_price = result.nextReferencePrice;
-    await saveStrategy(strategy);
+    await deps.save(strategy);
   }
 
-  // N-sample wick confirmation (shared stepper, also exercised by the eval suite).
-  const stepped = stepConfirmation(
-    { count: confirmCounts.get(phaseKey) ?? 0 },
-    result.conditionMet,
-    trigger.confirm_samples,
-  );
-  confirmCounts.set(phaseKey, stepped.state.count);
-  if (stepped.fired) {
-    await fire(strategy, phase, price, now, result.observed);
+  // No repetition counting: unrepresentative quotes are rejected at the stream's entry filter,
+  // so a condition that survives to here is acted on immediately.
+  if (result.conditionMet) {
+    await fire(strategy, phase, price, now, deps, result.observed);
   }
 }
 
@@ -222,10 +285,10 @@ async function fire(
   phase: StrategyPhase,
   price: number,
   now: Date,
+  deps: MonitorDeps,
   observed?: Record<string, number | string>,
 ): Promise<void> {
   const phaseKey = `${strategy.id}:${phase.id}`;
-  confirmCounts.set(phaseKey, 0);
   const recurrence = phase.recurrence;
   const triggerCount = recurrence?.trigger_count ?? 0;
 
@@ -233,9 +296,9 @@ async function fire(
   strategy.status = "running";
   phase.status = "running";
   strategy.running = { execution_id: `exec-${strategy.id}-${phase.id}-${triggerCount}`, phase_id: phase.id, started_at: now.toISOString() };
-  await saveStrategy(strategy);
+  await deps.save(strategy);
 
-  const outcome = await executeTrigger(strategy, phase, price, now, observed);
+  const outcome = await deps.execute(strategy, phase, price, now, observed);
   delete strategy.running;
 
   if (outcome.placed) {
@@ -262,10 +325,7 @@ async function fire(
         side: phase.action.side,
         at: now.toISOString(),
       });
-      const cancelled = cancelOcoPeers(strategy, phase);
-      for (const cancelledPhaseId of cancelled) {
-        confirmCounts.delete(`${strategy.id}:${cancelledPhaseId}`);
-      }
+      cancelOcoPeers(strategy, phase);
       activateEligiblePhases(strategy);
     }
   } else if (outcome.blocked || outcome.skipped) {
@@ -281,5 +341,5 @@ async function fire(
     phase.failure_reason = outcome.reason ?? "strategy action failed";
   }
   strategy.status = nextStrategyStatus(strategy);
-  await saveStrategy(strategy);
+  await deps.save(strategy);
 }

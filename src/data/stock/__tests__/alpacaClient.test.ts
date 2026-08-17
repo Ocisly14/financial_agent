@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createTtlCache, fetchBars } from "../alpacaClient.ts";
+import { createTtlCache, fetchBars, resolveFeed } from "../alpacaClient.ts";
 
 test("fetchBars generalizes timeframe and preserves daily/minute timestamp format", async () => {
   const originalFetch = globalThis.fetch;
@@ -61,4 +61,60 @@ test("failed result is not cached when loader throws", async () => {
   await assert.rejects(() => cached("AAPL", 1_000));
   assert.equal(await cached("AAPL", 1_500), "ok");
   assert.equal(calls, 2);
+});
+
+test("a rate-limited request is retried after backing off", async () => {
+  const originalFetch = globalThis.fetch;
+  const delays: number[] = [];
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return calls === 1
+      ? new Response("rate limit", { status: 429 })
+      : new Response(JSON.stringify({ bars: [], next_page_token: null }), { status: 200 });
+  };
+  try {
+    await fetchBars("AAPL", "1Day", "2026-07-01", "2026-07-02", "iex", {
+      sleep: async (ms: number) => { delays.push(ms); },
+    });
+    assert.equal(calls, 2);
+    assert.deepEqual(delays, [1_000]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("retries give up and surface the upstream status", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response("still limited", { status: 429 });
+  try {
+    await assert.rejects(
+      fetchBars("AAPL", "1Day", "2026-07-01", "2026-07-02", "iex", { sleep: async () => {} }),
+      /Alpaca 429/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a 4xx that is not a rate limit is not retried", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => { calls++; return new Response("nope", { status: 403 }); };
+  try {
+    await assert.rejects(
+      fetchBars("AAPL", "1Day", "2026-07-01", "2026-07-02", "iex", { sleep: async () => {} }),
+      /Alpaca 403/,
+    );
+    assert.equal(calls, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("the feed defaults to the configured environment feed", () => {
+  assert.equal(resolveFeed(undefined, { ALPACA_FEED: "sip" }), "sip");
+  assert.equal(resolveFeed(undefined, {}), "iex");
+  assert.equal(resolveFeed("iex", { ALPACA_FEED: "sip" }), "iex", "an explicit argument wins");
+  assert.equal(resolveFeed(undefined, { ALPACA_FEED: "nonsense" }), "iex");
 });

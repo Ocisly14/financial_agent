@@ -50,17 +50,12 @@ const modelDatabasePath = resolve(process.env["E2E_MODEL_DB_PATH"]?.trim() || jo
 // The agent pauses with a resume line instead of failing, so the round loop just dispatches its own
 // thread again — continuity is the thread, not the model handle.
 const maxRounds = Number(process.env["E2E_MAX_ROUNDS"] ?? 6);
-const roundTimeoutMs = Number(process.env["E2E_ROUND_TIMEOUT_MIN"] ?? 25) * 60_000;
+const roundTimeoutMs = Number(process.env["E2E_ROUND_TIMEOUT_MIN"] ?? 60) * 60_000;
 
 const initialPrompt = process.env["E2E_PROMPT"]?.trim()
-  || `Build a complete DCF valuation model for ${symbol} from its SEC filings, end to end. `
-    + `Nothing has been prepared for you: extract the filing statements yourself, get the history `
-    + `unified and mapped onto the spine, analyze where the profit actually comes from, author the `
-    + `forecast on your own judgment, complete the WACC sheet and the terminal assumptions, and `
-    + `finish only once the model reads as valued. Report the implied value per share and the `
-    + `judgment calls behind it.`;
+  || `Build me a DCF valuation model for ${symbol} `;
 
-const continuationPrompt = `Continue the ${symbol} DCF in this same thread. Read the model first to `
+const continuationPrompt = process.env["E2E_CONTINUATION_PROMPT"]?.trim() || `Continue the ${symbol} DCF in this same thread. Read the model first to `
   + `see what is already filled, keep what holds, redo nothing, and complete only what is still `
   + `missing through to the valued stage.`;
 
@@ -79,6 +74,7 @@ process.env["SESSION_DB_PATH"] = join(outputDirectory, "sessions.sqlite");
 process.env["FINANCIAL_MODEL_DB_PATH"] = modelDatabasePath;
 
 const { createFinancialAgentApp, resolveLlmProvider } = await import("../../../src/agent/createApp.ts");
+const { llmCostReport } = await import("../../../src/infra/llm/provider.ts");
 const { getDefaultFinancialModelToolDeps } = await import("../../../mcp_tools/financial-model/financialModelTools.ts");
 // A snapshot's `cells` is a Map, which JSON.stringify writes as `{}` — the one field a reader most
 // needs from the dump would go missing silently. The codec's wire form is what the store persists,
@@ -211,6 +207,16 @@ for (let round = 1; round <= maxRounds; round++) {
   // A hard failure is not something another round recovers from; a pause or an early finish short of
   // `valued` is, and continuing the thread is exactly how the agent is designed to be resumed.
   if (result!.status === "failed") { console.log(`\n   failed — stopping.`); break; }
+  // A timeout is the one status the dispatcher synthesizes itself, without metrics — so `llm_calls`
+  // reads 0 even for a round that worked the whole window. Nested subagents persist as they go, so
+  // whatever the thread reached is on disk and the next round resumes from it; that is what the
+  // round loop and `continuationPrompt` exist for. This must be read before the dead-provider check
+  // below, which would otherwise take the missing metrics for a provider that was never reached.
+  if (result!.status === "timeout") {
+    console.log(`\n   timed out after ${(roundTimeoutMs / 60_000).toFixed(0)}min at lifecycle `
+      + `"${entry.lifecycleAfter ?? "-"}" — resuming the thread in the next round.`);
+    continue;
+  }
   // A round that never reached the provider is reported as an ordinary step-budget pause (the loop
   // breaks on the LLM error with its "exhausted" flag still set). Left alone it would look like
   // progress and burn every remaining round against a dead provider, so read the metrics instead of
@@ -262,8 +268,19 @@ if (model) {
     assumptionCount: assumptions.length, customRowCount: customRows.length });
 }
 
+// The cost table is a first-class result, not a log line to be grepped afterwards. Reading
+// `tokens_in` alone once made a change that cost 23% MORE look like a 93% saving, so the weighted
+// total and the read/write ratio ship next to the verdict where the next run can diff them.
+const cost = llmCostReport();
 write("summary.json", { ...verdict, symbol, sessionId, threadId, provider: providerName,
-  toolCalls: stepSeq, rounds, finalSummary: lastResult?.summary ?? null, finishedAt: new Date().toISOString() });
+  toolCalls: stepSeq, rounds, cost, finalSummary: lastResult?.summary ?? null, finishedAt: new Date().toISOString() });
+
+console.log("\n# prompt cost by agent (equivalent input tokens; ratio below 1 means writes are never read back)");
+for (const [label, row] of Object.entries(cost)) {
+  console.log(`  ${label.padEnd(32)} calls=${String(row.calls).padEnd(4)} in=${row.tokens_in} `
+    + `cache_r=${row.cache_read} cache_w=${row.cache_write} out=${row.tokens_out} `
+    + `equiv=${row.equivalent_input_tokens} r/w=${row.cache_read_write_ratio ?? "-"}`);
+}
 
 console.log(`\nArtifacts: ${outputDirectory}`);
 if (verdict["pass"]) {

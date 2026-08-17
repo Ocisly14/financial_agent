@@ -214,8 +214,6 @@ function normalizeTrigger(raw: unknown): Record<string, unknown> {
   if (signalPeriod !== undefined) out["signal_period"] = signalPeriod;
   const averageType = str(src["average_type"] || src["ma_type"]).toLowerCase();
   if (averageType) out["average_type"] = averageType;
-  const cs = firstNum(src, ["confirm_samples", "confirmations", "confirm"]);
-  out["confirm_samples"] = cs ?? 2;
   return out;
 }
 

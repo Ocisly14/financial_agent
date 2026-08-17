@@ -39,7 +39,7 @@ type AccountingRule = {
         calculate?: (values: readonly number[]) => number;
         requireSameUnit?: boolean;
       }
-    | { kind: "not_applicable"; refs: string[] };
+    | { kind: "not_applicable"; refs: string[]; reason: "no_prior_period" };
 };
 
 const term = (lineItemId: string, sign: 1 | -1 = 1): SignedTerm => ({ lineItemId, sign });
@@ -142,7 +142,7 @@ const ACCOUNTING_RULES: readonly AccountingRule[] = [
     terms: (periodIndex, actualPeriods) => {
       const prior = actualPeriods[periodIndex - 1];
       if (prior === undefined) {
-        return { kind: "not_applicable", refs: ["operating_working_capital"] };
+        return { kind: "not_applicable", refs: ["operating_working_capital"], reason: "no_prior_period" };
       }
       return {
         kind: "terms",
@@ -221,15 +221,18 @@ export function reconcileDcf(input: ReconciliationInput): ReconciliationResult[]
     for (const rule of ACCOUNTING_RULES) {
       const resolved = rule.terms(periodIndex, actualPeriods);
       const common = resolved.kind === "not_applicable"
-        ? notApplicable(
-            period.id,
-            rule.parentLineItemId,
-            [
-              cellKey(rule.parentLineItemId, period.id),
-              ...resolved.refs.map((ref) => coordinate(ref, period.id)),
-            ],
-            input.cells,
-          )
+        ? {
+            ...notApplicable(
+              period.id,
+              rule.parentLineItemId,
+              [
+                cellKey(rule.parentLineItemId, period.id),
+                ...resolved.refs.map((ref) => coordinate(ref, period.id)),
+              ],
+              input.cells,
+            ),
+            skipReason: { kind: resolved.reason, refs: [cellKey(rule.parentLineItemId, period.id)] },
+          }
         : reconcileTerms(
             period.id,
             rule.parentLineItemId,
@@ -267,10 +270,20 @@ function reconcileTerms(
   const parentItem = usableItem(itemById.get(parentLineItemId));
   const memberItems = terms.map((candidate) => usableItem(itemById.get(baseLineItemId(candidate.lineItemId))));
   if (parentItem === undefined || terms.length === 0 || memberItems.some((item) => item === undefined)) {
-    return notApplicable(periodId, parentLineItemId, refs, cells);
+    const absent = [
+      ...(parentItem === undefined ? [parentRef as string] : []),
+      ...termRefs.filter((_, index) => memberItems[index] === undefined),
+    ];
+    return { ...notApplicable(periodId, parentLineItemId, refs, cells),
+      ...(absent.length > 0 ? { skipReason: { kind: "missing_line_item" as const, refs: absent } } : {}) };
   }
-  if (requireSameUnit && memberItems.some((item) => !sameUnit(parentItem.unit, item!.unit))) {
-    return notApplicable(periodId, parentLineItemId, refs, cells);
+  if (requireSameUnit) {
+    const mismatched = terms.flatMap((candidate, index) =>
+      sameUnit(parentItem.unit, memberItems[index]!.unit) ? [] : [termRefs[index]!]);
+    if (mismatched.length > 0) {
+      return { ...notApplicable(periodId, parentLineItemId, refs, cells),
+        skipReason: { kind: "unit_mismatch", refs: mismatched } };
+    }
   }
 
   const actual = finiteValue(cells.get(parentRef));
@@ -285,6 +298,10 @@ function reconcileTerms(
       difference: null,
       tolerance: comparisonTolerance(actual, null),
       refs,
+      skipReason: { kind: "missing_values", refs: [
+        ...(actual === null ? [parentRef as string] : []),
+        ...termRefs.filter((_, index) => values[index] === null),
+      ] },
     };
   }
 
@@ -377,4 +394,57 @@ function categoryRuleId(group: DcfCategoryGroup): string {
 
 function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/**
+ * Why a required identity failed, in the terms the fix is made in.
+ *
+ * A failed check reports that a parent and the sum of its components disagree. That is enough to
+ * know something is wrong and nothing about WHICH component is wrong, so an agent goes reading the
+ * workbook component by component to find out — ten consecutive reads in one AMZN run, and it never
+ * got there, because the values it needed sat behind a section filter it kept getting wrong.
+ *
+ * The diagnosis is already computable here. A component stored under the opposite polarity to its
+ * siblings — an income-positive XBRL concept like `OtherOperatingIncomeExpenseNet` landing among
+ * expense-positive rows — does not merely perturb the sum: it moves it by exactly TWICE its own
+ * value, because the term is added where it should have been subtracted. So a residual that equals
+ * 2x a component names that component, and the fix is a sign, not a search.
+ *
+ * This accuses rather than corrects, deliberately. "Other operating expense (income), net" is
+ * genuinely income in some years, so flipping on the sign of the value would corrupt those years;
+ * only the author of the mapping knows which convention the row was meant to carry.
+ */
+/**
+ * Each canonical row's accounting identities, rendered as the equation the engine will check.
+ *
+ * Derived from ACCOUNTING_RULES rather than written out again, because the whole point is that the
+ * mapper is judged by these exact rules: a hand-copied list would drift from them silently, which is
+ * the failure this is meant to prevent one level up. Only the fixed-term identities render — the
+ * period-relative ones say nothing useful about a single row.
+ */
+export function identitiesByLineItem(): Map<string, string[]> {
+  const byItem = new Map<string, string[]>();
+  for (const rule of ACCOUNTING_RULES) {
+    const built = rule.terms(1, []);
+    if (built.kind !== "terms") continue;
+    const equation = `${rule.parentLineItemId} = ` + built.terms
+      .map((entry, index) => index === 0
+        ? (entry.sign === 1 ? entry.lineItemId : `-${entry.lineItemId}`)
+        : `${entry.sign === 1 ? "+" : "-"} ${entry.lineItemId}`)
+      .join(" ");
+    for (const id of [rule.parentLineItemId, ...built.terms.map((entry) => entry.lineItemId)]) {
+      byItem.set(id, [...(byItem.get(id) ?? []), equation]);
+    }
+  }
+  return byItem;
+}
+
+export function explainFailedIdentity(
+  failure: { residual: number; tolerance: number },
+  components: readonly { lineItemId: string; value: number }[],
+): { components: readonly { lineItemId: string; value: number }[]; polaritySuspects: string[] } {
+  const polaritySuspects = components
+    .filter((component) => Math.abs(failure.residual - 2 * component.value) <= failure.tolerance)
+    .map((component) => component.lineItemId);
+  return { components, polaritySuspects };
 }

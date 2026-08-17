@@ -6,9 +6,10 @@ import { FINANCIAL_MODELING_TOOLS, MARKET_DATA_TOOLS, MARKET_RESEARCH_TOOLS, TRA
 import { DCF_PRIVATE_SUBAGENT_TOOL } from "../../../mcp_tools/financial-model/dcfSubagentTool.ts";
 import { STATEMENT_EXTRACTION_TOOL } from "../../../mcp_tools/financial-model/statementExtractionTool.ts";
 
-/** A mapping run is load, judge, submit, correct — 8-10 rounds in practice. The rest absorbs a schema
- *  retry, an extra correction, or an issuer with more dimension axes than Apple. */
-const MAPPING_AGENT_STEPS = 15;
+/** A mapping run is load, judge, draft in statement-sized batches, validate, then correct. The
+ * remaining budget absorbs a schema retry, an extra correction, or an issuer with several useful
+ * dimension axes. */
+const MAPPING_AGENT_STEPS = 18;
 
 export function createSubagentRegistry(): SubagentRegistry {
   const registry = new SubagentRegistry();
@@ -70,7 +71,8 @@ export function createSubagentRegistry(): SubagentRegistry {
     // No skills, and none of the skill framework tools: this agent's methodology is inline in its
     // prompt, where it rides the cached prefix instead of being re-sent as progress every step.
     defaultTools: ["load_concept_inventory", "list_dimension_axes", "get_axis_breakdown",
-      "submit_unification_decision", "patch_unification_decision"],
+      "start_unification_draft", "patch_unification_decision", "validate_unification_decision",
+      "submit_unification_decision"],
     maxToolSteps: MAPPING_AGENT_STEPS,
     systemPrompt: statementUnificationSubagentPrompt,
   });

@@ -95,7 +95,7 @@ function modelRevisionFrames(payload: JsonObject): SSEEvent[] {
     if (typeof change.kind === "string") kinds.add(change.kind);
     // The id-bearing keys across the RevisionChange union as of 02682e2:
     // `lineItemId` (assumption_set / formula_set / fact_replaced /
-    // line_item_added / metric_added / line_item_source_set),
+    // line_item_added / line_item_source_set),
     // `parentLineItemId` (category_group_set), `mappedLineItemIds`
     // (statements_staged). Do not add speculative keys for kinds that do not
     // exist — check the union in `src/financial-model/views.ts` first.

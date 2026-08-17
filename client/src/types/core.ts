@@ -25,6 +25,10 @@ export type UserInputQuestion = {
 export type UserInputAnswer = {
   question_id: string;
   selected_option_ids: string[];
+  /** What the user typed into the question's free-text field, trimmed. Present
+   *  only when non-empty, and it counts as one selection against the question's
+   *  limits — an unlisted answer displaces a listed one. */
+  free_text?: string;
 };
 
 /** Which actor asked. Three can: the Topic agent the user is talking to, the
@@ -53,7 +57,7 @@ export type MemberInputRequestFrame = {
 
 export type UserInputSubmission = {
   requestId: string;
-  answers: Array<{ questionId: string; selectedOptionIds: string[] }>;
+  answers: Array<{ questionId: string; selectedOptionIds: string[]; freeText?: string }>;
 };
 
 export interface Character {

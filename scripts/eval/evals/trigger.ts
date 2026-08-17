@@ -7,10 +7,16 @@ import type { EvalResult } from "../lib/report.ts";
 
 const DIR = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_FILES = [
-  "clean-5pct-drawdown.json",
-  "single-wick-spike.json",
-  "noisy-chop.json",
+  "intraday-drawdown.json",
+  "single-print-outlier.json",
+  "session-chop.json",
   "trailing-stop-retrace.json",
+  // The session ends. These four are the shapes that only exist because of that, and the ones a
+  // fixture set ported from a 24/7 market cannot contain.
+  "overnight-gap-outside-window.json",
+  "gap-through-level.json",
+  "halt-and-resume.json",
+  "auction-spike-rejected.json",
 ];
 
 function loadFixtures(): ReplayFixture[] {

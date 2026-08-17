@@ -194,7 +194,10 @@ export function resolveDetailLineItemIds(decision: SpineDecision, unified: Unifi
 
 export type SpineFromUnifiedResult = {
   facts: Fact[];
+  /** Missing periods on required targets. These block a complete spine mapping. */
   coverageGaps: Array<{ targetId: string; periodId: string }>;
+  /** Missing periods on mapped optional targets. Informational only: do not retry the mapping. */
+  optionalCoverageGaps: Array<{ targetId: string; periodId: string }>;
   /** Coverage gap + partial-sum messages; empty = pass. */
   findings: string[];
 };
@@ -276,18 +279,21 @@ export function buildSpineFromUnified(input: { decision: SpineDecision;
   const gapDeclared = new Set(decision.spineGaps.map((g) => g.targetId));
   const claimed = new Set(decision.mappings.map((m) => m.targetId));
   const coverageGaps: SpineFromUnifiedResult["coverageGaps"] = [];
+  const optionalCoverageGaps: SpineFromUnifiedResult["optionalCoverageGaps"] = [];
   for (const targetId of spineIds) {
     if (gapDeclared.has(targetId)) continue;
     if (!claimed.has(targetId) && !required.has(targetId)) continue;
     for (const periodId of unified.periods) {
       if (covered.has(`${targetId}|${periodId}`)) continue;
-      coverageGaps.push({ targetId, periodId });
-      // Only a required target's absence is worth an agent round: the rest are not read by any
-      // formula or identity, so a missing year costs the model nothing.
       if (required.has(targetId)) {
+        coverageGaps.push({ targetId, periodId });
         findings.push(`coverage_gap: required ${targetId} has no value in ${periodId} and is not declared a spine gap`);
+      } else {
+        // An issuer can stop presenting an optional zero-activity line. Preserve that audit fact,
+        // but never make the mapping agent mistake it for a blocking historical-coverage failure.
+        optionalCoverageGaps.push({ targetId, periodId });
       }
     }
   }
-  return { facts, coverageGaps, findings };
+  return { facts, coverageGaps, optionalCoverageGaps, findings };
 }

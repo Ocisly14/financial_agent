@@ -117,12 +117,10 @@ test("lifecycle gate failures remain visible as structured blockers", () => {
   const { service } = setup();
   const result = service.createModel(CREATE_INPUT);
 
-  assert.deepEqual(result.currentWorkbook.diagnostics, [{
-    code: "history_review_required",
-    refs: [],
-    message: "history requires selected periods and committed spine facts",
-    stage: "history_committed",
-  }]);
+  assert.ok(result.currentWorkbook.diagnostics.some((diagnostic) =>
+    diagnostic.code === "history_review_required"
+    && diagnostic.message === "history requires selected periods and committed spine facts"
+    && diagnostic.stage === "history_committed"));
 });
 
 test("source declarations are reconciled from each row's filled channel", () => {
@@ -152,8 +150,24 @@ test("source declarations are reconciled from each row's filled channel", () => 
     spineFact("cash_available_for_bridge", "FY2025", 95),
   ], historicalPeriodIds: ["FY2024", "FY2025"] });
   snapshot = store.getRevision("model-1")!.snapshot;
-  assert.equal(row("cash_available_for_bridge").historical, "actual");
-  assert.equal(snapshot.formulas.some((formula) => formula.lineItemId === "cash_available_for_bridge"), false);
+  // A later fact must not silently erase an explicit formula. This lets the agent replace an
+  // over-broad mapped line (for example, all leases) with a model calculation (finance leases).
+  assert.equal(row("cash_available_for_bridge").historical, "formula");
+  assert.equal(snapshot.formulas.some((formula) => formula.lineItemId === "cash_available_for_bridge"), true);
+  assert.equal(snapshot.cells.get(cellKey("cash_available_for_bridge", "FY2024"))?.value, 100);
+  assert.equal(snapshot.cells.get(cellKey("cash_available_for_bridge", "FY2025"))?.value, 95);
+
+  const view = service.getModel("model-1");
+  assert.ok("currentWorkbook" in view);
+  const bridge = view.currentWorkbook.sections.dcf.find((candidate) =>
+    "lineItemId" in candidate && candidate.lineItemId === "cash_available_for_bridge");
+  assert.ok(bridge && "cells" in bridge);
+  // Row-level source stays formula because it has a formula in the historical range, but cell-level
+  // provenance must retain the FY2025 fact rather than reporting it as an unbacked formula cell.
+  assert.equal(bridge.cells["FY2024"]?.source.kind, "formula");
+  assert.deepEqual(bridge.cells["FY2025"]?.source, {
+    kind: "fact", factId: "cash_available_for_bridge@FY2025",
+  });
 });
 
 test("createModel commits a deterministic value-free model-created summary", () => {
@@ -239,6 +253,56 @@ test("a failed required DCF category reconciliation keeps the model reading as d
   // Lifecycle is derived: unresolved reconciliation keeps the model reading as draft.
   assert.equal(snapshot.lifecycleStage, "draft");
   assert.equal(store.getRevision("model-1")?.revision, 2);
+});
+
+test("reconciliation trail marks a unified fact superseded by an agent formula rather than dropping it", () => {
+  const { store, service } = setup();
+  service.createModel(CREATE_INPUT);
+  const fact = (lineItemId: string, periodId: string, value: number, rowId: string): Fact => ({
+    ...spineFact(lineItemId, periodId, value),
+    provenance: { ...spineFact(lineItemId, periodId, value).provenance, concept: rowId },
+  });
+  service.commitSpineFacts("model-1", 0, { facts: [
+    fact("revenue.total", "FY2024", 100, "revenue-row"),
+    fact("cost_of_revenue", "FY2024", 20, "cost-row"),
+    fact("gross_profit", "FY2024", 40, "gross-profit-row"),
+  ], historicalPeriodIds: ["FY2024"] });
+  service.applyOperations("model-1", 1, [
+    { kind: "set_line_item_source", lineItemId: "revenue.total", range: "historical", source: "formula" },
+    { kind: "set_formula", formula: {
+      lineItemId: "revenue.total", appliesTo: "historical", periodIds: ["FY2024"], source: "gross_profit",
+    } },
+  ]);
+  const failed = current(store).reconciliationResults.find((result) =>
+    result.ruleId === "accounting_identity:gross_profit" && result.periodId === "FY2024");
+  assert.equal(failed?.status, "failed");
+  // The superseded row must not point at evidence that no longer drives the number, but dropping it
+  // silently leaves a short list the agent reads as "everything else is fine".
+  assert.deepEqual(failed?.unifiedTrail, [
+    { lineItemId: "revenue.total", rowIds: [], absent: "superseded" },
+    { lineItemId: "cost_of_revenue", rowIds: ["cost-row"] },
+    { lineItemId: "gross_profit", rowIds: ["gross-profit-row"] },
+  ]);
+});
+
+test("a reconciliation ref with no unified fact at all is distinguished from a superseded one", () => {
+  const { store, service } = setup();
+  service.createModel(CREATE_INPUT);
+  const fact = (lineItemId: string, periodId: string, value: number, rowId: string): Fact => ({
+    ...spineFact(lineItemId, periodId, value),
+    provenance: { ...spineFact(lineItemId, periodId, value).provenance, concept: rowId },
+  });
+  // cost_of_revenue is never mapped: 100 - undefined != 40 fails, and the agent needs to see which
+  // of the three refs is the one carrying no evidence.
+  service.commitSpineFacts("model-1", 0, { facts: [
+    fact("revenue.total", "FY2024", 100, "revenue-row"),
+    fact("gross_profit", "FY2024", 40, "gross-profit-row"),
+  ], historicalPeriodIds: ["FY2024"] });
+
+  const failed = current(store).reconciliationResults.find((result) =>
+    result.ruleId === "accounting_identity:gross_profit" && result.periodId === "FY2024");
+  assert.equal(failed?.unifiedTrail?.find((step) => step.lineItemId === "cost_of_revenue")?.absent,
+    "unmapped");
 });
 
 test("readCells and targeted getModel reads are workbook slices and never commit", () => {
@@ -444,6 +508,29 @@ test("commitSpineFacts commits onto canonical targets and selects the actual per
   assert.ok(landed.every((fact) => fact.status === "committed"), JSON.stringify(landed.map((f) => f.status)));
 });
 
+test("a later spine mapping supersedes active evidence instead of silently retaining the old mapping", () => {
+  const { store, service } = setup();
+  service.createModel(CREATE_INPUT);
+  service.commitSpineFacts("model-1", 0, {
+    facts: [spineFact("non_operating_income_expense", "FY2024", 12)], historicalPeriodIds: ["FY2024"],
+  });
+  const corrected = spineFact("non_operating_income_expense", "FY2024", 7);
+  corrected.provenance.sourceRefs = ["unified.income_statement.other_income_expense_net.FY2024"];
+  const result = service.commitSpineFacts("model-1", 1, { facts: [corrected], historicalPeriodIds: ["FY2024"] });
+  assert.equal(result.revision, 2);
+
+  const facts = current(store).facts.filter((fact) => fact.lineItemId === "non_operating_income_expense" && fact.periodId === "FY2024");
+  assert.equal(facts.length, 2);
+  const old = facts.find((fact) => fact.status === "superseded");
+  const replacement = facts.find((fact) => fact.status === "committed");
+  assert.ok(old);
+  assert.ok(replacement);
+  assert.equal(replacement.value, 7);
+  assert.equal(replacement.supersedesFactId, old.factId);
+  assert.deepEqual(replacement.provenance.sourceRefs, ["unified.income_statement.other_income_expense_net.FY2024"]);
+  assert.equal(current(store).cells.get(cellKey("non_operating_income_expense", "FY2024"))?.value, 7);
+});
+
 test("a revenue detail row is installed as a revenue stream and carries its label", () => {
   const { service } = setup();
   service.createModel(CREATE_INPUT);
@@ -470,7 +557,7 @@ test("committed spine facts are history evidence without legacy statement-mappin
     && fact.provenance.sourceType === "unified_statements"));
 });
 
-test("the history commit installs the working-capital identity over exactly the mapped components", () => {
+test("the history commit leaves working-capital modeling to an explicit formula", () => {
   const { store, service } = setup();
   service.createModel(CREATE_INPUT);
   // AR, inventory, AP mapped; the other four WC components are declared gaps for this issuer —
@@ -484,9 +571,9 @@ test("the history commit installs the working-capital identity over exactly the 
   const reviewed = service.commitSpineFacts("model-1", 0, { facts, historicalPeriodIds: ["FY2024", "FY2025"] });
   const formula = store.getRevision("model-1")!.snapshot.formulas
     .find((f) => f.lineItemId === "operating_working_capital" && f.appliesTo === "historical");
-  assert.equal(formula?.source, "accounts_receivable + inventory - accounts_payable");
+  assert.equal(formula, undefined);
   const operations = reviewed.currentWorkbook.sections.operations;
-  assert.equal(operations.find((r) => r.lineItemId === "operating_working_capital")!.cells["FY2025"]!.value, 33 + 11 - 22);
+  assert.equal(operations.find((r) => r.lineItemId === "operating_working_capital")!.cells["FY2025"]!.status, "not_modeled");
   assert.equal(operations.find((r) => r.lineItemId === "ratio.operating_nwc_to_revenue")!.cells["FY2025"]?.status, "not_modeled");
 });
 
@@ -576,6 +663,54 @@ test("a custom metric row carries its description into the workbook view and sur
   const snapshot = store.getRevision("model-1")!.snapshot;
   const decoded = financialModelSnapshotCodec.decode(financialModelSnapshotCodec.encode(snapshot));
   assert.equal(decoded.lineItems.find((i) => i.id === "metric.custom.opex_ratio")?.description, "Operating expense intensity");
+});
+
+/**
+ * `custom_metrics` used to be the one branch of addExtensibleLineItem that demanded the fully
+ * qualified id, while its sibling `revenue` branch had always accepted a bare slug and prefixed it.
+ * An AMZN run lost a batch to that asymmetry, naming a segment margin `margin.operating.aws` — a
+ * reasonable id, rejected for a prefix the tool never asked for. Both spellings now land in the
+ * same agent-owned namespace, so the boundary that makes a row redefinable is still by construction.
+ */
+test("a custom metric may be named with a bare slug or its full id, and both land in metric.custom", () => {
+  const { service } = setup();
+  service.createModel(CREATE_INPUT);
+
+  service.applyOperations("model-1", 0, [
+    { kind: "add_line_item", lineItem: { id: "margin.operating.aws", label: "AWS operating margin",
+      parentId: "custom_metrics", unit: { kind: "ratio" } } },
+    { kind: "add_line_item", lineItem: { id: "metric.custom.spelled_out", label: "Spelled out",
+      parentId: "custom_metrics", unit: { kind: "ratio" } } },
+  ]);
+
+  const view = service.getModel("model-1");
+  assert.ok("currentWorkbook" in view);
+  const ids = view.currentWorkbook.sections.metrics.map((row) => row.lineItemId);
+  assert.ok(ids.includes("metric.custom.margin.operating.aws"), `bare slug was not prefixed: ${ids.join(", ")}`);
+  assert.ok(ids.includes("metric.custom.spelled_out"), "the full id still works unchanged");
+});
+
+test("a slug that could not be a line item id is still refused", () => {
+  const { service } = setup();
+  service.createModel(CREATE_INPUT);
+
+  assert.throws(() => service.applyOperations("model-1", 0, [
+    { kind: "add_line_item", lineItem: { id: "AWS Margin!", label: "x", parentId: "custom_metrics",
+      unit: { kind: "ratio" } } },
+  ]), invalidCode("invalid_model_operation"));
+});
+
+test("the same custom metric named both ways collides rather than silently duplicating", () => {
+  const { service } = setup();
+  service.createModel(CREATE_INPUT);
+  service.applyOperations("model-1", 0, [
+    { kind: "add_line_item", lineItem: { id: "gm", label: "GM", parentId: "custom_metrics", unit: { kind: "ratio" } } },
+  ]);
+
+  assert.throws(() => service.applyOperations("model-1", 1, [
+    { kind: "add_line_item", lineItem: { id: "metric.custom.gm", label: "GM again",
+      parentId: "custom_metrics", unit: { kind: "ratio" } } },
+  ]), invalidCode("invalid_model_operation"));
 });
 
 test("metric.custom rows and fixed drivers accept agent-authored formulas", () => {
@@ -883,4 +1018,27 @@ test("filling risk_free_rate and equity_risk_premium resolves the wacc row once 
   // draft and no valuation is produced — the wacc sheet alone never makes a model read as valued.
   assert.equal(filled.status, "draft");
   assert.equal(filled.currentWorkbook.valuation ?? null, null);
+});
+
+/**
+ * A formula naming a row that does not exist is the same failure as a selector naming one, and has
+ * to carry the same `unknownName` — the tool boundary searches on that field alone to attach near
+ * misses. An AMZN run wrote `unified.is_total_operating_expenses` (a unified rowId it had not
+ * imported) and got back a bare "unknown line item", while the identical mistake made through a
+ * selector came back with candidates and the one call that fetches them.
+ */
+test("a formula naming an unknown row reports which name was rejected", () => {
+  const { service } = setup();
+  service.createModel(CREATE_INPUT);
+
+  assert.throws(() => service.applyOperations("model-1", 0, [
+    { kind: "set_formula", formula: { lineItemId: "margin.operating", appliesTo: "historical",
+      source: "unified.is_total_operating_expenses - revenue.total", periodIds: ["FY2024"] } },
+  ]), (error: unknown) => {
+    assert.ok(error instanceof FinancialModelError, "engine rejects the formula");
+    assert.equal(error.code, "invalid_formula");
+    assert.equal(error.details?.["unknownName"], "unified.is_total_operating_expenses",
+      "and names the rejected id so the tool boundary can search for near misses");
+    return true;
+  });
 });

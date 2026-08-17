@@ -14,20 +14,37 @@ export type InventoryRow = {
   dimensions: XbrlDimension[];
   /** Distinct display labels, latest filing's first. */
   labels: string[];
-  /** Tree position in the latest filing carrying this row; null when onlyInOlderFilings. */
+  /** Tree position in the newest filing that CARRIED this row — not the newest filing overall.
+   *
+   *  A line the issuer retired is still a line of the statement it was retired from: MSFT's "Cash
+   *  premium on debt exchange" sits under Financing beside repayments and dividends, and reading
+   *  that is what separates a retired face line (needs its own row) from the superseded half of a
+   *  re-tag (merges into the live row via alsoTaggedAs). Nulling the position because the newest
+   *  filing dropped the concept flattened both cases into identical orphans at depth 0, leaving the
+   *  label as the only evidence — and the retired line lost its year's money to supplemental.
+   *
+   *  Whether the issuer still reports the line is not a separate flag: the newest period missing
+   *  from `values` says it, and says which year it stopped. */
   parentLabel: string | null;
   depth: number;
-  onlyInOlderFilings: boolean;
-  /** Sorted periodIds with at least one fact across filings. */
-  periodCoverage: string[];
-  /** Most recent value, for sign/scale judgment only — never backfilled from here. */
-  sampleValue: number | null;
-  sampleUnit: Unit | null;
-  /** Per covered period: sign of the latest-filing-wins value AFTER deterministic orientation. */
-  perYearSigns: Array<{ periodId: string; sign: -1 | 0 | 1 }>;
+  /** Present ONLY when filings disagree about where the row sits, keyed by every covered period and
+   *  resolved from the same filing that supplied that period's value. Issuers rarely move a line, so
+   *  the common case spends nothing; when one does move, the move is what the reader needs to see. */
+  parentByPeriod?: Record<string, { label: string | null; depth: number }>;
+  /** Latest-filing-wins value per period, AFTER deterministic orientation, keyed in ascending period
+   *  order. The key set IS the row's period coverage. Never backfilled from here.
+   *
+   *  Whole values rather than a sample plus per-year signs, because scale is what the reader needs
+   *  and no single sample carries it: MSFT's commercial paper is 0 in its newest tagged year and
+   *  $6.693B the year before, so a most-recent sample reads as a dead legacy line. A sign alone says
+   *  the older year is non-zero without saying it is billions. At two to five periods a row this is
+   *  also the cheaper encoding — the sign objects it replaces cost more bytes than the numbers do. */
+  values: Record<string, number>;
+  /** Unit of the row's most recent value. */
+  unit: Unit | null;
 };
 
-type Accumulator = InventoryRow & { samplePeriodEnd: string; order: number };
+type Accumulator = InventoryRow & { unitPeriodEnd: string; order: number };
 
 export function buildConceptInventory(input: {
   filings: readonly PresentationExtract[];
@@ -40,6 +57,10 @@ export function buildConceptInventory(input: {
   const coverage = new Map<string, Set<string>>();
   // key -> periodId -> latest-filing-wins raw value (first write wins: filings iterate newest-first).
   const resolved = new Map<string, Map<string, { value: number; accession: string }>>();
+  // key -> accession -> where that filing put the row. Kept per filing rather than collapsed, so a
+  // row an issuer moved between sections can be reported per period instead of silently taking the
+  // newest position for years that were reported under the old one.
+  const positions = new Map<string, Map<string, { label: string | null; depth: number }>>();
   let appendOrder = 1_000_000; // rows absent from the latest filing sort after its declared order
 
   filings.forEach((extraction, filingIndex) => {
@@ -53,25 +74,29 @@ export function buildConceptInventory(input: {
           const signature = dimensionSignature(factPayload.dimensions);
           const opening = node.openingBalance === true;
           const key = `${stmt.statement}|${node.conceptQName}|${signature}|${opening ? "opening" : ""}`;
+          const position = treePosition(node, byNodeId);
           let row = rows.get(key);
           if (!row) {
+            // Filings iterate newest-first, so the filing creating the row is the newest one that
+            // carries it — its position is the row's, whether or not the very latest filing has it.
             row = { statement: stmt.statement, conceptQName: node.conceptQName, dimensionSignature: signature,
               openingBalance: opening,
-              dimensions: [...factPayload.dimensions], labels: [], parentLabel: null, depth: 0,
-              onlyInOlderFilings: filingIndex > 0, periodCoverage: [], sampleValue: null, sampleUnit: null,
-              perYearSigns: [], samplePeriodEnd: "", order: filingIndex === 0 ? nodeOrder : appendOrder++ };
-            if (filingIndex === 0) { const pos = treePosition(node, byNodeId); row.parentLabel = pos.parentLabel; row.depth = pos.depth; }
+              dimensions: [...factPayload.dimensions], labels: [],
+              parentLabel: position.parentLabel, depth: position.depth, values: {}, unit: null,
+              unitPeriodEnd: "", order: filingIndex === 0 ? nodeOrder : appendOrder++ };
             rows.set(key, row);
             coverage.set(key, new Set());
             resolved.set(key, new Map());
+            positions.set(key, new Map());
           }
+          positions.get(key)!.set(extraction.filing.accession, { label: position.parentLabel, depth: position.depth });
           if (!row.labels.includes(node.label)) row.labels.push(node.label);
           coverage.get(key)!.add(factPayload.periodId);
           const byPeriod = resolved.get(key)!;
           if (!byPeriod.has(factPayload.periodId)) {
             byPeriod.set(factPayload.periodId, { value: factPayload.value, accession: extraction.filing.accession });
           }
-          if (end > row.samplePeriodEnd) { row.samplePeriodEnd = end; row.sampleValue = factPayload.value; row.sampleUnit = factPayload.unit; }
+          if (end > row.unitPeriodEnd) { row.unitPeriodEnd = end; row.unit = factPayload.unit; }
         }
       });
     }
@@ -80,15 +105,23 @@ export function buildConceptInventory(input: {
   const orientation = buildSignOrientation(input.filings);
   return [...rows.entries()]
     .sort(([, a], [, b]) => statementOrder(a.statement) - statementOrder(b.statement) || a.order - b.order)
-    .map(([key, { samplePeriodEnd: _end, order: _order, ...row }]) => {
-      const periodCoverage = [...coverage.get(key)!].sort();
+    .map(([key, { unitPeriodEnd: _end, order: _order, ...row }]) => {
       const byPeriod = resolved.get(key)!;
-      const perYearSigns = periodCoverage.map((periodId) => {
+      const byAccession = positions.get(key)!;
+      const values: Record<string, number> = {};
+      const parentByPeriod: Record<string, { label: string | null; depth: number }> = {};
+      let moved = false;
+      for (const periodId of [...coverage.get(key)!].sort()) {
         const chosen = byPeriod.get(periodId)!;
         const flipped = orientation.flips.get(chosen.accession)?.has(row.conceptQName) ?? false;
-        return { periodId, sign: Math.sign(flipped ? -chosen.value : chosen.value) as -1 | 0 | 1 };
-      });
-      return { ...row, periodCoverage, perYearSigns };
+        values[periodId] = flipped ? -chosen.value : chosen.value;
+        // The position that goes with a period is the one held by the filing that supplied its
+        // value, so the two can never describe different filings' versions of the row.
+        const at = byAccession.get(chosen.accession) ?? { label: row.parentLabel, depth: row.depth };
+        parentByPeriod[periodId] = at;
+        if (at.label !== row.parentLabel || at.depth !== row.depth) moved = true;
+      }
+      return { ...row, values, ...(moved ? { parentByPeriod } : {}) };
     });
 }
 

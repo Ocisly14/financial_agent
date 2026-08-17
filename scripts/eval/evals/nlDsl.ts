@@ -5,16 +5,34 @@ import { tradingOperationsSubagentPrompt } from "../../../src/agent/prompts/suba
 import { PromptRenderer } from "../../../src/framework/prompt.ts";
 import { ModelRouter } from "../../../src/infra/llm/provider.ts";
 import { resolveLlmProvider } from "../../../src/agent/createApp.ts";
-import { formatAllowedTools } from "../../../src/framework/subagent.ts";
+import { buildLoopToolSpecs } from "../../../src/framework/subagent.ts";
+import type { LlmToolSpec } from "../../../src/infra/llm/provider.ts";
 
 export type GoldDsl = {
   tool: string; trigger_type: string; direction: string;
-  pct?: number; price?: number; side: string;
+  /** Exactly one of these is the trigger's level: pct for the change triggers, price for
+   *  absolute_threshold, threshold for rsi_threshold. A cross trigger has none. */
+  pct?: number; price?: number; threshold?: number;
+  /** rolling_change only. The schema requires it, so a transcription that drops it is rejected
+   *  outright — scoring it as a pass would hide the one failure the tool cannot absorb. */
+  window_minutes?: number;
+  side: string;
   sizing_kind: string; sizing_value: number; symbol: string; recurrence_mode: string;
 };
 export type NlCase = { id: string; input: string; gold: GoldDsl };
 
 type GenCall = { tool: string; input: Record<string, unknown> };
+
+/**
+ * The one level a trigger fires at, whichever field carries it. A cross trigger pins none, and
+ * gold that names none is satisfied by any generated value — there is nothing to be wrong about.
+ */
+function triggerLevelMatches(trigger: Record<string, unknown>, gold: { pct?: number; price?: number; threshold?: number }): boolean {
+  if (gold.pct !== undefined) return Number(trigger["pct"]) === gold.pct;
+  if (gold.price !== undefined) return Number(trigger["price"]) === gold.price;
+  if (gold.threshold !== undefined) return Number(trigger["threshold"]) === gold.threshold;
+  return true;
+}
 
 /** Normalize the generated tool input and compare each critical field to gold. */
 export function scoreCase(generated: GenCall | null, gold: GoldDsl): {
@@ -45,14 +63,15 @@ export function scoreCase(generated: GenCall | null, gold: GoldDsl): {
     tool: toolMatch,
     trigger_type: String(trigger["type"] ?? "") === gold.trigger_type,
     direction: String(trigger["direction"] ?? "") === gold.direction,
-    threshold: gold.pct !== undefined ? Number(trigger["pct"]) === gold.pct : Number(trigger["price"]) === gold.price,
+    threshold: triggerLevelMatches(trigger, gold),
+    window: gold.window_minutes === undefined || Number(trigger["window_minutes"]) === gold.window_minutes,
     side: String(action["side"] ?? "") === gold.side,
     sizing_kind: String(size["type"] ?? size["kind"] ?? "") === gold.sizing_kind,
     sizing_value: Number(size["value"] ?? 0) === gold.sizing_value,
     symbol: symbol.toUpperCase() === gold.symbol.toUpperCase(),
     recurrence_mode: String(recurrence["mode"] ?? "") === gold.recurrence_mode,
   };
-  const critical = ["tool", "trigger_type", "direction", "threshold", "side", "sizing_kind", "sizing_value"];
+  const critical = ["tool", "trigger_type", "direction", "threshold", "window", "side", "sizing_kind", "sizing_value"];
   const intentMatch = critical.every((k) => fields[k] === true);
   return { fields, intentMatch, toolMatch };
 }
@@ -65,9 +84,13 @@ export function scoreCase(generated: GenCall | null, gold: GoldDsl): {
 
 export type GoldPhase = {
   id?: string; depends_on?: string[]; activate_on?: string; price_anchor_phase_id?: string; cancel_group?: string;
-  trigger_type: string; direction: string; pct?: number; price?: number; window_minutes?: number;
+  trigger_type: string; direction: string; pct?: number; price?: number; threshold?: number; window_minutes?: number;
+  /** Indicator shape. Pinned whenever the plan states it, which is whenever it differs from the
+   *  schema default — a plan transcribed onto the wrong period or timeframe is the wrong plan. */
+  period?: number; timeframe?: string;
+  fast_period?: number; slow_period?: number; signal_period?: number; average_type?: string;
   side: string; sizing_kind: string; sizing_value: number;
-  order_type?: string; max_slippage_bps?: number; confirm_samples?: number;
+  order_type?: string; max_slippage_bps?: number;
   recurrence_mode: string; max_triggers?: number; cooldown_minutes?: number; reanchor?: boolean;
 };
 export type GoldMultiDsl = {
@@ -98,17 +121,20 @@ function phaseFullyMatches(gen: Record<string, unknown>, gold: GoldPhase): boole
   const action = (gen["action"] ?? {}) as Record<string, unknown>;
   const size = (action["size"] ?? {}) as Record<string, unknown>;
   const recurrence = (gen["recurrence"] ?? {}) as Record<string, unknown>;
-  const thresholdOk = gold.pct !== undefined ? Number(trigger["pct"]) === gold.pct : Number(trigger["price"]) === gold.price;
   if (String(trigger["type"] ?? "") !== gold.trigger_type) return false;
   if (String(trigger["direction"] ?? "") !== gold.direction) return false;
-  if (!thresholdOk) return false;
+  if (!triggerLevelMatches(trigger, gold)) return false;
   if (gold.window_minutes !== undefined && Number(trigger["window_minutes"]) !== gold.window_minutes) return false;
+  for (const field of ["period", "fast_period", "slow_period", "signal_period"] as const) {
+    if (gold[field] !== undefined && Number(trigger[field]) !== gold[field]) return false;
+  }
+  if (gold.timeframe !== undefined && String(trigger["timeframe"] ?? "") !== gold.timeframe) return false;
+  if (gold.average_type !== undefined && String(trigger["average_type"] ?? "") !== gold.average_type) return false;
   if (String(action["side"] ?? "") !== gold.side) return false;
   if (String(size["type"] ?? size["kind"] ?? "") !== gold.sizing_kind) return false;
   if (Number(size["value"] ?? 0) !== gold.sizing_value) return false;
   if (gold.order_type !== undefined && String(action["order_type"] ?? "") !== gold.order_type) return false;
   if (gold.max_slippage_bps !== undefined && Number(action["max_slippage_bps"]) !== gold.max_slippage_bps) return false;
-  if (gold.confirm_samples !== undefined && Number(trigger["confirm_samples"]) !== gold.confirm_samples) return false;
   if (String(recurrence["mode"] ?? "") !== gold.recurrence_mode) return false;
   if (gold.max_triggers !== undefined && Number(recurrence["max_triggers"]) !== gold.max_triggers) return false;
   if (gold.cooldown_minutes !== undefined && Number(recurrence["cooldown_minutes"]) !== gold.cooldown_minutes) return false;
@@ -222,35 +248,51 @@ function parseCalls(text: string): GenCall[] {
     .map((c) => ({ tool: String(c["tool"]), input: (c["input"] && typeof c["input"] === "object" ? c["input"] : {}) as Record<string, unknown> }));
 }
 
-let cachedAllowedTools: string | null = null;
+let cachedToolSpecs: LlmToolSpec[] | null = null;
 let cachedRenderer: PromptRenderer | null = null;
 let cachedRouter: ModelRouter | null = null;
 
-function ensureWiring(): { allowedTools: string; renderer: PromptRenderer; router: ModelRouter } {
-  if (!cachedAllowedTools || !cachedRenderer || !cachedRouter) {
+function ensureWiring(): { toolSpecs: LlmToolSpec[]; renderer: PromptRenderer; router: ModelRouter } {
+  if (!cachedToolSpecs || !cachedRenderer || !cachedRouter) {
     const registry = new McpToolRegistry();
     registerAllTools(registry);
     const tradingDefs = registry.list().filter((t) => (TRADING_OPERATIONS_TOOLS as readonly string[]).includes(t.name));
-    cachedAllowedTools = formatAllowedTools(tradingDefs);
+    // The same native specs the dispatched agent receives (`buildLoopToolSpecs`, subagent.ts), which
+    // is the only channel carrying create_strategy's argument schema. Rendering the tools as prompt
+    // text instead measured a protocol the agent stopped using when it moved to native tool calls —
+    // and since the prompt has no {{allowedTools}} slot, that text reached the model nowhere at all,
+    // which is why every case scored zero.
+    cachedToolSpecs = buildLoopToolSpecs(tradingDefs);
     cachedRenderer = new PromptRenderer();
     // Reuse the app's provider resolution so ① runs on the SAME provider the agent
     // actually uses (Vertex service-account when configured, else API key / Anthropic).
     cachedRouter = new ModelRouter(resolveLlmProvider());
   }
-  return { allowedTools: cachedAllowedTools, renderer: cachedRenderer, router: cachedRouter };
+  return { toolSpecs: cachedToolSpecs, renderer: cachedRenderer, router: cachedRouter };
 }
 
+/**
+ * One transcription round: the task text carries a plan whose every parameter is already decided,
+ * exactly as the strategy-design skill hands it over, and the agent's job is to render it as
+ * create_strategy arguments. This is the step trading_operations actually owns in production — it
+ * has no market tools and makes no choices — so it is the step worth scoring.
+ */
 export async function generateStrategyCall(input: string): Promise<GenCall | null> {
-  const { allowedTools, renderer, router } = ensureWiring();
+  const { toolSpecs, renderer, router } = ensureWiring();
   const { system, prompt } = renderer.render(tradingOperationsSubagentPrompt, {
-    allowedTools,
     task: input,
     progress: "(nothing yet)",
+    stepBudget: "",
   });
   const res = await router.generate(
     [{ role: "system", content: system }, { role: "user", content: prompt }],
-    { modelClass: "MEDIUM", temperature: 0, metadata: { mode: "subagent", agent: "trading_operations" } },
+    { modelClass: "MEDIUM", temperature: 0, metadata: { mode: "subagent", agent: "trading_operations" },
+      tools: toolSpecs },
   );
-  const calls = parseCalls(res.text);
-  return calls[0] ?? null;
+  // `finish` is how the agent reports a task it will not act on; it is not a strategy call.
+  const call = (res.toolCalls ?? []).find((candidate) => candidate.name !== "finish");
+  if (call) return { tool: call.name, input: call.input as Record<string, unknown> };
+  // Providers without native tool calling still answer in text; read it the old way rather than
+  // scoring a real answer as no answer.
+  return parseCalls(res.text)[0] ?? null;
 }

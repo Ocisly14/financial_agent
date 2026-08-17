@@ -1,4 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+    panViewport,
+    resolveViewport,
+    zoomViewport,
+    type CandleViewport,
+} from "@/lib/candleViewport";
 import { DEFAULT_CANDLE_THEME, type CandleTheme } from "./candleTheme";
 
 export { DEFAULT_CANDLE_THEME, type CandleTheme } from "./candleTheme";
@@ -71,7 +77,7 @@ function fmtClock(ms: number): string {
 }
 
 export function CandleScope({
-    candles,
+    candles: allCandles,
     lastPrice,
     sessionHigh,
     sessionLow,
@@ -88,12 +94,25 @@ export function CandleScope({
     const [width, setWidth] = useState(720);
     const [hover, setHover] = useState<{ x: number; y: number } | null>(null);
     const [pulse, setPulse] = useState(0);
+    /** null = the whole series, following the live edge. */
+    const [viewport, setViewport] = useState<CandleViewport | null>(null);
+    const dragRef = useRef<{ x: number; startViewport: CandleViewport | null } | null>(null);
+    // Separate from dragRef: a ref mutation does not re-render, so the cursor would never change.
+    const [dragging, setDragging] = useState(false);
+
+    // Slicing here — ahead of the price domain, the overlays and the hover readout — is what
+    // makes zoom a one-line concept: everything downstream already derives from `candles`.
+    const candles = useMemo(() => {
+        const { start, end } = resolveViewport(viewport, allCandles.length);
+        return start === 0 && end === allCandles.length ? allCandles : allCandles.slice(start, end);
+    }, [allCandles, viewport]);
 
     // gentle heartbeat so the live candle glows even when no new tick lands
     useEffect(() => {
         const id = setInterval(() => setPulse((p) => (p + 1) % 1000), 850);
         return () => clearInterval(id);
     }, []);
+
 
     useEffect(() => {
         const el = wrapRef.current;
@@ -156,6 +175,46 @@ export function CandleScope({
         return { padR, padL, padT, padB, plotW, plotH };
     }, [width, height, formatTimestamp]);
 
+    /** Where the pointer sits across the plot, 0 at the left edge and 1 at the right. */
+    const anchorRatioAt = useCallback((clientX: number, rect: DOMRect): number => {
+        const { padL, plotW } = layout;
+        return Math.min(1, Math.max(0, (clientX - rect.left - padL) / plotW));
+    }, [layout]);
+
+    /**
+     * One listener covers a mouse wheel and a Mac trackpad alike: the browser reports a pinch as
+     * a wheel event with `ctrlKey` set, and a two-finger swipe as horizontal delta. It is
+     * registered by hand because React's onWheel is passive, and a passive listener cannot stop
+     * the page from scrolling underneath the chart.
+     */
+    useEffect(() => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+
+        const onWheel = (event: WheelEvent): void => {
+            const total = allCandles.length;
+            if (total === 0) return;
+            event.preventDefault();
+
+            const horizontal = Math.abs(event.deltaX) > Math.abs(event.deltaY);
+            if (horizontal && !event.ctrlKey) {
+                const { start, end } = resolveViewport(viewport, total);
+                const perPixel = (end - start) / Math.max(1, layout.plotW);
+                setViewport((current) => panViewport(current, total, event.deltaX * perPixel));
+                return;
+            }
+
+            // Trackpad pinches arrive in far smaller increments than a wheel notch.
+            const step = event.ctrlKey ? 0.01 : 0.0015;
+            const factor = Math.exp(event.deltaY * step);
+            const anchor = anchorRatioAt(event.clientX, canvas.getBoundingClientRect());
+            setViewport((current) => zoomViewport(current, total, factor, anchor));
+        };
+
+        canvas.addEventListener("wheel", onWheel, { passive: false });
+        return () => canvas.removeEventListener("wheel", onWheel);
+    }, [allCandles.length, anchorRatioAt, layout.plotW, viewport]);
+
     const yOf = (price: number) => {
         const { padT, plotH } = layout;
         const { lo, hi } = domain;
@@ -179,7 +238,7 @@ export function CandleScope({
         const xRight = padL + plotW;
         const yBottom = padT + plotH;
 
-        const slot = plotW / Math.max(candles.length, 30);
+        const slot = viewport ? plotW / candles.length : plotW / Math.max(candles.length, 30);
         const inPlot =
             hover !== null &&
             hover.x >= padL && hover.x <= xRight &&
@@ -271,7 +330,10 @@ export function CandleScope({
         // ── candles ──
         const n = candles.length;
         if (n > 0) {
-            const slot = plotW / Math.max(n, 30);
+            // The 30-candle floor keeps a nearly-empty series from drawing a few huge blocks.
+            // Once the user has zoomed, it would instead cap how wide a candle can get — the
+            // opposite of what they asked for — so an explicit viewport opts out of it.
+            const slot = viewport ? plotW / n : plotW / Math.max(n, 30);
             const bodyW = Math.max(1.5, Math.min(slot * 0.62, 11));
             candles.forEach((c, i) => {
                 const cx = padL + slot * (i + 0.5);
@@ -397,7 +459,7 @@ export function CandleScope({
     const hovered = useMemo(() => {
         if (!hover || candles.length === 0) return null;
         const { padL, plotW } = layout;
-        const slot = plotW / Math.max(candles.length, 30);
+        const slot = viewport ? plotW / candles.length : plotW / Math.max(candles.length, 30);
         const idx = Math.floor((hover.x - padL) / slot);
         return candles[idx] ?? candles[candles.length - 1];
     }, [hover, candles, layout]);
@@ -471,12 +533,34 @@ export function CandleScope({
             )}
             <canvas
                 ref={canvasRef}
-                className="block w-full cursor-crosshair"
-                onMouseMove={(e) => {
-                    const r = e.currentTarget.getBoundingClientRect();
-                    setHover({ x: e.clientX - r.left, y: e.clientY - r.top });
+                className={dragging ? "block w-full cursor-grabbing" : "block w-full cursor-crosshair"}
+                onPointerDown={(e) => {
+                    if (e.button !== 0 || allCandles.length === 0) return;
+                    dragRef.current = { x: e.clientX, startViewport: viewport };
+                    setDragging(true);
+                    e.currentTarget.setPointerCapture(e.pointerId);
+                    setHover(null);
                 }}
-                onMouseLeave={() => setHover(null)}
+                onPointerMove={(e) => {
+                    const drag = dragRef.current;
+                    const r = e.currentTarget.getBoundingClientRect();
+                    if (!drag) {
+                        setHover({ x: e.clientX - r.left, y: e.clientY - r.top });
+                        return;
+                    }
+                    // Dragging the content right reveals older candles, so the window moves back.
+                    const { start, end } = resolveViewport(drag.startViewport, allCandles.length);
+                    const perPixel = (end - start) / Math.max(1, layout.plotW);
+                    setViewport(panViewport(drag.startViewport, allCandles.length, -(e.clientX - drag.x) * perPixel));
+                }}
+                onPointerUp={(e) => {
+                    dragRef.current = null;
+                    setDragging(false);
+                    e.currentTarget.releasePointerCapture(e.pointerId);
+                }}
+                onPointerCancel={() => { dragRef.current = null; setDragging(false); }}
+                onDoubleClick={() => setViewport(null)}
+                onMouseLeave={() => { if (!dragRef.current) setHover(null); }}
             />
         </span>
     );

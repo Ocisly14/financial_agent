@@ -43,18 +43,23 @@ export type UnificationSupplemental = { conceptQName: string; dimensionSignature
   openingBalance?: boolean; label: string; reason: string };
 export type UnificationDecision = { rows: UnifiedRowDecision[];
   excluded?: UnificationExclusion[]; supplemental?: UnificationSupplemental[] };
+export type HeldOutEntryRef = Pick<UnificationExclusion, "conceptQName" | "dimensionSignature" | "openingBalance">;
 
 /**
  * A correction to an existing decision. Findings normally touch a handful of rows out of a hundred,
  * and re-emitting the whole decision costs far more to generate than it does to describe the change —
- * so a re-run patches instead. `rows` is patched by rowId because it is the bulk; the held-out lists
- * are small enough to restate wholesale, and omitting one leaves it untouched.
+ * so a re-run patches instead. Rows are patched by rowId and held-out entries by their concept,
+ * dimension signature, and opening-balance flag. The wholesale list fields remain for compatibility.
  */
 export type UnificationPatch = {
   upsertRows?: UnifiedRowDecision[];
   deleteRowIds?: string[];
   excluded?: UnificationExclusion[];
   supplemental?: UnificationSupplemental[];
+  upsertExcluded?: UnificationExclusion[];
+  deleteExcluded?: HeldOutEntryRef[];
+  upsertSupplemental?: UnificationSupplemental[];
+  deleteSupplemental?: HeldOutEntryRef[];
 };
 
 /** Applies a patch, preserving row order: replaced rows stay put, new ones append. */
@@ -66,10 +71,26 @@ export function applyUnificationPatch(base: UnificationDecision, patch: Unificat
     .map((row) => upserts.get(row.rowId) ?? row);
   const existing = new Set(rows.map((row) => row.rowId));
   for (const row of patch.upsertRows ?? []) if (!existing.has(row.rowId) && !deleted.has(row.rowId)) rows.push(row);
+  const heldOutKey = (entry: HeldOutEntryRef) =>
+    `${entry.conceptQName}|${entry.dimensionSignature ?? ""}|${entry.openingBalance ? "opening" : "closing"}`;
+  const patchHeldOut = <T extends HeldOutEntryRef>(current: T[] | undefined, replacement: T[] | undefined,
+    upserts: T[] | undefined, deletes: HeldOutEntryRef[] | undefined): T[] | undefined => {
+    if (replacement === undefined && !upserts?.length && !deletes?.length) return current;
+    const removed = new Set((deletes ?? []).map(heldOutKey));
+    const replacements = new Map((upserts ?? []).map((entry) => [heldOutKey(entry), entry]));
+    const next = (replacement ?? current ?? []).filter((entry) => !removed.has(heldOutKey(entry)))
+      .map((entry) => replacements.get(heldOutKey(entry)) ?? entry);
+    const present = new Set(next.map(heldOutKey));
+    for (const entry of upserts ?? []) if (!removed.has(heldOutKey(entry)) && !present.has(heldOutKey(entry))) next.push(entry);
+    return next;
+  };
+  const excluded = patchHeldOut(base.excluded, patch.excluded, patch.upsertExcluded, patch.deleteExcluded);
+  const supplemental = patchHeldOut(base.supplemental, patch.supplemental,
+    patch.upsertSupplemental, patch.deleteSupplemental);
   return {
     rows,
-    ...(patch.excluded ?? base.excluded ? { excluded: patch.excluded ?? base.excluded } : {}),
-    ...(patch.supplemental ?? base.supplemental ? { supplemental: patch.supplemental ?? base.supplemental } : {}),
+    ...(excluded ? { excluded } : {}),
+    ...(supplemental ? { supplemental } : {}),
   };
 }
 
@@ -114,7 +135,10 @@ export type RestatementDifference = { conceptQName: string; dimensionSignature: 
   chosenAccession: string; chosenValue: number;
   candidates: Array<{ accession: string; value: number; contextId: string; sourceAnchor: string }> };
 
-export type UnifiedBackfillFinding = { code: "missing_fact" | "unit_mismatch" | "alternate_tag_disagreement";
+export type UnifiedBackfillFinding = { code: "missing_fact" | "unit_mismatch" | "alternate_tag_disagreement"
+  /** The line exists in an older filing for this period, but the filing that speaks for the period
+   *  folded it into another row — its value is already inside that row's restated number. */
+  | "superseded_line";
   rowId: string; periodId: string; conceptQName: string; message: string };
 
 /** Comparable identity for a unit: currency and per-share amounts differ by their currency code too. */
@@ -183,7 +207,7 @@ export function checkUnificationCompleteness(input: { inventory: readonly Invent
   }
 
   const coveringOf = (conceptQName: string, signature: string, opening: boolean, periodId: string) =>
-    (inventoryByRef.get(cellRef(conceptQName, signature, opening)) ?? []).filter((inv) => inv.periodCoverage.includes(periodId));
+    (inventoryByRef.get(cellRef(conceptQName, signature, opening)) ?? []).filter((inv) => inv.values[periodId] !== undefined);
 
   // Concepts routed away from the face statements. Both kinds answer `dangling`; only `excluded`
   // forfeits its values, so they stay separate rather than one bucket with a flag.
@@ -216,6 +240,19 @@ export function checkUnificationCompleteness(input: { inventory: readonly Invent
     }
     if (seenRowIds.has(row.rowId)) findings.push(`duplicate rowId "${row.rowId}"`);
     seenRowIds.add(row.rowId);
+    // `resolveRowComponents` deliberately drops a shared component in periods it does not cover —
+    // that is how a single row spans a re-tag. But an invented component covers *no* period, so it
+    // was previously dropped everywhere and silently became an all-null row. Check its tag family
+    // once before applying that per-period coverage filter. One known tag is enough: older tags
+    // outside the requested window may be legitimate alternates.
+    for (const component of row.components) {
+      const signature = component.dimensionSignature ?? "";
+      const opening = component.openingBalance === true;
+      const tags = componentTags(component);
+      if (!tags.some((tag) => inventoryByRef.has(cellRef(tag.conceptQName, signature, opening)))) {
+        findings.push(`row "${row.rowId}" references ${tags.map((tag) => refOf(tag.conceptQName, signature, opening)).join(" / ")}, which is not in the inventory`);
+      }
+    }
     for (const override of row.perYearOverrides ?? []) {
       if (!requested.has(override.periodId)) findings.push(`row "${row.rowId}" overrides ${override.periodId}, which is not a requested period`);
     }
@@ -258,7 +295,7 @@ export function checkUnificationCompleteness(input: { inventory: readonly Invent
   for (const inv of input.inventory) {
     const ref = cellRef(inv.conceptQName, inv.dimensionSignature, inv.openingBalance);
     if (heldOut.has(ref)) continue;
-    for (const periodId of inv.periodCoverage) {
+    for (const periodId of Object.keys(inv.values)) {
       if (!requested.has(periodId)) continue;
       if (!uses.has(`${inv.statement}|${ref}|${periodId}`)) {
         findings.push(`dangling: inventory row ${refOf(inv.conceptQName, inv.dimensionSignature, inv.openingBalance)} (${inv.statement}) is not consumed by any unified row in ${periodId}, and is not listed as excluded or supplemental`);
@@ -281,6 +318,56 @@ export function buildUnifiedStatements(input: { decision: UnificationDecision;
   const filings = [...input.filings].sort((a, b) => b.filing.filedAt.localeCompare(a.filing.filedAt));
   const orientation = buildSignOrientation(input.filings);
 
+  // Which filing speaks for a period. Defined here, not just at the roll-up check, because it also
+  // decides what may be resolved at all: see `authorityRefs` below.
+  //
+  // "Reports the period" has to mean a comparative column, not a stray fact. A closing-balance node
+  // dated at a year end doubles as the next year's opening instant, so the FY2024 10-K carries one
+  // FY2021 cash fact and would otherwise pass for an FY2021 source. A real comparative column fills
+  // most of the statement's lines, so the bar is set against the statement's own best-covered period.
+  // Authority is per statement, not per filing, because the statements of one filing reach back
+  // different distances.
+  const reportsPeriod = (stmt: PresentationExtract["statements"][number], periodId: string) => {
+    const counts = new Map<string, number>();
+    for (const node of stmt.nodes) {
+      if (node.openingBalance === true) continue;
+      for (const f of node.facts) if (f.dimensions.length === 0) counts.set(f.periodId, (counts.get(f.periodId) ?? 0) + 1);
+    }
+    const fullColumn = Math.max(0, ...counts.values());
+    return (counts.get(periodId) ?? 0) * 2 >= fullColumn;
+  };
+  const authority = new Map<string, string>();
+  const authorityStatements = new Map<string, PresentationExtract["statements"][number]>();
+  for (const extraction of filings) {
+    for (const stmt of extraction.statements) for (const periodId of periods) {
+      const key = `${stmt.statement}|${periodId}`;
+      if (!authority.has(key) && reportsPeriod(stmt, periodId)) {
+        authority.set(key, extraction.filing.accession);
+        authorityStatements.set(key, stmt);
+      }
+    }
+  }
+
+  // The lines the authority for a period actually presents in that period. A concept an issuer folds
+  // into another line does not restate to zero — it disappears, while the older filing that presented
+  // it keeps its fact forever. Resolving "newest filing carrying THIS CONCEPT" therefore keeps paying
+  // out a line the issuer has since absorbed, and the money lands twice: Tesla's FY2022 customer
+  // deposits (1,063M) survived that way while the FY2023 10-K had already restated accrued
+  // liabilities from 7,142M to 8,205M to include it. The roll-up check cannot catch it either — an
+  // absorbed line is in no calculation tree, so it is not a break, just an extra row nobody sums.
+  // A period the authority does not present the line in resolves to nothing.
+  const authorityRefs = new Map<string, Set<string>>();
+  for (const [key, stmt] of authorityStatements) {
+    const periodId = key.slice(key.indexOf("|") + 1);
+    const refs = new Set<string>();
+    for (const node of stmt.nodes) for (const f of node.facts) {
+      if (f.periodId === periodId) refs.add(cellRef(node.conceptQName, dimensionSignature(f.dimensions), node.openingBalance));
+    }
+    authorityRefs.set(key, refs);
+  }
+  /** ref|period -> the accession that superseded it, for the finding the dropped row earns. */
+  const superseded = new Map<string, string>();
+
   // cellRef|period -> candidates, newest filing first. The rollforward side is part of the key: a
   // cash statement carries its opening and closing balance under one concept, and merging them here
   // would let a closing-balance row resolve to the opening number.
@@ -288,7 +375,15 @@ export function buildUnifiedStatements(input: { decision: UnificationDecision;
   for (const extraction of filings) {
     for (const stmt of extraction.statements) for (const node of stmt.nodes) for (const payload of node.facts) {
       if (!requested.has(payload.periodId)) continue;
-      const key = `${cellRef(node.conceptQName, dimensionSignature(payload.dimensions), node.openingBalance)}|${payload.periodId}`;
+      const ref = cellRef(node.conceptQName, dimensionSignature(payload.dimensions), node.openingBalance);
+      const authorityKey = `${stmt.statement}|${payload.periodId}`;
+      const presented = authorityRefs.get(authorityKey);
+      // Absent authority means no filing presents this statement for this period; nothing to defer to.
+      if (presented !== undefined && !presented.has(ref)) {
+        superseded.set(`${ref}|${payload.periodId}`, authority.get(authorityKey)!);
+        continue;
+      }
+      const key = `${ref}|${payload.periodId}`;
       const list = index.get(key) ?? [];
       list.push({ accession: extraction.filing.accession, filedAt: extraction.filing.filedAt, value: payload.value,
         unit: payload.unit, decimals: payload.decimals, contextId: payload.contextId, sourceAnchor: payload.sourceAnchor,
@@ -317,7 +412,7 @@ export function buildUnifiedStatements(input: { decision: UnificationDecision;
     cellRef(tag, component.dimensionSignature ?? "", component.openingBalance);
   const coveredTags = (component: UnifiedComponent, periodId: string) => componentTags(component)
     .filter((tag) => (inventoryByRef.get(refOfComponent(component, tag.conceptQName)) ?? [])
-      .some((inv) => inv.periodCoverage.includes(periodId))
+      .some((inv) => inv.values[periodId] !== undefined)
       && !heldOut.has(refOfComponent(component, tag.conceptQName)));
 
   for (const row of input.decision.rows) {
@@ -337,8 +432,17 @@ export function buildUnifiedStatements(input: { decision: UnificationDecision;
         const read = tags.find((tag) => (index.get(`${refOfComponent(component, tag.conceptQName)}|${periodId}`) ?? []).length > 0);
         if (read === undefined) {
           missing = true;
-          backfillFindings.push({ code: "missing_fact", rowId: row.rowId, periodId, conceptQName: component.conceptQName,
-            message: `row ${row.rowId} points at ${tags.map((t) => t.conceptQName).join(" / ")} in ${periodId}, but no filing carries that fact` });
+          // Absorbed is not the same as never reported, and the reader needs to be told which: one
+          // says the issuer folded this line into another and the money is already in that row, the
+          // other says nobody ever tagged it. Silently dropping the value would leave a row that
+          // used to have a number looking like an extraction gap.
+          const absorbed = tags.map((tag) => superseded.get(`${refOfComponent(component, tag.conceptQName)}|${periodId}`))
+            .find((accession) => accession !== undefined);
+          backfillFindings.push(absorbed === undefined
+            ? { code: "missing_fact", rowId: row.rowId, periodId, conceptQName: component.conceptQName,
+              message: `row ${row.rowId} points at ${tags.map((t) => t.conceptQName).join(" / ")} in ${periodId}, but no filing carries that fact` }
+            : { code: "superseded_line", rowId: row.rowId, periodId, conceptQName: component.conceptQName,
+              message: `row ${row.rowId} points at ${component.conceptQName}, which an older filing presents in ${periodId} but ${absorbed} — the filing that speaks for ${periodId} — does not: the issuer folded this line into another one, whose restated value already contains it. Left empty rather than paid out twice.` });
           continue;
         }
         const concept = read.conceptQName;
@@ -495,26 +599,7 @@ export function buildUnifiedStatements(input: { decision: UnificationDecision;
   // statement, not per filing, because the statements of one filing reach back different distances —
   // and a rollforward's opening balance does not count as reporting a period, or the filing that
   // merely carries FY2021's closing cash would be treated as an FY2021 source.
-  // "Reports the period" has to mean a comparative column, not a stray fact. A closing-balance node
-  // dated at a year end doubles as the next year's opening instant, so the FY2024 10-K carries one
-  // FY2021 cash fact and would otherwise pass for an FY2021 source. A real comparative column fills
-  // most of the statement's lines, so the bar is set against the statement's own best-covered period.
-  const reportsPeriod = (stmt: PresentationExtract["statements"][number], periodId: string) => {
-    const counts = new Map<string, number>();
-    for (const node of stmt.nodes) {
-      if (node.openingBalance === true) continue;
-      for (const f of node.facts) if (f.dimensions.length === 0) counts.set(f.periodId, (counts.get(f.periodId) ?? 0) + 1);
-    }
-    const fullColumn = Math.max(0, ...counts.values());
-    return (counts.get(periodId) ?? 0) * 2 >= fullColumn;
-  };
-  const authority = new Map<string, string>();
-  for (const extraction of filings) {
-    for (const stmt of extraction.statements) for (const periodId of periods) {
-      const key = `${stmt.statement}|${periodId}`;
-      if (!authority.has(key) && reportsPeriod(stmt, periodId)) authority.set(key, extraction.filing.accession);
-    }
-  }
+  // `authority` is built above, where it also gates what may resolve at all.
 
   for (const extraction of filings) {
     const statementOfRole = new Map(extraction.statements.map((s) => [s.roleUri, s.statement]));

@@ -1,9 +1,0 @@
-{ "id": "clean-5pct-drawdown", "symbol": "AAPL", "expectedFire": true,
-  "label": "clean 5% drawdown from window high, holds",
-  "trigger": { "type": "rolling_change", "direction": "down", "pct": 5, "window_minutes": 10, "confirm_samples": 2 },
-  "candles": [
-    {"ts":0,"high":100,"low":100,"close":100},
-    {"ts":60000,"high":100,"low":100,"close":100},
-    {"ts":120000,"high":100,"low":93,"close":94},
-    {"ts":180000,"high":94,"low":92,"close":93}
-  ] }

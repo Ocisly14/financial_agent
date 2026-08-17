@@ -114,6 +114,7 @@ const derivation = await deriveWaccParameters({
   symbol, asOfDate, facts: modelStore.getRevision(modelId)!.snapshot.facts,
   lineItems: modelStore.getRevision(modelId)!.snapshot.lineItems,
   periods: modelStore.getRevision(modelId)!.snapshot.periods,
+  cells: modelStore.getRevision(modelId)!.snapshot.cells,
   deps: { dailyCloses, treasury30y: (asOf) => fetchTreasury30y(asOf) } });
 console.log(`\nDerived ${derivation.derived.length} term(s); unreachable: ${derivation.unreachable.map((u) => u.name).join(", ") || "none"}`);
 for (const entry of derivation.unreachable) console.log(`  - ${entry.name}: ${entry.reason}`);
@@ -127,7 +128,7 @@ for (const parameter of derivation.derived) {
 }
 if (derivation.cashAndEquivalents) {
   computedInputs.push({ rowId: "cash_and_equivalents_value", value: derivation.cashAndEquivalents.value,
-    provenance: { sourceType: "filing", sourceRefs: derivation.cashAndEquivalents.sourceRefs,
+    provenance: { sourceType: derivation.cashAndEquivalents.sourceType, sourceRefs: derivation.cashAndEquivalents.sourceRefs,
       asOfDate, rationale: derivation.cashAndEquivalents.rationale } });
 }
 const refreshed = service.refreshWaccSheet(modelId, committed.revision, computedInputs);

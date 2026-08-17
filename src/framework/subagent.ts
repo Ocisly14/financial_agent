@@ -68,7 +68,7 @@ function extractJsonObject(text: string): string | null {
   return null;
 }
 
-type ToolCall = { tool: string; input: JsonObject };
+type ToolCall = { id: string; tool: string; input: JsonObject };
 type SubagentStep =
   | { action: "call_tool"; calls: ToolCall[] }
   | { action: "finish"; summary: string };
@@ -79,7 +79,7 @@ function toToolCall(value: unknown): ToolCall | null {
   const tool = typeof o.tool === "string" ? o.tool.trim() : "";
   if (!tool) return null;
   const input = o.input && typeof o.input === "object" ? (o.input as JsonObject) : {};
-  return { tool, input };
+  return { id: newId("toolcall"), tool, input };
 }
 
 /**
@@ -214,35 +214,56 @@ function commonPrefixLength(current: string, previous: string): number {
   return index;
 }
 
+/** What a step has to remember for the next one: the region it sent, and where it cut it. */
+export type ProgressCache = { progress: string; cuts: readonly number[] };
+
 /**
- * `previousProgress` is the progress region as it was rendered for the step before, and it earns a
- * third breakpoint: the static prefix stops growing after step one, while the progress region holds
- * everything the run has learned — tens of thousands of characters of playbook text among them —
- * and re-sending all of it at full price every step is most of what a long dispatch costs.
+ * The progress region holds everything the run has learned — tens of thousands of characters of
+ * playbook text among them — and re-sending it at full price every step is most of what a long
+ * dispatch costs. So it is cut into blocks and the newest boundaries carry cache breakpoints.
+ *
+ * The cuts are APPEND-ONLY, and that is the load-bearing part. Cutting at a freshly computed offset
+ * every step shipped once, and it was worse than no caching at all: the block that ended at the
+ * previous step's boundary was no longer sent as its own block, nothing matched, and every step
+ * wrote a fresh full-region entry it never read back — moving 39k tokens from the 1.0x full price
+ * to the 1.25x write price. A cut, once made, therefore stays a cut; a step only adds a new one
+ * after it, and only once enough has accrued to be worth its own write.
  */
-export function splitForPromptCache(system: string, prompt: string, previousProgress?: string): LlmMessage[] {
+export function splitForPromptCache(system: string, prompt: string, previous?: ProgressCache):
+{ messages: LlmMessage[]; cuts: number[] } {
   const index = prompt.indexOf(PROGRESS_MARKER);
   if (index <= 0) {
-    return [{ role: "system", content: system, cache: true }, { role: "user", content: prompt }];
+    return { messages: [{ role: "system", content: system, cache: true }, { role: "user", content: prompt }], cuts: [] };
   }
   const head = { role: "system" as const, content: system, cache: true };
   const staticPrefix = { role: "user" as const, content: prompt.slice(0, index), cache: true };
   const progress = prompt.slice(index);
 
-  const shared = previousProgress === undefined ? 0 : commonPrefixLength(progress, previousProgress);
-  if (shared < MIN_ROLLING_CACHE_CHARS) {
-    return [head, staticPrefix, { role: "user", content: progress }];
+  const shared = previous === undefined ? 0 : commonPrefixLength(progress, previous.progress);
+  // A cut past the shared prefix names an offset whose block content has since changed, so its
+  // entry is unreachable however we slice this request — drop it rather than carry it forward.
+  const kept = (previous?.cuts ?? []).filter((cut) => cut <= shared);
+  const newest = kept[kept.length - 1] ?? 0;
+  const cuts = shared - newest >= MIN_ROLLING_CACHE_CHARS ? [...kept, shared] : [...kept];
+  if (cuts.length === 0) return { messages: [head, staticPrefix, { role: "user", content: progress }], cuts };
+
+  const blocks: LlmMessage[] = [];
+  let start = 0;
+  for (const cut of cuts) {
+    blocks.push({ role: "user", content: progress.slice(start, cut) });
+    start = cut;
   }
-  // Nothing new since the last step — a retry on identical state. Cache the whole region rather than
-  // splitting it: an empty trailing block is not a text block a provider will accept.
-  if (shared >= progress.length) {
-    return [head, staticPrefix, { role: "user", content: progress, cache: true }];
-  }
-  return [
-    head, staticPrefix,
-    { role: "user", content: progress.slice(0, shared), cache: true },
-    { role: "user", content: progress.slice(shared) },
-  ];
+  // An empty trailing block is not a text block a provider will accept, so a step whose region is
+  // byte-identical to the last one ends on its final cut instead.
+  const tail = progress.slice(start);
+  if (tail.length > 0) blocks.push({ role: "user", content: tail });
+
+  // Anthropic allows four breakpoints and system + static prefix take two. Spend the rest on the
+  // two newest cuts: the older of them is what the previous step wrote and this one reads back,
+  // the newer is what this step writes for the next.
+  const atACut = tail.length > 0 ? blocks.length - 1 : blocks.length;
+  for (let i = Math.max(0, atACut - 2); i < atACut; i += 1) blocks[i]!.cache = true;
+  return { messages: [head, staticPrefix, ...blocks], cuts };
 }
 
 /** The progress region of a rendered prompt, or undefined when it carries none. */
@@ -262,7 +283,7 @@ export function stepFromToolCalls(calls: LlmToolCall[]): SubagentStep {
   }
   const toolCalls = calls
     .filter((call) => call.name !== FINISH_TOOL.name)
-    .map((call): ToolCall => ({ tool: call.name, input: call.input }));
+    .map((call): ToolCall => ({ id: call.id ?? newId("toolcall"), tool: call.name, input: call.input }));
   return { action: "call_tool", calls: toolCalls };
 }
 
@@ -274,13 +295,31 @@ export function formatAllowedTools(tools: ToolDefinition[]): string {
   return tools.map((tool) => `- ${tool.name}: ${tool.description}${formatToolArgs(tool.inputSchema)}`).join("\n");
 }
 
+/**
+ * A tool declares failure with its `error` field, and nothing else counts.
+ *
+ * This used to also sniff the summary for "failed", "error", "missing" and friends, on the theory
+ * that a tool might report trouble in prose alone. No tool ever did — but plenty report a standing
+ * condition in a summary that succeeded, and those were reclassified as failures. The reference case
+ * is `get_financial_model`: "Loaded financial model fm_X revision 7 (draft); required DCF
+ * reconciliation checks failed." is a successful read whose last clause names what still blocks the
+ * lifecycle. Marked as an error, it was then dropped by `subagentToolOutputs` — which skips errored
+ * results — so the overview the agent had just asked for never reached its context. It read again,
+ * and again: ten identical reads in one AMZN run, ~580KB of answers discarded before delivery.
+ *
+ * Guessing was never the more reliable signal, only the more eager one.
+ */
 function normalizeToolError(output: { summary: string; error?: { code: string; message: string } }): { code: string; message: string } | undefined {
-  if (output.error) return output.error;
-  const summary = output.summary.trim();
-  if (/^(.*\bfailed\b|failed\b|.*\berror\b|error\b|missing\b|invalid\b|unable\b|no token found\b)/i.test(summary)) {
-    return { code: "tool_failed", message: summary };
-  }
-  return undefined;
+  return output.error;
+}
+
+/** Keep the provider-visible result identical to the structured evidence the next prompt renders,
+ * while retaining the native call id required by OpenAI, Anthropic, and Gemini tool protocols. */
+function nativeToolResult(call: ToolCall, toolName: string, data: unknown, isError: boolean): LlmMessage {
+  let content: string;
+  try { content = JSON.stringify(data); }
+  catch { content = JSON.stringify({ summary: "tool returned unserializable data" }); }
+  return { role: "tool", content, toolCallId: call.id, toolName, ...(isError ? { toolResultIsError: true } : {}) };
 }
 
 export type RunSubagentInput = {
@@ -290,6 +329,8 @@ export type RunSubagentInput = {
   taskId: string;
   request: TaskRequest;
   allowedTools: ToolDefinition[];
+  /** Cancels every provider request in this run when the caller's overall deadline expires. */
+  signal?: AbortSignal;
   /**
    * Tools scoped to this run, resolved before the shared registry. The DCF mapping agents need it:
    * their tools close over the model they were pinned to and the decision they have submitted so
@@ -414,15 +455,19 @@ export class SubagentRuntime {
     await maybeCompactThread(state, this.modelRouter, definition.name, threadId, input.taskId);
 
     if (definition.name === "financial_modeling" && input.request.model_id && allowed.has("get_financial_model")) {
-      await this.runToolCall(definition, input, { tool: "get_financial_model", input: { modelId: input.request.model_id } }, allowed);
+      await this.runToolCall(definition, input, { id: newId("toolcall"), tool: "get_financial_model", input: { modelId: input.request.model_id } }, allowed);
     }
 
     const maxToolSteps = definition.maxToolSteps ?? DEFAULT_MAX_TOOL_STEPS;
     let exhausted = true;
     /** Set only by the provider call below, which is the one failure that ends the loop outright. */
     let llmFailure: { code: string; message: string } | undefined;
-    /** Last step's progress region, so this step can mark how much of it held still and cache it. */
-    let previousProgress: string | undefined;
+    /** Last step's progress region and the cuts it made in it, so this step can re-send those blocks
+     *  byte-identically — which is what makes the entry the last step wrote readable now. */
+    let previousCache: ProgressCache | undefined;
+    /** The immediately preceding native tool exchange. It is appended after the rendered evidence
+     * so providers can associate a result with the call that caused it. */
+    let nativeToolTranscript: LlmMessage[] = [];
     for (let step = 1; step <= maxToolSteps; step++) {
       // Compact only completed earlier rounds before every prompt. The current
       // dispatch remains verbatim, even if it is itself large.
@@ -435,7 +480,27 @@ export class SubagentRuntime {
         modelContext: input.request.model_id
           ? `The user is currently viewing model ${input.request.model_id}. Prefer continuing it: refresh it before any mutation and keep your work in that model unless the task or evidence gives a concrete reason to select or create another model.`
           : "No existing model handle was supplied.",
-        progress: `(you are at step ${step} of your ${maxToolSteps}-step budget)\n` + (definition.name === "financial_modeling"
+        // The step counter belongs BELOW the progress region, never inside it. It changes every
+        // step, and a provider matches a cached prefix by bytes — at the head of the region it
+        // moved the divergence point to the first digit and made the rolling breakpoint unreachable.
+        // Everything that changes on every step lives here, below {{progress}} — never inside it.
+        // The live revision belongs to this slot for the same reason the step counter does: it moves
+        // whenever the agent writes, and inside the region it would split the projection at whatever
+        // offset it happened to sit. The agent still needs it (a mutation must state the revision it
+        // is based on), so it is stated here, where being volatile costs nothing.
+        stepBudget: ((): string => {
+          const budget = `(you are at step ${step} of your ${maxToolSteps}-step budget)`;
+          if (definition.name !== "financial_modeling") return budget;
+          const live = latestFinancialModelState(state.subagentToolOutputs({ thread: threadId }));
+          if (live.revision === undefined && live.model_id === undefined) return budget;
+          const stamp = [
+            ...(live.model_id === undefined ? [] : [`model ${live.model_id}`]),
+            ...(live.revision === undefined ? [] : [`revision ${live.revision}`]),
+            ...(live.lifecycle_stage === undefined ? [] : [`stage ${live.lifecycle_stage}`]),
+          ].join(", ");
+          return `[LIVE MODEL STATE] ${stamp} — this is the current revision; base your next mutation on it.\n${budget}`;
+        })(),
+        progress: (definition.name === "financial_modeling"
           // Thread scope, not task scope: continuing a thread means the agent
           // comes back to everything it has done here, not just this round.
           ? projectFinancialModelProgress(state.subagentToolOutputs({ thread: threadId }), state.subagentToolErrors({ thread: threadId }),
@@ -448,19 +513,20 @@ export class SubagentRuntime {
       // Recorded before the call, not after: a step that throws still told the next one what it sent,
       // and a retry that re-renders the same progress should read it from cache rather than re-pay.
       const progressSent = progressRegion(rendered.prompt);
+      const split = splitForPromptCache(rendered.system, rendered.prompt, previousCache);
       try {
         const completion = await this.modelRouter.generate(
-          splitForPromptCache(rendered.system, rendered.prompt, previousProgress),
+          nativeToolTranscript.length > 0 ? [...split.messages, ...nativeToolTranscript] : split.messages,
           // Built from the live set, so a skill's grant reaches the model. This is
           // the one thing that can change the cached request prefix mid-run; an
           // invoke_skill therefore costs one cache miss, and only one.
           { modelClass: definition.modelClass, temperature: 0.1, metadata: { mode: "subagent", agent: definition.name },
-            tools: buildLoopToolSpecs([...allowed.values()]) },
+            tools: buildLoopToolSpecs([...allowed.values()]), ...(input.signal ? { signal: input.signal } : {}) },
         );
         completionText = completion.text;
         completionToolCalls = completion.toolCalls;
         llmCalls++;
-        previousProgress = progressSent;
+        previousCache = progressSent === undefined ? undefined : { progress: progressSent, cuts: split.cuts };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         log.error(`[${definition.name}] LLM call failed at step ${step}`, { error: message });
@@ -546,13 +612,21 @@ export class SubagentRuntime {
       // Run this step's tool calls in parallel — they are independent (any tool
       // whose choice depends on a prior result is issued in a later iteration).
       const toolResults = await Promise.all(stepObj.calls.map((call) => this.runToolCall(definition, input, call, allowed, step)));
+      // The provider's own calls, in the order stepFromToolCalls kept them, so each replayed call
+      // can be given back its signature. Gemini 3.x rejects the whole request when a functionCall
+      // it minted comes back without one, and the args alone do not carry it.
+      const signedCalls = (completionToolCalls ?? []).filter((call) => call.name !== FINISH_TOOL.name);
+      nativeToolTranscript = [{ role: "assistant", content: completionText,
+        toolCalls: stepObj.calls.map((call, index) => ({ id: call.id, name: call.tool, input: call.input,
+          ...(signedCalls[index]?.signature ? { signature: signedCalls[index]!.signature } : {}) })) },
+      ...toolResults.map((result) => result.nativeToolResult).filter((message): message is LlmMessage => message !== undefined)];
       if (definition.name === "financial_modeling" && allowed.has("get_financial_model")) {
         const stepConflict = toolResults.some((result) => result.errorCode === "revision_conflict");
         const modelId = stepConflict
           ? latestFinancialModelState(state.subagentToolOutputs({ thread: threadId })).model_id ?? input.request.model_id
           : undefined;
         if (modelId) {
-          const refresh = await this.runToolCall(definition, input, { tool: "get_financial_model", input: { modelId } }, allowed);
+          const refresh = await this.runToolCall(definition, input, { id: newId("toolcall"), tool: "get_financial_model", input: { modelId } }, allowed);
           recoveredRevisionConflict = refresh.errorCode === undefined;
         }
       }
@@ -612,8 +686,19 @@ export class SubagentRuntime {
     // 中途已被它克服的工具报错也不该盖过 finish 总结。
     const RUNTIME_NUDGE_CODES = new Set(["financial_mutation_serialization_required", "unparseable_step", "no_action_taken",
       "user_input_must_be_solo"]);
-    const firstToolError = toolErrors.find((error) => !RUNTIME_NUDGE_CODES.has(error.code)
-      && !(recoveredRevisionConflict && error.code === "revision_conflict"));
+    // Only a fault the agent never got past ended the run. A tool error is fed back to it and
+    // normally corrected a step or two later, so the errors that count are the ones with no
+    // successful call after them — otherwise a spent step budget three steps past a corrected fault
+    // reports as "failed", carrying a message that was already stale, and a caller built to resume a
+    // pause stops instead. (AAPL: sourceType rejected at step 27, fixed and committed at 29-30,
+    // budget spent at 30 — reported as a failure, and five of six rounds never ran.)
+    const outcomes = state.subagentToolOutcomes({ task: input.taskId });
+    const lastSuccess = outcomes.reduce((latest, outcome, index) => (outcome.error ? latest : index), -1);
+    const firstToolError = outcomes.slice(lastSuccess + 1)
+      .map((outcome) => outcome.error)
+      .find((error): error is { code: string; message: string } => error !== undefined
+        && !RUNTIME_NUDGE_CODES.has(error.code)
+        && !(recoveredRevisionConflict && error.code === "revision_conflict"));
     const finished = finishSummary !== "";
     // Thread scope: this describes where the WORK stands, and the model handle
     // may well have been established in an earlier round of this thread.
@@ -664,7 +749,8 @@ export class SubagentRuntime {
     call: ToolCall,
     allowed: Map<string, ToolDefinition>,
     step?: number,
-  ): Promise<{ awaitingApproval: boolean; approvalId?: string; errorCode?: string; userInputRequest?: UserInputRequest }> {
+  ): Promise<{ awaitingApproval: boolean; approvalId?: string; errorCode?: string;
+    userInputRequest?: UserInputRequest; nativeToolResult?: LlmMessage }> {
     const { state, threadId } = input;
     const tool = allowed.get(call.tool);
     if (!tool) {
@@ -676,7 +762,8 @@ export class SubagentRuntime {
         { task_id: input.taskId, name: call.tool, error: { code: "invalid_tool", message: `"${call.tool}" is not an allowed tool — choose from the allowed list or finish.` } },
         { threadId, parent: input.taskId },
       );
-      return { awaitingApproval: false, errorCode: "invalid_tool" };
+      return { awaitingApproval: false, errorCode: "invalid_tool",
+        nativeToolResult: nativeToolResult(call, call.tool, { error: "invalid_tool", message: `"${call.tool}" is not an allowed tool — choose from the allowed list or finish.` }, true) };
     }
 
     // Ownership lives here rather than in the tool: `execute` is a pure
@@ -695,7 +782,8 @@ export class SubagentRuntime {
           { task_id: input.taskId, name: tool.name, error: { code: "skill_not_allowed", message } },
           { threadId, parent: input.taskId },
         );
-        return { awaitingApproval: false, errorCode: "skill_not_allowed" };
+        return { awaitingApproval: false, errorCode: "skill_not_allowed",
+          nativeToolResult: nativeToolResult(call, tool.name, { error: "skill_not_allowed", message }, true) };
       }
     }
 
@@ -728,7 +816,8 @@ export class SubagentRuntime {
         { tool_use_id: toolUseId, task_id: input.taskId, name: tool.name, error: { code: "tool_error", message: error instanceof Error ? error.message : String(error) } },
         { threadId, parent: useEv.event_id },
       );
-      return { awaitingApproval: false, errorCode: "tool_error" };
+      return { awaitingApproval: false, errorCode: "tool_error",
+        nativeToolResult: nativeToolResult(call, tool.name, { error: "tool_error", message: error instanceof Error ? error.message : String(error) }, true) };
     }
 
     log.info(`[${definition.name}] tool result: ${tool.name}`, { summary: output.summary });
@@ -760,14 +849,20 @@ export class SubagentRuntime {
         { approval_id: output.approval.approval_id, payload: output.approval.payload, from_thread: threadId },
         { parent: input.taskId },
       );
-      return { awaitingApproval: true, approvalId: output.approval.approval_id };
+      return { awaitingApproval: true, approvalId: output.approval.approval_id,
+        nativeToolResult: nativeToolResult(call, tool.name, output.generation_context?.data ?? { summary: output.summary }, Boolean(normalizedError)) };
     }
 
     if (output.user_input_request) {
-      return { awaitingApproval: false, userInputRequest: output.user_input_request };
+      return { awaitingApproval: false, userInputRequest: output.user_input_request,
+        nativeToolResult: nativeToolResult(call, tool.name, output.generation_context?.data ?? { summary: output.summary }, Boolean(normalizedError)) };
     }
 
-    return normalizedError ? { awaitingApproval: false, errorCode: normalizedError.code } : { awaitingApproval: false };
+    return normalizedError
+      ? { awaitingApproval: false, errorCode: normalizedError.code,
+        nativeToolResult: nativeToolResult(call, tool.name, output.generation_context?.data ?? { summary: output.summary }, true) }
+      : { awaitingApproval: false,
+        nativeToolResult: nativeToolResult(call, tool.name, output.generation_context?.data ?? { summary: output.summary }, false) };
   }
 }
 
@@ -816,6 +911,11 @@ function compactExtraction(raw: JsonObject): JsonObject {
 function projectFinancialModelData(outputs: ReturnType<SessionState["subagentToolOutputs"]>): JsonObject {
   const revisions: JsonValue[] = [];
   let active: JsonObject = {};
+  // The live revision is deliberately NOT a field of `active` — it changes on every mutation and is
+  // rendered below the progress region instead. The slice-invalidation logic still needs to know
+  // which revision the context is standing on, so it is tracked here rather than read back out of
+  // the projection. Reading it from `active` is what made the two concerns one; they are not.
+  let activeRevision: number | undefined;
   // A narrowed workbook read is evidence the agent explicitly asked for.  Unlike the overview,
   // multiple sections are meant to be read together (for example revenue plus history before a
   // forecast), so keep every distinct slice of the current revision instead of letting whichever
@@ -860,7 +960,7 @@ function projectFinancialModelData(outputs: ReturnType<SessionState["subagentToo
         const modelId = data["model_id"];
         const revision = typeof data["revision"] === "number" ? data["revision"] : undefined;
         const currentModelId = typeof active["model_id"] === "string" ? active["model_id"] : undefined;
-        const currentRevision = typeof active["revision"] === "number" ? active["revision"] : undefined;
+        const currentRevision = activeRevision;
         const changesModel = currentModelId !== undefined && currentModelId !== modelId;
         const advancesRevision = revision !== undefined && (currentRevision === undefined || revision > currentRevision);
         // Explicit historical reads must not make the current model context regress. They remain
@@ -921,19 +1021,36 @@ function projectFinancialModelData(outputs: ReturnType<SessionState["subagentToo
             evictedWorkbookSlices += 1;
           }
         }
-        active = { ...retained, model_id: modelId, ...(revision !== undefined ? { revision } : {}),
-          ...(typeof data["lifecycle_stage"] === "string" ? { lifecycle_stage: data["lifecycle_stage"] } : {}),
+        // Key order inside this object is the same caching decision as the order of the projection
+        // that holds it, and it matters more here, because this is the largest object in the
+        // projection and it is rebuilt on every model read or write.
+        //
+        // `revision` used to sit second. It advances on every mutation, so a mutation step's cache
+        // ended 40 bytes into a 28k object and the whole of it — workbook slices the agent had read
+        // many steps ago and that had not changed since — was re-billed uncached. Measured on a TSLA
+        // run: mutation steps read back 20,441 cached tokens where the steps around them read 49,058.
+        //
+        // It is no longer here at all: the one value that changes on literally every mutation is
+        // rendered into the volatile {{stepBudget}} slot, BELOW the progress region, so it cannot
+        // divide this object at any offset. Ordering alone would have been a convention held up by a
+        // test; keeping it out of the region is structural. What stays here is the big, slow-moving
+        // evidence, and the counters, which only move when the slices above them move anyway.
+        active = { ...retained,
+          ...(data["filing_insights"] !== undefined ? { filing_insights: data["filing_insights"] } : {}),
+          ...(workbookSlices.size > 0 ? { workbook_slices: [...workbookSlices.values()].map((cached) => cached.slice) } : {}),
+          ...(data["revision_history"] !== undefined ? { revision_history: data["revision_history"] } : {}),
           // model_overview is what both the read and the write answer with. Narrow reads accumulate
           // in workbook_slices for this revision; neither carries a whole workbook any more.
           ...(data["model_overview"] ? { model_overview: data["model_overview"] } : {}),
           ...(data["model_change_context"] ? { model_change_context: data["model_change_context"] } : {}),
-          ...(workbookSlices.size > 0 ? { workbook_slices: [...workbookSlices.values()].map((cached) => cached.slice) } : {}),
+          // Counters and stamps: small, and they move whenever anything above them moves.
           ...(workbookSlices.size > 0 ? { workbook_slices_context_chars: workbookSliceChars } : {}),
           ...(evictedWorkbookSlices > 0 ? { workbook_slices_evicted: evictedWorkbookSlices } : {}),
           ...(workbookSlices.size > 0 && [...workbookSlices.values()].some((cached) => cached.slice["revision"] !== revision)
             ? { workbook_slices_notice: "Slices from an earlier revision are historical context only; reread that section before using current values." } : {}),
-          ...(data["filing_insights"] !== undefined ? { filing_insights: data["filing_insights"] } : {}),
-          ...(data["revision_history"] !== undefined ? { revision_history: data["revision_history"] } : {}) };
+          model_id: modelId,
+          ...(typeof data["lifecycle_stage"] === "string" ? { lifecycle_stage: data["lifecycle_stage"] } : {}) };
+        activeRevision = revision ?? (changesModel ? undefined : currentRevision);
         captured = true;
       }
       if (captured) continue;
@@ -951,15 +1068,28 @@ function projectFinancialModelData(outputs: ReturnType<SessionState["subagentToo
   //
   // So: what never changes first, then what only ever grows at its own end, then what is rewritten
   // or windowed. It reads better this way too — the freshest state ends up nearest the question.
+  // Ordered by how likely a field is to be UNCHANGED between two consecutive steps, most likely
+  // first. Not by "static, then append-only, then rewritten" — that reading is wrong and cost real
+  // money. A provider matches a byte prefix, so an append is a divergence point exactly like a
+  // rewrite: everything below it is re-billed whether or not it changed. `revision_summaries` grows
+  // by one small entry on every mutation, and ordering it above `active_model_context` therefore
+  // re-bills the tens of thousands of tokens of workbook slices underneath it — slices that are
+  // deliberately retained across a mutation precisely so they can be read from cache.
+  //
+  // So the question to ask of each field is not "does it only grow?" but "will this step change it?",
+  // and the big, slow-moving evidence goes above the small, per-step bookkeeping.
   return {
     skill_guidance: Object.fromEntries(skillGuidance),
     skill_references: Object.fromEntries(skillReferences),
-    revision_summaries: revisions,
-    query_results: queryResults,
     ...(extraction ? { latest_extraction: extraction } : {}),
-    active_model_context: active,
-    latest_subagent_results: subagentResults.slice(-2),
+    // Untouched by a mutation step: these move only when their own tool is called.
+    query_results: queryResults,
     other_results: [...otherResults.values()],
+    latest_subagent_results: subagentResults.slice(-2),
+    // Large, and stable across a mutation up to the per-step stamps at its own end.
+    active_model_context: active,
+    // One small entry per mutation — last, so it cannot push anything above it out of the cache.
+    revision_summaries: revisions,
   };
 }
 

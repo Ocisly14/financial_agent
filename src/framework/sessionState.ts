@@ -74,6 +74,28 @@ export function parseThreadId(threadId: string): { session_id: string; agent: Ag
 }
 
 const APPROVAL_TTL_MS = 15 * 60_000;
+const ERROR_PROGRESS_DETAILS_MAX_CHARS = 6_000;
+
+/**
+ * Failed tools often return the exact refs or revision needed for a corrective
+ * call in generation_context.data. Keep that structured feedback in the
+ * subagent's next prompt, but cap it so one malformed response cannot crowd
+ * out the rest of its working memory.
+ */
+function formatToolErrorProgress(name: string, payload: JsonObject): string {
+  const error = payload.error as { code?: string; message?: string } | undefined;
+  const code = error?.code ?? "tool_error";
+  const message = error?.message ?? "";
+  const context = payload.generation_context as GenerationContext | undefined;
+  if (!context?.data) return `[${name} error(${code})] ${message}`;
+  let details: string;
+  try { details = JSON.stringify(context.data); }
+  catch { details = "[unserializable error details]"; }
+  if (details.length > ERROR_PROGRESS_DETAILS_MAX_CHARS) {
+    details = `${details.slice(0, ERROR_PROGRESS_DETAILS_MAX_CHARS)}…[truncated]`;
+  }
+  return `[${name} error(${code})] ${message} | details=${details}`;
+}
 
 /** Allowed (source, kind) pairs. Lightweight fail-fast guard against dirty events. */
 const KINDS: Record<Source, ReadonlySet<string>> = {
@@ -155,6 +177,40 @@ export function foldUserInputRequest(event: SessionEvent, events: readonly Sessi
     return { ...request, asked_by, status: "answered", answers: response.answers };
   }
   return { ...request, asked_by, status: "skipped" };
+}
+
+/** Heading for a turn the user opened by answering an `ask_user` card. */
+export const ANSWER_BLOCK_HEADING = "[ANSWERED YOUR QUESTIONS]";
+
+/**
+ * The block that opens the current turn in the prompt, heading included.
+ *
+ * The heading is part of the value rather than part of the template because it
+ * states what kind of turn this is: a request to respond to, or the user
+ * closing a question the agent itself asked. Labelling an answer as the
+ * "latest message" invited the agent to reply to its own echoed question text.
+ */
+export function formatLatestInput(userMessage: string, isAnswer: boolean): string {
+  return isAnswer
+    ? `[THE USER ANSWERED YOUR QUESTIONS — CONTINUE FROM HERE]\n${userMessage}`
+    : `[THE USER'S LATEST MESSAGE — RESPOND TO THIS]\n${userMessage}`;
+}
+
+/**
+ * A turn's opening line in the prompt.
+ *
+ * Answering a card is not the user speaking — it is a structured reply to
+ * something the agent asked, so it arrives as its own labelled block instead of
+ * as `User: …`. Rendering it as speech made the agent treat its own question
+ * text, echoed back, as a fresh request.
+ *
+ * The discriminator is `input_response`, which `beginTurn` writes on exactly
+ * these events. `researchRuntime.renderEventLine` renders the same shape, so
+ * the two runtimes' transcripts agree.
+ */
+export function formatUserMessageLine(event: SessionEvent): string {
+  const content = event.payload.content as string;
+  return event.payload.input_response ? `${ANSWER_BLOCK_HEADING}\n${content}` : `User: ${content}`;
 }
 
 /**
@@ -560,7 +616,7 @@ export class SessionState {
       const name = (e.payload.name as string) ?? "tool";
       const err = e.payload.error as { message?: string } | undefined;
       if (err) {
-        lines.push(`[${name} error] ${err.message ?? ""}`);
+        lines.push(formatToolErrorProgress(name, e.payload));
         continue;
       }
       const gc = e.payload.generation_context as GenerationContext | undefined;
@@ -617,6 +673,23 @@ export class SessionState {
       }
     }
     return notes;
+  }
+
+  /** Every tool result in order, carrying only its outcome. Reading errors and outputs as two
+   *  separate lists loses their interleaving, and the interleaving is the whole question when asking
+   *  whether a fault ended the run: an error with a successful call after it is one the agent
+   *  corrected, and only an error nothing succeeded after is what a run stopped on. */
+  subagentToolOutcomes(scope: TraceScope): { name: string; error?: { code: string; message: string } }[] {
+    const out: { name: string; error?: { code: string; message: string } }[] = [];
+    for (const e of this.trace(scope)) {
+      if (e.kind !== "tool_result") continue;
+      const err = e.payload.error as { code?: string; message?: string } | undefined;
+      const name = (e.payload.name as string) ?? "tool";
+      out.push(err
+        ? { name, error: { code: err.code ?? "tool_error", message: err.message ?? (e.payload.summary as string | undefined) ?? "Tool failed." } }
+        : { name });
+    }
+    return out;
   }
 
   subagentToolErrors(scope: TraceScope): { name: string; code: string; message: string; summary?: string; step?: number }[] {
@@ -772,7 +845,7 @@ export class SessionState {
     const priorArtifacts: ArtifactRef[] = [];
     const priorLines: string[] = [];
     for (const e of visible.filter((e) => e.turn < turn && e.turn > compactedThrough)) {
-      if (e.kind === "user_message") priorLines.push(`User: ${e.payload.content as string}`);
+      if (e.kind === "user_message") priorLines.push(formatUserMessageLine(e));
       else if (e.kind === "reply" && e.payload.final === true) priorLines.push(`You: ${e.payload.content as string}`);
       else if (e.kind === "dispatch") priorLines.push(this.formatDispatchLine(e));
       else if (e.kind === "approval_required" && this.isApprovalPendingEvent(e)) priorLines.push(this.formatApprovalRequiredLine(e));
@@ -804,7 +877,7 @@ export class SessionState {
         const name = e.payload.name as string;
         const err = e.payload.error as { message?: string } | undefined;
         if (err) {
-          progressLines.push(`[${name} error] ${err.message ?? ""}`);
+          progressLines.push(formatToolErrorProgress(name, e.payload));
         } else {
           const gc = e.payload.generation_context as GenerationContext | undefined;
           const lines = [`[${name} result] ${e.payload.summary as string}`];

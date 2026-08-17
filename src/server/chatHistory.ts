@@ -85,6 +85,11 @@ export function projectChatHistory(events: readonly SessionEvent[]): ChatHistory
   for (const event of events) {
     const createdAt = Date.parse(event.timestamp);
     if (event.kind === "user_message") {
+      // A turn opened by answering an `ask_user` card is not something the user
+      // said, and the card already shows what was chosen. Rendering it as a
+      // bubble duplicated the card in prose. The event still exists — it opens
+      // the turn and `foldUserInputRequest` reads it — it just isn't a message.
+      if (event.payload.input_response) continue;
       const origin = event.payload.origin as ChatHistoryMessage["origin"] | undefined;
       messages.push({
         id: event.event_id,

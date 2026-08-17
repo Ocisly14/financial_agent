@@ -700,16 +700,29 @@ function normalizeReconciliationResult(value: unknown, path: string): Reconcilia
     "residual", "difference", "tolerance", "refs", "parentLineItemId",
   ] as const;
   const object = kind === "category"
-    ? exactObject(value, path, [...sharedFields, "category", "reviewDecisionId"], ["unifiedTrail"])
-    : exactObject(value, path, [...sharedFields, "identity"], ["unifiedTrail"]);
+    ? exactObject(value, path, [...sharedFields, "category", "reviewDecisionId"], ["unifiedTrail", "skipReason"])
+    : exactObject(value, path, [...sharedFields, "identity"], ["unifiedTrail", "skipReason"]);
   const unifiedTrail = hasOwn(object, "unifiedTrail")
     ? array(object.unifiedTrail, `${path}.unifiedTrail`, (entry, entryPath) => {
-      const step = exactObject(entry, entryPath, ["lineItemId", "rowIds"]);
+      const step = exactObject(entry, entryPath, ["lineItemId", "rowIds"], ["absent"]);
       return {
         lineItemId: nonemptyString(step.lineItemId, `${entryPath}.lineItemId`),
         rowIds: stringArray(step.rowIds, `${entryPath}.rowIds`),
+        ...(hasOwn(step, "absent")
+          ? { absent: enumValue(step.absent, `${entryPath}.absent`, ["superseded", "derived", "unmapped"]) }
+          : {}),
       };
     })
+    : undefined;
+  const skipReason = hasOwn(object, "skipReason")
+    ? (() => {
+      const reason = exactObject(object.skipReason, `${path}.skipReason`, ["kind", "refs"]);
+      return {
+        kind: enumValue(reason.kind, `${path}.skipReason.kind`,
+          ["unit_mismatch", "missing_line_item", "no_prior_period", "missing_values"]),
+        refs: stringArray(reason.refs, `${path}.skipReason.refs`),
+      };
+    })()
     : undefined;
   const common = {
     ruleId: nonemptyString(object.ruleId, `${path}.ruleId`),
@@ -728,6 +741,7 @@ function normalizeReconciliationResult(value: unknown, path: string): Reconcilia
     refs: stringArray(object.refs, `${path}.refs`),
     parentLineItemId: nonemptyString(object.parentLineItemId, `${path}.parentLineItemId`),
     ...(unifiedTrail === undefined ? {} : { unifiedTrail }),
+    ...(skipReason === undefined ? {} : { skipReason }),
   };
   if (kind === "category") {
     return {

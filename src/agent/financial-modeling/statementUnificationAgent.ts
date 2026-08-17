@@ -65,6 +65,8 @@ export async function runStatementUnificationAgent(input: {
   task: string;
   /** From createStatementUnificationTools: the read side, pinned to this run's model. */
   readTools: RegisteredTool[];
+  /** Optional overall deadline, propagated to every LLM request made by the subagent. */
+  signal?: AbortSignal;
   filings: readonly PresentationExtract[];
   requestedPeriods: readonly Period[];
   tables?: readonly FilingTable[];
@@ -84,11 +86,22 @@ export async function runStatementUnificationAgent(input: {
     sessionId: input.sessionId, agentId: input.agentId, taskId, threadId, state: input.state,
     request: { agent: "statement_unification", task: input.task },
     allowedTools: runTools.map(({ execute: _execute, ...definition }) => definition),
+    ...(input.signal ? { signal: input.signal } : {}),
     toolRegistry: registry,
   });
 
   const delivered = delivery.delivered();
   if (!delivered) {
+    if (input.signal?.aborted) {
+      const reason = input.signal.reason instanceof Error ? input.signal.reason.message : "deadline expired";
+      throw new Error(`statement_unification timed out: ${reason}`);
+    }
+    const lastEvaluation = delivery.lastEvaluation();
+    if (lastEvaluation) {
+      // A dirty candidate is useful only to the agent while it is correcting it. Letting it escape
+      // would make downstream mapping reason over data the unification checks already rejected.
+      throw new Error(`statement_unification finished with ${lastEvaluation.findings.length} unresolved finding(s); no unified statements were committed: ${lastEvaluation.findings.slice(0, 3).join("; ")}`);
+    }
     // Nothing was submitted: there is no partial artifact to salvage, and shipping an empty one would
     // read downstream as "this issuer has no statements" rather than "the agent never delivered".
     throw new Error(`statement_unification finished without submitting a decision: ${input.task}`);

@@ -1,22 +1,20 @@
-import { getSnapshotCached } from "../data/stock/alpacaClient.ts";
+import { getRealtimeFeed } from "../data/stock/realtime/sharedFeed.ts";
 import { getSharedBarRepository } from "../data/stock/sharedRepository.ts";
 import type { OhlcSample } from "../../mcp_tools/trading/strategy/priceTrigger.ts";
 import type { PriceTrigger } from "../../mcp_tools/trading/strategy/priceTrigger.ts";
 import { loadTechnicalBars } from "../../mcp_tools/technical/stockTechnicalData.ts";
 
-/** Latest stock price for strategy validation and monitoring. */
+/**
+ * Latest stock price for strategy validation and monitoring.
+ *
+ * Prefers the realtime stream, which answers from memory without touching the network. Falls
+ * back to the REST snapshot whenever the stream has nothing trustworthy — no subscription slot,
+ * a degraded connection, or a quote too old to act on.
+ */
 export async function fetchStockStrategyPrice(symbol: string): Promise<number> {
   const normalized = symbol.trim().toUpperCase();
-  const snapshot = await getSnapshotCached(normalized, Date.now());
-  if (
-    snapshot.bidPrice !== null &&
-    snapshot.askPrice !== null &&
-    snapshot.bidPrice > 0 &&
-    snapshot.askPrice > 0
-  ) {
-    return (snapshot.bidPrice + snapshot.askPrice) / 2;
-  }
-  if (snapshot.price !== null && snapshot.price > 0) return snapshot.price;
+  const price = await getRealtimeFeed().latestPrice(normalized, Date.now());
+  if (price > 0) return price;
   throw new Error(`No current stock price is available for ${normalized}.`);
 }
 

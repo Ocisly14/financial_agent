@@ -38,10 +38,14 @@ code between and after them. Neither agent ever touches a number.
 
 ## 2. Stage Ⓐ: `statement_unification` (new DCF subagent)
 
-Input: the concept inventory plus the requested periods. `conceptInventory.ts` is extended: besides
-the single `sampleValue`, each row carries **per-year sign samples** (the sign of one resolved value
-per covered period, after the deterministic sign normalization of §3), so the agent can see a
-sign-inconsistent series directly instead of inferring it from one sample. Output
+Input: the concept inventory plus the requested periods. `conceptInventory.ts` is extended: each row
+carries its **resolved value per covered period** (`values`, after the deterministic sign
+normalization of §3), so the agent sees the whole series rather than inferring it from one sample.
+
+This supersedes the earlier `sampleValue` + per-year signs pairing, which cost more bytes than the
+values do (85 rows of MSFT: 18.5k chars of signs and samples vs 10k of values) while hiding scale —
+a line that is zero in its newest tagged year and billions in an earlier one read as dead legacy,
+and MSFT's FY2024 commercial paper was demoted to supplemental on exactly that reading. Output
 (schema-validated):
 
 ```jsonc

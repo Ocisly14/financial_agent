@@ -3,7 +3,6 @@ import test from "node:test";
 import { parseFormula } from "../dsl/parser.ts";
 import { evaluate, ENGINE_VERSION } from "../engine.ts";
 import { FinancialModelError } from "../errors.ts";
-import { installDefaultMetrics } from "../metrics.ts";
 import type { FinancialModelSnapshot } from "../operations.ts";
 import { addSourceStatementRows, createSkeleton } from "../skeleton.ts";
 import type { ModelView, Revision, RevisionHeader } from "../store.ts";
@@ -34,7 +33,6 @@ function snapshot(mapped = false): FinancialModelSnapshot {
     value: 100, unit: { kind: "currency", code: "USD" },
     provenance: { sourceType: "unified_statements", sourceRefs: ["unified.revenue.total"], asOfDate: "2025-01-01" },
   }] satisfies Fact[] : [];
-  skeleton = installDefaultMetrics(skeleton, periods);
   if (mapped) {
     skeleton.lineItems = skeleton.lineItems.map((item) => item.id === "revenue.total"
       ? { ...item, historical: "actual" as const }
@@ -184,6 +182,25 @@ test("workbook slices validate selectors, preserve order, and do not mutate snap
     /fcff \(role fcff\)/);
   assert.throws(() => buildWorkbookSlice("m", 1, model, { lineItemIds: ["fcff"], periodIds: ["FY2025"],
     periodClass: "actual" }), /FY2025 \(forecast\)/);
+});
+
+/**
+ * `history` is a structural section — a group of rows — but it reads like a time range, and an agent
+ * that wants one row's historical numbers reaches for it by name. That collision cost ten identical
+ * rejections in a single AMZN run: the error said which section the row was in, which is true and
+ * useless, because the agent did not want a section at all. Name the trap where it is hit.
+ */
+test("asking for a named row under section history is told that section is structural, not temporal", () => {
+  const model = snapshot(true);
+
+  assert.throws(() => buildWorkbookSlice("m", 1, model, { lineItemIds: ["revenue.total"], section: "history" }),
+    (error: unknown) => {
+      assert.ok(error instanceof FinancialModelError && error.code === "invalid_model_query");
+      assert.match(error.message, /revenue\.total \(section revenue\)/, "still says where the row actually lives");
+      assert.match(error.message, /not a time range|periodClass/,
+        "and points at the filter that does select history");
+      return true;
+    });
 });
 
 test("selectors fully intersect exact cells, row filters, period filters, and preserve coordinate order", () => {
