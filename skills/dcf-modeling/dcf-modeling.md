@@ -18,7 +18,9 @@ Build the valuation from first principles in this order:
 
 Every forecast, WACC and terminal assumption must therefore say: which company-specific historical fact it anchors on; what future industry or company development changes or preserves it; and why the generic reference does not override that causal case.
 
-The work runs in six stages. This is only the map — **each stage has a detailed playbook you fetch with read_skill_reference (skill: `dcf-modeling`) when you are about to do it**, and a formula toolbox shared by all of them. Read a stage's playbook before its first tool call, not all of them upfront: they are written to be read at the moment of use.
+The work runs in six stages. This is only the map. **Reading a stage's playbook is a precondition for acting in that stage, not a suggestion**: fetch it with read_skill_reference (skill: `dcf-modeling`) before that stage's first tool call. A stage entered without its playbook is a stage you are improvising, and a revision written there is not undone by reading it afterwards.
+
+Read them one at a time, at the moment of use. That is guidance about *when*, never about *whether* — pulling all six upfront wastes context, skipping one saves nothing and costs the run.
 
 | stage | you are about to… | read first |
 | --- | --- | --- |

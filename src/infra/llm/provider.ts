@@ -37,6 +37,11 @@ export type LlmToolCall = {
   id?: string;
   name: string;
   input: JsonObject;
+  /** Opaque provider token that must be handed back verbatim with this call on later turns.
+   *  Gemini 3.x mints a `thoughtSignature` per function call and rejects (400) any subsequent
+   *  request whose functionCall parts lack it, so the loop has to carry it, not just the args.
+   *  Providers that mint no such token leave it unset and it never reaches the wire. */
+  signature?: string;
 };
 
 export type GenerateOptions = {

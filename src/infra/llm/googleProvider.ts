@@ -9,7 +9,10 @@ const MODEL_MAP = resolveModelMap({
 }, ["GOOGLE"]);
 
 type GeminiPart = { text?: string; functionCall?: { id?: string; name: string; args?: JsonObject };
-  functionResponse?: { id?: string; name: string; response: JsonObject } };
+  functionResponse?: { id?: string; name: string; response: JsonObject };
+  // Gemini 3.x returns an opaque signature alongside each functionCall and requires it back,
+  // verbatim, on every later turn that replays the call. See LlmToolCall.signature.
+  thoughtSignature?: string };
 type GeminiContent = { role: "user" | "model"; parts: GeminiPart[] };
 
 type GeminiResponse = {
@@ -17,7 +20,11 @@ type GeminiResponse = {
     content?: { parts?: GeminiPart[]; role?: string };
     finishReason?: string;
   }>;
-  usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
+  // Gemini reports the implicit-cache hit inside promptTokenCount, so the uncached remainder this
+  // codebase calls tokens_in is promptTokenCount MINUS cachedContentTokenCount. Reporting the whole
+  // prompt as tokens_in would hide every cache hit the run gets. Implicit caching has no write fee —
+  // only an explicit cachedContents resource is billed for storage — so cache_write stays 0.
+  usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; cachedContentTokenCount?: number };
 };
 
 function toolResponse(content: string, isError = false): JsonObject {
@@ -30,6 +37,43 @@ function toolResponse(content: string, isError = false): JsonObject {
   } catch {
     return isError ? { error: content } : { result: content };
   }
+}
+
+// The Generative Language API takes an OpenAPI-subset Schema, not full JSON Schema, and rejects the
+// whole request (400 INVALID_ARGUMENT, "Unknown name") on any field outside that subset rather than
+// ignoring it. Zod emits `additionalProperties: false` on every object, so an untouched tool schema
+// fails before the model is ever reached. The Vertex path never hit this because the AI SDK's
+// `jsonSchema()` strips it there.
+// The 3.x flash/pro ceiling is 65536; DeepSeek here asks for 64000 on the same reasoning.
+const MAX_OUTPUT_TOKENS = Number(process.env["GOOGLE_MAX_OUTPUT_TOKENS"] || 64_000);
+
+// 429 (rate limited) and 5xx (overloaded / transient) are the server declining to answer right now.
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+const MAX_RETRIES = Number(process.env["GOOGLE_MAX_RETRIES"] || 4);
+const RETRY_BASE_MS = 1_000;
+
+const UNSUPPORTED_SCHEMA_KEYS = new Set(["additionalProperties", "$schema"]);
+
+// `oneOf` is the worse case: the subset knows `anyOf` and simply DROPS `oneOf`, with no error at all.
+// A discriminated union then reaches the model as "an object, contents unknown", and it invents field
+// names to fill the hole. Measured directly against gemini-3.7-flash with this repo's own operations
+// schema: under `oneOf` it produced {startPeriod, endPeriod, expression} — none of which exist — and
+// with the identical schema under `anyOf` it produced {lineItemId, appliesTo, source, periodIds},
+// correct on the first try. Every field description inside a variant is dropped with it, which is how
+// an AMZN run spent 7 of its 30 steps guessing shapes and then wrote its terminal exit multiple as a
+// bare constant through set_formula — the one operation whose shape it had finally learned.
+//
+// The two keywords differ only when more than one variant matches. These unions are discriminated by
+// a `kind` enum, so exactly one ever matches and the rename is lossless.
+export function toGeminiSchema<T>(schema: T): T {
+  if (Array.isArray(schema)) return schema.map(toGeminiSchema) as T;
+  if (schema === null || typeof schema !== "object") return schema;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(schema)) {
+    if (UNSUPPORTED_SCHEMA_KEYS.has(key)) continue;
+    out[key === "oneOf" ? "anyOf" : key] = toGeminiSchema(value);
+  }
+  return out as T;
 }
 
 /**
@@ -63,9 +107,10 @@ export class GoogleProvider implements LlmProvider {
           name: m.toolName ?? "tool", response: toolResponse(m.content, m.toolResultIsError) } }]
         : [
           ...(m.content === "" ? [] : [{ text: m.content }]),
-          ...(m.toolCalls ?? []).map((call, index) => ({ functionCall: {
-            ...(call.id ? { id: call.id } : {}), name: call.name, args: call.input,
-          } })),
+          ...(m.toolCalls ?? []).map((call) => ({
+            functionCall: { ...(call.id ? { id: call.id } : {}), name: call.name, args: call.input },
+            ...(call.signature ? { thoughtSignature: call.signature } : {}),
+          })),
         ];
       if (parts.length === 0) continue;
       const last = contents[contents.length - 1];
@@ -81,13 +126,17 @@ export class GoogleProvider implements LlmProvider {
       // the model's reasoning and collapses planning into reflexive repeat calls.
       ...(options.tools?.length
         ? {
-          tools: [{ functionDeclarations: options.tools.map((t) => ({ name: t.name, description: t.description, parameters: t.inputSchema })) }],
+          tools: [{ functionDeclarations: options.tools.map((t) => ({ name: t.name, description: t.description, parameters: toGeminiSchema(t.inputSchema) })) }],
           toolConfig: { functionCallingConfig: { mode: "AUTO" } },
         }
         : {}),
       generationConfig: {
         temperature: options.temperature ?? 0.2,
-        maxOutputTokens: 4096,
+        // 4096 truncated this agent's real steps: a batched patch call plus 3.x thinking tokens,
+        // which count against the same budget, exceeded it mid-call. The step came back as prose,
+        // the loop nudged it to act, and it truncated again — 8 wasted steps at 41k input each in
+        // one TSLA run. Match the other providers: ask for the model's own ceiling.
+        maxOutputTokens: MAX_OUTPUT_TOKENS,
       },
     };
 
@@ -96,21 +145,37 @@ export class GoogleProvider implements LlmProvider {
     const query = streaming ? "?alt=sse&key=" : "?key=";
     const url = `${this.baseUrl}/v1beta/models/${model}:${method}${query}${this.apiKey}`;
 
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      ...(options.signal ? { signal: options.signal } : {}),
-    });
-
-    if (!response.ok) {
+    // A dispatch is one long thread: the loop has no way to resume a step, so an error here throws
+    // away every step before it. A single 503 "high demand" at step 21 of a TSLA run discarded four
+    // minutes and 1.3M input tokens of committed work. Retry the errors that are the server saying
+    // "not now" — never a 4xx, which would fail identically however many times it is sent.
+    let response: Response | undefined;
+    for (let attempt = 0; ; attempt += 1) {
+      response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
+      if (response.ok) break;
       const err = await response.text();
-      throw new Error(`Google API error ${response.status}: ${err}`);
+      if (!RETRYABLE_STATUS.has(response.status) || attempt >= MAX_RETRIES) {
+        throw new Error(`Google API error ${response.status}: ${err}`);
+      }
+      // Exponential backoff with jitter, so several agents that hit the same spike do not all
+      // come back at the same instant and recreate it.
+      const delay = Math.round(RETRY_BASE_MS * 2 ** attempt * (1 + Math.random()));
+      await new Promise((resolveDelay, rejectDelay) => {
+        const timer = setTimeout(resolveDelay, delay);
+        options.signal?.addEventListener("abort", () => { clearTimeout(timer); rejectDelay(new Error("aborted")); },
+          { once: true });
+      });
     }
 
     let text = "";
     let tokensIn = 0;
     let tokensOut = 0;
+    let cacheRead = 0;
     const toolCalls: LlmToolCall[] = [];
 
     if (streaming && response.body) {
@@ -138,11 +203,13 @@ export class GoogleProvider implements LlmProvider {
             }
             for (const part of parts) {
               if (part.functionCall) toolCalls.push({ ...(part.functionCall.id ? { id: part.functionCall.id } : {}),
-                name: part.functionCall.name, input: part.functionCall.args ?? {} });
+                name: part.functionCall.name, input: part.functionCall.args ?? {},
+                ...(part.thoughtSignature ? { signature: part.thoughtSignature } : {}) });
             }
             if (event.usageMetadata) {
               tokensIn = event.usageMetadata.promptTokenCount ?? tokensIn;
               tokensOut = event.usageMetadata.candidatesTokenCount ?? tokensOut;
+              cacheRead = event.usageMetadata.cachedContentTokenCount ?? cacheRead;
             }
           } catch {
             // skip malformed SSE lines
@@ -155,18 +222,22 @@ export class GoogleProvider implements LlmProvider {
       text = parts.map((p) => p.text ?? "").join("");
       for (const part of parts) {
         if (part.functionCall) toolCalls.push({ ...(part.functionCall.id ? { id: part.functionCall.id } : {}),
-          name: part.functionCall.name, input: part.functionCall.args ?? {} });
+          name: part.functionCall.name, input: part.functionCall.args ?? {},
+          ...(part.thoughtSignature ? { signature: part.thoughtSignature } : {}) });
       }
       tokensIn = json.usageMetadata?.promptTokenCount ?? 0;
       tokensOut = json.usageMetadata?.candidatesTokenCount ?? 0;
+      cacheRead = json.usageMetadata?.cachedContentTokenCount ?? 0;
     }
 
     return {
       text,
       ...(toolCalls.length > 0 ? { toolCalls } : {}),
       metrics: {
-        tokens_in: tokensIn,
+        tokens_in: Math.max(0, tokensIn - cacheRead),
         tokens_out: tokensOut,
+        cache_read: cacheRead,
+        cache_write: 0,
         ms: Date.now() - start,
         model_class: options.modelClass,
         provider: this.name,

@@ -29,7 +29,10 @@ type StreamChunk = {
     delta?: { content?: string; tool_calls?: ToolCallDelta[] };
     finish_reason?: string | null;
   }>;
-  usage?: { prompt_tokens?: number; completion_tokens?: number };
+  // DeepSeek splits the prompt into what its server-side cache served and what it had to read:
+  // prompt_tokens = prompt_cache_hit_tokens + prompt_cache_miss_tokens. There is no write tier.
+  usage?: { prompt_tokens?: number; completion_tokens?: number;
+    prompt_cache_hit_tokens?: number; prompt_cache_miss_tokens?: number };
 };
 
 /**
@@ -131,6 +134,7 @@ export class DeepSeekProvider implements LlmProvider {
     let text = "";
     let tokensIn = 0;
     let tokensOut = 0;
+    let cacheRead: number | undefined;
     let finishReason = "?";
     let droppedFrames = 0;
     // Arguments stream as fragments keyed by the call's position in the reply; the
@@ -170,7 +174,14 @@ export class DeepSeekProvider implements LlmProvider {
           }
           if (choice?.finish_reason) finishReason = choice.finish_reason;
           if (chunk.usage) {
-            tokensIn = chunk.usage.prompt_tokens ?? tokensIn;
+            // `tokens_in` is the uncached remainder by contract (see LlmMetrics), so the miss count
+            // is what belongs there; the hit count is the cache read. Without those fields the whole
+            // prompt is the only honest answer, and cacheRead stays undefined — "nobody said" rather
+            // than "nothing was cached", which is what kept cache_read_write_ratio null on every run.
+            const hit = chunk.usage.prompt_cache_hit_tokens;
+            const miss = chunk.usage.prompt_cache_miss_tokens;
+            tokensIn = (hit === undefined ? undefined : miss) ?? chunk.usage.prompt_tokens ?? tokensIn;
+            if (hit !== undefined) cacheRead = hit;
             tokensOut = chunk.usage.completion_tokens ?? tokensOut;
           }
         } catch {
@@ -207,6 +218,7 @@ export class DeepSeekProvider implements LlmProvider {
       ...(toolCalls.length > 0 ? { toolCalls } : {}),
       metrics: {
         tokens_in: tokensIn,
+        ...(cacheRead === undefined ? {} : { cache_read: cacheRead }),
         tokens_out: tokensOut,
         ms: Date.now() - start,
         model_class: options.modelClass,

@@ -8,6 +8,7 @@ import { WACC_SHEET_ROW_IDS } from "../../src/financial-model/waccSheet.ts";
 const string = (description?: string): JsonSchema => ({ type: "string", ...(description ? { description } : {}) });
 const number: JsonSchema = { type: "number" };
 const strings: JsonSchema = { type: "array", items: string() };
+const stringsWith = (description: string): JsonSchema => ({ type: "array", items: string(), description });
 const object = (properties: Record<string, JsonSchema>, required: string[] = []): JsonSchema =>
   ({ type: "object", properties, required, additionalProperties: false });
 const array = (items: JsonSchema): JsonSchema => ({ type: "array", items });
@@ -35,16 +36,40 @@ const fact = object({ factId: string(), status: { type: "string", enum: ["staged
 ["factId", "status", "periodId", "value", "unit", "provenance"]);
 const decision = (actions: string[]) => object({ decisionId: string(), factId: string(), action: { type: "string", enum: actions }, mappedLineItemId: string(),
   replacementFactId: string(), rationale: string(), reviewedBy: string(), reviewedAt: HOST_STAMPED }, ["decisionId", "factId", "action", "rationale", "reviewedBy"]);
-const assumption = object({ assumptionId: string(), lineItemId: string(), periods: strings,
-  payload: { type: "object", oneOf: [object({ kind: { type: "string", enum: ["values"] }, values: array(number), unit: unitSchema }, ["kind", "values", "unit"]),
-    object({ kind: { type: "string", enum: ["not_applicable"] } }, ["kind"])] },
+const assumption = object({ assumptionId: string("Your id for this assumption; writing the same id again replaces it."),
+  lineItemId: string("The row this assumption fills. Its range must already be assumption-sourced or "
+    + "still empty — a range carrying facts or a formula is refused, so re-source it in the same batch."),
+  periods: stringsWith("Period ids this assumption covers. Non-empty, no duplicates."),
+  payload: { type: "object",
+    description: "`values` carries either ONE value applied to every period in `periods`, or exactly "
+      + "one per period — any other length is refused, and so is a unit incompatible with the row's own "
+      + "(`growth.*`, `margin.*` and `tax_rate` rows are percent; `ratio.*` rows are ratio, and a percent "
+      + "payload on a ratio row rejects the whole batch). `not_applicable` states the row has no value here.",
+    oneOf: [object({ kind: { type: "string", enum: ["values"] }, values: array(number), unit: unitSchema }, ["kind", "values", "unit"]),
+      object({ kind: { type: "string", enum: ["not_applicable"] } }, ["kind"])] },
   sourceType: { type: "string", enum: ["user", "management_guidance", "company_disclosure", "consensus", "macro_research", "industry_research", "analyst_inference"] },
   sourceRefs: strings, asOfDate: string(), rationale: string() },
   ["assumptionId", "lineItemId", "periods", "payload", "sourceType", "sourceRefs", "asOfDate", "rationale"]);
-// periodIds is required here because validateFormula refuses a formula without it: leaving it
-// optional made the schema promise something the engine then rejected.
-const formula = object({ lineItemId: string(), appliesTo: { type: "string", enum: ["historical", "forecast"] }, source: string(), periodIds: strings },
-  ["lineItemId", "appliesTo", "source", "periodIds"]);
+// Every rule the engine enforces on a formula is stated here, because here is the only place an
+// agent reads before writing one. They used to live only in validateFormula and in a playbook, and
+// an AMZN run spent 7 of its 30 steps rediscovering them one rejected batch at a time.
+const formula = object({
+  lineItemId: string("The row this formula fills. That row's `appliesTo` range must already be "
+    + "formula-sourced or still empty — a range carrying facts or an assumption is refused, so "
+    + "re-source it in the same batch that rewrites it."),
+  appliesTo: { type: "string", enum: ["historical", "forecast"],
+    description: "Which range this formula covers. Every id in `periodIds` must belong to it — a "
+      + "forecast period listed under `historical` is refused." },
+  source: string("The expression, e.g. `revenue.total * margin.operating`. Units are inferred and "
+    + "enforced. `+` and `-` accept only same-unit or rate±rate operands (the literals 0 and 1 are "
+    + "the exceptions), so `0.08 + 0.04 * POW(0.8, YEAR_INDEX())` is REFUSED: POW always returns a "
+    + "ratio and 0.08 is a bare number. `*` and `/` are permissive (number × ratio → ratio). "
+    + "YEAR_INDEX() is a number and forecast-only, so a linear fade `a + (t - a) * YEAR_INDEX() / N` "
+    + "is legal; to decay toward a non-zero target, reference a rate-typed row for the target rather "
+    + "than writing it as a literal. LAG, YOY, CAGR, SUM and AVERAGE take a row id, never an expression."),
+  periodIds: stringsWith("Explicit period ids this formula covers, e.g. [\"FY2026\", \"FY2027\"]. "
+    + "Required and non-empty — the engine never infers them from `appliesTo`."),
+}, ["lineItemId", "appliesTo", "source", "periodIds"]);
 const categoryGroup = object({ parentLineItemId: string(), category: string(), periodIds: strings, members: array(groupMember), reviewDecisionId: string() },
   ["parentLineItemId", "category", "periodIds", "members", "reviewDecisionId"]);
 const sensitivity = object({ waccDeltas: array(number), terminalGrowthDeltas: array(number), exitMultipleDeltas: array(number) },
@@ -77,7 +102,17 @@ const operationVariants: JsonSchema[] = [
 ];
 
 export const operationsInputSchema = object({ modelId: string(), expectedRevision: number,
-  operations: { type: "array", items: { type: "object", oneOf: operationVariants } } }, ["modelId", "expectedRevision", "operations"]);
+  // Six of seven rejected batches in one AMZN run were this single mistake — the payload's fields
+  // written directly on the operation. Naming the shape here costs one line and saved none of them,
+  // because it was not said anywhere the agent read.
+  operations: { type: "array",
+    description: "Each operation is `{ kind, <payload> }`, where the payload is ONE nested object "
+      + "named for the kind: set_formula → `formula`, set_assumption → `assumption`, "
+      + "set_valuation_config → `config`, set_category_group → `group`, replace_fact → `replacement`, "
+      + "set_line_item_source and set_wacc_input carry their fields directly. Payload fields are never "
+      + "flattened onto the operation itself — `{kind:\"set_formula\", lineItemId:…}` is refused; it is "
+      + "`{kind:\"set_formula\", formula:{lineItemId:…}}`. Operations apply in order within the batch.",
+    items: { type: "object", oneOf: operationVariants } } }, ["modelId", "expectedRevision", "operations"]);
 
 /** Per-batch operation cap: structural errors in long JSON output accumulate with length, so an
  *  oversized batch is rejected outright with a hint to split it. */

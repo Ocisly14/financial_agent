@@ -249,6 +249,45 @@ test("omits the tools field entirely when the caller declares none", async () =>
   );
 });
 
+/**
+ * DeepSeek caches server-side and splits its prompt tokens into hit and miss. Reading only
+ * `prompt_tokens` left the cost table's cache columns at 0 for every run on this provider — which
+ * reads as "nothing was cached" when it actually means "nobody asked". `cache_read_write_ratio`, the
+ * health signal CLAUDE.md leans on, was therefore null on every DeepSeek run: the guard was off.
+ */
+test("splits DeepSeek's prompt tokens into the uncached remainder and the cache read", async () => {
+  await withStubbedFetch(
+    () => sseResponse([
+      { choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] },
+      { choices: [], usage: { prompt_tokens: 40_000, completion_tokens: 120,
+        prompt_cache_hit_tokens: 36_000, prompt_cache_miss_tokens: 4_000 } },
+    ]),
+    async () => {
+      const result = await new DeepSeekProvider("sk-test")
+        .generate([{ role: "user", content: "hi" }], { modelClass: "MEDIUM" });
+      assert.equal(result.metrics.tokens_in, 4_000, "tokens_in is the uncached remainder, not the whole prompt");
+      assert.equal(result.metrics.cache_read, 36_000);
+      assert.equal(result.metrics.cache_write, undefined,
+        "DeepSeek has no write tier to report; absent says so, 0 would claim nothing was cached");
+    },
+  );
+});
+
+test("a usage frame without the cache fields reports the prompt whole, and claims no caching either way", async () => {
+  await withStubbedFetch(
+    () => sseResponse([
+      { choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] },
+      { choices: [], usage: { prompt_tokens: 40_000, completion_tokens: 120 } },
+    ]),
+    async () => {
+      const result = await new DeepSeekProvider("sk-test")
+        .generate([{ role: "user", content: "hi" }], { modelClass: "MEDIUM" });
+      assert.equal(result.metrics.tokens_in, 40_000);
+      assert.equal(result.metrics.cache_read, undefined);
+    },
+  );
+});
+
 test("accumulates streamed text deltas and reports them to onToken", async () => {
   await withStubbedFetch(
     () => sseResponse([

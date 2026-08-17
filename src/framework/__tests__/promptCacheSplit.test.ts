@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { progressRegion, projectFinancialModelProgress, splitForPromptCache, SubagentRuntime } from "../subagent.ts";
+import { buildLoopToolSpecs, progressRegion, projectFinancialModelProgress, splitForPromptCache, SubagentRuntime } from "../subagent.ts";
 import { SessionState } from "../sessionState.ts";
 import { ModelRouter } from "../../infra/llm/provider.ts";
 import type { GenerateResult, LlmMessage, LlmProvider } from "../../infra/llm/provider.ts";
@@ -150,6 +150,36 @@ test("re-reading the model leaves the rest of the projection byte-identical", ()
     + "the playbook text, and every step pays for the text again");
 });
 
+test("a mutation step keeps the workbook slices it already read inside the cached prefix", () => {
+  // The projection's biggest object is `active_model_context`, and the slices the agent read many
+  // steps ago dominate it. A mutation only advances the revision — the slices are deliberately
+  // retained across it (they are only cleared when a read lands on a revision it cannot explain).
+  // So the bytes that must hold still here are the slices, and what must move is the revision stamp.
+  //
+  // With `revision` ordered ahead of them, as it originally was, a mutation step diverged about
+  // forty bytes into the object and re-billed every slice below it: measured on a TSLA run, those
+  // steps read back 20,441 cached tokens where their neighbours read 49,058.
+  const rows = Array.from({ length: 400 }, (_, i) => ({ section: "revenue", lineItemId: `line.${i}`, label: `Row ${i} of the revenue build`, values: { FY2024: i * 1000, FY2025: i * 1100 } }));
+  const readModel = { name: "get_financial_model", summary: "s",
+    generation_context: { data: { model_id: "m1", revision: 4, lifecycle_stage: "draft",
+      workbook_slice: { revision: 4, rows } } } };
+  const mutate = (revision: number) => ({ name: "apply_financial_model_operations", summary: "s",
+    generation_context: { data: { model_id: "m1", revision, lifecycle_stage: "draft",
+      model_change_context: { applied: revision }, revision_summary: { revision, change: "batch" } } } });
+
+  const before = projectFinancialModelProgress([readModel, mutate(5)] as never, [] as never, []);
+  const after = projectFinancialModelProgress([readModel, mutate(5), mutate(6)] as never, [] as never, []);
+
+  let shared = 0;
+  while (shared < Math.min(before.length, after.length) && before[shared] === after[shared]) shared += 1;
+
+  assert.ok(after.includes("Row 399 of the revenue build"), "the slice really is in the projection");
+  assert.ok(shared > after.indexOf("Row 399 of the revenue build"),
+    `the shared prefix ended at byte ${shared} of ${after.length}, before the last workbook row at `
+    + `${after.indexOf("Row 399 of the revenue build")} — something that moves every step is ordered `
+    + "ahead of the slices, and the whole workbook is re-billed on every mutation");
+});
+
 /**
  * The same ordering invariant, one level up: the split above can only work if what dispatch renders
  * INTO the progress region is itself stable. The step counter is the counterexample that shipped —
@@ -239,4 +269,46 @@ test("the injected region holds still across steps, so the rolling breakpoint fi
   assert.match(fourth[2]!.content, /us-gaap:alphaConcept0/, "and they are the earlier batch's data");
   assert.equal(fourth.at(-1)!.cache, undefined, "only what this step added is at full price");
   assert.match(fourth.at(-1)!.content, /us-gaap:gammaConcept0/);
+});
+
+test("granting a tool appends it, leaving every earlier declaration byte-identical", () => {
+  // Tool declarations are part of the cached prefix, and on Gemini they sit AHEAD of the messages:
+  // measured directly against the API, a request whose tools carry the same names in a different
+  // order reads back zero cached tokens. Reordering therefore costs the whole prompt, on every step,
+  // while changing nothing a test would otherwise notice — it is only visible as a larger bill.
+  // `allowed` is a Map keyed by tool name, so a skill's grant appends; this pins that down.
+  const tool = (name: string) => ({ name, description: `${name} does a thing`, category: "non_trading" as const,
+    inputSchema: { type: "object" as const, properties: {} }, execute: async () => ({ summary: "" }) });
+  const base = [tool("get_financial_model"), tool("apply_financial_model_operations"), tool("invoke_skill")];
+  const granted = [...base, tool("financial_search")];
+
+  const before = buildLoopToolSpecs(base);
+  const after = buildLoopToolSpecs(granted);
+
+  assert.deepEqual(after.slice(0, before.length - 1), before.slice(0, -1),
+    "the tools that were already there must be declared in the same order, unchanged");
+  assert.equal(after.at(-1)!.name, "finish", "finish stays last");
+  assert.deepEqual(before.map((spec) => spec.name), ["get_financial_model", "apply_financial_model_operations", "invoke_skill", "finish"],
+    "declaration order follows the allowed set, and nothing sorts it");
+});
+
+test("the live revision is stated below the region, never inside the projection", () => {
+  // Structural, not conventional. Ordering the revision last inside `active_model_context` would
+  // also have worked, but only as a convention one edit away from being undone. Keeping it out of
+  // the region entirely means no offset inside the projection can depend on it: the value that
+  // changes on literally every mutation cannot split the tens of thousands of tokens above it.
+  // The agent still needs it, so dispatch renders it into the volatile {{stepBudget}} slot.
+  const readModel = (revision: number) => ({ name: "get_financial_model", summary: "s",
+    generation_context: { data: { model_id: "m1", revision, lifecycle_stage: "draft",
+      workbook_slice: { revision, rows: [{ section: "revenue", lineItemId: "line.1", label: "Total revenue" }] } } } });
+
+  const projected = projectFinancialModelProgress([readModel(7)] as never, [] as never, []);
+
+  // The slice carries its own revision as data the agent read; what must be absent is the
+  // projection's own live stamp, which is what moved every step.
+  const active = (JSON.parse(projected) as { active_model_context: Record<string, unknown> }).active_model_context;
+  assert.ok(!Object.hasOwn(active, "revision"),
+    `active_model_context still stamps the live revision, so every mutation splits it: ${JSON.stringify(active).slice(0, 300)}`);
+  assert.equal(active["model_id"], "m1", "the model id stays — it does not change between steps");
+  assert.ok(JSON.stringify(active).includes('"revision":7'), "the slice keeps the revision it was read at, as data");
 });

@@ -483,7 +483,23 @@ export class SubagentRuntime {
         // The step counter belongs BELOW the progress region, never inside it. It changes every
         // step, and a provider matches a cached prefix by bytes — at the head of the region it
         // moved the divergence point to the first digit and made the rolling breakpoint unreachable.
-        stepBudget: `(you are at step ${step} of your ${maxToolSteps}-step budget)`,
+        // Everything that changes on every step lives here, below {{progress}} — never inside it.
+        // The live revision belongs to this slot for the same reason the step counter does: it moves
+        // whenever the agent writes, and inside the region it would split the projection at whatever
+        // offset it happened to sit. The agent still needs it (a mutation must state the revision it
+        // is based on), so it is stated here, where being volatile costs nothing.
+        stepBudget: ((): string => {
+          const budget = `(you are at step ${step} of your ${maxToolSteps}-step budget)`;
+          if (definition.name !== "financial_modeling") return budget;
+          const live = latestFinancialModelState(state.subagentToolOutputs({ thread: threadId }));
+          if (live.revision === undefined && live.model_id === undefined) return budget;
+          const stamp = [
+            ...(live.model_id === undefined ? [] : [`model ${live.model_id}`]),
+            ...(live.revision === undefined ? [] : [`revision ${live.revision}`]),
+            ...(live.lifecycle_stage === undefined ? [] : [`stage ${live.lifecycle_stage}`]),
+          ].join(", ");
+          return `[LIVE MODEL STATE] ${stamp} — this is the current revision; base your next mutation on it.\n${budget}`;
+        })(),
         progress: (definition.name === "financial_modeling"
           // Thread scope, not task scope: continuing a thread means the agent
           // comes back to everything it has done here, not just this round.
@@ -596,8 +612,13 @@ export class SubagentRuntime {
       // Run this step's tool calls in parallel — they are independent (any tool
       // whose choice depends on a prior result is issued in a later iteration).
       const toolResults = await Promise.all(stepObj.calls.map((call) => this.runToolCall(definition, input, call, allowed, step)));
+      // The provider's own calls, in the order stepFromToolCalls kept them, so each replayed call
+      // can be given back its signature. Gemini 3.x rejects the whole request when a functionCall
+      // it minted comes back without one, and the args alone do not carry it.
+      const signedCalls = (completionToolCalls ?? []).filter((call) => call.name !== FINISH_TOOL.name);
       nativeToolTranscript = [{ role: "assistant", content: completionText,
-        toolCalls: stepObj.calls.map((call) => ({ id: call.id, name: call.tool, input: call.input })) },
+        toolCalls: stepObj.calls.map((call, index) => ({ id: call.id, name: call.tool, input: call.input,
+          ...(signedCalls[index]?.signature ? { signature: signedCalls[index]!.signature } : {}) })) },
       ...toolResults.map((result) => result.nativeToolResult).filter((message): message is LlmMessage => message !== undefined)];
       if (definition.name === "financial_modeling" && allowed.has("get_financial_model")) {
         const stepConflict = toolResults.some((result) => result.errorCode === "revision_conflict");
@@ -665,8 +686,19 @@ export class SubagentRuntime {
     // 中途已被它克服的工具报错也不该盖过 finish 总结。
     const RUNTIME_NUDGE_CODES = new Set(["financial_mutation_serialization_required", "unparseable_step", "no_action_taken",
       "user_input_must_be_solo"]);
-    const firstToolError = toolErrors.find((error) => !RUNTIME_NUDGE_CODES.has(error.code)
-      && !(recoveredRevisionConflict && error.code === "revision_conflict"));
+    // Only a fault the agent never got past ended the run. A tool error is fed back to it and
+    // normally corrected a step or two later, so the errors that count are the ones with no
+    // successful call after them — otherwise a spent step budget three steps past a corrected fault
+    // reports as "failed", carrying a message that was already stale, and a caller built to resume a
+    // pause stops instead. (AAPL: sourceType rejected at step 27, fixed and committed at 29-30,
+    // budget spent at 30 — reported as a failure, and five of six rounds never ran.)
+    const outcomes = state.subagentToolOutcomes({ task: input.taskId });
+    const lastSuccess = outcomes.reduce((latest, outcome, index) => (outcome.error ? latest : index), -1);
+    const firstToolError = outcomes.slice(lastSuccess + 1)
+      .map((outcome) => outcome.error)
+      .find((error): error is { code: string; message: string } => error !== undefined
+        && !RUNTIME_NUDGE_CODES.has(error.code)
+        && !(recoveredRevisionConflict && error.code === "revision_conflict"));
     const finished = finishSummary !== "";
     // Thread scope: this describes where the WORK stands, and the model handle
     // may well have been established in an earlier round of this thread.
@@ -879,6 +911,11 @@ function compactExtraction(raw: JsonObject): JsonObject {
 function projectFinancialModelData(outputs: ReturnType<SessionState["subagentToolOutputs"]>): JsonObject {
   const revisions: JsonValue[] = [];
   let active: JsonObject = {};
+  // The live revision is deliberately NOT a field of `active` — it changes on every mutation and is
+  // rendered below the progress region instead. The slice-invalidation logic still needs to know
+  // which revision the context is standing on, so it is tracked here rather than read back out of
+  // the projection. Reading it from `active` is what made the two concerns one; they are not.
+  let activeRevision: number | undefined;
   // A narrowed workbook read is evidence the agent explicitly asked for.  Unlike the overview,
   // multiple sections are meant to be read together (for example revenue plus history before a
   // forecast), so keep every distinct slice of the current revision instead of letting whichever
@@ -923,7 +960,7 @@ function projectFinancialModelData(outputs: ReturnType<SessionState["subagentToo
         const modelId = data["model_id"];
         const revision = typeof data["revision"] === "number" ? data["revision"] : undefined;
         const currentModelId = typeof active["model_id"] === "string" ? active["model_id"] : undefined;
-        const currentRevision = typeof active["revision"] === "number" ? active["revision"] : undefined;
+        const currentRevision = activeRevision;
         const changesModel = currentModelId !== undefined && currentModelId !== modelId;
         const advancesRevision = revision !== undefined && (currentRevision === undefined || revision > currentRevision);
         // Explicit historical reads must not make the current model context regress. They remain
@@ -984,19 +1021,36 @@ function projectFinancialModelData(outputs: ReturnType<SessionState["subagentToo
             evictedWorkbookSlices += 1;
           }
         }
-        active = { ...retained, model_id: modelId, ...(revision !== undefined ? { revision } : {}),
-          ...(typeof data["lifecycle_stage"] === "string" ? { lifecycle_stage: data["lifecycle_stage"] } : {}),
+        // Key order inside this object is the same caching decision as the order of the projection
+        // that holds it, and it matters more here, because this is the largest object in the
+        // projection and it is rebuilt on every model read or write.
+        //
+        // `revision` used to sit second. It advances on every mutation, so a mutation step's cache
+        // ended 40 bytes into a 28k object and the whole of it — workbook slices the agent had read
+        // many steps ago and that had not changed since — was re-billed uncached. Measured on a TSLA
+        // run: mutation steps read back 20,441 cached tokens where the steps around them read 49,058.
+        //
+        // It is no longer here at all: the one value that changes on literally every mutation is
+        // rendered into the volatile {{stepBudget}} slot, BELOW the progress region, so it cannot
+        // divide this object at any offset. Ordering alone would have been a convention held up by a
+        // test; keeping it out of the region is structural. What stays here is the big, slow-moving
+        // evidence, and the counters, which only move when the slices above them move anyway.
+        active = { ...retained,
+          ...(data["filing_insights"] !== undefined ? { filing_insights: data["filing_insights"] } : {}),
+          ...(workbookSlices.size > 0 ? { workbook_slices: [...workbookSlices.values()].map((cached) => cached.slice) } : {}),
+          ...(data["revision_history"] !== undefined ? { revision_history: data["revision_history"] } : {}),
           // model_overview is what both the read and the write answer with. Narrow reads accumulate
           // in workbook_slices for this revision; neither carries a whole workbook any more.
           ...(data["model_overview"] ? { model_overview: data["model_overview"] } : {}),
           ...(data["model_change_context"] ? { model_change_context: data["model_change_context"] } : {}),
-          ...(workbookSlices.size > 0 ? { workbook_slices: [...workbookSlices.values()].map((cached) => cached.slice) } : {}),
+          // Counters and stamps: small, and they move whenever anything above them moves.
           ...(workbookSlices.size > 0 ? { workbook_slices_context_chars: workbookSliceChars } : {}),
           ...(evictedWorkbookSlices > 0 ? { workbook_slices_evicted: evictedWorkbookSlices } : {}),
           ...(workbookSlices.size > 0 && [...workbookSlices.values()].some((cached) => cached.slice["revision"] !== revision)
             ? { workbook_slices_notice: "Slices from an earlier revision are historical context only; reread that section before using current values." } : {}),
-          ...(data["filing_insights"] !== undefined ? { filing_insights: data["filing_insights"] } : {}),
-          ...(data["revision_history"] !== undefined ? { revision_history: data["revision_history"] } : {}) };
+          model_id: modelId,
+          ...(typeof data["lifecycle_stage"] === "string" ? { lifecycle_stage: data["lifecycle_stage"] } : {}) };
+        activeRevision = revision ?? (changesModel ? undefined : currentRevision);
         captured = true;
       }
       if (captured) continue;
@@ -1014,15 +1068,28 @@ function projectFinancialModelData(outputs: ReturnType<SessionState["subagentToo
   //
   // So: what never changes first, then what only ever grows at its own end, then what is rewritten
   // or windowed. It reads better this way too — the freshest state ends up nearest the question.
+  // Ordered by how likely a field is to be UNCHANGED between two consecutive steps, most likely
+  // first. Not by "static, then append-only, then rewritten" — that reading is wrong and cost real
+  // money. A provider matches a byte prefix, so an append is a divergence point exactly like a
+  // rewrite: everything below it is re-billed whether or not it changed. `revision_summaries` grows
+  // by one small entry on every mutation, and ordering it above `active_model_context` therefore
+  // re-bills the tens of thousands of tokens of workbook slices underneath it — slices that are
+  // deliberately retained across a mutation precisely so they can be read from cache.
+  //
+  // So the question to ask of each field is not "does it only grow?" but "will this step change it?",
+  // and the big, slow-moving evidence goes above the small, per-step bookkeeping.
   return {
     skill_guidance: Object.fromEntries(skillGuidance),
     skill_references: Object.fromEntries(skillReferences),
-    revision_summaries: revisions,
-    query_results: queryResults,
     ...(extraction ? { latest_extraction: extraction } : {}),
-    active_model_context: active,
-    latest_subagent_results: subagentResults.slice(-2),
+    // Untouched by a mutation step: these move only when their own tool is called.
+    query_results: queryResults,
     other_results: [...otherResults.values()],
+    latest_subagent_results: subagentResults.slice(-2),
+    // Large, and stable across a mutation up to the per-step stamps at its own end.
+    active_model_context: active,
+    // One small entry per mutation — last, so it cannot push anything above it out of the cache.
+    revision_summaries: revisions,
   };
 }
 

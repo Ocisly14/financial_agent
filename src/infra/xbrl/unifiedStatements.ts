@@ -135,7 +135,10 @@ export type RestatementDifference = { conceptQName: string; dimensionSignature: 
   chosenAccession: string; chosenValue: number;
   candidates: Array<{ accession: string; value: number; contextId: string; sourceAnchor: string }> };
 
-export type UnifiedBackfillFinding = { code: "missing_fact" | "unit_mismatch" | "alternate_tag_disagreement";
+export type UnifiedBackfillFinding = { code: "missing_fact" | "unit_mismatch" | "alternate_tag_disagreement"
+  /** The line exists in an older filing for this period, but the filing that speaks for the period
+   *  folded it into another row — its value is already inside that row's restated number. */
+  | "superseded_line";
   rowId: string; periodId: string; conceptQName: string; message: string };
 
 /** Comparable identity for a unit: currency and per-share amounts differ by their currency code too. */
@@ -315,6 +318,56 @@ export function buildUnifiedStatements(input: { decision: UnificationDecision;
   const filings = [...input.filings].sort((a, b) => b.filing.filedAt.localeCompare(a.filing.filedAt));
   const orientation = buildSignOrientation(input.filings);
 
+  // Which filing speaks for a period. Defined here, not just at the roll-up check, because it also
+  // decides what may be resolved at all: see `authorityRefs` below.
+  //
+  // "Reports the period" has to mean a comparative column, not a stray fact. A closing-balance node
+  // dated at a year end doubles as the next year's opening instant, so the FY2024 10-K carries one
+  // FY2021 cash fact and would otherwise pass for an FY2021 source. A real comparative column fills
+  // most of the statement's lines, so the bar is set against the statement's own best-covered period.
+  // Authority is per statement, not per filing, because the statements of one filing reach back
+  // different distances.
+  const reportsPeriod = (stmt: PresentationExtract["statements"][number], periodId: string) => {
+    const counts = new Map<string, number>();
+    for (const node of stmt.nodes) {
+      if (node.openingBalance === true) continue;
+      for (const f of node.facts) if (f.dimensions.length === 0) counts.set(f.periodId, (counts.get(f.periodId) ?? 0) + 1);
+    }
+    const fullColumn = Math.max(0, ...counts.values());
+    return (counts.get(periodId) ?? 0) * 2 >= fullColumn;
+  };
+  const authority = new Map<string, string>();
+  const authorityStatements = new Map<string, PresentationExtract["statements"][number]>();
+  for (const extraction of filings) {
+    for (const stmt of extraction.statements) for (const periodId of periods) {
+      const key = `${stmt.statement}|${periodId}`;
+      if (!authority.has(key) && reportsPeriod(stmt, periodId)) {
+        authority.set(key, extraction.filing.accession);
+        authorityStatements.set(key, stmt);
+      }
+    }
+  }
+
+  // The lines the authority for a period actually presents in that period. A concept an issuer folds
+  // into another line does not restate to zero — it disappears, while the older filing that presented
+  // it keeps its fact forever. Resolving "newest filing carrying THIS CONCEPT" therefore keeps paying
+  // out a line the issuer has since absorbed, and the money lands twice: Tesla's FY2022 customer
+  // deposits (1,063M) survived that way while the FY2023 10-K had already restated accrued
+  // liabilities from 7,142M to 8,205M to include it. The roll-up check cannot catch it either — an
+  // absorbed line is in no calculation tree, so it is not a break, just an extra row nobody sums.
+  // A period the authority does not present the line in resolves to nothing.
+  const authorityRefs = new Map<string, Set<string>>();
+  for (const [key, stmt] of authorityStatements) {
+    const periodId = key.slice(key.indexOf("|") + 1);
+    const refs = new Set<string>();
+    for (const node of stmt.nodes) for (const f of node.facts) {
+      if (f.periodId === periodId) refs.add(cellRef(node.conceptQName, dimensionSignature(f.dimensions), node.openingBalance));
+    }
+    authorityRefs.set(key, refs);
+  }
+  /** ref|period -> the accession that superseded it, for the finding the dropped row earns. */
+  const superseded = new Map<string, string>();
+
   // cellRef|period -> candidates, newest filing first. The rollforward side is part of the key: a
   // cash statement carries its opening and closing balance under one concept, and merging them here
   // would let a closing-balance row resolve to the opening number.
@@ -322,7 +375,15 @@ export function buildUnifiedStatements(input: { decision: UnificationDecision;
   for (const extraction of filings) {
     for (const stmt of extraction.statements) for (const node of stmt.nodes) for (const payload of node.facts) {
       if (!requested.has(payload.periodId)) continue;
-      const key = `${cellRef(node.conceptQName, dimensionSignature(payload.dimensions), node.openingBalance)}|${payload.periodId}`;
+      const ref = cellRef(node.conceptQName, dimensionSignature(payload.dimensions), node.openingBalance);
+      const authorityKey = `${stmt.statement}|${payload.periodId}`;
+      const presented = authorityRefs.get(authorityKey);
+      // Absent authority means no filing presents this statement for this period; nothing to defer to.
+      if (presented !== undefined && !presented.has(ref)) {
+        superseded.set(`${ref}|${payload.periodId}`, authority.get(authorityKey)!);
+        continue;
+      }
+      const key = `${ref}|${payload.periodId}`;
       const list = index.get(key) ?? [];
       list.push({ accession: extraction.filing.accession, filedAt: extraction.filing.filedAt, value: payload.value,
         unit: payload.unit, decimals: payload.decimals, contextId: payload.contextId, sourceAnchor: payload.sourceAnchor,
@@ -371,8 +432,17 @@ export function buildUnifiedStatements(input: { decision: UnificationDecision;
         const read = tags.find((tag) => (index.get(`${refOfComponent(component, tag.conceptQName)}|${periodId}`) ?? []).length > 0);
         if (read === undefined) {
           missing = true;
-          backfillFindings.push({ code: "missing_fact", rowId: row.rowId, periodId, conceptQName: component.conceptQName,
-            message: `row ${row.rowId} points at ${tags.map((t) => t.conceptQName).join(" / ")} in ${periodId}, but no filing carries that fact` });
+          // Absorbed is not the same as never reported, and the reader needs to be told which: one
+          // says the issuer folded this line into another and the money is already in that row, the
+          // other says nobody ever tagged it. Silently dropping the value would leave a row that
+          // used to have a number looking like an extraction gap.
+          const absorbed = tags.map((tag) => superseded.get(`${refOfComponent(component, tag.conceptQName)}|${periodId}`))
+            .find((accession) => accession !== undefined);
+          backfillFindings.push(absorbed === undefined
+            ? { code: "missing_fact", rowId: row.rowId, periodId, conceptQName: component.conceptQName,
+              message: `row ${row.rowId} points at ${tags.map((t) => t.conceptQName).join(" / ")} in ${periodId}, but no filing carries that fact` }
+            : { code: "superseded_line", rowId: row.rowId, periodId, conceptQName: component.conceptQName,
+              message: `row ${row.rowId} points at ${component.conceptQName}, which an older filing presents in ${periodId} but ${absorbed} — the filing that speaks for ${periodId} — does not: the issuer folded this line into another one, whose restated value already contains it. Left empty rather than paid out twice.` });
           continue;
         }
         const concept = read.conceptQName;
@@ -529,26 +599,7 @@ export function buildUnifiedStatements(input: { decision: UnificationDecision;
   // statement, not per filing, because the statements of one filing reach back different distances —
   // and a rollforward's opening balance does not count as reporting a period, or the filing that
   // merely carries FY2021's closing cash would be treated as an FY2021 source.
-  // "Reports the period" has to mean a comparative column, not a stray fact. A closing-balance node
-  // dated at a year end doubles as the next year's opening instant, so the FY2024 10-K carries one
-  // FY2021 cash fact and would otherwise pass for an FY2021 source. A real comparative column fills
-  // most of the statement's lines, so the bar is set against the statement's own best-covered period.
-  const reportsPeriod = (stmt: PresentationExtract["statements"][number], periodId: string) => {
-    const counts = new Map<string, number>();
-    for (const node of stmt.nodes) {
-      if (node.openingBalance === true) continue;
-      for (const f of node.facts) if (f.dimensions.length === 0) counts.set(f.periodId, (counts.get(f.periodId) ?? 0) + 1);
-    }
-    const fullColumn = Math.max(0, ...counts.values());
-    return (counts.get(periodId) ?? 0) * 2 >= fullColumn;
-  };
-  const authority = new Map<string, string>();
-  for (const extraction of filings) {
-    for (const stmt of extraction.statements) for (const periodId of periods) {
-      const key = `${stmt.statement}|${periodId}`;
-      if (!authority.has(key) && reportsPeriod(stmt, periodId)) authority.set(key, extraction.filing.accession);
-    }
-  }
+  // `authority` is built above, where it also gates what may resolve at all.
 
   for (const extraction of filings) {
     const statementOfRole = new Map(extraction.statements.map((s) => [s.roleUri, s.statement]));

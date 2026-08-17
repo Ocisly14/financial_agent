@@ -111,7 +111,10 @@ test("a newer revision clears stale workbook slices", () => {
     output(3, "history"), output(3, "revenue"), output(4, "operations"),
   ], [], []));
 
-  assert.equal(projected.active_model_context.revision, 4);
+  // The live revision is stated below the progress region, not in it — it changes on every mutation
+  // and inside the projection it split everything under it. What must still be right here is that
+  // the projection TRACKED the advance: the stale slices are gone.
+  assert.ok(!Object.hasOwn(projected.active_model_context, "revision"));
   assert.deepEqual(projected.active_model_context.workbook_slices.map((slice: { rows: Array<{ lineItemId: string }> }) =>
     slice.rows[0]!.lineItemId), ["operations.row"]);
 });
@@ -135,7 +138,7 @@ test("a mutation keeps prior slices and carries its compact change context", () 
     read(3, "revenue", 1), read(3, "operations", 1), mutation,
   ], [], []));
 
-  assert.equal(projected.active_model_context.revision, 4);
+  assert.ok(!Object.hasOwn(projected.active_model_context, "revision"), "stated below the region instead");
   assert.deepEqual(projected.active_model_context.workbook_slices.map((slice: { revision: number; rows: Array<{ lineItemId: string; value: number }> }) =>
     [slice.revision, slice.rows[0]!.lineItemId, slice.rows[0]!.value]), [
     [3, "revenue.row", 1], [3, "operations.row", 1],

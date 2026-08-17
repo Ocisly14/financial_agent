@@ -62,3 +62,26 @@ test("sameUnit compares currency codes, not just kinds", () => {
   assert.equal(sameUnit(usd, eur), false);
   assert.equal(sameUnit(pct, ratio), false);
 });
+
+test("a bare number joins a rate under * and / but never under + or -", () => {
+  // This asymmetry is what the fade recipes turn on, and formulas.md §0 states it as a table. It is
+  // asserted here so the file and the engine cannot drift: the doc used to say "`number` is
+  // transparent" without qualification, an agent wrote the decay fade it implied —
+  // `0.08 + 0.04 * POW(0.8, YEAR_INDEX())` — and the batch died on `cannot apply '+' to number and
+  // ratio`, on the second-to-last step of its budget.
+  assert.equal(combine(t(num, 0.08), "+", t(ratio)), null, "the refusal the recipe hit");
+  assert.equal(combine(t(ratio), "+", t(num, 0.08)), null, "and it is symmetric");
+  assert.equal(combine(t(num, 0.08), "-", t(ratio)), null);
+
+  // Scaling stays free, which is why `g_0 * POW(...)` is legal and decays toward zero.
+  assert.deepEqual(combine(t(num, 0.04), "*", t(ratio)), ratio);
+  assert.deepEqual(combine(t(ratio), "/", t(num, 2)), ratio);
+
+  // Referencing a rate-typed row for the target is the way to decay toward a non-zero value.
+  assert.deepEqual(combine(t(ratio), "+", t(ratio)), ratio);
+  assert.deepEqual(combine(t(pct), "+", t(ratio)), ratio);
+
+  // The linear fade is all numbers — YEAR_INDEX() is a number — so it needs no such row.
+  assert.deepEqual(combine(t(num, 0.12), "+", t(num, 0.03)), num);
+  assert.equal(assignableTo(t(num, 0.12), ratio), true, "and a number result still fits a ratio row");
+});

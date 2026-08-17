@@ -25,6 +25,13 @@ equivalent input tokens = tokens_in + cache_read * 0.1 + cache_write * 1.25
 `in= cache_r= cache_w=` on every call, and the DCF e2e writes the table into `summary.json`. **The
 health signal is `cache_read_write_ratio`: below 1 means the run is writing entries it never reads.**
 
+That ratio only applies to providers with explicit breakpoints. Gemini's cache is implicit: there is
+no write fee and no breakpoint, so `cache_w` is always 0 and the ratio is undefined — read the hit
+rate instead, and watch the **absolute** `cache_r`. It moves in ~4096-token blocks, and a run whose
+`cache_r` sits at a constant well below the prompt size is telling you exactly where the projection
+diverges. Gemini will match a 376k-token prefix if you give it a stable one, so a low plateau is
+never the provider's ceiling — it is ours.
+
 ### 2. Nothing per-step or per-run may render inside the progress region
 
 A provider matches a cached prefix by bytes, so one volatile value at the head of the region moves
@@ -33,8 +40,23 @@ counter rendered as the region's first line did exactly that, and silently disab
 breakpoint for every agent. Volatile content belongs *after* `{{progress}}` — see the `{{stepBudget}}`
 slot in `src/agent/prompts/subagentPrompts.ts`.
 
-The same applies inside a projection: order it so what never changes comes first, what grows at its
-own end comes next, and what is rewritten each step comes last (`projectFinancialModelData`).
+The same applies inside a projection, but order it by the right question. "Static, then append-only,
+then rewritten" is the wrong rule and it cost real money: a prefix is matched by bytes, so an append
+is a divergence point exactly like a rewrite — everything below it is re-billed whether or not it
+changed. `revision_summaries` grows by one small entry per mutation, and sitting above
+`active_model_context` it re-billed the tens of thousands of tokens of workbook slices underneath it,
+slices that are retained across a mutation precisely so they can be read from cache.
+
+So ask of each field **"will this step change it?"**, and order most-likely-unchanged first — big,
+slow-moving evidence above small, per-step bookkeeping. This applies inside a nested object too:
+`revision` advances every mutation and used to sit second inside `active_model_context`, ending that
+step's cache forty bytes into a 28k object. Measured on a TSLA run, mutation steps read back 20,441
+cached tokens where their neighbours read 49,058.
+
+**Tool declarations are part of the cached prefix, ahead of the messages.** Measured against Gemini:
+the same tools in a different order read back *zero* cached tokens. Reordering costs the whole prompt
+on every step while changing nothing any test would notice — it shows up only as a larger bill.
+`allowed` is a Map keyed by tool name so a skill's grant appends; `promptCacheSplit.test.ts` pins it.
 
 Guarded by `dcfPromptInjection.test.ts`, which dispatches each agent twice with identical tool
 results and requires byte-identical regions.

@@ -675,6 +675,23 @@ export class SessionState {
     return notes;
   }
 
+  /** Every tool result in order, carrying only its outcome. Reading errors and outputs as two
+   *  separate lists loses their interleaving, and the interleaving is the whole question when asking
+   *  whether a fault ended the run: an error with a successful call after it is one the agent
+   *  corrected, and only an error nothing succeeded after is what a run stopped on. */
+  subagentToolOutcomes(scope: TraceScope): { name: string; error?: { code: string; message: string } }[] {
+    const out: { name: string; error?: { code: string; message: string } }[] = [];
+    for (const e of this.trace(scope)) {
+      if (e.kind !== "tool_result") continue;
+      const err = e.payload.error as { code?: string; message?: string } | undefined;
+      const name = (e.payload.name as string) ?? "tool";
+      out.push(err
+        ? { name, error: { code: err.code ?? "tool_error", message: err.message ?? (e.payload.summary as string | undefined) ?? "Tool failed." } }
+        : { name });
+    }
+    return out;
+  }
+
   subagentToolErrors(scope: TraceScope): { name: string; code: string; message: string; summary?: string; step?: number }[] {
     const out: { name: string; code: string; message: string; summary?: string; step?: number }[] = [];
     for (const e of this.trace(scope)) {
