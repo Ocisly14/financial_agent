@@ -2,6 +2,8 @@
 
 The valuation's actual work happens here, in three moves. Read `formulas.md` once before starting — every recipe below lives there with exact syntax.
 
+Read the sector playbook, or playbooks, the skill map routes this issuer to — in the same step, however many that is. The three moves below assume a margin-driven chain fits; for a bank, an insurer or a REIT it does not, and that playbook's chain-shape section replaces the default rather than annotating it. For every other sector it tells you which decomposition pays and where the margin story lives. Its calibration table is terminal only: those bands describe the steady state you will need in stage 6, and pulling one into an explicit year substitutes a sector average for the issuer evidence these three moves exist to find.
+
 ## Move 1 — decompose where profit comes from
 
 Profit is not one number; it is a sum of sources with different economics. Take the model apart before forecasting it:

@@ -155,6 +155,12 @@ async function resolveEventStore(): Promise<SqliteEventStore> {
 }
 
 function resolveSkillsPath(): string {
+  // SKILLS_DIR lets a run be pointed at a staged copy of the tree instead of the repo's own. That is
+  // what an A/B over guidance needs: the control arm is a copy with some guidance removed, and
+  // editing the real tree in place between arms would make the two runs incomparable and leave the
+  // repo dirty if either crashed. Unset in production, where the repo's skills/ is the only tree.
+  const override = process.env["SKILLS_DIR"]?.trim();
+  if (override) return path.resolve(override);
   const current = path.dirname(fileURLToPath(import.meta.url));
   return path.resolve(current, "../../skills");
 }

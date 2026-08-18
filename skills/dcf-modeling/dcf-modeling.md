@@ -32,7 +32,28 @@ Read them one at a time, at the moment of use. That is guidance about *when*, ne
 | 6. Valuation | terminal value, sensitivities, the verdict | `06-valuation.md` |
 | — | write any formula | `formulas.md` (the toolbox; read once before stage 4) |
 
-Resuming an existing model: read get_financial_model first, locate the stage from the lifecycle and what is filled, and fetch only that stage's playbook.
+One more playbook rides alongside stage 4: the sector's. Stage 4 asks what changes and what persists, and that question has a different answer for a bank than for a software company — the difference is the shape of the chain, not its detail. At stage 4's start read every playbook covering a material part of this issuer's **business**, choosing by what it actually does rather than by its GICS label when the two disagree: a payment network is not a bank, an insurance broker carries no underwriting risk, a real estate services firm is not a REIT. Most issuers need one. An issuer whose segments run on genuinely different economics — a chip designer that also sells enterprise software, a retailer with a captive lender, a health insurer that also owns clinics and a pharmacy manager — needs each of them, and then owes a sentence naming which segment's economics drive the consolidated forecast and how the others are modelled beside it. Materiality is the gate, not a count: a segment too small to move the valuation does not earn its playbook's tokens.
+
+| the issuer is… | read |
+| --- | --- |
+| software, semiconductors, IT hardware | `sectors/technology.md` |
+| telecom carrier, media and entertainment, ad or interactive platform | `sectors/communication-services.md` |
+| retail, autos, restaurants, hotels, travel, apparel, homebuilders | `sectors/consumer-discretionary.md` |
+| food, beverage, tobacco, household and personal products, grocery and club retail | `sectors/consumer-staples.md` |
+| capital goods, aerospace and defense, transport, commercial services | `sectors/industrials.md` |
+| chemicals, metals and mining, packaging, construction materials | `sectors/materials.md` |
+| oil and gas production, refining, oilfield services, midstream | `sectors/energy.md` |
+| regulated electric, gas or water utility; merchant power | `sectors/utilities.md` |
+| bank, thrift, custody bank | `sectors/banks.md` |
+| property, casualty, life or specialty insurer; insurance broker | `sectors/insurance.md` |
+| asset manager, exchange, index or data provider, payment network, retail broker | `sectors/asset-management-and-market-infrastructure.md` |
+| pharmaceutical, commercial or clinical-stage biotech | `sectors/pharma-and-biotech.md` |
+| medical devices, life science tools, diagnostics, managed care, hospitals, distributors | `sectors/medtech-and-healthcare-services.md` |
+| equity REIT of any property type | `sectors/reits.md` |
+
+Banks, insurers and REITs break the free-cash-flow-to-the-firm chain outright — debt is raw material rather than financing, reserves fund an investment portfolio rather than being debt to deduct, book depreciation is not an economic cost. For those three the playbook's chain-shape section **replaces** the default chain; it is not a footnote to it. Where one of them covers only a segment — the captive lender inside an industrial, the underwriting arm inside a diversified healthcare issuer — carve that segment out and model it on its own terms rather than reshaping the whole chain around it, and say in the report which construction produced which part of the value.
+
+Resuming an existing model: read get_financial_model first, locate the stage from the lifecycle and what is filled, then fetch that stage's playbook and the sector playbook above — no other stage's. The sector playbook is not a fresh-run luxury: a resumed run is extending a chain and setting a terminal, and both depend on it.
 
 Disciplines that bind every stage:
 
