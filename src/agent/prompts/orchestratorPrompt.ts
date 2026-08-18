@@ -70,6 +70,9 @@ Invoke a skill when its description matches what the user is asking for. A skill
 - For stock and ETF data or strategy tasks, always name the ticker explicitly. If the security is ambiguous or no ticker can be resolved reliably from the conversation, ask the user instead of inventing or defaulting to one.
 - Resolve relative time ("last 30 days", "this week") into absolute dates against the Current Date.
 - Pass through concrete parameters the user gave verbatim (symbol, days, amounts). Never invent prices, levels, or amounts they did not state.
+- A subagent reads ONLY the task text you write — not your conversation, not [CURRENT TURN PROGRESS], not another subagent's result. Everything the task depends on has to travel with it, and there are exactly two ways to send it:
+  - It came from a task result → put that result line's source_event_id into "source_event_ids" and the runtime renders that result's data into the subagent's prompt verbatim. Do this whenever an id exists. Do not retype the numbers instead: you cannot see how much data sits behind an id, and retyping is where a figure quietly becomes a different figure.
+  - It has no id — your own reading of those results, what the user told you, the constraint you settled on → write it into "task". Nothing else carries it. An id does not: the data goes over, why it matters here does not, so a dispatch with ids still needs a task that says what to do with them.
 - Keep tasks detailed but not overlapping.
 
 Keep each strategy task focused on one ticker and one coherent strategy. Put supported multi-phase conditions into that strategy's phases instead of splitting them into unrelated tasks.
@@ -133,7 +136,7 @@ always better than a wrong mark. Marks are optional: the answer must read correc
 Output exactly ONE JSON object and NOTHING else — no code fences, no commentary:
 {
   "reply":     "<user-facing message for this step,must be a complete response.>",
-  "dispatch":  null | [ { "agent": "<agent-name>", "task": "<detailed natural-language instruction>", "thread": null | "<thread-id from [SUBAGENT THREADS]>", "model_id": "<optional financial model id>" } ],
+  "dispatch":  null | [ { "agent": "<agent-name>", "task": "<detailed natural-language instruction>", "thread": null | "<thread-id from [SUBAGENT THREADS]>", "model_id": "<optional financial model id>", "source_event_ids": null | [ "<source_event_id from a result line, whose data this task needs>" ] } ],
   "skill":      null | "<skill-name>",
   "tool_calls": null | [ { "name": "<tool-name>", "input": { } } ]
 }
@@ -145,6 +148,7 @@ Rules:
 - "agent" must match [AGENTS YOU CAN DISPATCH TO]; "skill" must match [SKILLS YOU CAN INVOKE]; every "tool_calls[].name" must match [TOOLS YOU CAN CALL DIRECTLY]; "thread", when non-null, must be copied exactly from [SUBAGENT THREADS] and must belong to the same agent.
 - Use "model_id" only for financial_modeling. When [ACTIVE WORKSPACE MODEL] names a model and the user is modifying or continuing that visible DCF, prefer that exact id; omit it only when you have a concrete reason to work on another model.
 - Entries in [DATA FROM EARLIER TASKS] are compact indexes, not full tool outputs. If you need an exact prior field, call read_compacted_task_data with that entry's source_event_id and a narrow path; do not infer omitted numbers.
+- Every id in "source_event_ids" must be one printed on a result line in this topic; an id that is not fails that task outright rather than running it without the data.
 - Never include a "tools" field inside a dispatch task — tool selection is the subagent's job.
 - Return ONLY the JSON object.
 `,

@@ -401,7 +401,17 @@ export class OrchestratorRuntime {
             ? { model_id: t.model_id.trim() }
             : t.agent === "financial_modeling" && input.activeModel
               ? { model_id: input.activeModel.modelId }
-              : {}) }));
+              : {}),
+          // Ids of earlier results whose data this task needs. Uncapped on purpose:
+          // the caller passes an id precisely because it cannot see how much data
+          // sits behind one, so a count it silently trimmed here would drop data
+          // the task was written around. The dispatcher's size limit is the real
+          // bound, and it fails the task out loud.
+          ...(Array.isArray(t.source_event_ids)
+            ? ((ids) => (ids.length > 0 ? { source_event_ids: ids } : {}))(
+              t.source_event_ids.filter((id): id is string => typeof id === "string" && id.trim() !== "")
+                .map((id) => id.trim()))
+            : {}) }));
 
       const toolCalls = (stepObj.tool_calls ?? []).filter((call) => directTools.has(call.name));
 

@@ -497,6 +497,21 @@ export class SessionState {
   }
 
   /**
+   * One task result's own data, by the `source_event_id` printed on its result
+   * line. Used to hand an earlier result's data to a later dispatch without a
+   * model retyping it.
+   *
+   * `agent` and `summary` come back with it because the receiving subagent has
+   * never seen this result and needs to know whose work it is looking at.
+   */
+  taskResultData(sourceEventId: string): { agent: AgentKind; summary: string; data: JsonObject } | undefined {
+    const event = this.events.find((e) => e.kind === "task_result" && e.event_id === sourceEventId);
+    const data = (event?.payload.generation_context as GenerationContext | undefined)?.data;
+    if (!event || !data) return undefined;
+    return { agent: event.source as AgentKind, summary: String(event.payload.summary ?? ""), data };
+  }
+
+  /**
    * The subagent conversations this topic has, most recently active last —
    * what the orchestrator picks from when it wants to continue work rather
    * than start over.
@@ -928,7 +943,9 @@ export class SessionState {
     const evArtifacts = (e.payload.artifacts as ArtifactRef[] | undefined) ?? [];
     const error = e.payload.error as { code: string; message: string } | undefined;
 
-    const parts: string[] = [`[${agent} result] status=${e.payload.status as string} | ${e.payload.summary as string}`];
+    // The id is printed so the caller can hand this result's data to a later
+    // dispatch (`source_event_ids`) instead of retyping its numbers into prose.
+    const parts: string[] = [`[${agent} result] status=${e.payload.status as string} source_event_id=${e.event_id} | ${e.payload.summary as string}`];
     if (error) parts.push(`  error(${error.code}): ${error.message}`);
     if (gc) {
       if (gc.prompt) parts.push(`  generation_context_prompt: ${gc.prompt}`);

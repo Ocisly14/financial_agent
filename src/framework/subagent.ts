@@ -328,6 +328,14 @@ export type RunSubagentInput = {
   /** The dispatch this run answers — where its task_result is written. */
   taskId: string;
   request: TaskRequest;
+  /**
+   * Earlier results' data, already resolved from `request.source_event_ids` and
+   * rendered as the block that sits above [PROGRESS SO FAR]. Empty for a task
+   * that was handed nothing — and then the prompt is byte-identical to one
+   * built before handoffs existed, which is what keeps the cached prefix of
+   * every ordinary dispatch intact.
+   */
+  handedData?: string;
   allowedTools: ToolDefinition[];
   /** Cancels every provider request in this run when the caller's overall deadline expires. */
   signal?: AbortSignal;
@@ -477,6 +485,10 @@ export class SubagentRuntime {
       const rendered = this.renderer.render(definition.systemPrompt, {
         task: input.request.task,
         skills: skillRoster,
+        // Constant for the whole run — resolved once at dispatch, above the
+        // progress region and never rewritten, so it costs one cache write and
+        // is read back on every step after it.
+        handedData: input.handedData ?? "",
         modelContext: input.request.model_id
           ? `The user is currently viewing model ${input.request.model_id}. Prefer continuing it: refresh it before any mutation and keep your work in that model unless the task or evidence gives a concrete reason to select or create another model.`
           : "No existing model handle was supplied.",

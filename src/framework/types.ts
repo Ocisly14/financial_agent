@@ -118,6 +118,19 @@ export type TaskRequest = {
   /** The financial-model handle to refresh before mutating. Not a resumption
    *  key — continuity is `thread`. */
   model_id?: string;
+  /**
+   * Earlier task results whose data this task needs verbatim, named by the
+   * `source_event_id` the caller saw on their result lines. The host reads each
+   * one's `generation_context.data` out of the log and renders it into the
+   * subagent's prompt.
+   *
+   * This exists because the caller is the only actor holding every result, and
+   * retyping numbers out of one result into a task's prose is a transcription
+   * step that can silently get them wrong. Passing the id moves the data
+   * without a model in the middle of it. What the id CANNOT carry is why that
+   * data matters here — that still belongs in `task`.
+   */
+  source_event_ids?: string[];
   tools?: string[];
   timeout_ms?: number;
 };

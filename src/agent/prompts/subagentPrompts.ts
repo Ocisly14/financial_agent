@@ -19,7 +19,7 @@ With every step, first write ONE short line of text — what this step is doing,
 {{task}}
 </task>
 
-[PROGRESS SO FAR]
+{{handedData}}[PROGRESS SO FAR]
 {{progress}}
 
 {{stepBudget}}
@@ -46,7 +46,7 @@ With every step, first write ONE short line of text — what this step is doing,
 {{task}}
 </task>
 
-[PROGRESS SO FAR]
+{{handedData}}[PROGRESS SO FAR]
 {{progress}}
 
 {{stepBudget}}
@@ -90,7 +90,7 @@ With every step, first write ONE short line of text — what this step is doing,
 [MODEL RESUMPTION]
 {{modelContext}}
 
-[PROGRESS SO FAR]
+{{handedData}}[PROGRESS SO FAR]
 {{progress}}
 
 {{stepBudget}}
@@ -131,7 +131,7 @@ With every step, first write ONE short line of text — what this step is doing,
 {{task}}
 </task>
 
-[PROGRESS SO FAR]
+{{handedData}}[PROGRESS SO FAR]
 {{progress}}
 
 {{stepBudget}}
@@ -215,7 +215,7 @@ With every step, first write ONE short line of text — what this step is doing,
 {{task}}
 </task>
 
-[PROGRESS SO FAR]
+{{handedData}}[PROGRESS SO FAR]
 {{progress}}
 
 {{stepBudget}}
@@ -263,7 +263,7 @@ With every step, first write ONE short line of text — what this step is doing,
 {{task}}
 </task>
 
-[PROGRESS SO FAR]
+{{handedData}}[PROGRESS SO FAR]
 {{progress}}
 
 {{stepBudget}}
