@@ -61,18 +61,22 @@ async function runMultiPhase(): Promise<void> {
   let phasesTotal = 0;
   let guardrailCases = 0;
   let guardrailHits = 0;
+  let schemaValids = 0;
   for (const { c, r } of scored) {
     if (r.intentMatch) intentMatches++;
+    if (r.schemaValid) schemaValids++;
     if (r.toolMatch) toolMatches++;
     if (r.phaseCountMatch) phaseCountMatches++;
     phasesMatched += r.phasesMatched;
     phasesTotal += r.phasesTotal;
     if (c.gold.guardrails) { guardrailCases++; if (r.guardrailsMatch) guardrailHits++; }
     console.log(`${r.intentMatch ? "✔" : "✘"} ${c.id} (${r.phasesMatched}/${r.phasesTotal} phases): ${c.input}`);
+    for (const issue of r.schemaIssues) console.log(`   ↳ create_strategy would reject: ${issue}`);
   }
   const n = cases.length;
   console.log("\n=== ① NL→DSL fidelity — multi-phase (configured LLM) ===");
   console.log(`① multi:    intent-match ${pct(intentMatches / n)} · tool-select ${pct(toolMatches / n)}  (n=${n})`);
+  console.log(`   schema-accepted:     ${pct(schemaValids / n)} (${schemaValids}/${n})`);
   console.log(`   phase-count-correct: ${pct(phaseCountMatches / n)}`);
   console.log(`   per-phase fidelity:  ${pct(phasesMatched / phasesTotal)} (${phasesMatched}/${phasesTotal} phases)`);
   console.log(`   guardrails correct:  ${guardrailCases === 0 ? "n/a" : pct(guardrailHits / guardrailCases)} (${guardrailHits}/${guardrailCases})`);

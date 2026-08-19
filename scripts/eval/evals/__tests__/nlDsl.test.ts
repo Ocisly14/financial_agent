@@ -9,7 +9,7 @@ const gold: GoldDsl = {
 };
 
 test("intentMatch true only when all critical fields match", () => {
-  const phases = [{ price_trigger: { type: "rolling_change", direction: "down", pct: 5 },
+  const phases = [{ price_trigger: { type: "rolling_change", direction: "down", pct: 5, window_minutes: 60 },
     action: { side: "BUY", quote_size: 200 }, recurrence: { mode: "one_shot" } }];
   const generated = { tool: "create_strategy", input: { symbol: "AAPL", phases } };
   const r = scoreCase(generated, gold);
@@ -34,8 +34,8 @@ test("null generation scores as total miss", () => {
 const multiGold: GoldMultiDsl = {
   tool: "create_strategy", symbol: "AAPL",
   phases: [
-    { trigger_type: "rolling_change", direction: "down", pct: 5, side: "BUY", sizing_kind: "fixed_quote_usd", sizing_value: 200, recurrence_mode: "one_shot" },
-    { trigger_type: "rolling_change", direction: "down", pct: 10, side: "BUY", sizing_kind: "fixed_quote_usd", sizing_value: 300, recurrence_mode: "one_shot" },
+    { trigger_type: "rolling_change", direction: "down", pct: 5, window_minutes: 60, side: "BUY", sizing_kind: "fixed_quote_usd", sizing_value: 200, recurrence_mode: "one_shot" },
+    { trigger_type: "rolling_change", direction: "down", pct: 10, window_minutes: 120, side: "BUY", sizing_kind: "fixed_quote_usd", sizing_value: 300, recurrence_mode: "one_shot" },
   ],
   guardrails: { total_budget_usd: 500 },
 };
@@ -46,8 +46,8 @@ test("multi: all phases + guardrails correct → intentMatch, order-independent"
     symbol: "AAPL",
     guardrails: { total_budget_usd: 500 },
     phases: [
-      { price_trigger: { type: "rolling_change", direction: "down", pct: 10 }, action: { side: "BUY", quote_size: 300 }, recurrence: { mode: "one_shot" } },
-      { price_trigger: { type: "rolling_change", direction: "down", pct: 5 }, action: { side: "BUY", quote_size: 200 }, recurrence: { mode: "one_shot" } },
+      { price_trigger: { type: "rolling_change", direction: "down", pct: 10, window_minutes: 120 }, action: { side: "BUY", quote_size: 300 }, recurrence: { mode: "one_shot" } },
+      { price_trigger: { type: "rolling_change", direction: "down", pct: 5, window_minutes: 60 }, action: { side: "BUY", quote_size: 200 }, recurrence: { mode: "one_shot" } },
     ],
   };
   const r = scoreMultiCase({ tool: "create_strategy", input }, multiGold);
@@ -60,7 +60,7 @@ test("multi: all phases + guardrails correct → intentMatch, order-independent"
 test("multi: missing a phase → not intentMatch", () => {
   const input = {
     symbol: "AAPL", guardrails: { total_budget_usd: 500 },
-    phases: [{ price_trigger: { type: "rolling_change", direction: "down", pct: 5 }, action: { side: "BUY", quote_size: 200 }, recurrence: { mode: "one_shot" } }],
+    phases: [{ price_trigger: { type: "rolling_change", direction: "down", pct: 5, window_minutes: 60 }, action: { side: "BUY", quote_size: 200 }, recurrence: { mode: "one_shot" } }],
   };
   const r = scoreMultiCase({ tool: "create_strategy", input }, multiGold);
   assert.equal(r.phaseCountMatch, false);
@@ -113,8 +113,8 @@ test("multi: wrong guardrail budget → not intentMatch even if phases match", (
   const input = {
     symbol: "AAPL", guardrails: { total_budget_usd: 999 },
     phases: [
-      { price_trigger: { type: "rolling_change", direction: "down", pct: 5 }, action: { side: "BUY", quote_size: 200 }, recurrence: { mode: "one_shot" } },
-      { price_trigger: { type: "rolling_change", direction: "down", pct: 10 }, action: { side: "BUY", quote_size: 300 }, recurrence: { mode: "one_shot" } },
+      { price_trigger: { type: "rolling_change", direction: "down", pct: 5, window_minutes: 60 }, action: { side: "BUY", quote_size: 200 }, recurrence: { mode: "one_shot" } },
+      { price_trigger: { type: "rolling_change", direction: "down", pct: 10, window_minutes: 120 }, action: { side: "BUY", quote_size: 300 }, recurrence: { mode: "one_shot" } },
     ],
   };
   const r = scoreMultiCase({ tool: "create_strategy", input }, multiGold);
@@ -210,4 +210,54 @@ test("single: a rolling_change window is scored — the schema requires it, so d
   assert.equal(scoreCase(call({ type: "rolling_change", direction: "down", pct: 3, window_minutes: 60 }), goldWindowed).intentMatch, true);
   assert.equal(scoreCase(call({ type: "rolling_change", direction: "down", pct: 3, window_minutes: 30 }), goldWindowed).intentMatch, false);
   assert.equal(scoreCase(call({ type: "rolling_change", direction: "down", pct: 3 }), goldWindowed).intentMatch, false);
+});
+
+// ── Schema acceptance ─────────────────────────────────────────────────────────
+// A transcription is only right if create_strategy would take it. These two cases
+// carry every gold field and differ solely in whether the payload survives the tool.
+
+const windowGold: GoldMultiDsl = {
+  tool: "create_strategy", symbol: "AAPL",
+  phases: [{ trigger_type: "rolling_change", direction: "down", pct: 5, window_minutes: 60,
+    side: "BUY", sizing_kind: "fixed_quote_usd", sizing_value: 200, recurrence_mode: "one_shot" }],
+};
+
+test("multi: a schema-valid transcription passes", () => {
+  const input = { symbol: "AAPL", phases: [{
+    price_trigger: { type: "rolling_change", direction: "down", pct: 5, window_minutes: 60 },
+    action: { side: "BUY", size: { type: "fixed_quote_usd", value: 200 } }, recurrence: { mode: "one_shot" } }] };
+  const r = scoreMultiCase({ tool: "create_strategy", input }, windowGold);
+  assert.equal(r.schemaValid, true);
+  assert.deepEqual(r.schemaIssues, []);
+  assert.equal(r.intentMatch, true);
+});
+
+test("multi: a payload create_strategy would reject never counts as an intent match", () => {
+  // rolling_change with no window_minutes — the one omission the tool cannot absorb.
+  const input = { symbol: "AAPL", phases: [{
+    price_trigger: { type: "rolling_change", direction: "down", pct: 5 },
+    action: { side: "BUY", size: { type: "fixed_quote_usd", value: 200 } }, recurrence: { mode: "one_shot" } }] };
+  const r = scoreMultiCase({ tool: "create_strategy", input }, windowGold);
+  assert.equal(r.schemaValid, false);
+  assert.ok(r.schemaIssues.length > 0, "the rejection reason is reported, not just the verdict");
+  assert.equal(r.intentMatch, false);
+});
+
+test("multi: an unparseable strategy still reports the fields it got right", () => {
+  // A duplicate phase id is rejected by the schema's superRefine, not by any field check.
+  const phase = {
+    price_trigger: { type: "rolling_change", direction: "down", pct: 5, window_minutes: 60 },
+    action: { side: "BUY", size: { type: "fixed_quote_usd", value: 200 } }, recurrence: { mode: "one_shot" } };
+  const input = { symbol: "AAPL", phases: [{ ...phase, id: "same" }, { ...phase, id: "same" }] };
+  const r = scoreMultiCase({ tool: "create_strategy", input }, {
+    ...windowGold, phases: [windowGold.phases[0]!, windowGold.phases[0]!] });
+  assert.equal(r.schemaValid, false);
+  assert.equal(r.phasesMatched, 2, "the field-level diff still runs, so the report says what else was right");
+  assert.equal(r.intentMatch, false);
+});
+
+test("multi: no tool call reports the miss as a schema failure too", () => {
+  const r = scoreMultiCase(null, windowGold);
+  assert.equal(r.schemaValid, false);
+  assert.deepEqual(r.schemaIssues, ["no tool call generated"]);
 });
