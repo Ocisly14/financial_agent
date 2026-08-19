@@ -146,7 +146,7 @@ test("the agent's roster reaches its system prompt, and an invoked skill's tools
   const { runtime, definition, state, toolSpecsPerStep, systemPrompts } = runtimeHarness({}, skills);
 
   await runtime.run(definition, {
-    sessionId: "s", agentId: "a", taskId: "t", threadId: "th", state,
+    sessionId: "s", tenantId: "a", taskId: "t", threadId: "th", state,
     request: { agent: "financial_modeling", task: "do it" },
     allowedTools: [{ name: "invoke_skill", description: "d", category: "main", inputSchema: { type: "object" } }],
   });
@@ -163,7 +163,7 @@ test("a skill outside the agent's roster never reaches the registry", async () =
   const { runtime, definition, state, toolSpecsPerStep } = runtimeHarness({ skills: [] }, skills);
 
   await runtime.run(definition, {
-    sessionId: "s", agentId: "a", taskId: "t", threadId: "th", state,
+    sessionId: "s", tenantId: "a", taskId: "t", threadId: "th", state,
     request: { agent: "financial_modeling", task: "do it" },
     allowedTools: [{ name: "invoke_skill", description: "d", category: "main", inputSchema: { type: "object" } }],
   });

@@ -34,7 +34,7 @@ export const CATCH_UP_THROTTLE_MS = 60_000;
 /** The slice of SqliteEventStore this scheduler needs. Narrow so tests can stub it. */
 export type TopicDigestStore = {
   isTopicDigestDue(topicId: string): boolean;
-  listDigestDueTopics(agentId: string): string[];
+  listDigestDueTopics(tenantId: string): string[];
   getTopicDigest(topicId: string): { summary: string | null; throughTurn: number } | null;
   setTopicDigest(
     topicId: string,
@@ -115,14 +115,14 @@ export class TopicDigestScheduler {
    * Throttled per agent, and safe to call from a hot request path: it returns
    * as soon as the work is dispatched only if the caller does not await it.
    */
-  async catchUp(agentId: string, now = Date.now()): Promise<void> {
+  async catchUp(tenantId: string, now = Date.now()): Promise<void> {
     // "Never swept" is absence, not timestamp 0 — the first sweep after a
     // restart is the one that matters most and must never be throttled away.
-    const last = this.lastCatchUp.get(agentId);
+    const last = this.lastCatchUp.get(tenantId);
     if (last !== undefined && now - last < this.catchUpThrottleMs) return;
-    this.lastCatchUp.set(agentId, now);
+    this.lastCatchUp.set(tenantId, now);
 
-    const due = this.store.listDigestDueTopics(agentId).filter((topicId) => !this.inFlight.has(topicId));
+    const due = this.store.listDigestDueTopics(tenantId).filter((topicId) => !this.inFlight.has(topicId));
     if (due.length === 0) return;
     await mapWithConcurrency(due, DIGEST_CONCURRENCY, (topicId) => this.run(topicId));
   }

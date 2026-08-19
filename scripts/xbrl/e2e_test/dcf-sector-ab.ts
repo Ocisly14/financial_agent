@@ -100,7 +100,7 @@ function validateSeed(): Record<string, unknown> {
     }
     const lineItems = (snapshot["lineItems"] as Array<Record<string, unknown>> | undefined) ?? [];
     return {
-      seedDb, seedModelId, ownerAgentId: model["owner_agent_id"], revision: latest["revision"], stage,
+      seedDb, seedModelId, ownerTenantId: model["owner_agent_id"], revision: latest["revision"], stage,
       lineItemCount: lineItems.length,
       revenueRows: lineItems.map((i) => String(i["id"])).filter((id) => id.startsWith("revenue.")).sort(),
     };

@@ -207,7 +207,7 @@ async function handleChat(
     return jsonError(res, 400, "sessionId is required for inputResponse");
   }
   const sessionId = body.sessionId ?? newId("sess");
-  const agentId = (req.headers["x-agent-id"] as string | undefined) ?? "default";
+  const tenantId = (req.headers["x-agent-id"] as string | undefined) ?? "default";
   const state = await app.sessions.getOrCreate(sessionId);
 
   let message: string;
@@ -236,8 +236,8 @@ async function handleChat(
   // through `ensureTopic`: that would insert a phantom `chat_rooms` row with
   // the same id, and the Research would then show up in the Topic sidebar and
   // shadow itself.
-  const research = app.eventStore.getResearch(agentId, sessionId);
-  if (!research) app.eventStore.ensureTopic(agentId, sessionId, defaultRoomName());
+  const research = app.eventStore.getResearch(tenantId, sessionId);
+  if (!research) app.eventStore.ensureTopic(tenantId, sessionId, defaultRoomName());
 
   let activeModel: {
     modelId: string;
@@ -254,7 +254,7 @@ async function handleChat(
     }
     const model = getDefaultFinancialModelToolDeps().modelStore.getMeta(body.activeModelId);
     if (!model) return jsonError(res, 404, "active financial model not found");
-    if (model.ownerAgentId !== agentId) return jsonError(res, 403, "active financial model belongs to another agent");
+    if (model.ownerTenantId !== tenantId) return jsonError(res, 403, "active financial model belongs to another agent");
     const belongsToSession = research
       ? app.eventStore.listResearchMembers(sessionId).some((member) => member.topicId === model.originSessionId)
       : model.originSessionId === sessionId;
@@ -280,12 +280,12 @@ async function handleChat(
   const keepaliveMs = Number.parseInt(process.env["SSE_KEEPALIVE_INTERVAL"] ?? "15000", 10);
   const keepalive = setInterval(() => res.write(": ping\n\n"), keepaliveMs);
   const unsubscribe = attachSse(state, (frame) => sseWrite(res, frame));
-  activeWorkflows.set(agentId, { kind: "task_chain", startedAt: Date.now(), sessionId });
+  activeWorkflows.set(tenantId, { kind: "task_chain", startedAt: Date.now(), sessionId });
 
   try {
     if (research) {
       await app.researchRuntime.run({
-        agentId,
+        tenantId,
         researchId: sessionId,
         researchName: research.name,
         userMessage: message,
@@ -298,10 +298,10 @@ async function handleChat(
       });
       // `appendEvent` bumps `chat_rooms.updated_at`, which a Research has no row
       // in; without this the sidebar would order Researches by creation only.
-      app.eventStore.renameResearch(agentId, sessionId, research.name);
+      app.eventStore.renameResearch(tenantId, sessionId, research.name);
     } else {
       await app.orchestrator.run({
-        agentId,
+        tenantId,
         sessionId,
         userMessage: message,
         ...(inputResponse ? { inputResponse } : {}),
@@ -313,7 +313,7 @@ async function handleChat(
   } finally {
     clearInterval(keepalive);
     unsubscribe();
-    activeWorkflows.delete(agentId);
+    activeWorkflows.delete(tenantId);
     // The turn is over — the one moment at which this Topic's history is a
     // complete thought. Arming the debounce here (rather than when the user
     // sent the message) is what stops the summariser reading a half-streamed
@@ -350,7 +350,7 @@ async function handleCreateTopic(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   app: FinancialAgentApp,
-  agentId: string,
+  tenantId: string,
 ): Promise<void> {
   let body: { name?: string } = {};
   const rawBody = await readBody(req);
@@ -362,7 +362,7 @@ async function handleCreateTopic(
     }
   }
   const topicId = newId("room");
-  const topic = app.eventStore.createTopic(agentId, topicId, body.name?.trim() || defaultRoomName());
+  const topic = app.eventStore.createTopic(tenantId, topicId, body.name?.trim() || defaultRoomName());
   jsonOk(res, { success: true, topic });
 }
 
@@ -370,7 +370,7 @@ async function handleUpdateTopic(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   app: FinancialAgentApp,
-  agentId: string,
+  tenantId: string,
   topicId: string,
 ): Promise<void> {
   let body: { name?: string; category?: string | null };
@@ -395,7 +395,7 @@ async function handleUpdateTopic(
     patch.category = body.category === null ? null : asTopicCategory(body.category);
   }
 
-  if (!app.eventStore.updateTopic(agentId, topicId, patch)) {
+  if (!app.eventStore.updateTopic(tenantId, topicId, patch)) {
     return jsonError(res, 404, "topic not found");
   }
   jsonOk(res, { success: true, topic: { id: topicId, ...patch } });
@@ -527,8 +527,8 @@ async function handleReplaceTopicCharts(
 /** Members resolved to the same TopicSummary shape the Topic routes return,
  *  in membership order. A member whose Topic was deleted is skipped rather
  *  than returned as a hole. */
-function researchMembers(app: FinancialAgentApp, agentId: string, researchId: string) {
-  const topics = new Map(app.eventStore.listTopics(agentId).map((topic) => [topic.id, topic]));
+function researchMembers(app: FinancialAgentApp, tenantId: string, researchId: string) {
+  const topics = new Map(app.eventStore.listTopics(tenantId).map((topic) => [topic.id, topic]));
   return app.eventStore
     .listResearchMembers(researchId)
     .map((member) => topics.get(member.topicId))
@@ -536,8 +536,8 @@ function researchMembers(app: FinancialAgentApp, agentId: string, researchId: st
 }
 
 /** §7.4: an unnamed Research is named after what it compares. */
-function defaultResearchName(app: FinancialAgentApp, agentId: string, topicIds: string[]): string {
-  const topics = new Map(app.eventStore.listTopics(agentId).map((topic) => [topic.id, topic]));
+function defaultResearchName(app: FinancialAgentApp, tenantId: string, topicIds: string[]): string {
+  const topics = new Map(app.eventStore.listTopics(tenantId).map((topic) => [topic.id, topic]));
   const labels = topicIds
     .map((topicId) => topics.get(topicId))
     .filter((topic): topic is NonNullable<typeof topic> => topic !== undefined)
@@ -549,7 +549,7 @@ async function handleCreateResearch(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   app: FinancialAgentApp,
-  agentId: string,
+  tenantId: string,
 ): Promise<void> {
   let body: { name?: string; topicIds?: unknown } = {};
   const rawBody = await readBody(req);
@@ -565,14 +565,14 @@ async function handleCreateResearch(
     : [];
 
   const researchId = newId("research");
-  const name = body.name?.trim() || defaultResearchName(app, agentId, topicIds);
-  const research = app.eventStore.createResearch(agentId, researchId, name);
+  const name = body.name?.trim() || defaultResearchName(app, tenantId, topicIds);
+  const research = app.eventStore.createResearch(tenantId, researchId, name);
   if (topicIds.length) app.eventStore.replaceResearchMembers(researchId, topicIds);
 
   jsonOk(res, {
     success: true,
     research: { ...research, memberCount: topicIds.length },
-    members: researchMembers(app, agentId, researchId),
+    members: researchMembers(app, tenantId, researchId),
   });
 }
 
@@ -580,7 +580,7 @@ async function handleUpdateResearch(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   app: FinancialAgentApp,
-  agentId: string,
+  tenantId: string,
   researchId: string,
 ): Promise<void> {
   let body: { name?: string };
@@ -592,20 +592,20 @@ async function handleUpdateResearch(
   if (body.name === undefined) return jsonError(res, 400, "name is required");
   const name = body.name.trim();
   if (!name) return jsonError(res, 400, "name must not be empty");
-  if (!app.eventStore.renameResearch(agentId, researchId, name)) {
+  if (!app.eventStore.renameResearch(tenantId, researchId, name)) {
     return jsonError(res, 404, "research not found");
   }
-  jsonOk(res, { success: true, research: app.eventStore.getResearch(agentId, researchId) });
+  jsonOk(res, { success: true, research: app.eventStore.getResearch(tenantId, researchId) });
 }
 
 async function handleReplaceResearchMembers(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   app: FinancialAgentApp,
-  agentId: string,
+  tenantId: string,
   researchId: string,
 ): Promise<void> {
-  if (!app.eventStore.getResearch(agentId, researchId)) return jsonError(res, 404, "research not found");
+  if (!app.eventStore.getResearch(tenantId, researchId)) return jsonError(res, 404, "research not found");
 
   let body: { topicIds?: unknown };
   try {
@@ -616,7 +616,7 @@ async function handleReplaceResearchMembers(
   if (!Array.isArray(body.topicIds)) return jsonError(res, 400, "topicIds must be an array");
 
   // Only Topics that actually belong to this agent, de-duplicated, order kept.
-  const known = new Set(app.eventStore.listTopics(agentId).map((topic) => topic.id));
+  const known = new Set(app.eventStore.listTopics(tenantId).map((topic) => topic.id));
   const topicIds: string[] = [];
   for (const candidate of body.topicIds) {
     if (typeof candidate !== "string" || !known.has(candidate) || topicIds.includes(candidate)) continue;
@@ -624,7 +624,7 @@ async function handleReplaceResearchMembers(
   }
 
   app.eventStore.replaceResearchMembers(researchId, topicIds);
-  jsonOk(res, { success: true, members: researchMembers(app, agentId, researchId) });
+  jsonOk(res, { success: true, members: researchMembers(app, tenantId, researchId) });
 }
 
 async function handleStatic(pathname: string, res: http.ServerResponse): Promise<void> {
@@ -723,16 +723,16 @@ export function createHttpServer(app: FinancialAgentApp): http.Server {
 
       const topicsMatch = pathname.match(/^\/api\/agents\/([^/]+)\/topics$/);
       if (topicsMatch) {
-        const agentId = decodeURIComponent(topicsMatch[1]!);
+        const tenantId = decodeURIComponent(topicsMatch[1]!);
         if (method === "GET") {
-          jsonOk(res, { success: true, topics: app.eventStore.listTopics(agentId) });
+          jsonOk(res, { success: true, topics: app.eventStore.listTopics(tenantId) });
           // Backstop for digests a restart lost, AFTER the response is out so
           // the sidebar never waits on a model call. Throttled inside, because
           // the client repeats this poll every 30s per open tab.
-          void app.topicDigests.catchUp(agentId);
+          void app.topicDigests.catchUp(tenantId);
           return;
         }
-        if (method === "POST") return await handleCreateTopic(req, res, app, agentId);
+        if (method === "POST") return await handleCreateTopic(req, res, app, tenantId);
       }
 
       const topicModelsMatch = pathname.match(/^\/api\/agents\/([^/]+)\/topics\/([^/]+)\/models$/);
@@ -767,11 +767,11 @@ export function createHttpServer(app: FinancialAgentApp): http.Server {
 
       const topicMatch = pathname.match(/^\/api\/agents\/([^/]+)\/topics\/([^/]+)$/);
       if (topicMatch) {
-        const agentId = decodeURIComponent(topicMatch[1]!);
+        const tenantId = decodeURIComponent(topicMatch[1]!);
         const topicId = decodeURIComponent(topicMatch[2]!);
-        if (method === "PUT") return await handleUpdateTopic(req, res, app, agentId, topicId);
+        if (method === "PUT") return await handleUpdateTopic(req, res, app, tenantId, topicId);
         if (method === "DELETE") {
-          if (!app.eventStore.deleteTopic(agentId, topicId)) return jsonError(res, 404, "topic not found");
+          if (!app.eventStore.deleteTopic(tenantId, topicId)) return jsonError(res, 404, "topic not found");
           app.sessions.delete(topicId);
           return jsonOk(res, { success: true, message: "deleted" });
         }
@@ -779,36 +779,36 @@ export function createHttpServer(app: FinancialAgentApp): http.Server {
 
       const researchesMatch = pathname.match(/^\/api\/agents\/([^/]+)\/researches$/);
       if (researchesMatch) {
-        const agentId = decodeURIComponent(researchesMatch[1]!);
-        if (method === "GET") return jsonOk(res, { success: true, researches: app.eventStore.listResearches(agentId) });
-        if (method === "POST") return await handleCreateResearch(req, res, app, agentId);
+        const tenantId = decodeURIComponent(researchesMatch[1]!);
+        if (method === "GET") return jsonOk(res, { success: true, researches: app.eventStore.listResearches(tenantId) });
+        if (method === "POST") return await handleCreateResearch(req, res, app, tenantId);
       }
 
       // Matched before the bare /researches/:id route below, which would
       // otherwise swallow "/members" as part of the id.
       const researchMembersMatch = pathname.match(/^\/api\/agents\/([^/]+)\/researches\/([^/]+)\/members$/);
       if (researchMembersMatch) {
-        const agentId = decodeURIComponent(researchMembersMatch[1]!);
+        const tenantId = decodeURIComponent(researchMembersMatch[1]!);
         const researchId = decodeURIComponent(researchMembersMatch[2]!);
         if (method === "GET") {
-          if (!app.eventStore.getResearch(agentId, researchId)) return jsonError(res, 404, "research not found");
-          return jsonOk(res, { success: true, members: researchMembers(app, agentId, researchId) });
+          if (!app.eventStore.getResearch(tenantId, researchId)) return jsonError(res, 404, "research not found");
+          return jsonOk(res, { success: true, members: researchMembers(app, tenantId, researchId) });
         }
-        if (method === "PUT") return await handleReplaceResearchMembers(req, res, app, agentId, researchId);
+        if (method === "PUT") return await handleReplaceResearchMembers(req, res, app, tenantId, researchId);
       }
 
       const researchMatch = pathname.match(/^\/api\/agents\/([^/]+)\/researches\/([^/]+)$/);
       if (researchMatch) {
-        const agentId = decodeURIComponent(researchMatch[1]!);
+        const tenantId = decodeURIComponent(researchMatch[1]!);
         const researchId = decodeURIComponent(researchMatch[2]!);
         if (method === "GET") {
-          const research = app.eventStore.getResearch(agentId, researchId);
+          const research = app.eventStore.getResearch(tenantId, researchId);
           if (!research) return jsonError(res, 404, "research not found");
-          return jsonOk(res, { success: true, research, members: researchMembers(app, agentId, researchId) });
+          return jsonOk(res, { success: true, research, members: researchMembers(app, tenantId, researchId) });
         }
-        if (method === "PUT") return await handleUpdateResearch(req, res, app, agentId, researchId);
+        if (method === "PUT") return await handleUpdateResearch(req, res, app, tenantId, researchId);
         if (method === "DELETE") {
-          if (!app.eventStore.deleteResearch(agentId, researchId)) return jsonError(res, 404, "research not found");
+          if (!app.eventStore.deleteResearch(tenantId, researchId)) return jsonError(res, 404, "research not found");
           // Members are NOT deleted: a Topic outlives any Research it is in (§3).
           app.sessions.delete(researchId);
           return jsonOk(res, { success: true, message: "deleted" });

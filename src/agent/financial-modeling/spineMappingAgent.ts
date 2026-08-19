@@ -39,7 +39,7 @@ export async function runSpineMappingAgent(input: {
   definition: SubagentDefinition;
   state: SessionState;
   sessionId: string;
-  agentId: string;
+  tenantId: string;
   task: string;
   /** From createSpineMappingTools: the read side, pinned to this run's model. */
   readTools: RegisteredTool[];
@@ -62,7 +62,7 @@ export async function runSpineMappingAgent(input: {
   const threadId = input.state.openThread("spine_mapping");
   const taskId = input.state.recordDispatch("spine_mapping", input.task, threadId).event_id;
   const task = await input.subagentRuntime.run(input.definition, {
-    sessionId: input.sessionId, agentId: input.agentId, taskId, threadId, state: input.state,
+    sessionId: input.sessionId, tenantId: input.tenantId, taskId, threadId, state: input.state,
     request: { agent: "spine_mapping", task: input.task },
     allowedTools: runTools.map(({ execute: _execute, ...definition }) => definition),
     toolRegistry: registry,

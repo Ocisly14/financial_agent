@@ -63,7 +63,7 @@ export type StatementExtractionDeps = {
 /** Writes only the dedicated ingestion/insight/table stores; never touches a model revision. */
 export async function runStatementExtraction(
   deps: StatementExtractionDeps,
-  ownerAgentId: string,
+  ownerTenantId: string,
   request: FinancialModelSourceRequest,
 ): Promise<StatementExtractionResult> {
   const ingestionRunId = `ing_${randomUUID()}`;
@@ -98,7 +98,7 @@ export async function runStatementExtraction(
     // Agent decides whether to proceed, so the verification detail rides along in
     // diagnostics rather than blocking here.
     const diagnostics = [...extractions.flatMap((filing) => filing.diagnostics), ...curation.diagnostics];
-    deps.ingestionStore.saveIngestion({ ingestionRunId, modelId, ownerAgentId, symbol: request.symbol.toUpperCase(), status: "ready",
+    deps.ingestionStore.saveIngestion({ ingestionRunId, modelId, ownerTenantId, symbol: request.symbol.toUpperCase(), status: "ready",
       source, ...(prepared ? { prepared } : {}), filingInsightSetId: insights.insightSetId, diagnostics,
       curatedTables: curation.curatedTables, curations: curation.curations, verification: curation.verification, presentationExtracts });
     return { ingestionRunId, modelId, status: "ready", accessions: source.filings.map((filing) => filing.accession),
@@ -110,7 +110,7 @@ export async function runStatementExtraction(
       : error instanceof ArelleAdapterError ? error.code : "statement_extraction_failed";
     const message = error instanceof Error ? error.message : String(error);
     const diagnostics = error instanceof IncompleteFinancialStatementsError ? error.diagnostics : [];
-    deps.ingestionStore.saveIngestion({ ingestionRunId, modelId, ownerAgentId, symbol: request.symbol.toUpperCase(), status: "failed",
+    deps.ingestionStore.saveIngestion({ ingestionRunId, modelId, ownerTenantId, symbol: request.symbol.toUpperCase(), status: "failed",
       ...(resolvedSource ? { source: resolvedSource } : {}), diagnostics, error: { code, message } });
     return { ingestionRunId, modelId, status: "failed", accessions: resolvedSource?.filings.map((filing) => filing.accession) ?? [],
       diagnostics, error: { code, message, retryable: !NON_RETRYABLE_CODES.has(code) } };

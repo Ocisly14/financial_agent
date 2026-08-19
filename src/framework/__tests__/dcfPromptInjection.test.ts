@@ -68,7 +68,7 @@ async function drive(agent: AgentKind, script: Step[]): Promise<LlmMessage[][]> 
   const dispatch = state.recordDispatch(agent, "value AMZN", thread);
 
   await new SubagentRuntime(new ModelRouter(provider), tools).run(definition, {
-    sessionId: "s", agentId: "agent-1", taskId: dispatch.event_id,
+    sessionId: "s", tenantId: "agent-1", taskId: dispatch.event_id,
     request: { agent, task: "value AMZN" },
     allowedTools: [...queues.keys()].map((name) => {
       const { execute: _execute, ...rest } = tools.get(name)!;

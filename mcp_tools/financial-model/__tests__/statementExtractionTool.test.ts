@@ -59,7 +59,7 @@ function unflaggedFixture() {
   return { tool, insightStore };
 }
 
-const context = { agentId: "agent-1", sessionId: "session-1" } as never;
+const context = { tenantId: "agent-1", sessionId: "session-1" } as never;
 
 test("the extraction tool is a plain tool: a symbol in, an ingestion run and coverage statistics out", async () => {
   const { tool, store } = fixture();

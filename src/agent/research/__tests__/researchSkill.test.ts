@@ -18,7 +18,7 @@ import type { TopicOrchestrator } from "../tools.ts";
 /** A store with no members: `buildMemberContext` short-circuits before ever
  *  touching charts/compaction, so nothing else needs implementing here. */
 class EmptyResearchStore implements ResearchRuntimeStore {
-  createTopic(_agentId: string, topicId: string, name: string, createdAt = Date.now()): TopicSummary {
+  createTopic(_tenantId: string, topicId: string, name: string, createdAt = Date.now()): TopicSummary {
     return {
       id: topicId, name, leadSymbol: null, subjectSymbols: [], createdAt, lastMessage: null, messageCount: 0,
       summary: null, category: null, categoryLocked: false,
@@ -70,7 +70,7 @@ function registryWith(spec: {
  *  inside the run loop, not about the input's own field values. */
 function runInput(): ResearchRunInput {
   return {
-    agentId: "default",
+    tenantId: "default",
     researchId: "res_1",
     researchName: "半导体估值",
     userMessage: "半导体这一批怎么看？",

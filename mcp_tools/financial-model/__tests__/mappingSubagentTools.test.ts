@@ -7,7 +7,7 @@ const byName = (tools: RegisteredTool[], name: string): RegisteredTool | undefin
 /** These are ordinary MCP tools now: async, and the payload rides in generation_context.data.
  *  A failure comes back as an error result rather than a throw. */
 async function data<T>(tool: RegisteredTool | undefined, input: object): Promise<T> {
-  const result = await tool!.execute(input as never, { sessionId: "s", agentId: "owner" });
+  const result = await tool!.execute(input as never, { sessionId: "s", tenantId: "owner" });
   if (result.error) throw new Error(result.error.message);
   return result.generation_context!.data as T;
 }
@@ -69,12 +69,12 @@ function setup(symbols: readonly string[]) {
   const service = new FinancialModelService(modelStore, "session-1");
   const modelIds = symbols.map((symbol, index) => {
     const modelId = `fm-${index}`;
-    service.createModel({ modelId, ownerAgentId: "agent-1", originSessionId: "session-1", symbol,
+    service.createModel({ modelId, ownerTenantId: "agent-1", originSessionId: "session-1", symbol,
       metadata: {}, reportingCurrency: "USD", periods: PERIODS, preparedStatementRows: [] });
     return modelId;
   });
   return { modelStore, sourceReviewStore, modelIds,
-    deps: { modelStore, sourceReviewStore, ownerAgentId: "agent-1" } };
+    deps: { modelStore, sourceReviewStore, ownerTenantId: "agent-1" } };
 }
 
 test("mapping tool preserves typed errors and their correction details", async () => {
@@ -82,7 +82,7 @@ test("mapping tool preserves typed errors and their correction details", async (
     inputSchema: { type: "object" } }, () => {
     throw new FinancialModelError("revision_conflict", "revision is stale", { currentRevision: 7 });
   });
-  const result = await tool.execute({}, { sessionId: "s", agentId: "owner" });
+  const result = await tool.execute({}, { sessionId: "s", tenantId: "owner" });
   assert.equal(result.error?.code, "revision_conflict");
   assert.equal(result.error?.message, "revision is stale");
   assert.deepEqual(result.generation_context?.data, { error: "revision_conflict", currentRevision: 7 });
@@ -181,7 +181,7 @@ test("spine mapping refuses to load before unification has stored anything", asy
 test("another agent's model is invisible, so a subagent cannot load across owners", async () => {
   const { sourceReviewStore, modelIds, deps } = setup(["TSLA"]);
   sourceReviewStore.save(modelIds[0]!, review({ presentationExtracts: [{} as never] }));
-  const loader = createStatementUnificationTools({ ...deps, ownerAgentId: "agent-2" });
+  const loader = createStatementUnificationTools({ ...deps, ownerTenantId: "agent-2" });
   await assert.rejects(() => data(byName(loader.tools, "load_concept_inventory"), { symbol: "TSLA" }),
     /no model holds extracted data for TSLA/);
 });

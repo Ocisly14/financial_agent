@@ -35,7 +35,7 @@ console.log(`# Step 5 — explore-then-calculate tool loop for ${symbol} → ${o
 const modelStore = new InMemoryModelStore<FinancialModelSnapshot, RevisionChangeSummary>(financialModelSnapshotCodec);
 const service = new FinancialModelService(modelStore, "e2e-session");
 const modelId = `fm-${symbol.toLowerCase()}-explore-test`;
-service.createModel({ modelId, ownerAgentId: AGENT, originSessionId: "e2e-session", symbol,
+service.createModel({ modelId, ownerTenantId: AGENT, originSessionId: "e2e-session", symbol,
   metadata: { companyName: source.company.title }, reportingCurrency: source.reportingCurrency,
   periods: source.periods, preparedStatementRows: [] });
 const labelByRowId = new Map([...unified.rows, ...(unified.breakdownRows ?? [])].map((row) => [row.rowId, row.label]));
@@ -51,7 +51,7 @@ sourceReviewStore.save(modelId, { ingestionRunId: "e2e", coverage: { requestedPe
 const deps = { modelStore, insightStore: new InMemoryFilingInsightStore(),
   sourceReviewStore, ingestionStore: sourceReviewStore } as FinancialModelToolDeps;
 const tools = new Map(createWorkbenchTools(deps).map((tool) => [tool.name, tool]));
-const ctx = { agentId: AGENT, sessionId: "e2e-session" };
+const ctx = { tenantId: AGENT, sessionId: "e2e-session" };
 
 const workbookCatalog = Object.values(committed.currentWorkbook.sections).flat()
   .filter((row) => actualIds.some((p) => row.cells[p]?.value !== null && row.cells[p]?.value !== undefined))

@@ -36,7 +36,7 @@ console.log(`# Step 4 — agent formula test for ${symbol} → ${outputDirectory
 const modelStore = new InMemoryModelStore<FinancialModelSnapshot, RevisionChangeSummary>(financialModelSnapshotCodec);
 const service = new FinancialModelService(modelStore, "e2e-session");
 const modelId = `fm-${symbol.toLowerCase()}-formula-test`;
-service.createModel({ modelId, ownerAgentId: AGENT, originSessionId: "e2e-session", symbol,
+service.createModel({ modelId, ownerTenantId: AGENT, originSessionId: "e2e-session", symbol,
   metadata: { companyName: source.company.title }, reportingCurrency: source.reportingCurrency,
   periods: source.periods, preparedStatementRows: [] });
 
@@ -102,7 +102,7 @@ const deps = { modelStore, insightStore: new InMemoryFilingInsightStore(),
   sourceReviewStore, ingestionStore: sourceReviewStore } as FinancialModelToolDeps;
 const calculate = createWorkbenchTools(deps).find((tool) => tool.name === "calculate_model_rows")!;
 const result = await calculate.execute({ modelId, expectedRevision: committed.revision, rows: proposed },
-  { agentId: AGENT, sessionId: "e2e-session" });
+  { tenantId: AGENT, sessionId: "e2e-session" });
 
 if (result.error) {
   console.log(`\nTool REJECTED the batch: [${result.error.code}] ${result.error.message}`);

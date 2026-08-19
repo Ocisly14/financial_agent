@@ -78,7 +78,7 @@ function setup(): { financial: FinancialModelToolDeps; modelId: string; sourceRe
   const sourceReviewStore = new InMemorySourceReviewStore();
   const service = new FinancialModelService(modelStore, "session-1");
   const modelId = "fm-1";
-  service.createModel({ modelId, ownerAgentId: "agent-1", originSessionId: "session-1", symbol: "TEST",
+  service.createModel({ modelId, ownerTenantId: "agent-1", originSessionId: "session-1", symbol: "TEST",
     metadata: {}, reportingCurrency: "USD", periods: PERIODS, preparedStatementRows: [] });
   return { modelId, sourceReviewStore,
     financial: { modelStore, sourceReviewStore, ingestionStore: sourceReviewStore,
@@ -113,7 +113,7 @@ test("statement_unification reports breakdown counts in summary and generation_c
   await session(runner.sessions, "s1");
   const tool = createDcfSubagentTool({ ...runner, financial: { ...financial, tableStore } });
   const result = await tool.execute({ subagent: "statement_unification", modelId, task: "Unify TEST's filings." },
-    { agentId: "agent-1", sessionId: "s1" });
+    { tenantId: "agent-1", sessionId: "s1" });
   assert.equal(result.error, undefined);
   assert.match(result.summary, /2 breakdown row\(s\) on 1 axis\/axes/);
   const data = result.generation_context!.data as { unifiedStatements: { breakdownRows: number } };
@@ -129,7 +129,7 @@ test("statement_unification behaves as before when deps has no tableStore", asyn
   await session(runner.sessions, "s1");
   const tool = createDcfSubagentTool({ ...runner, financial });
   const result = await tool.execute({ subagent: "statement_unification", modelId, task: "Unify TEST's filings." },
-    { agentId: "agent-1", sessionId: "s1" });
+    { tenantId: "agent-1", sessionId: "s1" });
   assert.equal(result.error, undefined);
   assert.doesNotMatch(result.summary, /breakdown row/);
   const data = result.generation_context!.data as { unifiedStatements: { breakdownRows: number } };
@@ -175,7 +175,7 @@ test("spine_mapping labels a breakdown detail row from breakdownRows, not the ro
   await session(runner.sessions, "s1");
   const tool = createDcfSubagentTool({ ...runner, financial });
   const result = await tool.execute({ subagent: "spine_mapping", modelId, task: "Map TEST's unified statements." },
-    { agentId: "agent-1", sessionId: "s1" });
+    { tenantId: "agent-1", sessionId: "s1" });
   assert.equal(result.error, undefined, result.summary);
 
   const service = new FinancialModelService(financial.modelStore, "s1");

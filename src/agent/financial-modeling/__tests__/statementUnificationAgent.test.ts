@@ -53,7 +53,7 @@ async function run(runtime: SubagentRuntime) {
   const state = new SessionState("s", new Date().toISOString());
   state.beginTurn("go");
   return runStatementUnificationAgent({ subagentRuntime: runtime, definition, state,
-    sessionId: "s", agentId: "a", task, readTools: [loadTool()], filings, requestedPeriods: periods });
+    sessionId: "s", tenantId: "a", task, readTools: [loadTool()], filings, requestedPeriods: periods });
 }
 
 test("a submitted decision is checked, stored, and returned as the artifact", async () => {

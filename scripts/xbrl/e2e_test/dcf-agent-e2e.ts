@@ -42,7 +42,7 @@ const symbol = (process.env["E2E_SYMBOL"]?.trim() || positional[0]?.trim() || "A
 const outputDirectory = resolve(process.env["E2E_AGENT_OUTPUT_DIR"]?.trim()
   || join("data", "e2e-test", "dcf-agent", symbol.toLowerCase()));
 const sessionId = process.env["E2E_SESSION_ID"]?.trim() || `e2e-dcf-agent-${symbol.toLowerCase()}`;
-const agentId = `e2e-dcf-agent-${symbol.toLowerCase()}`;
+const tenantId = `e2e-dcf-agent-${symbol.toLowerCase()}`;
 const resumeModelId = process.env["E2E_RESUME_MODEL_ID"]?.trim() || undefined;
 const modelDatabasePath = resolve(process.env["E2E_MODEL_DB_PATH"]?.trim() || join(outputDirectory, "financial-models.sqlite"));
 // One dispatch is capped at the agent's own 30-step budget, which a from-scratch DCF outgrows: the
@@ -94,7 +94,7 @@ const write = (name: string, value: unknown): void =>
 const append = (name: string, value: unknown): void =>
   appendFileSync(join(outputDirectory, name), `${JSON.stringify(value)}\n`, "utf8");
 
-write("run-config.json", { symbol, sessionId, agentId, outputDirectory, modelDatabasePath, resumeModelId, provider: providerName,
+write("run-config.json", { symbol, sessionId, tenantId, outputDirectory, modelDatabasePath, resumeModelId, provider: providerName,
   maxRounds, roundTimeoutMs, fresh, initialPrompt, continuationPrompt, startedAt: new Date().toISOString() });
 
 console.log(`# DCF Agent end-to-end — ${symbol} via ${providerName} → ${outputDirectory}`);
@@ -160,13 +160,13 @@ state.subscribe((event: SessionEvent) => {
 // ── the round loop: dispatch, record, continue the same thread ───────────────
 // No human is watching this stream, so ask_user is taken off the pool — a question here would stall
 // the run against an empty seat until the timeout. The agent's other judgment calls stay its own.
-const dispatcher = app.createDispatcher(sessionId, agentId);
+const dispatcher = app.createDispatcher(sessionId, tenantId);
 dispatcher.setUserInputAllowed(false);
 
 const findModel = (): ReturnType<typeof deps.modelStore.list>[number] | undefined =>
   resumeModelId === undefined
-    ? deps.modelStore.list({ ownerAgentId: agentId, symbol }).at(-1)
-    : deps.modelStore.list({ ownerAgentId: agentId, symbol }).find((model) => model.modelId === resumeModelId);
+    ? deps.modelStore.list({ ownerTenantId: tenantId, symbol }).at(-1)
+    : deps.modelStore.list({ ownerTenantId: tenantId, symbol }).find((model) => model.modelId === resumeModelId);
 
 state.beginTurn(initialPrompt);
 

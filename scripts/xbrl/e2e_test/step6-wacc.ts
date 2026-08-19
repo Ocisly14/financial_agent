@@ -44,7 +44,7 @@ const assert = (condition: boolean, message: string): void => {
 const modelStore = new InMemoryModelStore<FinancialModelSnapshot, RevisionChangeSummary>(financialModelSnapshotCodec);
 const service = new FinancialModelService(modelStore, "e2e-session");
 const modelId = `fm-${symbol.toLowerCase()}-wacc-test`;
-service.createModel({ modelId, ownerAgentId: AGENT, originSessionId: "e2e-session", symbol,
+service.createModel({ modelId, ownerTenantId: AGENT, originSessionId: "e2e-session", symbol,
   metadata: { companyName: source.company.title }, reportingCurrency: source.reportingCurrency,
   periods: source.periods, preparedStatementRows: [] });
 

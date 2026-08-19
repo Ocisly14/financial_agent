@@ -67,8 +67,8 @@ test("a dispatch issued from inside a skill's workflow already carries that skil
     inputSchema: { type: "object" }, execute: async () => ({ summary: "ok" }) });
 
   const sessions = new SessionRegistry();
-  const dispatcherFactory = (sessionId: string, agentId: string) =>
-    new Dispatcher(sessionId, subagents, subagentRuntime as never, dispatchTools, sessions.getExisting(sessionId), agentId);
+  const dispatcherFactory = (sessionId: string, tenantId: string) =>
+    new Dispatcher(sessionId, subagents, subagentRuntime as never, dispatchTools, sessions.getExisting(sessionId), tenantId);
 
   let call = 0;
   const provider: LlmProvider = {
@@ -93,7 +93,7 @@ test("a dispatch issued from inside a skill's workflow already carries that skil
     sessions,
   );
 
-  await orchestrator.run({ agentId: "agent-1", sessionId: "s1", userMessage: "go" });
+  await orchestrator.run({ tenantId: "agent-1", sessionId: "s1", userMessage: "go" });
 
   assert.equal(seen.length, 1, "the workflow's dispatch must reach the subagent runtime");
   assert.deepEqual(seen[0]!.allowedTools.map((tool) => tool.name), ["granted_tool"],

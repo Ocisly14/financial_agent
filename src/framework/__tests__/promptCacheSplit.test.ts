@@ -229,7 +229,7 @@ async function stepsOf(batches: string[]): Promise<LlmMessage[][]> {
     name: "statement_unification", description: "d", modelClass: "MEDIUM", defaultTools: ["load_batch"],
     systemPrompt: { system: "s", prompt: "<task>\n{{task}}\n</task>\n\n[PROGRESS SO FAR]\n{{progress}}\n\n{{stepBudget}}\nTake your next action now." },
   } as never, {
-    sessionId: "s", agentId: "agent-1", taskId: dispatch.event_id,
+    sessionId: "s", tenantId: "agent-1", taskId: dispatch.event_id,
     request: { agent: "statement_unification", task: "unify AMZN" },
     allowedTools: [definition], state, threadId: thread,
   });

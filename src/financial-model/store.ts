@@ -7,14 +7,14 @@ import type { JsonObject, JsonValue } from "../framework/types.ts";
 
 export type NewModelMeta = {
   modelId: string;
-  ownerAgentId: string;
+  ownerTenantId: string;
   originSessionId: string;
   symbol: string;
   metadata: JsonObject;
 };
 
 export type ModelFilter = {
-  ownerAgentId?: string;
+  ownerTenantId?: string;
   originSessionId?: string;
   symbol?: string;
   lifecycleStage?: LifecycleStage;
@@ -140,7 +140,7 @@ function validateInput<TSnapshot, TSummary extends JsonObject>(
 function matchesFilter(view: ModelView, filter: ModelFilter): boolean {
   const includesArchived = filter.includeArchived || filter.lifecycleStage === "archived";
   if (!includesArchived && view.lifecycleStage === "archived") return false;
-  if (filter.ownerAgentId !== undefined && view.ownerAgentId !== filter.ownerAgentId) return false;
+  if (filter.ownerTenantId !== undefined && view.ownerTenantId !== filter.ownerTenantId) return false;
   if (filter.originSessionId !== undefined && view.originSessionId !== filter.originSessionId) return false;
   if (filter.symbol !== undefined && view.symbol !== filter.symbol) return false;
   if (filter.lifecycleStage !== undefined && view.lifecycleStage !== filter.lifecycleStage) return false;
@@ -260,7 +260,7 @@ implements ModelStore<TSnapshot, TChangeSummary> {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.db.prepare("INSERT INTO financial_models VALUES (?, ?, ?, ?, ?, ?)")
-        .run(meta.modelId, meta.ownerAgentId, meta.originSessionId, meta.symbol, JSON.stringify(meta.metadata), createdAt);
+        .run(meta.modelId, meta.ownerTenantId, meta.originSessionId, meta.symbol, JSON.stringify(meta.metadata), createdAt);
       this.db.prepare("INSERT INTO financial_model_revisions VALUES (?, 0, NULL, ?, ?, ?, ?, ?, ?)")
         .run(meta.modelId, initial.lifecycleStage, encoded.snapshotJson, encoded.summaryJson,
           initial.engineVersion, initial.creatingSessionId, createdAt);
@@ -279,7 +279,7 @@ implements ModelStore<TSnapshot, TChangeSummary> {
         revision: number; lifecycle_stage: LifecycleStage; updated_at: string;
       }) | undefined;
     if (!row) return undefined;
-    return { modelId: row.model_id, ownerAgentId: row.owner_agent_id, originSessionId: row.origin_session_id,
+    return { modelId: row.model_id, ownerTenantId: row.owner_agent_id, originSessionId: row.origin_session_id,
       symbol: row.symbol, metadata: decodeSummary<JsonObject>(row.metadata_json), currentRevision: row.revision,
       lifecycleStage: row.lifecycle_stage, updatedAt: row.updated_at, createdAt: row.created_at };
   }

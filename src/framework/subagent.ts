@@ -324,7 +324,7 @@ function nativeToolResult(call: ToolCall, toolName: string, data: unknown, isErr
 
 export type RunSubagentInput = {
   sessionId: string;
-  agentId: string;
+  tenantId: string;
   /** The dispatch this run answers — where its task_result is written. */
   taskId: string;
   request: TaskRequest;
@@ -817,7 +817,7 @@ export class SubagentRuntime {
       const registry = input.toolRegistry?.get(tool.name) ? input.toolRegistry : this.toolRegistry;
       output = await registry.call(tool.name, callInput, {
         sessionId: input.sessionId,
-        agentId: input.agentId,
+        tenantId: input.tenantId,
         taskId: input.taskId,
       });
     } catch (error) {

@@ -26,7 +26,7 @@ export interface SourceReviewStore { save(modelId: string, artifact: SourceRevie
 export type FilingIngestionArtifact = {
   ingestionRunId: string;
   modelId: string;
-  ownerAgentId: string;
+  ownerTenantId: string;
   symbol: string;
   status: "ready" | "failed";
   source?: ResolvedFinancialModelSource;
@@ -46,7 +46,7 @@ export type FilingIngestionArtifact = {
 export interface FilingIngestionStore {
   saveIngestion(artifact: FilingIngestionArtifact): void;
   getIngestion(ingestionRunId: string): FilingIngestionArtifact | undefined;
-  consumeIngestion(ingestionRunId: string, ownerAgentId: string, symbol: string): FilingIngestionArtifact | undefined;
+  consumeIngestion(ingestionRunId: string, ownerTenantId: string, symbol: string): FilingIngestionArtifact | undefined;
 }
 
 export class InMemorySourceReviewStore implements SourceReviewStore, FilingIngestionStore {
@@ -58,7 +58,7 @@ export class InMemorySourceReviewStore implements SourceReviewStore, FilingInges
   getIngestion(id: string): FilingIngestionArtifact | undefined { const value = this.ingestions.get(id); return value && structuredClone(value); }
   consumeIngestion(id: string, owner: string, symbol: string): FilingIngestionArtifact | undefined {
     const value = this.ingestions.get(id);
-    if (!value || value.ownerAgentId !== owner || value.symbol !== symbol || value.consumedAt) return undefined;
+    if (!value || value.ownerTenantId !== owner || value.symbol !== symbol || value.consumedAt) return undefined;
     value.consumedAt = new Date().toISOString(); return structuredClone(value);
   }
 }
@@ -90,7 +90,7 @@ export class SqliteSourceReviewStore implements SourceReviewStore, FilingIngesti
     this.db.prepare(`INSERT INTO financial_model_filing_ingestions VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(ingestion_run_id) DO UPDATE SET owner_agent_id=excluded.owner_agent_id,
         symbol=excluded.symbol, artifact_json=excluded.artifact_json`)
-      .run(artifact.ingestionRunId, artifact.ownerAgentId, artifact.symbol, JSON.stringify(artifact), new Date().toISOString());
+      .run(artifact.ingestionRunId, artifact.ownerTenantId, artifact.symbol, JSON.stringify(artifact), new Date().toISOString());
   }
   getIngestion(id: string): FilingIngestionArtifact | undefined {
     const row = this.db.prepare("SELECT artifact_json FROM financial_model_filing_ingestions WHERE ingestion_run_id=?").get(id) as { artifact_json: string } | undefined;
@@ -100,7 +100,7 @@ export class SqliteSourceReviewStore implements SourceReviewStore, FilingIngesti
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const value = this.getIngestion(id);
-      if (!value || value.ownerAgentId !== owner || value.symbol !== symbol || value.consumedAt) { this.db.exec("ROLLBACK"); return undefined; }
+      if (!value || value.ownerTenantId !== owner || value.symbol !== symbol || value.consumedAt) { this.db.exec("ROLLBACK"); return undefined; }
       value.consumedAt = new Date().toISOString();
       this.db.prepare("UPDATE financial_model_filing_ingestions SET artifact_json=? WHERE ingestion_run_id=?").run(JSON.stringify(value), id);
       this.db.exec("COMMIT"); return value;

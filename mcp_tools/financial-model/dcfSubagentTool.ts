@@ -44,7 +44,7 @@ export function createDcfSubagentTool(deps: {
       const modelId = requiredString(input, "modelId");
       {
         const meta = deps.financial.modelStore.getMeta(modelId);
-        if (!meta || meta.ownerAgentId !== context.agentId) return { summary: "Financial model not found.", error: { code: "financial_model_not_found", message: "Financial model not found." } };
+        if (!meta || meta.ownerTenantId !== context.tenantId) return { summary: "Financial model not found.", error: { code: "financial_model_not_found", message: "Financial model not found." } };
         const sourceReview = deps.financial.sourceReviewStore.get(modelId);
         if (!sourceReview) return { summary: "Source review unavailable.", error: { code: "source_review_unavailable", message: `${subagent} requires a prepared source review` } };
         if (subagent === "statement_unification") {
@@ -52,12 +52,12 @@ export function createDcfSubagentTool(deps: {
             error: { code: "presentation_extract_unavailable", message: "statement_unification needs presentationExtracts; re-run extract_filing_statements" } };
           const requestedPeriods = sourceReview.statementViews.income_statement.candidate.periods;
           const loader = createStatementUnificationTools({ modelStore: deps.financial.modelStore,
-            sourceReviewStore: deps.financial.sourceReviewStore, ownerAgentId: context.agentId, modelId,
+            sourceReviewStore: deps.financial.sourceReviewStore, ownerTenantId: context.tenantId, modelId,
             ...(deps.financial.tableStore ? { tableStore: deps.financial.tableStore } : {}) });
           const run = await runStatementUnificationAgent({
             subagentRuntime: deps.subagentRuntime, definition: deps.subagents.get("statement_unification"),
             state: deps.sessions.getExisting(context.sessionId),
-            sessionId: context.sessionId, agentId: context.agentId,
+            sessionId: context.sessionId, tenantId: context.tenantId,
             task: requiredString(input, "task"), readTools: loader.tools,
             filings: sourceReview.presentationExtracts, requestedPeriods,
             tables: deps.financial.tableStore?.getRunTables(sourceReview.ingestionRunId) ?? [] });
@@ -90,7 +90,7 @@ export function createDcfSubagentTool(deps: {
         const current = service.getModel(modelId);
         if (!("currentWorkbook" in current)) throw new Error("default model context expected");
         const loader = createSpineMappingTools({ modelStore: deps.financial.modelStore,
-          sourceReviewStore: deps.financial.sourceReviewStore, ownerAgentId: context.agentId, modelId });
+          sourceReviewStore: deps.financial.sourceReviewStore, ownerTenantId: context.tenantId, modelId });
         // The persistence implementation belongs at this boundary, but its invocation belongs to
         // spine_mapping: runSpineMappingAgent calls it only after the agent's last candidate is
         // structurally complete and reconciliation-clean.
@@ -100,7 +100,7 @@ export function createDcfSubagentTool(deps: {
         const run = await runSpineMappingAgent({
           subagentRuntime: deps.subagentRuntime, definition: deps.subagents.get("spine_mapping"),
           state: deps.sessions.getExisting(context.sessionId),
-          sessionId: context.sessionId, agentId: context.agentId,
+          sessionId: context.sessionId, tenantId: context.tenantId,
           task: requiredString(input, "task"), readTools: loader.tools,
           unified,
           previewReconciliations: (facts) => service.previewSpineFacts(modelId, {

@@ -16,7 +16,7 @@ const taskResult = {
 test("reads only requested exact paths from a task result in the current session", async () => {
   const tool = createReadCompactedTaskDataTool({ loadEvents: async () => [taskResult] } as never);
   const result = await tool.execute({ source_event_id: "ev_result", paths: ["active_model_context.model_id", "tool_outputs.0.data.value"] },
-    { sessionId: "room_1", agentId: "agent_1" });
+    { sessionId: "room_1", tenantId: "agent_1" });
 
   assert.equal(result.error, undefined);
   assert.deepEqual(result.generation_context?.data.values, {
@@ -28,6 +28,6 @@ test("reads only requested exact paths from a task result in the current session
 test("rejects broad or malformed reads", async () => {
   const tool = createReadCompactedTaskDataTool({ loadEvents: async () => [taskResult] } as never);
   const result = await tool.execute({ source_event_id: "ev_result", paths: ["active model"] },
-    { sessionId: "room_1", agentId: "agent_1" });
+    { sessionId: "room_1", tenantId: "agent_1" });
   assert.equal(result.error?.code, "invalid_compacted_task_read");
 });

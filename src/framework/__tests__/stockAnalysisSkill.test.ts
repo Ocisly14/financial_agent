@@ -88,7 +88,7 @@ test("stock-analysis references support progressive disclosure", async () => {
 
   const results = await Promise.all(paths.map((referencePath) => readReference.execute(
     { skill: "stock-analysis", path: referencePath },
-    { sessionId: "stock-analysis-reference-test", agentId: "agent-1" },
+    { sessionId: "stock-analysis-reference-test", tenantId: "agent-1" },
   )));
 
   for (const result of results) assert.equal(result.error, undefined);

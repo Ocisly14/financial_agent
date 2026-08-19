@@ -152,7 +152,7 @@ async function runSubagent(runtime: SubagentRuntime, state: SessionState, tools:
   const dispatch = state.recordDispatch("financial_modeling", "value AAPL", thread);
   await runtime.run(financialModeling, {
     sessionId: "s",
-    agentId: "agent-1",
+    tenantId: "agent-1",
     taskId: dispatch.event_id,
     request: { agent: "financial_modeling", task: "value AAPL" },
     allowedTools: ["get_financial_model", "ask_user"].map((name) => {
@@ -369,8 +369,8 @@ test("a subagent's pending question ends the orchestrator turn", async () => {
       });
     },
   };
-  const dispatcherFactory = (sessionId: string, agentId: string) =>
-    new Dispatcher(sessionId, subagents, subagentRuntime as never, tools, sessions.getExisting(sessionId), agentId);
+  const dispatcherFactory = (sessionId: string, tenantId: string) =>
+    new Dispatcher(sessionId, subagents, subagentRuntime as never, tools, sessions.getExisting(sessionId), tenantId);
 
   const steps = [
     JSON.stringify({ reply: "building", dispatch: [{ agent: "financial_modeling", task: "value AAPL" }] }),
@@ -389,7 +389,7 @@ test("a subagent's pending question ends the orchestrator turn", async () => {
     { system: "", prompt: "" }, new ModelRouter(provider), dispatcherFactory, subagents, new SkillRegistry(), tools, sessions,
   );
 
-  await orchestrator.run({ agentId: "agent-1", sessionId: "s", userMessage: "value AAPL" });
+  await orchestrator.run({ tenantId: "agent-1", sessionId: "s", userMessage: "value AAPL" });
 
   assert.equal(call, 1, "the orchestrator kept looping after its subagent asked the user");
   const state = sessions.getExisting("s");

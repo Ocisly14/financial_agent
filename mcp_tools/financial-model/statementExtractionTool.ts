@@ -60,7 +60,7 @@ export function createStatementExtractionTool(deps: {
         ?? (process.env["FILING_INSIGHTS_ENABLED"] === "1" ? createSmallModelInsightGenerator(deps.modelRouter) : undefined);
       const result = await runStatementExtraction({ provider, ingestionStore: deps.financial.ingestionStore,
         insightStore: deps.financial.insightStore, ...(generateInsights ? { generateInsights } : {}),
-        tableStore: filingTableStore() }, context.agentId, request);
+        tableStore: filingTableStore() }, context.tenantId, request);
 
       if (result.status === "failed") {
         // The summary is the only part the agent reads, so a failure that will answer identically

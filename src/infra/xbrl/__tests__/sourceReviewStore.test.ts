@@ -30,7 +30,7 @@ function unified(rowCount: number): UnifiedStatementsArtifact {
 }
 
 function ingestion(overrides: Partial<FilingIngestionArtifact> = {}): FilingIngestionArtifact {
-  return { ingestionRunId: RUN, modelId: MODEL, ownerAgentId: "agent-1", symbol: "AAPL",
+  return { ingestionRunId: RUN, modelId: MODEL, ownerTenantId: "agent-1", symbol: "AAPL",
     status: "ready", diagnostics: [], ...overrides };
 }
 

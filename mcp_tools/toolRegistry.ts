@@ -4,7 +4,7 @@ import type { JsonObject, ToolDefinition, ToolExecutionResult } from "../src/fra
 export type ToolExecutionContext = {
   sessionId: string;
   /** Authenticated owner propagated by the HTTP/runtime boundary. */
-  agentId: string;
+  tenantId: string;
   taskId?: string;
 };
 

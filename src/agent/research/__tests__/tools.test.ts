@@ -60,7 +60,7 @@ class FakeStore implements ResearchToolStore {
   members: ResearchMember[] = [];
   seen: Array<{ topicId: string; turn: number }> = [];
 
-  createTopic(_agentId: string, topicId: string, name: string, createdAt = Date.now()): TopicSummary {
+  createTopic(_tenantId: string, topicId: string, name: string, createdAt = Date.now()): TopicSummary {
     const topic: TopicSummary = {
       id: topicId, name, leadSymbol: null, subjectSymbols: [], createdAt, lastMessage: null, messageCount: 0,
       summary: null, category: null, categoryLocked: false,
@@ -132,7 +132,7 @@ function harness(options: {
   const frames: ResearchFrame[] = [];
   const runs: Array<{ sessionId: string; userMessage: string; allowUserInput?: boolean; activeModel?: { modelId: string } }> = [];
   const toolset = new ResearchToolset({
-    agentId: "default",
+    tenantId: "default",
     researchId: "res_1",
     researchName: "半导体估值",
     store,
@@ -168,7 +168,7 @@ test("dispatch_task runs the Topic's own orchestrator and returns its final repl
 
   assert.equal(result.status, "ok");
   assert.equal(result.reply, "reply to 渠道库存怎么样？");
-  assert.deepEqual(h.runs, [{ agentId: "default", sessionId: "room_a", userMessage: "渠道库存怎么样？" }],
+  assert.deepEqual(h.runs, [{ tenantId: "default", sessionId: "room_a", userMessage: "渠道库存怎么样？" }],
     "the background Topic run must not surface an input card outside the current Research");
 });
 
@@ -293,7 +293,7 @@ test("consult_topic is ephemeral: it asks the Topic but writes no member turn", 
   const sessions = new SessionRegistry(new InMemoryEventStore());
   store.createTopic("default", "room_a", "AAPL");
   const toolset = new ResearchToolset({
-    agentId: "default", researchId: "res_1", researchName: "Research", store, sessions,
+    tenantId: "default", researchId: "res_1", researchName: "Research", store, sessions,
     orchestrator: {
       async run() { return { response: "unused" }; },
       async consult(input) { consulted = input; return { response: "AAPL's established view is constructive." }; },

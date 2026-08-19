@@ -50,8 +50,8 @@ export async function createFinancialAgentApp() {
   // by name at call time, so registering into it after construction is fine.
   toolRegistry.register(createDcfSubagentTool({ subagentRuntime, subagents, sessions, financial: financialModelDeps }));
 
-  const dispatcherFactory = (sessionId: string, agentId: string, state?: import("../framework/sessionState.ts").SessionState) =>
-    new Dispatcher(sessionId, subagents, subagentRuntime, toolRegistry, state ?? sessions.getExisting(sessionId), agentId);
+  const dispatcherFactory = (sessionId: string, tenantId: string, state?: import("../framework/sessionState.ts").SessionState) =>
+    new Dispatcher(sessionId, subagents, subagentRuntime, toolRegistry, state ?? sessions.getExisting(sessionId), tenantId);
 
   const orchestrator = new OrchestratorRuntime(
     orchestratorPrompt,

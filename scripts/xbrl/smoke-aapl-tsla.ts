@@ -53,7 +53,7 @@ try {
     const companyDirectory = join(outputDirectory, symbol.toLowerCase());
     await mkdir(companyDirectory, { recursive: true });
     const extracted = await extractionTool.execute({ subagent: "statement_extraction", symbol, historyYears, forecastYears: 3 }, {
-      agentId: "smoke-owner",
+      tenantId: "smoke-owner",
       sessionId: "smoke-session",
     });
     if (extracted.error) throw new Error(`${symbol} statement extraction failed: ${extracted.error.code}: ${extracted.error.message}`);
@@ -76,7 +76,7 @@ try {
     });
 
     const created = await createTool.execute({ symbol, ingestionRunId }, {
-      agentId: "smoke-owner",
+      tenantId: "smoke-owner",
       sessionId: "smoke-session",
     });
     if (created.error) throw new Error(`${symbol} initial DCF creation failed: ${created.error.code}: ${created.error.message}`);

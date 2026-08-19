@@ -40,7 +40,7 @@ const codec: SnapshotCodec<Snapshot> = {
 function modelMeta(modelId = "model-1"): NewModelMeta {
   return {
     modelId,
-    ownerAgentId: "agent-1",
+    ownerTenantId: "agent-1",
     originSessionId: "session-1",
     symbol: "TEST",
     metadata: { currency: "USD" },
@@ -215,13 +215,13 @@ function storeContract(name: string, make: () => Harness): void {
     store.create(
       {
         ...modelMeta("model-2"),
-        ownerAgentId: "agent-2",
+        ownerTenantId: "agent-2",
         originSessionId: "session-2",
         symbol: "OTHER",
       },
       input("two", "history_committed"),
     );
-    assert.deepEqual(store.list({ ownerAgentId: "agent-1" }).map((view) => view.modelId), ["model-1"]);
+    assert.deepEqual(store.list({ ownerTenantId: "agent-1" }).map((view) => view.modelId), ["model-1"]);
     assert.deepEqual(store.list({ symbol: "OTHER" }).map((view) => view.modelId), ["model-2"]);
     assert.deepEqual(store.list({ lifecycleStage: "history_committed" }).map((view) => view.modelId), ["model-2"]);
   });

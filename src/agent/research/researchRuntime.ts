@@ -104,7 +104,7 @@ export type ResearchRuntimeDeps = {
 };
 
 export type ResearchRunInput = {
-  agentId: string;
+  tenantId: string;
   researchId: string;
   researchName: string;
   userMessage: string;
@@ -233,7 +233,7 @@ export class ResearchRuntime {
     const turn = state.beginTurn(input.userMessage, input.inputResponse);
 
     const toolset = new ResearchToolset({
-      agentId: input.agentId,
+      tenantId: input.tenantId,
       researchId: input.researchId,
       researchName: input.researchName,
       store: this.store,
@@ -349,7 +349,7 @@ export class ResearchRuntime {
       // Calls in one step run together: three `dispatch_task`s issued at once is the
       // whole reason the concurrency guard exists.
       const outcomes = await mapWithConcurrency(parsed.toolCalls, MAX_PARALLEL_TOOL_CALLS, (call) =>
-        this.invokeTool(toolset, state, input.agentId, call),
+        this.invokeTool(toolset, state, input.tenantId, call),
       );
       if (outcomes.some(Boolean)) {
         finalReply = status || "Please answer the questions below.";
@@ -389,7 +389,7 @@ export class ResearchRuntime {
     input: ResearchRunInput,
     state: SessionState,
   ): Promise<{ roster: string; externalDelta: string }> {
-    const facts = await this.memberFacts(input.agentId, input.researchId);
+    const facts = await this.memberFacts(input.tenantId, input.researchId);
     if (facts.length === 0) {
       return {
         roster: "(This Research has no members yet. Use create_topic to start a line of investigation, or edit_members to add an existing Topic.)",
@@ -436,11 +436,11 @@ export class ResearchRuntime {
     return seen;
   }
 
-  private async memberFacts(agentId: string, researchId: string): Promise<MemberFacts[]> {
+  private async memberFacts(tenantId: string, researchId: string): Promise<MemberFacts[]> {
     const members = this.store.listResearchMembers(researchId);
     if (members.length === 0) return [];
 
-    const topics = new Map(this.store.listTopics(agentId).map((topic) => [topic.id, topic]));
+    const topics = new Map(this.store.listTopics(tenantId).map((topic) => [topic.id, topic]));
 
     return mapWithConcurrency(members, 3, async (member): Promise<MemberFacts> => {
       const topic = topics.get(member.topicId);
@@ -545,11 +545,11 @@ export class ResearchRuntime {
    * Research's (§4.4). Bad arguments are reported back to the model in the same
    * shape, so it can correct itself on the next step rather than crash the turn.
    */
-  private async invokeTool(toolset: ResearchToolset, state: SessionState, agentId: string, call: ToolCall): Promise<UserInputRequest | undefined> {
+  private async invokeTool(toolset: ResearchToolset, state: SessionState, tenantId: string, call: ToolCall): Promise<UserInputRequest | undefined> {
     state.record("orchestrator", "tool_use", { name: call.name, input: call.input });
     try {
       if (call.name === "ask_user") {
-        const output = await this.tools.call("ask_user", call.input, { sessionId: state.session_id, agentId });
+        const output = await this.tools.call("ask_user", call.input, { sessionId: state.session_id, tenantId });
         const payload: JsonObject = { name: call.name, summary: output.summary };
         if (output.error) payload.error = output.error;
         state.record("orchestrator", "tool_result", payload);

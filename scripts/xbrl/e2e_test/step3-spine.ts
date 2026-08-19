@@ -31,7 +31,7 @@ state.beginTurn("step3");
 const spine = await runSpineMappingAgent({
   subagentRuntime: new SubagentRuntime(new ModelRouter(resolveLlmProvider()), new McpToolRegistry(), skills),
   definition: subagents.get("spine_mapping"),
-  state, sessionId: "e2e-spine", agentId: "e2e-agent",
+  state, sessionId: "e2e-spine", tenantId: "e2e-agent",
   task: `Map ${symbol}'s unified statements onto the canonical spine.`,
   readTools: fileLoader("load_unified_statements", { symbol, periods: unified.periods, rows: unified.rows }),
   unified,

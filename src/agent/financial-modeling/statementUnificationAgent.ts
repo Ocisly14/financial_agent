@@ -60,7 +60,7 @@ export async function runStatementUnificationAgent(input: {
   definition: SubagentDefinition;
   state: SessionState;
   sessionId: string;
-  agentId: string;
+  tenantId: string;
   /** The DCF Agent's instruction. Names the ticker; the agent loads its own working set by it. */
   task: string;
   /** From createStatementUnificationTools: the read side, pinned to this run's model. */
@@ -83,7 +83,7 @@ export async function runStatementUnificationAgent(input: {
   const threadId = input.state.openThread("statement_unification");
   const taskId = input.state.recordDispatch("statement_unification", input.task, threadId).event_id;
   const task = await input.subagentRuntime.run(input.definition, {
-    sessionId: input.sessionId, agentId: input.agentId, taskId, threadId, state: input.state,
+    sessionId: input.sessionId, tenantId: input.tenantId, taskId, threadId, state: input.state,
     request: { agent: "statement_unification", task: input.task },
     allowedTools: runTools.map(({ execute: _execute, ...definition }) => definition),
     ...(input.signal ? { signal: input.signal } : {}),

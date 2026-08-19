@@ -15,7 +15,7 @@ const PERIODS: Period[] = [
 function createInput(overrides: Partial<CreateModelInput> = {}): CreateModelInput {
   return {
     modelId: "model-1",
-    ownerAgentId: "agent-1",
+    ownerTenantId: "agent-1",
     originSessionId: "topic-1",
     symbol: "TEST",
     metadata: { companyName: "Synthetic Company" },

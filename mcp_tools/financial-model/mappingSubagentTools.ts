@@ -45,7 +45,7 @@ export function subagentTool(
 export type MappingSubagentDeps = {
   modelStore: ModelStore<FinancialModelSnapshot, RevisionChangeSummary>;
   sourceReviewStore: SourceReviewStore;
-  ownerAgentId: string;
+  ownerTenantId: string;
   /** The model the orchestrator named. Pins resolution when several versions of one issuer coexist;
    *  absent, the ticker must resolve to exactly one owned model. */
   modelId?: string;
@@ -74,13 +74,13 @@ function resolveModel(deps: MappingSubagentDeps, raw: JsonObject, schema: JsonSc
   const symbol = String(raw["symbol"]).trim().toUpperCase();
   if (deps.modelId !== undefined) {
     const meta = deps.modelStore.getMeta(deps.modelId);
-    if (!meta || meta.ownerAgentId !== deps.ownerAgentId) throw new Error(`model ${deps.modelId} is not available to this agent`);
+    if (!meta || meta.ownerTenantId !== deps.ownerTenantId) throw new Error(`model ${deps.modelId} is not available to this agent`);
     if (meta.symbol !== symbol) {
       throw new Error(`${symbol} is not the issuer of model ${deps.modelId} (${meta.symbol}); restate the instruction with the right ticker`);
     }
     return { modelId: deps.modelId, symbol };
   }
-  const owned = deps.modelStore.list({ ownerAgentId: deps.ownerAgentId, symbol });
+  const owned = deps.modelStore.list({ ownerTenantId: deps.ownerTenantId, symbol });
   if (owned.length === 0) throw new Error(`no model holds extracted data for ${symbol}; run extract_filing_statements and create_financial_model first`);
   // Ambiguity is the orchestrator's to resolve, not something to guess at: picking the newest model
   // would silently map into a workbook nobody asked for.

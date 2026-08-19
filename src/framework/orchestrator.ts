@@ -164,7 +164,7 @@ export type ActiveWorkspaceModel = {
 
 export type OrchestratorInput = {
   sessionId: string;
-  agentId: string;
+  tenantId: string;
   userMessage: string;
   inputResponse?: UserInputResponse;
   /** Model open in the caller's workspace; advisory context for DCF work. */
@@ -176,7 +176,7 @@ export type OrchestratorInput = {
 /** A read-only, non-persistent consultation of a Topic's current working context. */
 export type TopicConsultationInput = {
   sessionId: string;
-  agentId: string;
+  tenantId: string;
   question: string;
   activeModel?: ActiveWorkspaceModel;
 };
@@ -227,7 +227,7 @@ export class OrchestratorRuntime {
   private readonly renderer = new PromptRenderer();
   private readonly prompt: PromptTemplate;
   private readonly modelRouter: ModelRouter;
-  private readonly dispatcherFactory: (sessionId: string, agentId: string, state?: SessionState) => Dispatcher;
+  private readonly dispatcherFactory: (sessionId: string, tenantId: string, state?: SessionState) => Dispatcher;
   private readonly subagents: SubagentRegistry;
   private readonly skills: SkillRegistry;
   private readonly tools: McpToolRegistry;
@@ -237,7 +237,7 @@ export class OrchestratorRuntime {
   constructor(
     prompt: PromptTemplate,
     modelRouter: ModelRouter,
-    dispatcherFactory: (sessionId: string, agentId: string, state?: SessionState) => Dispatcher,
+    dispatcherFactory: (sessionId: string, tenantId: string, state?: SessionState) => Dispatcher,
     subagents: SubagentRegistry,
     skills: SkillRegistry,
     tools: McpToolRegistry,
@@ -272,7 +272,7 @@ export class OrchestratorRuntime {
     );
     return this.runWithState({
       sessionId: input.sessionId,
-      agentId: input.agentId,
+      tenantId: input.tenantId,
       userMessage: input.question,
       ...(input.activeModel ? { activeModel: input.activeModel } : {}),
       allowUserInput: false,
@@ -285,7 +285,7 @@ export class OrchestratorRuntime {
     }
     const turn = state.beginTurn(input.userMessage, input.inputResponse);
 
-    const dispatcher = this.dispatcherFactory(input.sessionId, input.agentId, state);
+    const dispatcher = this.dispatcherFactory(input.sessionId, input.tenantId, state);
     // The same rule the orchestrator applies to its own ask_user below, pushed
     // down to the subagents it dispatches: no human on this stream, no asking.
     dispatcher.setUserInputAllowed(input.allowUserInput !== false);
@@ -432,7 +432,7 @@ export class OrchestratorRuntime {
         const [, toolOutcomes] = await Promise.all([
           // Subagents write their own task_result events.
           tasks.length > 0 ? dispatcher.dispatch(tasks) : Promise.resolve(),
-          Promise.all(toolCalls.map((call) => this.runOrchestratorTool(call, input.sessionId, input.agentId, state))),
+          Promise.all(toolCalls.map((call) => this.runOrchestratorTool(call, input.sessionId, input.tenantId, state))),
         ]);
         if (toolOutcomes.some(Boolean)) {
           finalReply = status || "Please answer the questions below.";
@@ -501,13 +501,13 @@ export class OrchestratorRuntime {
   private async runOrchestratorTool(
     call: OrchestratorToolCall,
     sessionId: string,
-    agentId: string,
+    tenantId: string,
     state: SessionState,
   ): Promise<UserInputRequest | undefined> {
     const { name, input: toolInput } = call;
     state.record("orchestrator", "tool_use", { name, input: toolInput });
     try {
-      const output = await this.tools.call(name, { ...toolInput }, { sessionId, agentId });
+      const output = await this.tools.call(name, { ...toolInput }, { sessionId, tenantId });
       const toolResultPayload: JsonObject = { name, summary: output.summary };
       if (output.generation_context) toolResultPayload.generation_context = output.generation_context as unknown as JsonObject;
       if (output.visualizations?.length) toolResultPayload.visualizations = output.visualizations;

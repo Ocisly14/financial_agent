@@ -26,7 +26,7 @@ test("ask_user normalizes a multi-question request and supplies defaults", async
         max_selections: 2,
       },
     ],
-  }, { sessionId: "s", agentId: "agent-1" });
+  }, { sessionId: "s", tenantId: "agent-1" });
 
   assert.equal(result.error, undefined);
   assert.match(result.user_input_request?.request_id ?? "", /^input_/);
@@ -44,7 +44,7 @@ test("ask_user rejects duplicate ids and invalid selection limits", async () => 
       question: "Pick",
       options: [{ id: "same", label: "A" }, { id: "same", label: "B" }],
     }],
-  }, { sessionId: "s", agentId: "agent-1" });
+  }, { sessionId: "s", tenantId: "agent-1" });
   assert.equal(duplicate.error?.code, "invalid_user_input_request");
 
   const limits = await createAskUserTool().execute({
@@ -55,6 +55,6 @@ test("ask_user rejects duplicate ids and invalid selection limits", async () => 
       min_selections: 2,
       max_selections: 1,
     }],
-  }, { sessionId: "s", agentId: "agent-1" });
+  }, { sessionId: "s", tenantId: "agent-1" });
   assert.equal(limits.error?.code, "invalid_user_input_request");
 });

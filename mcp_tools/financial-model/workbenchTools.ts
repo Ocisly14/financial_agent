@@ -112,9 +112,9 @@ function memberInWorkbook(rowId: string, lineItemIds: ReadonlySet<string>): bool
 
 type LoadResult = { unified: UnifiedStatementsArtifact; lineItemIds: ReadonlySet<string> };
 
-function loadUnified(deps: FinancialModelToolDeps, modelId: string, agentId: string): LoadResult | ToolExecutionResult {
+function loadUnified(deps: FinancialModelToolDeps, modelId: string, tenantId: string): LoadResult | ToolExecutionResult {
   const meta = deps.modelStore.getMeta(modelId);
-  if (!meta || meta.ownerAgentId !== agentId) return failure("financial_model_not_found", `model not found: ${modelId}`);
+  if (!meta || meta.ownerTenantId !== tenantId) return failure("financial_model_not_found", `model not found: ${modelId}`);
   const review = deps.sourceReviewStore.get(modelId);
   const unified = review?.unifiedStatements;
   if (!unified) return failure("unified_statements_unavailable", "no unified statements for this model yet; run the statement_unification subagent first");
@@ -187,7 +187,7 @@ export function expandSlugs(formula: string, slugs: ReadonlySet<string>): string
 function calculateModelRows(deps: FinancialModelToolDeps, input: JsonObject, context: ToolExecutionContext): ToolExecutionResult {
   const modelId = String(input["modelId"]);
   const meta = deps.modelStore.getMeta(modelId);
-  if (!meta || meta.ownerAgentId !== context.agentId) return failure("financial_model_not_found", `model not found: ${modelId}`);
+  if (!meta || meta.ownerTenantId !== context.tenantId) return failure("financial_model_not_found", `model not found: ${modelId}`);
   const stored = deps.modelStore.getRevision(modelId);
   if (!stored) return failure("financial_model_not_found", `model not found: ${modelId}`);
   const expectedRevision = input["expectedRevision"] as number;
@@ -331,7 +331,7 @@ function calculateModelRows(deps: FinancialModelToolDeps, input: JsonObject, con
 
 function listUnifiedStatements(deps: FinancialModelToolDeps, input: JsonObject, context: ToolExecutionContext): ToolExecutionResult {
   const modelId = String(input["modelId"]);
-  const loaded = loadUnified(deps, modelId, context.agentId);
+  const loaded = loadUnified(deps, modelId, context.tenantId);
   if (!isLoadResult(loaded)) return loaded;
   const { unified, lineItemIds } = loaded;
   const statementFilter = typeof input["statement"] === "string" ? input["statement"] as StatementKind : undefined;
@@ -363,7 +363,7 @@ function listUnifiedStatements(deps: FinancialModelToolDeps, input: JsonObject, 
 
 function getUnifiedRows(deps: FinancialModelToolDeps, input: JsonObject, context: ToolExecutionContext): ToolExecutionResult {
   const modelId = String(input["modelId"]);
-  const loaded = loadUnified(deps, modelId, context.agentId);
+  const loaded = loadUnified(deps, modelId, context.tenantId);
   if (!isLoadResult(loaded)) return loaded;
   const { unified } = loaded;
 

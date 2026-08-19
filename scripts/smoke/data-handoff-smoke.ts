@@ -86,13 +86,13 @@ async function main(): Promise<void> {
   const subagentRuntime = new SubagentRuntime(router, tools);
   const orchestrator = new OrchestratorRuntime(
     orchestratorPrompt, router,
-    (sessionId, agentId, state?: SessionState) =>
-      new Dispatcher(sessionId, subagents, subagentRuntime, tools, state ?? sessions.getExisting(sessionId), agentId),
+    (sessionId, tenantId, state?: SessionState) =>
+      new Dispatcher(sessionId, subagents, subagentRuntime, tools, state ?? sessions.getExisting(sessionId), tenantId),
     subagents, new SkillRegistry(), tools, sessions,
   );
 
   const sessionId = `smoke-handoff-${Date.now()}`;
-  const run = (userMessage: string) => orchestrator.run({ sessionId, agentId: "smoke", userMessage, allowUserInput: false });
+  const run = (userMessage: string) => orchestrator.run({ sessionId, tenantId: "smoke", userMessage, allowUserInput: false });
 
   console.log(`${BOLD}Dispatch data handoff — live model smoke test${RESET}`);
   console.log(`${DIM}provider=${process.env["LLM_PROVIDER"] ?? "(unset)"} session=${sessionId}${RESET}\n`);

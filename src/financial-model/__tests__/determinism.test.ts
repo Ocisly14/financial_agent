@@ -134,7 +134,7 @@ test("SQLite round-trip and repeated equivalent commits preserve snapshot bytes"
     store.create(
       {
         modelId: "deterministic-model",
-        ownerAgentId: "agent:test",
+        ownerTenantId: "agent:test",
         originSessionId: "session:test",
         symbol: "TEST",
         metadata: { fixture: "determinism" },
@@ -187,7 +187,7 @@ test("revision headers do not decode old snapshots and a latest read decodes exa
     store.create(
       {
         modelId: "header-model",
-        ownerAgentId: "agent:test",
+        ownerTenantId: "agent:test",
         originSessionId: "session:test",
         symbol: "HEAD",
         metadata: {},

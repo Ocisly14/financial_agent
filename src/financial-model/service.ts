@@ -163,7 +163,7 @@ export class FinancialModelService {
     const summary = makeSummary(calculated, [{ kind: "model_created" }]);
     const meta: NewModelMeta = {
       modelId: input.modelId,
-      ownerAgentId: input.ownerAgentId,
+      ownerTenantId: input.ownerTenantId,
       originSessionId: input.originSessionId,
       symbol: input.symbol,
       metadata: {

@@ -67,7 +67,7 @@ export class Dispatcher {
   private readonly subagentRuntime: SubagentRuntime;
   private readonly tools: McpToolRegistry;
   private readonly state: SessionState;
-  private readonly agentId: string;
+  private readonly tenantId: string;
   private skillSections: Partial<Record<AgentKind, string>> = {};
   private skillTools: string[] | undefined;
   private userInputAllowed = true;
@@ -78,14 +78,14 @@ export class Dispatcher {
     subagentRuntime: SubagentRuntime,
     tools: McpToolRegistry,
     state: SessionState,
-    agentId: string,
+    tenantId: string,
   ) {
     this.sessionId = sessionId;
     this.subagents = subagents;
     this.subagentRuntime = subagentRuntime;
     this.tools = tools;
     this.state = state;
-    this.agentId = agentId;
+    this.tenantId = tenantId;
   }
 
   /**
@@ -266,7 +266,7 @@ export class Dispatcher {
       await withTimeout(
         this.subagentRuntime.run(definition, {
           sessionId: this.sessionId,
-          agentId: this.agentId,
+          tenantId: this.tenantId,
           taskId,
           threadId,
           request: this.withSkillSection(request),

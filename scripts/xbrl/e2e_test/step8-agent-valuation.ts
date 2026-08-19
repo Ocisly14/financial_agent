@@ -69,7 +69,7 @@ if (resuming) {
   const revision = modelStore.getRevision(modelId)!;
   console.log(`Resuming existing model at revision ${revision.revision} (${revision.lifecycleStage}); foundation build skipped.`);
 } else {
-  service.createModel({ modelId, ownerAgentId: AGENT_ID, originSessionId: "e2e-session", symbol,
+  service.createModel({ modelId, ownerTenantId: AGENT_ID, originSessionId: "e2e-session", symbol,
     metadata: { companyName: source.company.title }, reportingCurrency: source.reportingCurrency,
     periods, preparedStatementRows: [] });
   const labelByRowId = new Map([...unified.rows, ...(unified.breakdownRows ?? [])].map((row) => [row.rowId, row.label]));
@@ -146,7 +146,7 @@ const baseTask = resuming
 
 const task = baseTask;
 const dispatch = state.recordDispatch("financial_modeling", task);
-await runtime.run(definition, { sessionId: "e2e-session", agentId: AGENT_ID, taskId: dispatch.event_id,
+await runtime.run(definition, { sessionId: "e2e-session", tenantId: AGENT_ID, taskId: dispatch.event_id,
   request: { agent: "financial_modeling", task, model_id: modelId },
   allowedTools: tools.list(), state, parentEventId: dispatch.event_id });
 const summary = state.task(dispatch.event_id)?.result?.summary ?? "";

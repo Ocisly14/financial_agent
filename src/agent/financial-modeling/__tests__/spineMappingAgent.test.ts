@@ -62,7 +62,7 @@ const definition: SubagentDefinition = {
 async function run(runtime: SubagentRuntime, counter = { calls: 0 }) {
   const state = new SessionState("s", new Date().toISOString());
   state.beginTurn("go");
-  return runSpineMappingAgent({ subagentRuntime: runtime, definition, state, sessionId: "s", agentId: "a",
+  return runSpineMappingAgent({ subagentRuntime: runtime, definition, state, sessionId: "s", tenantId: "a",
     task, readTools: [loadTool(counter)], unified, spineIds });
 }
 
@@ -80,7 +80,7 @@ test("a post-mapping reconciliation failure is returned to the mapping agent and
     refs: ["operating_income@FY2025"], unifiedTrail: [{ lineItemId: "other_operating_expenses", rowIds: ["other_opex"] }],
   };
   let commits = 0;
-  await assert.rejects(() => runSpineMappingAgent({ subagentRuntime: runtime, definition, state, sessionId: "s", agentId: "a",
+  await assert.rejects(() => runSpineMappingAgent({ subagentRuntime: runtime, definition, state, sessionId: "s", tenantId: "a",
     task, readTools: [loadTool({ calls: 0 })], unified, spineIds,
     previewReconciliations: () => [failed], commit: () => { commits += 1; return { revision: 2 }; } }),
   /finished with 1 unresolved finding\(s\); no facts were committed/);
@@ -111,7 +111,7 @@ test("a clean mapping invokes its commit callback exactly once after verificatio
   const state = new SessionState("s", new Date().toISOString());
   state.beginTurn("go");
   let commits = 0;
-  const result = await runSpineMappingAgent({ subagentRuntime: runtime, definition, state, sessionId: "s", agentId: "a",
+  const result = await runSpineMappingAgent({ subagentRuntime: runtime, definition, state, sessionId: "s", tenantId: "a",
     task, readTools: [loadTool({ calls: 0 })], unified, spineIds,
     commit: (candidate) => { commits += 1; assert.equal(candidate.facts.length, 2); return { revision: 7 }; } });
 

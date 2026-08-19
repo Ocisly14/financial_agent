@@ -120,7 +120,7 @@ async function createModel(deps: FinancialModelToolDeps, input: JsonObject, cont
   const ingestionRunId = typeof input["ingestionRunId"] === "string" ? input["ingestionRunId"] : "";
   if (!ingestionRunId) return failure("statement_extraction_required", "Run the private statement_extraction subagent before creating the model.", { retryable: true });
   const ingestion = deps.ingestionStore.getIngestion(ingestionRunId);
-  if (!ingestion || ingestion.ownerAgentId !== context.agentId || ingestion.symbol !== symbol) {
+  if (!ingestion || ingestion.ownerTenantId !== context.tenantId || ingestion.symbol !== symbol) {
     return failure("filing_ingestion_not_found", "Owned filing ingestion run not found.");
   }
   const source = ingestion.source;
@@ -131,7 +131,7 @@ async function createModel(deps: FinancialModelToolDeps, input: JsonObject, cont
   const modelId = deps.modelStore.getMeta(ingestion.modelId) ? `fm_${randomUUID()}` : ingestion.modelId;
   const service = new FinancialModelService(deps.modelStore, context.sessionId);
   try {
-    const created = service.createModel({ modelId, ownerAgentId: context.agentId, originSessionId: context.sessionId, symbol,
+    const created = service.createModel({ modelId, ownerTenantId: context.tenantId, originSessionId: context.sessionId, symbol,
       metadata: { cik: String(source.company.cik), companyName: source.company.title, fiscalYearEnd: source.fiscalYearEnd },
       reportingCurrency: source.reportingCurrency, periods: source.periods, preparedStatementRows: [] });
     if (ingestion.status !== "ready" || !ingestion.prepared) return failure(ingestion.error?.code ?? "incomplete_financial_statements",
@@ -171,7 +171,7 @@ async function mutate(deps: FinancialModelToolDeps, input: JsonObject, context: 
   action: (service: FinancialModelService, id: string, revision: number) => ReturnType<FinancialModelService["archive"]>,
   options: { refreshWacc?: boolean } = {}): Promise<ToolExecutionResult> {
   try {
-    const id = requireString(input, "modelId"); requireOwner(deps, id, context.agentId);
+    const id = requireString(input, "modelId"); requireOwner(deps, id, context.tenantId);
     const service = new FinancialModelService(deps.modelStore, context.sessionId);
     const expectedRevision = requireInteger(input, "expectedRevision");
     const reviewResult = action(service, id, expectedRevision);
@@ -300,7 +300,7 @@ function waccSummary(waccSheet: WaccSheet | null): string {
 
 async function getModel(deps: FinancialModelToolDeps, input: JsonObject, context: ToolExecutionContext): Promise<ToolExecutionResult> {
   try {
-    const id = requireString(input, "modelId"); requireOwner(deps, id, context.agentId);
+    const id = requireString(input, "modelId"); requireOwner(deps, id, context.tenantId);
     const service = new FinancialModelService(deps.modelStore, context.sessionId);
     const revision = typeof input["revision"] === "number" ? input["revision"] : undefined;
     const stored = deps.modelStore.getRevision(id, revision);
@@ -331,7 +331,7 @@ async function getModel(deps: FinancialModelToolDeps, input: JsonObject, context
 }
 
 async function listModels(deps: FinancialModelToolDeps, input: JsonObject, context: ToolExecutionContext): Promise<ToolExecutionResult> {
-  const filter: ModelFilter = { ownerAgentId: context.agentId };
+  const filter: ModelFilter = { ownerTenantId: context.tenantId };
   if (typeof input["symbol"] === "string") filter.symbol = input["symbol"].toUpperCase();
   if (typeof input["lifecycleStage"] === "string" && ["draft", "history_committed", "revenue_forecast", "operations_fcff", "valued", "archived"].includes(input["lifecycleStage"])) {
     filter.lifecycleStage = input["lifecycleStage"] as NonNullable<ModelFilter["lifecycleStage"]>;
@@ -341,9 +341,9 @@ async function listModels(deps: FinancialModelToolDeps, input: JsonObject, conte
   return success(`Found ${models.length} owned financial model(s).`, { models });
 }
 
-function requireOwner(deps: FinancialModelToolDeps, id: string, agentId: string): void {
+function requireOwner(deps: FinancialModelToolDeps, id: string, tenantId: string): void {
   const model = deps.modelStore.getMeta(id);
-  if (!model || model.ownerAgentId !== agentId) throw new FinancialModelError("financial_model_not_found", `model not found: ${id}`);
+  if (!model || model.ownerTenantId !== tenantId) throw new FinancialModelError("financial_model_not_found", `model not found: ${id}`);
 }
 function insightContext(deps: FinancialModelToolDeps, id: string | null): FilingInsightContextView | null { return id ? deps.insightStore.getContext(id) ?? null : null; }
 /**

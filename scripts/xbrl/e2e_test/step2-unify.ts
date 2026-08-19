@@ -80,7 +80,7 @@ try {
   run = await runStatementUnificationAgent({
     subagentRuntime: new SubagentRuntime(new ModelRouter(resolveLlmProvider()), new McpToolRegistry(), skills),
     definition: subagents.get("statement_unification"),
-    state, sessionId: "e2e-unify", agentId: "e2e-agent",
+    state, sessionId: "e2e-unify", tenantId: "e2e-agent",
     task: `Unify ${symbol}'s extracted filings into multi-year statements.`,
     readTools,
     filings: extraction.filings,
