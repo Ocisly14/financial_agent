@@ -77,7 +77,8 @@ export function latestFinancialModelState(outputs: ReturnType<SessionState["suba
 /** 查询类工具:结果不进 active_model_context,但 agent 的后续判断依赖它们,
  * 所以全部保留,否则 agent 会因为看不到结果而无限重查。 */
 const FINANCIAL_QUERY_TOOLS = new Set([
-  "financial_search", "get_treasury_yield", "list_unified_statements", "get_unified_rows", "calculate_model_rows",
+  "financial_search", "read_search_result", "get_treasury_yield", "list_unified_statements", "get_unified_rows",
+  "calculate_model_rows",
 ]);
 
 /** Narrow reads must compose, but an agent can still issue arbitrary selectors. Keep a useful working

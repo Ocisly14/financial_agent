@@ -50,8 +50,9 @@ export async function createFinancialAgentApp() {
     tenantId: string,
     state?: import("../framework/sessionState.ts").SessionState,
     parentPath?: readonly import("../framework/types.ts").AgentKind[],
+    parentTaskId?: string,
   ) => new Dispatcher(sessionId, subagents, subagentRuntime, toolRegistry,
-    state ?? sessions.getExisting(sessionId), tenantId, parentPath);
+    state ?? sessions.getExisting(sessionId), tenantId, parentPath, parentTaskId);
 
   toolRegistry.register(createInvokeSkillTool(skills));
   toolRegistry.register(createReadSkillReferenceTool(skills));

@@ -16,7 +16,9 @@ export function isProgressAgent(agent: string | undefined): agent is ProgressAge
 export interface ProgressTask {
     taskId: string;
     description: string;
-    agent?: ProgressAgent;
+    /** The dispatched agent's bare name. Only the four ProgressAgents get their
+     *  own pill tab; nested delegates (statement_unification, …) land in "Other". */
+    agent?: string;
     /** The subagent conversation this task is a round of. Several tasks sharing
      *  one id are one continuing piece of work, not unrelated siblings. Absent
      *  on history recorded before threads existed. */
@@ -24,6 +26,9 @@ export interface ProgressTask {
     tool?: string;
     status: "in_progress" | "completed" | "error";
     summary?: string;
+    /** The caller's task when a nested delegate_to_agent made this dispatch;
+     *  absent on orchestrator dispatches. The topology panel draws edges from it. */
+    parentTaskId?: string;
 }
 
 function statusIcon(status: ProgressTask["status"]) {
@@ -39,7 +44,8 @@ function statusIcon(status: ProgressTask["status"]) {
     }
 }
 
-const agentMeta: Record<ProgressAgent, { label: string; icon: typeof Database; iconClassName: string }> = {
+/** Exported for the topology panel, so both surfaces color an agent the same way. */
+export const agentMeta: Record<ProgressAgent, { label: string; icon: typeof Database; iconClassName: string }> = {
     market_data: {
         label: "Market data agent",
         icon: Database,
@@ -67,7 +73,9 @@ function uniqueAgents(tasks: ProgressTask[]) {
 }
 
 function taskGroups(tasks: ProgressTask[], agents: ProgressAgent[]): Array<ProgressAgent | "uncategorized"> {
-    const hasUncategorized = tasks.some((task) => !task.agent);
+    // "Other" holds both agentless orchestrator rows and nested delegates whose
+    // agent has no tab of its own — without the guard those would vanish entirely.
+    const hasUncategorized = tasks.some((task) => !isProgressAgent(task.agent));
     return hasUncategorized ? [...agents, "uncategorized"] : agents;
 }
 
@@ -107,7 +115,7 @@ export function ChatProgressPill({ tasks, isComplete }: { tasks: ProgressTask[];
     const displayedGroups: Array<ProgressAgent | "uncategorized"> = groups.length > 0 ? groups : ["uncategorized"];
     const selectedGroup = activeGroup && displayedGroups.includes(activeGroup) ? activeGroup : displayedGroups[0];
     const selectedTasks = selectedGroup === "uncategorized"
-        ? tasks.filter((task) => !task.agent)
+        ? tasks.filter((task) => !isProgressAgent(task.agent))
         : tasks.filter((task) => task.agent === selectedGroup);
 
     useEffect(() => {
@@ -146,7 +154,7 @@ export function ChatProgressPill({ tasks, isComplete }: { tasks: ProgressTask[];
                         {displayedGroups.map((group) => {
                             const GroupIcon = groupIcon(group);
                             const groupTasks = group === "uncategorized"
-                                ? tasks.filter((task) => !task.agent)
+                                ? tasks.filter((task) => !isProgressAgent(task.agent))
                                 : tasks.filter((task) => task.agent === group);
                             const isActive = selectedGroup === group;
 

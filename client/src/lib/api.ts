@@ -573,7 +573,7 @@ export class StreamingApiClient {
                             status: 'in_progress',
                             message: `${parsed.agent ?? ''}: ${parsed.task ?? ''}`.trim(),
                             timestamp: Date.now(),
-                            data: { task_id: parsed.task_id, agent: parsed.agent, task: parsed.task, thread_id: parsed.thread_id },
+                            data: { task_id: parsed.task_id, agent: parsed.agent, task: parsed.task, thread_id: parsed.thread_id, parent_task_id: parsed.parent_task_id },
                         });
                         break;
                     case 'progress':

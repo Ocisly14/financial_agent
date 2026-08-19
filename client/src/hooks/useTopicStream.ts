@@ -11,7 +11,6 @@ import type { StrategyApprovalDialogData } from "@/components/Dialog/StrategyApp
 import { useToast } from "@/hooks/use-toast";
 import { useTranslation } from "react-i18next";
 import type { ContentWithUser } from "@/components/chat/types";
-import { isProgressAgent } from "@/components/ChatProgressPill";
 import type { ProgressTask } from "@/components/ChatProgressPill";
 
 type ClientInterrupt = {
@@ -188,10 +187,14 @@ export function useTopicStream(
                             const map = tasksRef.current;
                             const rec: ProgressTask = { ...(map.get(id) ?? { taskId: id, description: "", status: "in_progress" }) };
                             if (step.name === "dispatch") {
-                                const data = step.data as { agent?: string; task?: string; thread_id?: string } | undefined;
+                                const data = step.data as { agent?: string; task?: string; thread_id?: string; parent_task_id?: string } | undefined;
                                 const task = data?.task;
                                 rec.description = task || rec.description || step.message || "";
-                                if (isProgressAgent(data?.agent)) rec.agent = data.agent;
+                                // The bare name, whatever it is: the pill buckets
+                                // unknown agents into "Other", and the topology
+                                // panel needs nested delegates by name.
+                                if (data?.agent) rec.agent = data.agent;
+                                if (data?.parent_task_id) rec.parentTaskId = data.parent_task_id;
                                 // Only the dispatch frame carries the thread —
                                 // the later progress/task_done frames for this
                                 // same row do not, so it must stick.

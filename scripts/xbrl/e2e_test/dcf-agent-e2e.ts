@@ -45,10 +45,11 @@ const sessionId = process.env["E2E_SESSION_ID"]?.trim() || `e2e-dcf-agent-${symb
 const tenantId = `e2e-dcf-agent-${symbol.toLowerCase()}`;
 const resumeModelId = process.env["E2E_RESUME_MODEL_ID"]?.trim() || undefined;
 const modelDatabasePath = resolve(process.env["E2E_MODEL_DB_PATH"]?.trim() || join(outputDirectory, "financial-models.sqlite"));
-// One dispatch is capped at the agent's own 30-step budget, which a from-scratch DCF outgrows: the
-// data foundation alone (extract → unify → spine) is several steps that each nest a whole subagent.
-// The agent pauses with a resume line instead of failing, so the round loop just dispatches its own
-// thread again — continuity is the thread, not the model handle.
+// One dispatch is capped at the agent's own step budget (60, declared on its topology node). A
+// from-scratch DCF can still outgrow it: the data foundation alone (extract → unify → spine) is
+// several steps that each nest a whole delegated agent round. The agent pauses with a resume line
+// instead of failing, so the round loop just dispatches its own thread again — continuity is the
+// thread, not the model handle.
 const maxRounds = Number(process.env["E2E_MAX_ROUNDS"] ?? 6);
 const roundTimeoutMs = Number(process.env["E2E_ROUND_TIMEOUT_MIN"] ?? 60) * 60_000;
 
@@ -268,12 +269,63 @@ if (model) {
     assumptionCount: assumptions.length, customRowCount: customRows.length });
 }
 
+// Delegation accounting: who the DCF agent handed work to, how many rounds, on how many threads.
+// The mapping stages and the stage-4 research evidence both travel this path now, so a run where
+// market_research shows zero rounds is a run whose forecast was written without outside evidence —
+// visible here rather than only by reading the transcript.
+const events = state.allEvents();
+const delegations: Record<string, { rounds: number; threads: string[]; failed: number }> = {};
+for (const event of events) {
+  if (event.kind !== "dispatch") continue;
+  const agent = String(event.payload["agent"]);
+  if (agent === "financial_modeling") continue; // the harness's own round dispatches
+  const entry = delegations[agent] ??= { rounds: 0, threads: [], failed: 0 };
+  entry.rounds += 1;
+  const thread = String(event.payload["child_thread_id"] ?? "");
+  if (thread && !entry.threads.includes(thread)) entry.threads.push(thread);
+  const result = events.find((e) => e.kind === "task_result" && e.parent_event_id === event.event_id);
+  if (result && result.payload["status"] !== "ok") entry.failed += 1;
+}
+console.log("\n# delegation by the DCF agent (rounds / distinct threads / non-ok)");
+for (const [agent, entry] of Object.entries(delegations)) {
+  console.log(`  ${agent.padEnd(24)} rounds=${entry.rounds} threads=${entry.threads.length} non_ok=${entry.failed}`);
+}
+if (Object.keys(delegations).length === 0) console.log("  (none — the agent never delegated)");
+
+// Skill accounting: the dcf-modeling skill makes playbook reads a PRECONDITION of acting in a
+// stage, and stage 4 additionally requires the issuer's sector playbook(s). A run that reached
+// "valued" without a sectors/ read wrote its forecast against the skill's own rules — that has to
+// be visible here, not discovered by reading the transcript.
+const skillUse: { invoked: string[]; referencesRead: string[]; sectorReads: string[]; failedReads: string[] } = {
+  invoked: [], referencesRead: [], sectorReads: [], failedReads: [],
+};
+for (const event of events) {
+  if (event.kind === "tool_use" && event.payload["name"] === "invoke_skill") {
+    skillUse.invoked.push(String((event.payload["input"] as Record<string, unknown>)?.["skill"] ?? "?"));
+  }
+  if (event.payload["name"] === "read_skill_reference") {
+    const input = (event.payload["input"] ?? {}) as Record<string, unknown>;
+    const ref = `${String(input["skill"] ?? "?")}/${String(input["path"] ?? "?")}`;
+    if (event.kind === "tool_use") {
+      skillUse.referencesRead.push(ref);
+      if (String(input["path"] ?? "").startsWith("sectors/")) skillUse.sectorReads.push(String(input["path"]));
+    } else if (event.kind === "tool_result" && event.payload["error"] !== undefined) {
+      skillUse.failedReads.push(ref);
+    }
+  }
+}
+console.log("\n# skill discipline (invoke_skill + read_skill_reference, in call order)");
+console.log(`  invoked:    ${skillUse.invoked.join(", ") || "(NEVER — the agent improvised its methodology)"}`);
+console.log(`  playbooks:  ${skillUse.referencesRead.join(" → ") || "(none read)"}`);
+console.log(`  sector:     ${skillUse.sectorReads.join(", ") || "(NONE — stage 4 ran without its sector playbook)"}`);
+if (skillUse.failedReads.length > 0) console.log(`  failed:     ${skillUse.failedReads.join(", ")}`);
+
 // The cost table is a first-class result, not a log line to be grepped afterwards. Reading
 // `tokens_in` alone once made a change that cost 23% MORE look like a 93% saving, so the weighted
 // total and the read/write ratio ship next to the verdict where the next run can diff them.
 const cost = llmCostReport();
 write("summary.json", { ...verdict, symbol, sessionId, threadId, provider: providerName,
-  toolCalls: stepSeq, rounds, cost, finalSummary: lastResult?.summary ?? null, finishedAt: new Date().toISOString() });
+  toolCalls: stepSeq, rounds, delegations, skillUse, cost, finalSummary: lastResult?.summary ?? null, finishedAt: new Date().toISOString() });
 
 console.log("\n# prompt cost by agent (equivalent input tokens; ratio below 1 means writes are never read back)");
 for (const [label, row] of Object.entries(cost)) {

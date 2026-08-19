@@ -310,6 +310,13 @@ const en = {
             switchToDark: "Switch to dark mode",
         },
         resizeColumns: "Resize the chart and conversation columns",
+        topology: {
+            title: "Delegation map",
+            collapse: "Collapse the delegation map",
+            expand: "Show the delegation map",
+            resize: "Resize the delegation map",
+            steps: "{{count}} tasks",
+        },
         memberRow: {
             label: "Research members",
             remove: "Remove {{name}}",

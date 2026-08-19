@@ -302,6 +302,13 @@ const zhCN = {
             switchToDark: "切换到深色模式",
         },
         resizeColumns: "调整图表与对话的宽度",
+        topology: {
+            title: "调用拓扑",
+            collapse: "收起调用拓扑",
+            expand: "展开调用拓扑",
+            resize: "调整调用拓扑面板大小",
+            steps: "{{count}} 个任务",
+        },
         memberRow: {
             label: "研究成员",
             remove: "移除 {{name}}",

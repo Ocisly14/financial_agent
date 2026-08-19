@@ -17,7 +17,9 @@ export function projectEvent(event: SessionEvent, state: SessionState): SSEEvent
       return [
         { type: "progress", task_id: event.event_id, phase: "subagent_started", pct: 5, note: `${p.agent as string} subagent started` },
         { type: "dispatch", task_id: event.event_id, agent: p.agent as AgentKind, task: p.task as string,
-          thread_id: (p.child_thread_id as string) ?? event.session_id },
+          thread_id: (p.child_thread_id as string) ?? event.session_id,
+          ...(typeof p.parent_task_id === "string" ? { parent_task_id: p.parent_task_id } : {}),
+          ...(typeof p.parent_agent === "string" ? { parent_agent: p.parent_agent as AgentKind } : {}) },
       ];
     case "task_result":
       return [

@@ -19,7 +19,7 @@ import { suggestionClause, type NameSpace } from "../../src/framework/suggest.ts
 import { deriveWaccParameters, type DerivationDeps, type WaccParameterName } from "../../src/financial-model/waccDerivation.ts";
 import type { WaccSheet, WaccSheetComputedInput } from "../../src/financial-model/waccSheet.ts";
 import { getSharedBarRepository, type BarRepository } from "../../src/data/stock/index.ts";
-import { fetchTreasury30y } from "../../src/infra/market/treasuryYield.ts";
+import { fetchTreasuryYield } from "../../src/infra/market/treasuryYield.ts";
 
 export const FINANCIAL_MODELING_TOOLS = [
   "create_financial_model", "apply_financial_model_operations",
@@ -260,7 +260,7 @@ export async function refreshWaccSheetFromSpine(deps: FinancialModelToolDeps, se
     const derivationDeps: DerivationDeps = {
       dailyCloses: async (symbol, from, to) => repository === undefined ? []
         : (await repository.getBarsBetween(symbol, "1Day", from, to)).map((bar) => ({ t: bar.t, c: bar.c })),
-      treasury30y: (asOf) => fetchTreasury30y(asOf),
+      treasuryRiskFree: (asOf) => fetchTreasuryYield("10Y", asOf),
     };
     // The as-of date is the sheet's own — fixed at the model's creation — never today's date, so a
     // refresh years later still derives against the same anchor the skeleton was built with.

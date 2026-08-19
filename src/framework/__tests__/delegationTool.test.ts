@@ -83,8 +83,8 @@ function harness(script: Script, options: { calleeTools?: string[]; slowCalleeMs
   state.beginTurn("go");
   const runtime = new SubagentRuntime(new ModelRouter(provider), tools, undefined, subagents);
 
-  const dispatchers = (sessionId: string, tenantId: string, _s?: SessionState, parentPath?: readonly AgentKind[]) =>
-    new Dispatcher(sessionId, subagents, runtime, tools, state, tenantId, parentPath);
+  const dispatchers = (sessionId: string, tenantId: string, _s?: SessionState, parentPath?: readonly AgentKind[], parentTaskId?: string) =>
+    new Dispatcher(sessionId, subagents, runtime, tools, state, tenantId, parentPath, parentTaskId);
 
   tools.register(createDelegateToAgentTool({
     describe: (name) => subagents.get(name).description,
@@ -149,6 +149,26 @@ test("the returned thread continues the same conversation instead of opening a s
   assert.equal(rounds[0]!["thread"], rounds[1]!["thread"], "the second round must land on the first round's thread");
   assert.notEqual(rounds[0]!["task_id"], rounds[1]!["task_id"], "and be its own round on that thread");
   assert.equal(state.liveThreads().filter((t) => t.agent === CALLEE).length, 1);
+});
+
+test("a nested dispatch records its caller; an orchestrator dispatch stays parentless", async () => {
+  // The client's topology view draws edges from these fields — without them every
+  // dispatch looks orchestrator-rooted and nested delegation is invisible.
+  const { top, state } = harness({
+    [CALLER]: [[{ name: DELEGATE_TO_AGENT, input: { agent: CALLEE, task: "dig into AWS demand" } }]],
+    [CALLEE]: [[{ name: "finish", input: { summary: "dug" } }]],
+  });
+
+  await top.dispatch([{ agent: CALLER, task: "value AMZN" }]);
+
+  const dispatches = state.allEvents().filter((e) => e.kind === "dispatch");
+  const root = dispatches.find((e) => e.payload["agent"] === CALLER);
+  const nested = dispatches.find((e) => e.payload["agent"] === CALLEE);
+  assert.ok(root && nested, "both dispatches must be recorded");
+  assert.equal(root.payload["parent_task_id"], undefined);
+  assert.equal(root.payload["parent_agent"], undefined);
+  assert.equal(nested.payload["parent_task_id"], root.event_id, "the nested dispatch must name the caller's task");
+  assert.equal(nested.payload["parent_agent"], CALLER);
 });
 
 test("a thread this session never opened fails the call rather than silently starting over", async () => {

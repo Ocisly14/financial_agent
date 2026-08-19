@@ -15,6 +15,7 @@ export type DispatcherFactory = (
   tenantId: string,
   state?: SessionState,
   parentPath?: readonly AgentKind[],
+  parentTaskId?: string,
 ) => Dispatcher;
 
 /**
@@ -238,7 +239,7 @@ export function createDelegateToAgentTool(deps: {
         return refuse("delegation_cycle", `${requested} is already running above you (${[...parentPath, requested].join(" > ")}).`);
       }
 
-      const dispatcher = deps.dispatchers(context.sessionId, context.tenantId, undefined, parentPath);
+      const dispatcher = deps.dispatchers(context.sessionId, context.tenantId, undefined, parentPath, context.taskId);
       // A nested question has nowhere to go: ask_user ends the callee's turn and is resumed by the
       // ORCHESTRATOR re-dispatching that thread, while this caller is blocked inside execute. The
       // question would reach the user, the caller would hang to its timeout, and the answer would

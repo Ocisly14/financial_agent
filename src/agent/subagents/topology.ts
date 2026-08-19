@@ -40,9 +40,16 @@ export const AGENT_TOPOLOGY: readonly SubagentDefinition[] = [
     // Append only, never insert or reorder. Tool declaration order is part of the cached prefix,
     // ahead of the messages: reordering this list re-bills the whole prompt on every step of every
     // DCF while changing nothing a test would notice.
+    //
+    // No search tools. Outside evidence reaches this agent through market_research only, and that
+    // is a cost decision as much as a division of labour: a financial_search payload landed in
+    // `query_results`, which is uncapped and retained for the WHOLE run, so one cheap-looking call
+    // was re-billed on every remaining step of a 60-step agent. A delegated round burns the
+    // delegate's context instead and returns a bounded account. market_research is also strictly
+    // better at the job — it holds the SEC tools and the judgment to prefer a filed fact over a
+    // search snippet, which a raw query from here never had.
     defaultTools: [...FINANCIAL_MODELING_TOOLS, STATEMENT_EXTRACTION_TOOL,
-      "financial_search", "ask_user",
-      ...SKILL_FRAMEWORK_TOOLS, DELEGATE_TO_AGENT],
+      "ask_user", ...SKILL_FRAMEWORK_TOOLS, DELEGATE_TO_AGENT],
     // 方法论归它自己取:invoke_skill 拿六阶段地图,再按阶段 read_skill_reference
     // 取 playbook。不靠 orchestrator 转达,所以中途换 orchestrator 也不会丢。
     skills: ["dcf-modeling"],

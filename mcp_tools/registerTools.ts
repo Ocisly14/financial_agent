@@ -5,7 +5,7 @@ import { createGetStockPriceTool } from "./stock/getStockPriceTool.ts";
 // sector
 import { createGetSectorAnalysisTool } from "./sector/getSectorAnalysisTool.ts";
 // search
-import { createFinancialSearchTool } from "./search/financialSearchTool.ts";
+import { createSearchTools } from "./search/financialSearchTool.ts";
 // SEC filings and standardized company facts
 import { createSecTools, SEC_TOOL_NAMES } from "./sec/secTools.ts";
 // technical
@@ -28,7 +28,7 @@ export function registerAllTools(registry: McpToolRegistry, options: { financial
   // non_trading tools
   registry.register(createGetStockPriceTool());
   registry.register(createGetSectorAnalysisTool());
-  registry.register(createFinancialSearchTool());
+  for (const tool of createSearchTools()) registry.register(tool);
   for (const tool of createSecTools()) registry.register(tool);
   for (const tool of createTechnicalIndicatorTools()) registry.register(tool);
   for (const tool of createFinancialModelTools(options.financialModelDeps)) registry.register(tool);
@@ -56,6 +56,9 @@ export const MARKET_DATA_TOOLS = [
 export const MARKET_RESEARCH_TOOLS = [
   ...SEC_TOOL_NAMES,
   "financial_search",
+  // Appended, never inserted: the tool declarations are part of the cached prompt prefix, ahead of
+  // the messages, so reordering this list re-bills every step's whole prompt.
+  "read_search_result",
 ] as const;
 
 export const TRADING_OPERATIONS_TOOLS = [

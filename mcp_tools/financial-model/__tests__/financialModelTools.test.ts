@@ -235,7 +235,7 @@ test("without a price data source the WACC refresh reports itself skipped instea
 
 // --- WACC-sheet auto-refresh, wired end to end through review_financial_model_history --------------
 
-// refreshWaccSheetFromSpine wires treasury30y straight to fetchTreasury30y's default (global) fetch, so
+// refreshWaccSheetFromSpine wires treasuryRiskFree straight to fetchTreasuryYield's default (global) fetch, so
 // these tests stub globalThis.fetch with a canned treasury.gov-shaped feed rather than hitting the
 // network. Every requested month resolves to one point, dated the 1st of that month, at a fixed rate —
 // on or before any asOfDate drawn from that same month (model creation uses today's date).
@@ -250,7 +250,7 @@ function stubTreasuryFetch(): void {
 <feed xmlns:d="http://schemas.microsoft.com/ado/2007/08/dataservices" xmlns="http://www.w3.org/2005/Atom">
 <entry><content type="application/xml"><m:properties>
 <d:NEW_DATE m:type="Edm.DateTime">${month.slice(0, 4)}-${month.slice(4, 6)}-01T00:00:00</d:NEW_DATE>
-<d:BC_30YEAR m:type="Edm.Double">${WACC_TEST_RISK_FREE_RATE * 100}</d:BC_30YEAR>
+<d:BC_10YEAR m:type="Edm.Double">${WACC_TEST_RISK_FREE_RATE * 100}</d:BC_10YEAR>
 </m:properties></content></entry>
 </feed>`;
     return new Response(xml, { status: 200 });

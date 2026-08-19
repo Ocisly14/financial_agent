@@ -62,6 +62,7 @@ export class Dispatcher {
   private readonly tenantId: string;
   private userInputAllowed = true;
   private readonly parentPath: readonly AgentKind[];
+  private readonly parentTaskId: string | undefined;
 
   constructor(
     sessionId: string,
@@ -73,6 +74,9 @@ export class Dispatcher {
     /** The agents already running above the tasks this dispatcher will start. Empty at the top:
      *  the orchestrator is the root. A delegating agent passes its own chain. */
     parentPath: readonly AgentKind[] = [],
+    /** The dispatch event id of the run this dispatcher acts for — the caller's own task. Absent at
+     *  the top: an orchestrator dispatch has no caller. */
+    parentTaskId?: string,
   ) {
     this.sessionId = sessionId;
     this.subagents = subagents;
@@ -81,6 +85,7 @@ export class Dispatcher {
     this.state = state;
     this.tenantId = tenantId;
     this.parentPath = parentPath;
+    this.parentTaskId = parentTaskId;
   }
 
   /**
@@ -182,7 +187,11 @@ export class Dispatcher {
       error = thrown;
     }
     threadId ??= this.state.openThread(request.agent);
-    const taskId = this.state.recordDispatch(request.agent, request.task, threadId).event_id;
+    const parentAgent = this.parentPath.at(-1);
+    const parent = this.parentTaskId
+      ? { taskId: this.parentTaskId, ...(parentAgent ? { agent: parentAgent } : {}) }
+      : undefined;
+    const taskId = this.state.recordDispatch(request.agent, request.task, threadId, parent).event_id;
     if (error) {
       log.warn(`bad dispatch ← ${request.agent}`, { taskId, thread: request.thread, code: error.code });
       this.state.recordTaskResult(request.agent, taskId, {

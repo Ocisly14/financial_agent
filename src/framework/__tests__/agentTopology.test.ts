@@ -93,3 +93,16 @@ test("a declared tool nothing registered is a startup fault, not a silent gap", 
   );
   assert.match(message, /market_data declares tool 'stock_sma', which is not registered/);
 });
+
+test("every agent that can search can also finish reading what it found", () => {
+  // financial_search returns a truncated snippet plus a source_id; read_search_result is what
+  // exchanges that id for the full page. Granting one without the other tells an agent its
+  // evidence was cut off and gives it no way to see the rest — the DCF agent's pool is declared
+  // in its own list, so it does not inherit market_research's grant.
+  const missing = AGENT_TOPOLOGY
+    .filter((agent) => agent.defaultTools?.includes("financial_search"))
+    .filter((agent) => !agent.defaultTools?.includes("read_search_result"))
+    .map((agent) => agent.name);
+
+  assert.deepEqual(missing, []);
+});

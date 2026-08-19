@@ -448,8 +448,11 @@ export class SessionState {
    * conversations, and it is how the orchestrator learns the id of a thread it
    * just opened.
    */
-  recordDispatch(agent: AgentKind, task: string, childThreadId: string): SessionEvent {
-    return this.record("orchestrator", "dispatch", { agent, task, child_thread_id: childThreadId });
+  recordDispatch(agent: AgentKind, task: string, childThreadId: string, parent?: { taskId: string; agent?: AgentKind }): SessionEvent {
+    return this.record("orchestrator", "dispatch", {
+      agent, task, child_thread_id: childThreadId,
+      ...(parent ? { parent_task_id: parent.taskId, ...(parent.agent ? { parent_agent: parent.agent } : {}) } : {}),
+    });
   }
 
   recordTaskResult(agent: AgentKind, dispatchEventId: string, result: TaskResult): SessionEvent {

@@ -236,7 +236,9 @@ export type SSEEvent =
   | { type: "workflow_started"; workflow_id: string; skill: string; workflow: string; title?: string }
   | { type: "workflow_step"; workflow_id: string; step_id: string; title: string; status: "pending" | "running" | "done" | "failed"; pct?: number; note?: string }
   | { type: "workflow_done"; workflow_id: string; status: "ok" | "failed"; summary: string }
-  | { type: "dispatch"; task_id: string; agent: AgentKind; task: string; thread_id: string }
+  /** `parent_task_id`/`parent_agent` name the caller when a subagent delegated this
+   *  dispatch; absent on orchestrator-rooted dispatches. */
+  | { type: "dispatch"; task_id: string; agent: AgentKind; task: string; thread_id: string; parent_task_id?: string; parent_agent?: AgentKind }
   | { type: "progress"; task_id: string; phase: string; pct?: number; note?: string }
   | { type: "task_done"; task_id: string; status: TaskStatus; summary: string }
   | { type: "strategy_created"; strategy_id: string; status?: string; summary?: string }

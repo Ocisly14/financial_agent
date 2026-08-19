@@ -19,6 +19,7 @@ import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { ModelPane } from "@/components/model/ModelPane";
 import { ChartPane } from "./ChartPane";
 import { ConversationPane } from "./ConversationPane";
+import { DelegationTopologyPanel } from "./DelegationTopologyPanel";
 import { MemberRow, type MemberChip } from "./MemberRow";
 import { StatusBar } from "./StatusBar";
 import { TopicRail } from "./TopicRail";
@@ -441,6 +442,10 @@ export function TopicWorkspace({
                     </div>
                 </div>
             )}
+
+            {/* The session's live delegation call tree. Workspace-level like the
+                dialog below: it reflects the whole session, not one message. */}
+            <DelegationTopologyPanel messages={stream.messages} liveTasks={stream.liveTasks} />
 
             {/* A workspace-level interrupt, not part of the message flow —
                 which is why it hangs off the shell rather than the pane. */}

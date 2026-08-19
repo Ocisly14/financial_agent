@@ -49,6 +49,26 @@ test("final SSE carries a pending structured input request", () => {
   assert.equal(final.input_request?.status, "pending");
 });
 
+test("a dispatch frame carries its caller when the event has one, and omits it when not", () => {
+  const state = new SessionState("session-topology", new Date().toISOString());
+  state.beginTurn("Value AMZN");
+  const rootThread = state.openThread("financial_modeling");
+  const root = state.recordDispatch("financial_modeling", "value AMZN", rootThread);
+  const nestedThread = state.openThread("market_research");
+  const nested = state.recordDispatch("market_research", "AWS demand", nestedThread,
+    { taskId: root.event_id, agent: "financial_modeling" });
+
+  const rootFrame = projectEvent(root, state).find((f) => f.type === "dispatch");
+  assert.ok(rootFrame && rootFrame.type === "dispatch");
+  assert.equal(rootFrame.parent_task_id, undefined);
+  assert.equal(rootFrame.parent_agent, undefined);
+
+  const nestedFrame = projectEvent(nested, state).find((f) => f.type === "dispatch");
+  assert.ok(nestedFrame && nestedFrame.type === "dispatch");
+  assert.equal(nestedFrame.parent_task_id, root.event_id);
+  assert.equal(nestedFrame.parent_agent, "financial_modeling");
+});
+
 test("a financial model tool result projects one model_revision frame", () => {
   const state = new SessionState("session-model", new Date().toISOString());
   state.beginTurn("Build the AAPL model");
