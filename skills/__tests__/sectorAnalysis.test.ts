@@ -13,18 +13,16 @@ async function loadAll(): Promise<SkillRegistry> {
   return registry;
 }
 
-test("sector-analysis loads as a topic skill with its own tool grant and agent sections", async () => {
-  const registry = await loadAll();
-  const skill = registry.get("sector-analysis");
+test("sector-analysis loads as a topic skill whose sections stay in the body it hands its reader", async () => {
+  const skill = (await loadAll()).get("sector-analysis")!;
 
-  assert.ok(skill, "sector-analysis skill should load");
   assert.equal(skill.layer, "topic");
-  assert.equal(registry.get("sector-analysis", "research"), undefined);
-  assert.deepEqual(skill.tools, ["get_sector_analysis", "financial_search"]);
+  assert.equal(skill.tools, undefined, "a topic skill guides; the topology arms");
   assert.ok(skill.agentSections.market_data);
   assert.ok(skill.agentSections.market_research);
-  assert.equal(skill.agentSections.trading_operations, undefined);
+  assert.match(skill.body, /## for: market_data/);
 });
+
 
 test("sector-analysis defines full, subset, and single-sector semantics", async () => {
   const skill = (await loadAll()).get("sector-analysis")!;

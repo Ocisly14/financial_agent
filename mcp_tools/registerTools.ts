@@ -17,7 +17,9 @@ import {
   createManageStrategyTool,
 } from "./trading/strategyTools.ts";
 import { createAskUserTool } from "./user/askUserTool.ts";
-import { createFinancialModelTools, FINANCIAL_MODELING_TOOLS, type FinancialModelToolDeps } from "./financial-model/financialModelTools.ts";
+import { createFinancialModelTools, getDefaultFinancialModelToolDeps, FINANCIAL_MODELING_TOOLS, type FinancialModelToolDeps } from "./financial-model/financialModelTools.ts";
+import { createUnificationAgentTools } from "./financial-model/unificationDeliveryTools.ts";
+import { createSpineAgentTools } from "./financial-model/spineDeliveryTools.ts";
 import { createWorkbenchTools } from "./financial-model/workbenchTools.ts";
 import { createTreasuryYieldTool } from "./financial-model/treasuryYieldTool.ts";
 
@@ -31,6 +33,11 @@ export function registerAllTools(registry: McpToolRegistry, options: { financial
   for (const tool of createTechnicalIndicatorTools()) registry.register(tool);
   for (const tool of createFinancialModelTools(options.financialModelDeps)) registry.register(tool);
   for (const tool of createWorkbenchTools(options.financialModelDeps)) registry.register(tool);
+  // The two mapping agents' toolsets. Process-registered like every other agent's: their per-run
+  // working set lives in per-task state inside the tools, so nothing about them needs a private
+  // registry any more, and the pools their topology nodes declare resolve here like everyone else's.
+  for (const tool of createUnificationAgentTools(options.financialModelDeps ?? getDefaultFinancialModelToolDeps())) registry.register(tool);
+  for (const tool of createSpineAgentTools(options.financialModelDeps ?? getDefaultFinancialModelToolDeps())) registry.register(tool);
   registry.register(createTreasuryYieldTool());
   // Price-driven stock strategy tools. Execution is paper/shadow only until a
   // stock broker adapter is explicitly added.

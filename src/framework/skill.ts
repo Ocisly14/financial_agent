@@ -18,13 +18,19 @@ export type SkillDefinition = {
   path: string; // <name>.md 的绝对路径
   dir: string; // skill 目录的绝对路径，后续任务的路径锁定基准
   layer: SkillLayer;
+  /**
+   * The FULL post-frontmatter markdown, `## for:` sections included. A skill acts on its reader:
+   * the orchestrator reads the whole document and itself judges what each task it writes needs to
+   * carry. The framework no longer relays sections behind the reader's back — `agentSections`
+   * survives only to validate section targets and to serve the research layer's topicSection.
+   */
   body: string;
   agentSections: Partial<Record<AgentKind, string>>;
   /** `## for: topic` 的内容。只有 research 层的技能会有。 */
   topicSection?: string;
   /**
    * 这个技能激活后**额外授予**的工具，叠加在 agent 自己的池之上。它只放宽，
-   * 从不收窄——领域隔离由 toolAccess 的 category 门负责，那道门对每个名字照跑。
+   * 从不收窄——一个 agent 能够到什么，由它自己的 defaultTools 和 topology 说了算。
    */
   tools?: string[];
   workflow?: string;
@@ -223,13 +229,13 @@ function parseSkillMarkdown(filePath: string, dir: string, raw: string): SkillDe
     path: filePath,
     dir,
     layer,
-    body: split.body,
+    body: (match[2] ?? "").trim(),
     agentSections: split.agentSections,
   };
   if (split.topicSection !== undefined) skill.topicSection = split.topicSection;
 
-  // `agents:` 曾是派活白名单。它被删掉了：技能是指导，不是沙箱——越权由 toolAccess
-  // 的 category 门管，跑题由技能正文和 orchestrator 自己的判断管。留着不报错会让
+  // `agents:` 曾是派活白名单。它被删掉了：技能是指导，不是沙箱——能派给谁由 topology
+  // 说了算，跑题由技能正文和 orchestrator 自己的判断管。留着不报错会让
   // 作者以为白名单还在生效，所以写了就抛。
   if (frontmatter["agents"] !== undefined) {
     throw new Error(`skill ${name} declares 'agents', which no longer exists — a skill guides, it does not gate: ${filePath}`);
@@ -237,8 +243,12 @@ function parseSkillMarkdown(filePath: string, dir: string, raw: string): SkillDe
 
   const tools = optionalStringArray(frontmatter, "tools", filePath);
   if (tools) {
-    if (layer === "research") {
-      throw new Error(`research-layer skill ${name} may not declare 'tools': ${filePath}`);
+    // Only an agent-layer skill may declare tools, because that grant is SELF-directed: invoke_skill
+    // folds them into the caller's own live set. A topic skill's reader is the orchestrator, and its
+    // old `tools:` widened the pools of the agents it dispatched — a capability side-channel around
+    // the topology, which is the one place an agent's reach is declared.
+    if (layer !== "agent") {
+      throw new Error(`${layer}-layer skill ${name} may not declare 'tools' — a skill guides its reader; an agent's pool is declared in the topology: ${filePath}`);
     }
     skill.tools = tools;
   }

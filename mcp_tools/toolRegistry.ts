@@ -6,6 +6,14 @@ export type ToolExecutionContext = {
   /** Authenticated owner propagated by the HTTP/runtime boundary. */
   tenantId: string;
   taskId?: string;
+  /**
+   * Which agents are running, root first, joined by ">" — e.g. "financial_modeling>market_research".
+   * Absent at the root: HTTP routes and the orchestrator have no chain above them.
+   *
+   * This is an execution identity, not an owner: `tenantId` says whose data this is and is the same
+   * value the whole way down, while this says who is asking right now.
+   */
+  agentPath?: string;
 };
 
 export type ToolHandler = (input: JsonObject, context: ToolExecutionContext) => Promise<ToolExecutionResult>;
@@ -38,3 +46,27 @@ export class McpToolRegistry {
     return tool.execute(input, context);
   }
 }
+
+/**
+ * Per-task working state for tools that carry a conversation across steps — a draft decision, a
+ * loaded working set. One entry per dispatched task, keyed by `runKey` from the execution context
+ * every tool call carries, so ANY agent's tools get the same facility: no tool module hand-rolls
+ * its own map, and no state leaks between two runs that happen to share a process.
+ *
+ * Bounded FIFO: a run's state is garbage the moment its task_result is written, but nothing tells
+ * the tool that, so the store caps itself instead.
+ */
+const RUN_STATE_CAP = 16;
+export function runStateStore<T>(): { get: (key: string) => T | undefined; set: (key: string, value: T) => void } {
+  const states = new Map<string, T>();
+  return {
+    get: (key) => states.get(key),
+    set: (key, value) => {
+      states.delete(key);
+      states.set(key, value);
+      while (states.size > RUN_STATE_CAP) states.delete(states.keys().next().value!);
+    },
+  };
+}
+
+export const runKey = (context: ToolExecutionContext): string => context.taskId ?? context.sessionId;

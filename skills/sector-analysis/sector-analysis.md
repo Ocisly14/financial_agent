@@ -2,8 +2,9 @@
 name: sector-analysis
 description: Analyze US equity sectors using relative-strength and trend data, recent news, macro drivers, and conditional forward scenarios. Use for sector rotation, sector leadership, which sectors are improving or weakening, comparisons among sectors, or a deep diagnosis of one S&P 500 GICS sector.
 layer: topic
-tools: [get_sector_analysis, financial_search]
 ---
+
+# Sector analysis
 
 Analyze in this order: scope → data baseline → news interpretation → dual-horizon scenarios. Separate observed facts from inference before giving a forward view.
 
@@ -12,13 +13,13 @@ Analyze in this order: scope → data baseline → news interpretation → dual-
 Send only these 11 S&P 500 GICS sectors and their tradable proxies to the sector data tool:
 
 | Sector | ETF | Sector | ETF |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Communication Services | XLC | Consumer Discretionary | XLY |
 | Consumer Staples | XLP | Energy | XLE |
 | Financials | XLF | Health Care | XLV |
 | Industrials | XLI | Materials | XLB |
 | Real Estate | XLRE | Technology | XLK |
-| Utilities | XLU |  |  |
+| Utilities | XLU | — | — |
 
 - For a whole-market rotation or leadership request, analyze the complete 11-sector universe.
 - When the user explicitly selects several sectors, compare only that subset and label the rank as a rank within the selected subset.

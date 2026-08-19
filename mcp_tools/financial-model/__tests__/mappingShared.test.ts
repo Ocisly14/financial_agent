@@ -5,9 +5,12 @@ import type { RegisteredTool } from "../../toolRegistry.ts";
 const byName = (tools: RegisteredTool[], name: string): RegisteredTool | undefined => tools.find((tool) => tool.name === name);
 
 /** These are ordinary MCP tools now: async, and the payload rides in generation_context.data.
- *  A failure comes back as an error result rather than a throw. */
-async function data<T>(tool: RegisteredTool | undefined, input: object): Promise<T> {
-  const result = await tool!.execute(input as never, { sessionId: "s", tenantId: "owner" });
+ *  A failure comes back as an error result rather than a throw. Ownership and the per-task working
+ *  set both ride the execution context, exactly as a dispatched run supplies them. */
+async function data<T>(tool: RegisteredTool | undefined, input: object,
+  context: { sessionId?: string; tenantId?: string; taskId?: string } = {}): Promise<T> {
+  const result = await tool!.execute(input as never,
+    { sessionId: "session-1", tenantId: "agent-1", ...context });
   if (result.error) throw new Error(result.error.message);
   return result.generation_context!.data as T;
 }
@@ -23,7 +26,11 @@ import type { FilingTableFactOccurrence, XbrlDimension } from "../../../src/infr
 import type { Period } from "../../../src/financial-model/types.ts";
 import { FinancialModelError } from "../../../src/financial-model/errors.ts";
 import { CANONICAL_MAPPING_IDS, REQUIRED_MAPPING_IDS } from "../../../src/financial-model/skeleton.ts";
-import { createSpineMappingTools, createStatementUnificationTools, subagentTool } from "../mappingSubagentTools.ts";
+import { subagentTool } from "../mappingShared.ts";
+import { createUnificationAgentTools } from "../unificationDeliveryTools.ts";
+import { createSpineAgentTools } from "../spineDeliveryTools.ts";
+import { InMemoryFilingInsightStore } from "../../../src/infra/filing-insights/store.ts";
+import type { FinancialModelToolDeps } from "../financialModelTools.ts";
 
 const PERIODS: Period[] = [
   { id: "FY2024", label: "FY2024", start: "2024-01-01", end: "2024-12-31", cls: "actual" },
@@ -73,8 +80,9 @@ function setup(symbols: readonly string[]) {
       metadata: {}, reportingCurrency: "USD", periods: PERIODS, preparedStatementRows: [] });
     return modelId;
   });
-  return { modelStore, sourceReviewStore, modelIds,
-    deps: { modelStore, sourceReviewStore, ownerTenantId: "agent-1" } };
+  const deps: FinancialModelToolDeps = { modelStore, sourceReviewStore,
+    insightStore: new InMemoryFilingInsightStore(), ingestionStore: sourceReviewStore };
+  return { modelStore, sourceReviewStore, modelIds, deps };
 }
 
 test("mapping tool preserves typed errors and their correction details", async () => {
@@ -88,41 +96,70 @@ test("mapping tool preserves typed errors and their correction details", async (
   assert.deepEqual(result.generation_context?.data, { error: "revision_conflict", currentRevision: 7 });
 });
 
-test("the unification subagent's load tool resolves the ticker it was told to work on", async () => {
+test("the unification load tool resolves the ticker it was told to work on", async () => {
   const { sourceReviewStore, modelIds, deps } = setup(["TSLA"]);
   sourceReviewStore.save(modelIds[0]!, review({ presentationExtracts: [{ filing: { accession: "a" },
     calculationRelations: [], negatedConcepts: [], statements: [] } as never] }));
-  const loader = createStatementUnificationTools(deps);
+  const tools = createUnificationAgentTools(deps);
 
-  const loaded = await data<{ symbol: string }>(byName(loader.tools, "load_concept_inventory"), { symbol: "tsla" });
+  const loaded = await data<{ symbol: string }>(byName(tools, "load_concept_inventory"), { symbol: "tsla" });
   assert.equal(loaded.symbol, "TSLA");
-  // The host reads this back to check the subagent worked on the model the orchestrator named.
-  assert.deepEqual(loader.loaded(), { symbol: "TSLA", modelId: modelIds[0] });
-});
-
-test("a pinned modelId resolves among multiple versions of one ticker, and catches a wrong-ticker instruction", async () => {
-  const { sourceReviewStore, modelIds, deps } = setup(["TST", "TST"]);
-  sourceReviewStore.save(modelIds[1]!, review({ presentationExtracts: [{ filing: { accession: "a" },
-    calculationRelations: [], negatedConcepts: [], statements: [] } as never] }));
-  const { tools } = createStatementUnificationTools({ ...deps, modelId: modelIds[1]! });
-  const loaded = await data<{ symbol: string }>(byName(tools, "load_concept_inventory"), { symbol: "TST" });
-  assert.equal(loaded.symbol, "TST");
-  await assert.rejects(() => data(byName(tools, "load_concept_inventory"), { symbol: "NOPE" }), /not the issuer|NOPE/);
 });
 
 test("two models for one ticker is refused rather than guessed at", async () => {
   const { sourceReviewStore, modelIds, deps } = setup(["TSLA", "TSLA"]);
   for (const modelId of modelIds) sourceReviewStore.save(modelId, review({ presentationExtracts: [{} as never] }));
-  const loader = createStatementUnificationTools(deps);
-  await assert.rejects(() => data(byName(loader.tools, "load_concept_inventory"), { symbol: "TSLA" }),
+  const tools = createUnificationAgentTools(deps);
+  await assert.rejects(() => data(byName(tools, "load_concept_inventory"), { symbol: "TSLA" }),
     /2 models exist for TSLA/);
 });
 
 test("a ticker with no extracted data names the step that has to run first", async () => {
   const { deps } = setup(["TSLA"]);
-  const loader = createStatementUnificationTools(deps);
-  await assert.rejects(() => data(byName(loader.tools, "load_concept_inventory"), { symbol: "AAPL" }),
+  const tools = createUnificationAgentTools(deps);
+  await assert.rejects(() => data(byName(tools, "load_concept_inventory"), { symbol: "AAPL" }),
     /run extract_filing_statements/);
+});
+
+test("delivery refuses before a working set is loaded", async () => {
+  const { deps } = setup(["TSLA"]);
+  const tools = createUnificationAgentTools(deps);
+  await assert.rejects(() => data(byName(tools, "submit_unification_decision"), { decision: { rows: [] } }),
+    /load_concept_inventory/);
+});
+
+test("an accepted decision persists itself; a dirty one leaves the store untouched", async () => {
+  // This was the deleted host's job — persist after the run, throw on a dirty candidate. Now the
+  // store write IS the acceptance: it happens inside the submit result, and nothing else writes.
+  const { sourceReviewStore, modelIds, deps } = setup(["TSLA"]);
+  sourceReviewStore.save(modelIds[0]!, review({ presentationExtracts: [{ filing: { accession: "a" },
+    calculationRelations: [], negatedConcepts: [], statements: [] } as never] }));
+  const tools = createUnificationAgentTools(deps);
+  await data(byName(tools, "load_concept_inventory"), { symbol: "TSLA" }, { taskId: "t1" });
+
+  // A dirty decision: a row built on a concept the filings never reported.
+  const dirty = await data<{ status: string }>(byName(tools, "submit_unification_decision"),
+    { decision: { rows: [{ rowId: "ghost", statement: "income_statement", label: "Ghost",
+      components: [{ conceptQName: "x:Missing", weight: 1 }], rationale: "r" }] } }, { taskId: "t1" });
+  assert.equal(dirty.status, "incomplete");
+  assert.equal(sourceReviewStore.get(modelIds[0]!)?.unifiedStatements, undefined,
+    "a candidate with findings must never reach the store");
+
+  const accepted = await data<{ status: string; stored?: boolean }>(byName(tools, "submit_unification_decision"),
+    { decision: { rows: [] } }, { taskId: "t1" });
+  assert.equal(accepted.status, "accepted");
+  assert.equal(accepted.stored, true);
+  assert.ok(sourceReviewStore.get(modelIds[0]!)?.unifiedStatements, "acceptance is the store write");
+});
+
+test("working sets are task-scoped, so two runs do not share a draft", async () => {
+  const { sourceReviewStore, modelIds, deps } = setup(["TSLA"]);
+  sourceReviewStore.save(modelIds[0]!, review({ presentationExtracts: [{ filing: { accession: "a" },
+    calculationRelations: [], negatedConcepts: [], statements: [] } as never] }));
+  const tools = createUnificationAgentTools(deps);
+  await data(byName(tools, "load_concept_inventory"), { symbol: "TSLA" }, { taskId: "t1" });
+  await assert.rejects(() => data(byName(tools, "submit_unification_decision"),
+    { decision: { rows: [] } }, { taskId: "t2" }), /load_concept_inventory/);
 });
 
 /**
@@ -136,10 +173,10 @@ test("a ticker with no extracted data names the step that has to run first", asy
 test("the spine loader hands over the target ids, required separated from optional", async () => {
   const { sourceReviewStore, modelIds, deps } = setup(["TSLA"]);
   sourceReviewStore.save(modelIds[0]!, review({ unifiedStatements: { periods: [], rows: [] } as never }));
-  const loader = createSpineMappingTools(deps);
+  const tools = createSpineAgentTools(deps);
 
   const loaded = await data<{ spineTargets: { required: string[]; optional: string[] } }>(
-    byName(loader.tools, "load_unified_statements"), { symbol: "TSLA" });
+    byName(tools, "load_unified_statements"), { symbol: "TSLA" });
 
   assert.deepEqual([...REQUIRED_MAPPING_IDS].sort(), [...loaded.spineTargets.required].sort(),
     "the required set the agent is judged against is the one it is shown");
@@ -159,10 +196,10 @@ test("the spine loader exposes disclosed breakdown rows for revenue-detail selec
       memberQName: "x:ProductsMember", label: "Products", unit: USD, values: { FY2024: 60, FY2025: 66 },
       rationale: "disclosed product split", asOfDate: "2026-01-30" }],
   } as never }));
-  const loader = createSpineMappingTools(deps);
+  const tools = createSpineAgentTools(deps);
 
   const loaded = await data<{ breakdownRows: Array<{ rowId: string; label: string }> }>(
-    byName(loader.tools, "load_unified_statements"), { symbol: "TSLA" });
+    byName(tools, "load_unified_statements"), { symbol: "TSLA" });
 
   assert.deepEqual(loaded.breakdownRows, [{ rowId: "net_sales.product.products", label: "Products", axisQName: SEG,
     memberQName: "x:ProductsMember", unit: USD, values: { FY2024: 60, FY2025: 66 },
@@ -172,17 +209,16 @@ test("the spine loader exposes disclosed breakdown rows for revenue-detail selec
 test("spine mapping refuses to load before unification has stored anything", async () => {
   const { sourceReviewStore, modelIds, deps } = setup(["TSLA"]);
   sourceReviewStore.save(modelIds[0]!, review());
-  const loader = createSpineMappingTools(deps);
-  await assert.rejects(() => data(byName(loader.tools, "load_unified_statements"), { symbol: "TSLA" }),
+  const tools = createSpineAgentTools(deps);
+  await assert.rejects(() => data(byName(tools, "load_unified_statements"), { symbol: "TSLA" }),
     /run statement_unification first/);
-  assert.equal(loader.loaded(), undefined);
 });
 
-test("another agent's model is invisible, so a subagent cannot load across owners", async () => {
+test("another tenant's model is invisible, so a subagent cannot load across owners", async () => {
   const { sourceReviewStore, modelIds, deps } = setup(["TSLA"]);
   sourceReviewStore.save(modelIds[0]!, review({ presentationExtracts: [{} as never] }));
-  const loader = createStatementUnificationTools({ ...deps, ownerTenantId: "agent-2" });
-  await assert.rejects(() => data(byName(loader.tools, "load_concept_inventory"), { symbol: "TSLA" }),
+  const tools = createUnificationAgentTools(deps);
+  await assert.rejects(() => data(byName(tools, "load_concept_inventory"), { symbol: "TSLA" }, { tenantId: "agent-2" }),
     /no model holds extracted data for TSLA/);
 });
 
@@ -194,7 +230,7 @@ test("list_dimension_axes returns the axis catalog for the resolved run", async 
     dimFact(REV, "FY2025", 60e9, [dim("x:AMember", "Segment A")]),
     dimFact(REV, "FY2025", 40e9, [dim("x:BMember", "Segment B")]),
   ] })]);
-  const { tools } = createStatementUnificationTools({ ...deps, tableStore });
+  const tools = createUnificationAgentTools({ ...deps, tableStore });
   const result = await data<{ axes: Array<{ axisQName: string }> }>(byName(tools, "list_dimension_axes"), { symbol: "TST" });
   assert.equal(result.axes.length, 1);
   assert.equal(result.axes[0]!.axisQName, SEG);
@@ -208,7 +244,7 @@ test("get_axis_breakdown returns member series", async () => {
     dimFact(REV, "FY2025", 60e9, [dim("x:AMember", "Segment A")]),
     dimFact(REV, "FY2025", 40e9, [dim("x:BMember", "Segment B")]),
   ] })]);
-  const { tools } = createStatementUnificationTools({ ...deps, tableStore });
+  const tools = createUnificationAgentTools({ ...deps, tableStore });
   const result = await data<{ members: unknown[] }>(byName(tools, "get_axis_breakdown"), { symbol: "TST",
     axisQName: SEG, conceptQName: REV });
   assert.equal(result.members.length, 2);
@@ -221,7 +257,7 @@ test("an unknown exact axis/concept pair fails with a catalog recovery path", as
   tableStore.saveTables("ing-1", [table({ accession: "acc-2025", filedAt: "2026-01-30", facts: [
     dimFact(REV, "FY2025", 60e9, [dim("x:AMember", "Segment A")]),
   ] })]);
-  const { tools } = createStatementUnificationTools({ ...deps, tableStore });
+  const tools = createUnificationAgentTools({ ...deps, tableStore });
   await assert.rejects(() => data(byName(tools, "get_axis_breakdown"), { symbol: "TST",
     axisQName: "x:UnknownAxis", conceptQName: REV }), /list_dimension_axes/);
 });
@@ -234,7 +270,7 @@ test("get_axis_breakdown passes memberFilter and cursor through and rejects a ba
     dimFact(REV, "FY2025", 60e9, [dim("x:AMember", "Segment A")]),
     dimFact(REV, "FY2025", 40e9, [dim("x:BMember", "Segment B")]),
   ] })]);
-  const { tools } = createStatementUnificationTools({ ...deps, tableStore });
+  const tools = createUnificationAgentTools({ ...deps, tableStore });
   const breakdownTool = byName(tools, "get_axis_breakdown")!;
   const filtered = await data<{ members: Array<{ memberQName: string }> }>(breakdownTool, { symbol: "TST", axisQName: SEG, conceptQName: REV,
     memberFilter: "segment b" });
@@ -245,11 +281,13 @@ test("get_axis_breakdown passes memberFilter and cursor through and rejects a ba
   await assert.rejects(() => data(breakdownTool, { symbol: "TST", axisQName: SEG, conceptQName: REV, cursor: -1 }));
 });
 
-test("dimension tools are absent without a tableStore", async () => {
+test("without a tableStore the dimension tools refuse instead of exploring", async () => {
+  // Registered regardless — the topology's pool must resolve — but the capability is honest about
+  // being unavailable rather than returning an empty catalog that reads as "no dimensions disclosed".
   const { deps } = setup(["TST"]);
-  const { tools } = createStatementUnificationTools(deps);
-  assert.equal(byName(tools, "list_dimension_axes"), undefined);
-  assert.equal(byName(tools, "get_axis_breakdown"), undefined);
+  const tools = createUnificationAgentTools({ modelStore: deps.modelStore, sourceReviewStore: deps.sourceReviewStore });
+  await assert.rejects(() => data(byName(tools, "list_dimension_axes"), { symbol: "TST" }),
+    /dimension exploration is unavailable/);
 });
 
 /**
@@ -264,10 +302,10 @@ test("dimension tools are absent without a tableStore", async () => {
 test("spine targets carry the identities that decide whether a mapping is right", async () => {
   const { sourceReviewStore, modelIds, deps } = setup(["TSLA"]);
   sourceReviewStore.save(modelIds[0]!, review({ unifiedStatements: { periods: [], rows: [] } as never }));
-  const loader = createSpineMappingTools(deps);
+  const tools = createSpineAgentTools(deps);
 
   const loaded = await data<{ spineTargets: { required: string[]; optional: string[];
-    semantics: Record<string, string> } }>(byName(loader.tools, "load_unified_statements"), { symbol: "TSLA" });
+    semantics: Record<string, string> } }>(byName(tools, "load_unified_statements"), { symbol: "TSLA" });
 
   const opex = loaded.spineTargets.semantics["operating_expenses"];
   assert.ok(opex, "the target most often mis-mapped has to say what it means");
@@ -278,4 +316,49 @@ test("spine targets carry the identities that decide whether a mapping is right"
   assert.match(loaded.spineTargets.semantics["gross_profit"] ?? "", /revenue\.total = cost_of_revenue \+ gross_profit/);
   // Ids that no identity reads carry no note rather than a filler one.
   assert.equal(loaded.spineTargets.semantics["diluted_shares"], undefined);
+});
+
+// Regression for an Important finding: a breakdown row's label lives in unifiedStatements.breakdownRows,
+// not .rows, so the commit's label lookup must search both — otherwise the label falls back to the
+// rowId slug and the workbook shows e.g. "net_sales.statementbusinesssegments.products" instead of
+// "Products". The commit now happens inside submit_spine_decision, so that is where this drives it.
+test("an accepted spine mapping commits itself, labelling detail rows from breakdownRows", async () => {
+  const { sourceReviewStore, modelIds, deps } = setup(["TEST"]);
+  sourceReviewStore.save(modelIds[0]!, review({
+    unifiedStatements: {
+      periods: ["FY2025"],
+      rows: [{ rowId: "net_sales", statement: "income_statement", label: "Net sales", rationale: "",
+        values: { FY2025: 100e6 } }],
+      supplementalRows: [], excluded: [], restatements: [], rollupBreaks: [], findings: [], unresolvedFindings: [],
+      facts: [{ factId: "unified.income_statement.net_sales.FY2025", status: "staged",
+        lineItemId: "unified.income_statement.net_sales", periodId: "FY2025", value: 100e6,
+        unit: USD,
+        provenance: { sourceType: "filing", sourceRefs: [], asOfDate: "2026-01-30" } }],
+      breakdownRows: [{ rowId: "net_sales.seg.products", parentRowId: "net_sales",
+        axisQName: SEG, memberQName: "x:ProductsMember", label: "Products",
+        unit: USD, values: { FY2025: 60e6 }, rationale: "product mix",
+        asOfDate: "2026-01-30" }],
+    } as never,
+  }));
+  const tools = createSpineAgentTools(deps);
+  await data(byName(tools, "load_unified_statements"), { symbol: "TEST" }, { taskId: "t-spine" });
+
+  const otherRequired = [...REQUIRED_MAPPING_IDS].filter((targetId) => targetId !== "revenue.total");
+  const submitted = await data<{ status: string; committedRevision?: number }>(
+    byName(tools, "submit_spine_decision"),
+    { decision: {
+      mappings: [{ targetId: "revenue.total", rowIds: ["net_sales"], rationale: "top line" }],
+      detailRows: [{ parentTargetId: "revenue.total", rowId: "net_sales.seg.products", rationale: "product mix" }],
+      excluded: [],
+      spineGaps: otherRequired.map((targetId) => ({ targetId, reason: "not modeled in this test" })),
+    } }, { taskId: "t-spine" });
+
+  assert.equal(submitted.status, "accepted");
+  assert.equal(typeof submitted.committedRevision, "number", "acceptance IS the commit");
+
+  const service = new FinancialModelService(deps.modelStore, "session-1");
+  const view = service.getModel(modelIds[0]!);
+  assert.ok("currentWorkbook" in view);
+  const stream = view.currentWorkbook.sections.revenue.find((row) => row.lineItemId === "revenue.products");
+  assert.equal(stream?.label, "Products", JSON.stringify(view.currentWorkbook.sections.revenue.map((r) => r.lineItemId)));
 });

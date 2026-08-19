@@ -7,7 +7,7 @@ import { InMemoryModelStore } from "../../../src/financial-model/store.ts";
 import { InMemoryFilingInsightStore } from "../../../src/infra/filing-insights/store.ts";
 import { InMemorySourceReviewStore } from "../../../src/infra/xbrl/sourceReviewStore.ts";
 import { FinancialModelService } from "../../../src/financial-model/service.ts";
-import { projectFinancialModelProgress } from "../../../src/framework/subagent.ts";
+import { projectFinancialModelProgress } from "../../../src/agent/financial-modeling/dcfBehavior.ts";
 import { createFinancialModelTools, type FinancialModelToolDeps } from "../financialModelTools.ts";
 import type { RegisteredTool } from "../../toolRegistry.ts";
 import type { JsonObject } from "../../../src/framework/types.ts";

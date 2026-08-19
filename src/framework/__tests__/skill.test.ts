@@ -21,6 +21,7 @@ test("frontmatter arrays are parsed as arrays, not as their string form", async 
       "---",
       "name: demo",
       "description: a demo skill",
+      "layer: agent",
       "tools:",
       "  - get_stock_price",
       "  - stock_rsi",
@@ -31,7 +32,7 @@ test("frontmatter arrays are parsed as arrays, not as their string form", async 
 
   const registry = new SkillRegistry();
   await registry.loadFromDirectory(root);
-  const skill = registry.get("demo")!;
+  const skill = registry.get("demo", "agent")!;
 
   assert.deepEqual(skill.tools, ["get_stock_price", "stock_rsi"]);
   assert.equal(skill.body.trim(), "body text");

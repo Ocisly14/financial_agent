@@ -64,7 +64,7 @@ Compare reported results with prior guidance and stated operating priorities. Se
 Build an expectations ledger:
 
 | Item | Latest actual | Company guidance | External expectation | Evidence gap |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | Revenue or primary demand KPI | Sourced period | Sourced range/date | Named source/date | Missing or incompatible basis |
 | Margin or profit KPI | Sourced period | Sourced range/date | Named source/date | Missing or incompatible basis |
 | Cash flow or capital intensity | Sourced period | Sourced range/date | Named source/date | Missing or incompatible basis |

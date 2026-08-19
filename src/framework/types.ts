@@ -29,6 +29,27 @@ export type SkillStatus = "loaded" | "ok" | "failed";
 
 export type SkillLayer = "topic" | "research" | "agent";
 
+/**
+ * How an agent behaves when *another agent* hands it work. Its presence on a
+ * definition is the opt-in: an agent without one can only be dispatched by the
+ * orchestrator, so nothing becomes reachable from inside a run by accident.
+ */
+export type DelegationPolicy = {
+  /**
+   * What the caller gets back. `summary` hands over only the account the agent
+   * wrote when it finished; `summary_and_data` also passes its
+   * generation_context.
+   *
+   * `summary` is the one to reach for. A task result's `data` is every tool
+   * payload the agent collected — for a research agent that is the full text of
+   * every search it ran, which is precisely the cost delegating was supposed to
+   * keep out of the caller's context.
+   */
+  returns: "summary" | "summary_and_data";
+  /** Ceiling on one delegated round. Sits inside the caller's own deadline. */
+  timeoutMs: number;
+};
+
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 export type JsonObject = { [key: string]: JsonValue };
@@ -204,17 +225,19 @@ export type ToolExecutionResult = {
 /**
  * One decision the orchestrator emits per loop iteration. `reply` is always the
  * user-facing message for this turn (a short status line when an action is taken,
- * the final answer when all action fields are null). `dispatch` / `skill` /
- * `tool_calls` may share a step; `skill` is exclusive of both.
+ * the final answer when all action fields are null). Handing work to an agent is
+ * a `delegate_to_agent` entry in `tool_calls`, and loading a skill is an
+ * `invoke_skill` entry — the same contracts every agent uses, no fields of
+ * their own. invoke_skill is exclusive: alone in its step.
  */
 export type OrchestratorToolCall = { name: string; input: JsonObject };
 
 export type OrchestratorStep = {
   reply: string;
-  dispatch: TaskRequest[] | null;
-  skill: string | null;
-  /** Plural because reading two references should not cost two loop iterations
-   *  out of the step budget. A single `tool_call` object is still parsed. */
+  /** Every action is an entry here — delegate_to_agent to hand work to an agent, invoke_skill to
+   *  load guidance (alone in its step), the direct tools otherwise. Plural because reading two
+   *  references should not cost two loop iterations out of the step budget; a single `tool_call`
+   *  object is still parsed. */
   tool_calls: OrchestratorToolCall[] | null;
 };
 

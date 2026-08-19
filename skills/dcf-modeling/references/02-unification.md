@@ -1,12 +1,12 @@
 # Stage 2 — Statement unification
 
-`run_dcf_subagent { subagent: "statement_unification", modelId, task }`. The task string must name the ticker — the subagent loads its own working set from the store by that name; pasting data into the task is ignored by design.
+`delegate_to_agent { agent: "statement_unification", task }`. The task string must name the ticker — the delegate loads its own working set from the store by that name; pasting data into the task is ignored by design. Its accepted decision stores the unified statements itself, so its finish summary is your only report.
 
 ## What it does (so you can judge its report)
 
 - Builds a concept inventory of every face-statement concept across all filings, then partitions it into unified multi-year rows in the **issuer's own structure** — resolving re-tags (one line renamed across years is one row, not two), rollforwards, sign flips, and cross-filing restatements. Values resolve latest-filing-wins; roll-ups are checked against the calculation linkbase.
 - **Explores the issuer's XBRL dimension axes** (segments, products, geography) with progressive-disclosure tools, and attaches breakdown rows to the lines they disaggregate. When an axis mixes hierarchy levels (an aggregate beside its own pieces), it declares the member tree, and the host validates it bottom-up: children must sum to their node, roots to the parent row, each within ±10% (reconciling items cost a few percent — that tolerance is deliberate).
-- Everything lands in the store as the unified-statements artifact; you receive counts and a ≤120-word account, never rows.
+- An ACCEPTED decision lands in the store as the unified-statements artifact at the moment its checks pass; you receive the delegate's finish summary, never rows. A run that finishes without an accepted decision stored nothing — the tell is spine_mapping failing to load; re-dispatch on the same thread with the shortfall.
 
 ## Reading the report
 

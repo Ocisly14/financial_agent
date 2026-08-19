@@ -1,9 +1,12 @@
 import { validate } from "./schemas.ts";
-import { subagentTool } from "./mappingSubagentTools.ts";
-import type { RegisteredTool } from "../toolRegistry.ts";
-import type { JsonObject, JsonSchema, JsonValue } from "../../src/framework/types.ts";
+import { SYMBOL_INPUT, resolveModel, runKey, runStateStore, spineTargets, subagentTool } from "./mappingShared.ts";
+import { refreshWaccSheetFromSpine, type FinancialModelToolDeps } from "./financialModelTools.ts";
+import type { RegisteredTool, ToolExecutionContext } from "../toolRegistry.ts";
+import type { JsonSchema, JsonValue } from "../../src/framework/types.ts";
 import type { Fact, ReconciliationResult } from "../../src/financial-model/types.ts";
-import { applySpinePatch, buildSpineFromUnified, checkSpineCompleteness,
+import { FinancialModelService } from "../../src/financial-model/service.ts";
+import { CANONICAL_MAPPING_IDS, REQUIRED_MAPPING_IDS } from "../../src/financial-model/skeleton.ts";
+import { applySpinePatch, buildSpineFromUnified, checkSpineCompleteness, resolveDetailLineItemIds,
   type SpineDecision, type SpinePatch } from "../../src/infra/xbrl/spineFromUnified.ts";
 import type { UnifiedStatementsArtifact } from "../../src/infra/xbrl/unifiedStatements.ts";
 
@@ -77,26 +80,45 @@ export type SpineDelivery = { decision: SpineDecision; facts: Fact[];
   findings: string[];
   reconciliationFailures: ReconciliationResult[] };
 
-/** The spine_mapping agent's delivery surface — the same contract statement_unification gets:
- *  submit, read the host's findings off the tool result, correct with a patch. */
-export function createSpineDeliveryTools(context: {
+type SpineRunState = {
+  modelId: string;
+  symbol: string;
   unified: UnifiedStatementsArtifact;
   spineIds: ReadonlySet<string>;
   requiredIds: ReadonlySet<string>;
-  /** Runs the proposed mapping against the current workbook without writing a revision. */
-  previewReconciliations?: (facts: readonly Fact[]) => readonly ReconciliationResult[];
-}): { tools: RegisteredTool[]; delivered: () => SpineDelivery | undefined;
-  lastEvaluation: () => SpineDelivery | undefined } {
-  let delivered: SpineDelivery | undefined;
-  let lastEvaluation: SpineDelivery | undefined;
+  historicalPeriodIds: string[];
+  labelByRowId: Map<string, string>;
+  /** The workbook revision the next commit must build on; advanced by each commit this run makes. */
+  baseRevision: number;
+  lastEvaluation?: SpineDelivery;
+};
 
-  const evaluate = (decision: SpineDecision): JsonValue => {
-    const completeness = checkSpineCompleteness({ unified: context.unified, decision,
-      spineIds: context.spineIds, requiredIds: context.requiredIds });
-    const built = buildSpineFromUnified({ decision, unified: context.unified,
-      spineIds: context.spineIds, requiredIds: context.requiredIds });
+/**
+ * The spine_mapping agent's whole toolset — the same contract statement_unification gets: load the
+ * working set, submit, read the findings off the tool result, correct with a patch. Structural
+ * coverage AND a dry run of the workbook reconciliations gate every evaluation, and an accepted
+ * mapping commits itself: facts land in the workbook and the WACC sheet refreshes inside the same
+ * tool result the agent reads, so the revision it must quote onward is in its own transcript.
+ */
+export function createSpineAgentTools(deps: FinancialModelToolDeps): RegisteredTool[] {
+  const runs = runStateStore<SpineRunState>();
+
+  const requireRun = (context: ToolExecutionContext): SpineRunState => {
+    const state = runs.get(runKey(context));
+    if (!state) throw new Error("no working set loaded — call load_unified_statements with your ticker first");
+    return state;
+  };
+
+  const evaluate = async (state: SpineRunState, context: ToolExecutionContext, decision: SpineDecision): Promise<JsonValue> => {
+    const service = new FinancialModelService(deps.modelStore, context.sessionId);
+    const labels = Object.fromEntries((state.unified.breakdownRows ?? []).map((row) => [row.rowId, row.label]));
+    const completeness = checkSpineCompleteness({ unified: state.unified, decision,
+      spineIds: state.spineIds, requiredIds: state.requiredIds });
+    const built = buildSpineFromUnified({ decision, unified: state.unified,
+      spineIds: state.spineIds, requiredIds: state.requiredIds });
     const previewed = completeness.length === 0 && built.findings.length === 0
-      ? [...(context.previewReconciliations?.(built.facts) ?? [])].filter((result) => result.required)
+      ? service.previewSpineFacts(state.modelId, { facts: built.facts,
+        historicalPeriodIds: state.historicalPeriodIds, labels }).filter((result) => result.required)
       : [];
     const reconciliationFailures = previewed.filter((result) => result.status === "failed");
     // A required check the mapping made unrunnable is withheld work, not a pass: it blocks delivery
@@ -105,13 +127,30 @@ export function createSpineDeliveryTools(context: {
     const reconciliationFindings = previewed
       .flatMap((result) => describeReconciliationResult(result) ?? []);
     const findings = [...completeness, ...built.findings, ...reconciliationFindings];
-    const candidate: SpineDelivery = { decision, facts: built.facts, coverageGaps: built.coverageGaps,
+    state.lastEvaluation = { decision, facts: built.facts, coverageGaps: built.coverageGaps,
       optionalCoverageGaps: built.optionalCoverageGaps, findings, reconciliationFailures };
-    lastEvaluation = candidate;
-    // A preview with findings is input to the mapping agent's correction loop, never a mapping that
-    // downstream code may commit. This also revokes a previously accepted mapping after a bad patch.
-    delivered = findings.length === 0 ? candidate : undefined;
+
+    // A clean mapping commits itself. This used to be a host callback invoked after the run ended;
+    // committing at the moment of acceptance keeps the whole run on the ordinary dispatch path and
+    // puts the resulting revision in the tool result the agent reads and reports onward.
+    let committedRevision: number | undefined;
+    if (findings.length === 0 && built.facts.length > 0) {
+      const detailIds = resolveDetailLineItemIds(decision, state.unified);
+      const detailLabels = Object.fromEntries(decision.detailRows.map((detail) => [
+        detailIds[detail.rowId]!, state.labelByRowId.get(detail.rowId) ?? detail.rowId,
+      ]));
+      const commit = service.commitSpineFacts(state.modelId, state.baseRevision, {
+        facts: [...built.facts], labels: detailLabels, historicalPeriodIds: state.historicalPeriodIds,
+      });
+      // Committed facts make WACC terms derivable; refresh as the mapping's final commit step.
+      const waccOutcome = await refreshWaccSheetFromSpine(deps, service, state.modelId, commit.revision);
+      committedRevision = waccOutcome.kind === "refreshed" ? waccOutcome.result.currentWorkbook.revision : commit.revision;
+      state.baseRevision = committedRevision;
+    }
+
     return { status: findings.length === 0 ? "accepted" : "incomplete",
+      ...(committedRevision === undefined ? {} : { committedRevision,
+        next: `facts are in the workbook at revision ${committedRevision}; finish with that revision in your summary` }),
       facts: built.facts.length, coverageGaps: built.coverageGaps.length,
       optionalCoverageGaps: built.optionalCoverageGaps,
       reconciliationFailures: reconciliationFailures.map((result) => ({ ruleId: result.ruleId,
@@ -122,24 +161,51 @@ export function createSpineDeliveryTools(context: {
       findingCount: findings.length, findings: findings.slice(0, 40) } as unknown as JsonValue;
   };
 
+  const load = subagentTool({
+    name: "load_unified_statements", category: "non_trading",
+    description: "Load the unified multi-year statements statement_unification stored for one ticker, "
+      + "including any disclosed dimension breakdown rows that may be selected as revenue detail rows, "
+      + "with the canonical spine target ids you map them onto — required ones separated from optional. "
+      + "Always your first call: it opens the working set the delivery tools read.",
+    inputSchema: SYMBOL_INPUT,
+  }, (raw, context) => {
+    const { modelId, symbol } = resolveModel(deps, context.tenantId, raw, SYMBOL_INPUT);
+    const review = deps.sourceReviewStore.get(modelId);
+    if (!review?.unifiedStatements) throw new Error(`${symbol} has no unified statements; run statement_unification first`);
+    const unified = review.unifiedStatements;
+    const service = new FinancialModelService(deps.modelStore, context.sessionId);
+    const current = service.getModel(modelId);
+    if (!("currentWorkbook" in current)) throw new Error("default model context expected");
+    runs.set(runKey(context), { modelId, symbol, unified,
+      spineIds: new Set(CANONICAL_MAPPING_IDS), requiredIds: REQUIRED_MAPPING_IDS,
+      historicalPeriodIds: current.currentWorkbook.periods.filter((period) => period.cls === "actual").map((period) => period.id),
+      labelByRowId: new Map([...unified.rows, ...(unified.breakdownRows ?? [])].map((row) => [row.rowId, row.label])),
+      baseRevision: current.currentWorkbook.revision });
+    return { symbol, periods: unified.periods, rows: unified.rows,
+      breakdownRows: unified.breakdownRows ?? [],
+      spineTargets: spineTargets() } as unknown as JsonValue;
+  });
+
   const submit = subagentTool({
     name: "submit_spine_decision", category: "non_trading",
-    description: "Submit your complete spine mapping. The host checks structural coverage AND dry-runs the resulting workbook reconciliations. If reconciliationFailures is non-empty, inspect its rule, period, residual, and unifiedTrail — each trail entry names one term of the identity and the rows it was summed from, or why it has none: <unmapped> is a row you still owe, <superseded> and <derived> mean the cell is driven by a formula rather than your mapping. If reconciliationSkips is non-empty the check could not run at all: unit_mismatch means you mapped rows of one unit onto a target of another, missing_line_item means the named row is absent. Patch the mapping before finishing.",
+    description: "Submit your complete spine mapping. The host checks structural coverage AND dry-runs the resulting workbook reconciliations; a clean mapping commits its facts to the workbook and returns the new revision. If reconciliationFailures is non-empty, inspect its rule, period, residual, and unifiedTrail — each trail entry names one term of the identity and the rows it was summed from, or why it has none: <unmapped> is a row you still owe, <superseded> and <derived> mean the cell is driven by a formula rather than your mapping. If reconciliationSkips is non-empty the check could not run at all: unit_mismatch means you mapped rows of one unit onto a target of another, missing_line_item means the named row is absent. Patch the mapping before finishing.",
     inputSchema: SPINE_DECISION_SCHEMA,
-  }, (raw: JsonObject) => {
+  }, (raw, context) => {
+    const state = requireRun(context);
     validate(raw, SPINE_DECISION_SCHEMA, "$", true);
-    return evaluate(raw["decision"] as unknown as SpineDecision);
+    return evaluate(state, context, raw["decision"] as unknown as SpineDecision);
   });
 
   const patch = subagentTool({
     name: "patch_spine_decision", category: "non_trading",
     description: "Correct the mapping you already submitted, without restating it whole. Every list is patched by its own key — targetId, or rowId for the row-scoped ones — so upsert or delete only the entries at fault, and anything you do not name is left as it is. The host re-runs structural and accounting reconciliation checks after every patch; do not finish until both reconciliationFailures and reconciliationSkips are empty.",
     inputSchema: SPINE_PATCH_SCHEMA,
-  }, (raw: JsonObject) => {
-    if (!lastEvaluation) throw new Error("no mapping submitted yet — call submit_spine_decision first");
+  }, (raw, context) => {
+    const state = requireRun(context);
+    if (!state.lastEvaluation) throw new Error("no mapping submitted yet — call submit_spine_decision first");
     validate(raw, SPINE_PATCH_SCHEMA, "$", true);
-    return evaluate(applySpinePatch(lastEvaluation.decision, raw["patch"] as unknown as SpinePatch));
+    return evaluate(state, context, applySpinePatch(state.lastEvaluation.decision, raw["patch"] as unknown as SpinePatch));
   });
 
-  return { tools: [submit, patch], delivered: () => delivered, lastEvaluation: () => lastEvaluation };
+  return [load, submit, patch];
 }

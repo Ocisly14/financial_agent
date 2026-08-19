@@ -4,6 +4,8 @@ description: Use when the user wants to work from market conditions down to spec
 layer: research
 ---
 
+# Top-down research
+
 Use a three-round top-down research process. End every round with one user decision. Make the choice clear, but never choose on the user's behalf.
 
 ## Three rounds

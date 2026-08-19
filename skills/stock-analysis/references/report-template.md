@@ -23,7 +23,7 @@ Report the current quote, market session, relevant period return, drawdown, majo
 Use a compact table:
 
 | Dimension | Latest evidence | Direction | Why it matters |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Growth and demand | Period, definition, source | Improving / stable / weakening / unclear | Company-specific implication |
 | Margins and operating leverage | Period, definition, source | ... | ... |
 | Cash conversion and reinvestment | Period, definition, source | ... | ... |
@@ -57,7 +57,7 @@ Use dated catalysts when dates are confirmed. Rank risks by thesis impact rather
 Use one table per horizon:
 
 | Scenario | Causal driver | KPI or financial effect | Confirmation signal | Catalyst | Invalidation |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | Base | ... | ... | ... | ... | ... |
 | Upside | ... | ... | ... | ... | ... |
 | Downside | ... | ... | ... | ... | ... |

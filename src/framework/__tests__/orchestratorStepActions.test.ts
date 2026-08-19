@@ -138,14 +138,16 @@ test("a single tool_call object is still accepted", async () => {
   assert.deepEqual(h.toolCalls.map((c) => c.input["path"]), ["a.md"]);
 });
 
-test("dispatch and tool calls in the same step both run", async () => {
+test("a delegation and a direct tool call share one step and one list", async () => {
   const h = harness();
 
   await h.run([
     JSON.stringify({
       reply: "working",
-      dispatch: [{ agent: "market_data", task: "quote NVDA" }],
-      tool_calls: [{ name: "read_skill_reference", input: { path: "a.md" } }],
+      tool_calls: [
+        { name: "delegate_to_agent", input: { agent: "market_data", task: "quote NVDA" } },
+        { name: "read_skill_reference", input: { path: "a.md" } },
+      ],
     }),
     JSON.stringify({ reply: "done" }),
   ]);
@@ -154,11 +156,24 @@ test("dispatch and tool calls in the same step both run", async () => {
   assert.deepEqual(h.toolCalls.map((c) => c.input["path"]), ["a.md"]);
 });
 
+test("a model still emitting the retired dispatch field is folded into delegate calls, not dropped", async () => {
+  // Output tolerance, same spirit as accepting a lone `tool_call`: the old shape asks for exactly
+  // what delegate_to_agent does, and dropping its tasks would read as work that silently never ran.
+  const h = harness();
+
+  await h.run([
+    JSON.stringify({ reply: "working", dispatch: [{ agent: "market_data", task: "quote NVDA" }] }),
+    JSON.stringify({ reply: "done" }),
+  ]);
+
+  assert.deepEqual(h.dispatched.map((d) => d.task), ["quote NVDA"]);
+});
+
 test("the visible model becomes the advisory default for a DCF dispatch", async () => {
   const h = harness();
 
   await h.run([
-    JSON.stringify({ reply: "updating", dispatch: [{ agent: "financial_modeling", task: "update the DCF" }] }),
+    JSON.stringify({ reply: "updating", tool_calls: [{ name: "delegate_to_agent", input: { agent: "financial_modeling", task: "update the DCF" } }] }),
     JSON.stringify({ reply: "done" }),
   ], { activeModel: { modelId: "model-visible", symbol: "AAPL", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-08-12T00:00:00Z", currentRevision: 7, lifecycleStage: "valued" } });
 
@@ -169,7 +184,7 @@ test("an explicit DCF model choice remains available to the agent", async () => 
   const h = harness();
 
   await h.run([
-    JSON.stringify({ reply: "updating", dispatch: [{ agent: "financial_modeling", task: "build a comparison model", model_id: "model-other" }] }),
+    JSON.stringify({ reply: "updating", tool_calls: [{ name: "delegate_to_agent", input: { agent: "financial_modeling", task: "build a comparison model", model_id: "model-other" } }] }),
     JSON.stringify({ reply: "done" }),
   ], { activeModel: { modelId: "model-visible", symbol: "AAPL", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-08-12T00:00:00Z", currentRevision: 7, lifecycleStage: "valued" } });
 
@@ -183,7 +198,7 @@ test("pairing skill with another action is refused outright, not silently resolv
     JSON.stringify({
       reply: "working",
       skill: "whatever",
-      dispatch: [{ agent: "market_data", task: "quote NVDA" }],
+      tool_calls: [{ name: "delegate_to_agent", input: { agent: "market_data", task: "quote NVDA" } }],
     }),
     JSON.stringify({ reply: "done" }),
   ]);
@@ -199,15 +214,15 @@ test("the protocol error is visible to the model, so it can correct itself next 
     JSON.stringify({
       reply: "working",
       skill: "whatever",
-      dispatch: [{ agent: "market_data", task: "quote NVDA" }],
+      tool_calls: [{ name: "delegate_to_agent", input: { agent: "market_data", task: "quote NVDA" } }],
     }),
     JSON.stringify({ reply: "done" }),
   ]);
 
   const state = h.sessions.getExisting("s");
   const progress = state.projectForPrompt(1).currentTurnProgress;
-  assert.match(progress, /skill/i);
-  assert.match(progress, /exclusive|同时|mutually/i);
+  assert.match(progress, /invoke_skill/);
+  assert.match(progress, /only call/);
 });
 
 test("ask_user records a request and ends the turn without another model step", async () => {

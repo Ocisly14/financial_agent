@@ -19,7 +19,7 @@ import type { TaskRequest } from "../types.ts";
  * dispatches from inside `invoke()`. Before the fix the grant only landed on
  * the *next* loop iteration, so that first dispatch ran without it.
  */
-test("a dispatch issued from inside a skill's workflow already carries that skill's tool grant", async () => {
+test("a dispatch issued from inside a skill's workflow uses the agent's own declared pool", async () => {
   const skillsRoot = await mkdtemp(path.join(tmpdir(), "skill-allowance-"));
   await mkdir(path.join(skillsRoot, "granting-skill"));
   await writeFile(
@@ -27,8 +27,7 @@ test("a dispatch issued from inside a skill's workflow already carries that skil
     [
       "---",
       "name: granting-skill",
-      "description: grants one extra tool",
-      "tools: [granted_tool]",
+      "description: runs a workflow that dispatches",
       "workflow: granting-workflow",
       "---",
       "",
@@ -52,7 +51,7 @@ test("a dispatch issued from inside a skill's workflow already carries that skil
       name,
       description: "d",
       modelClass: "MEDIUM",
-      defaultTools: [],
+      defaultTools: name === "market_data" ? ["own_tool"] : [],
       systemPrompt: { system: "", prompt: "" },
     });
   }
@@ -63,7 +62,7 @@ test("a dispatch issued from inside a skill's workflow already carries that skil
   };
 
   const dispatchTools = new McpToolRegistry();
-  dispatchTools.register({ name: "granted_tool", description: "d", category: "non_trading",
+  dispatchTools.register({ name: "own_tool", description: "d", category: "non_trading",
     inputSchema: { type: "object" }, execute: async () => ({ summary: "ok" }) });
 
   const sessions = new SessionRegistry();
@@ -96,8 +95,11 @@ test("a dispatch issued from inside a skill's workflow already carries that skil
   await orchestrator.run({ tenantId: "agent-1", sessionId: "s1", userMessage: "go" });
 
   assert.equal(seen.length, 1, "the workflow's dispatch must reach the subagent runtime");
-  assert.deepEqual(seen[0]!.allowedTools.map((tool) => tool.name), ["granted_tool"],
-    "the grant must already be installed when invoke() dispatches");
+  // Skills no longer widen anyone's pool: the workflow's dispatch runs the agent exactly as the
+  // topology declares it. (The legacy `skill` step field in the fixture also proves the fold-in
+  // tolerance drives the same path.)
+  assert.deepEqual(seen[0]!.allowedTools.map((tool) => tool.name), ["own_tool"],
+    "the agent's own declared pool, nothing added");
 
   await rm(skillsRoot, { recursive: true, force: true });
 });

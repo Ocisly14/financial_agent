@@ -1,5 +1,5 @@
 import { newId } from "./ids.ts";
-import { isAgentKind } from "./types.ts";
+import { AGENT_KINDS, isAgentKind } from "./types.ts";
 import type {
   AgentKind,
   ArtifactRef,
@@ -98,18 +98,20 @@ function formatToolErrorProgress(name: string, payload: JsonObject): string {
 }
 
 /** Allowed (source, kind) pairs. Lightweight fail-fast guard against dirty events. */
+/** Every agent writes the same event kinds, wherever it sits in the hierarchy — a mapping agent
+ *  reporting to financial_modeling records exactly like one reporting to the orchestrator, which is
+ *  what makes its progress visible while it runs. The approval kinds are here for every agent even
+ *  though only trading tools raise them today: the gate on approvals is whether a tool returns one,
+ *  not this whitelist, and enumerating agents per kind meant editing this table for every new agent. */
+const AGENT_EVENT_KINDS: ReadonlySet<string> = new Set([
+  "task_result", "tool_use", "tool_result", "subagent_note", "approval_required", "approval_resolved",
+]);
+
 const KINDS: Record<Source, ReadonlySet<string>> = {
   user: new Set(["user_message"]),
   orchestrator: new Set(["reply", "dispatch", "skill_invoke", "skill_result", "error", "tool_use", "tool_result", "user_input_required"]),
-  market_data: new Set(["task_result", "tool_use", "tool_result", "subagent_note"]),
-  market_research: new Set(["task_result", "tool_use", "tool_result", "subagent_note"]),
-  trading_operations: new Set(["task_result", "tool_use", "tool_result", "approval_required", "approval_resolved", "subagent_note"]),
-  financial_modeling: new Set(["task_result", "tool_use", "tool_result", "subagent_note"]),
-  // The DCF mapping agents report to financial_modeling rather than to the orchestrator, but they
-  // write the same events — which is what makes their progress visible while they run.
-  statement_unification: new Set(["task_result", "tool_use", "tool_result", "subagent_note"]),
-  spine_mapping: new Set(["task_result", "tool_use", "tool_result", "subagent_note"]),
   skill: new Set(["skill_invoke", "workflow_started", "workflow_step", "workflow_done"]),
+  ...Object.fromEntries([...AGENT_KINDS].map((kind) => [kind, AGENT_EVENT_KINDS])) as Record<AgentKind, ReadonlySet<string>>,
 };
 
 export interface DerivedTask {

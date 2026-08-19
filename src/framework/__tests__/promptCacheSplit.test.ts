@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildLoopToolSpecs, progressRegion, projectFinancialModelProgress, splitForPromptCache, SubagentRuntime } from "../subagent.ts";
+import { buildLoopToolSpecs, progressRegion, splitForPromptCache, SubagentRuntime } from "../subagent.ts";
+import { projectFinancialModelProgress } from "../../agent/financial-modeling/dcfBehavior.ts";
 import { SessionState } from "../sessionState.ts";
 import { ModelRouter } from "../../infra/llm/provider.ts";
 import type { GenerateResult, LlmMessage, LlmProvider } from "../../infra/llm/provider.ts";

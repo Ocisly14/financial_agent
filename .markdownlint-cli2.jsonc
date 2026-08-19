@@ -1,0 +1,4 @@
+{
+  // Historical design docs and session reports are archives — not linted.
+  "ignores": ["docs/**", ".superpowers/**", "node_modules/**", "client/**", "data/**"]
+}

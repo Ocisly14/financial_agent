@@ -13,8 +13,7 @@ Use the following order. State the gap when a section lacks reliable evidence; d
 Use a complete table for a whole-market or subset comparison:
 
 | Rank | Sector (ETF) | Score | Relative phase | Absolute trend | 20/60/120/252-day returns | Returns vs. SPY | Risk |
-|---|---|---|---|---|---|---|---|
-
+| --- | --- | --- | --- | --- | --- | --- | --- |
 Include every successfully returned sector exactly once. In subset mode, state that the score is comparable only within that subset.
 
 For a single sector, use a diagnostic table covering absolute and relative multi-horizon returns, SMA50/SMA200, relative slope and R², acceleration, 60-day volatility, and 120-day maximum drawdown. Do not display a rank or score.
@@ -22,8 +21,7 @@ For a single sector, use a diagnostic table covering absolute and relative multi
 ## 3. News and catalysts
 
 | Date | Sector | Fact or expectation | Evidence type | Relationship to market signal | Source |
-|---|---|---|---|---|---|
-
+| --- | --- | --- | --- | --- | --- |
 Include only material that can change the view. Separate realized facts, institutional expectations, scheduled catalysts, and unverified reports.
 
 ## 4. Dual-horizon outlook
@@ -31,10 +29,10 @@ Include only material that can change the view. Separate realized facts, institu
 Write separate sections for 1–3 months and 6–12 months:
 
 | Scenario | Conditions and drivers | Confirmation signal | Catalyst | Invalidation condition |
-|---|---|---|---|---|
-| Base |  |  |  |  |
-| Upside |  |  |  |  |
-| Downside |  |  |  |  |
+| --- | --- | --- | --- | --- |
+| Base | — | — | — | — |
+| Upside | — | — | — | — |
+| Downside | — | — | — | — |
 
 In whole-market mode, group the analysis by leading / improving / weakening / lagging and highlight the two to four most important sectors. Expand the selected sector fully in single-sector mode.
 

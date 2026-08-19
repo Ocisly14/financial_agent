@@ -1,4 +1,5 @@
 import test from "node:test";
+import { dcfBehavior } from "../../agent/financial-modeling/dcfBehavior.ts";
 import assert from "node:assert/strict";
 import { SessionState } from "../sessionState.ts";
 import { SubagentRuntime } from "../subagent.ts";
@@ -20,6 +21,9 @@ const agent = {
   description: "d",
   modelClass: "MEDIUM" as const,
   defaultTools: ["flaky_tool"],
+  // The resumable-pause summary is no longer keyed off the agent's NAME — it is a behavior the
+  // topology node declares. The fixture declares it the same way production does.
+  behavior: dcfBehavior,
   systemPrompt: { system: "s", prompt: "{{task}} {{modelContext}} {{progress}}" },
 };
 

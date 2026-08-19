@@ -3,7 +3,6 @@ import type { SessionState } from "./sessionState.ts";
 import { SubagentRegistry, SubagentRuntime } from "./subagent.ts";
 import type { AgentKind, TaskRequest, TaskResult, ToolDefinition } from "./types.ts";
 import { createLogger } from "../infra/logger/logger.ts";
-import { assertToolAllowedForAgent } from "./toolAccess.ts";
 
 const log = createLogger("dispatcher");
 /** A research task routinely takes three or four LLM rounds with advanced web
@@ -11,12 +10,6 @@ const log = createLogger("dispatcher");
  *  and the completed work was discarded because there is no cancellation — the
  *  subagent ran on, answered, and nobody was listening. */
 const DEFAULT_TASK_TIMEOUT_MS = 5 * 60_000;
-const DEFAULT_TRADE_TASK_TIMEOUT_MS = 16 * 60_000;
-/** A DCF round is not one lookup: 30 tool steps at several seconds of model time each, and
- *  `run_dcf_subagent` nests a whole agent (unification, spine mapping) inside a single step.
- *  Five minutes could not cover that, and the timeout does not cancel — the agent finished,
- *  wrote its own task_result, and the task already carried a timeout nobody could reconcile. */
-const DCF_TASK_TIMEOUT_MS = 15 * 60_000;
 
 /**
  * Ceiling on what one dispatch may hand forward. Not a view on how many results a
@@ -28,12 +21,11 @@ const DCF_TASK_TIMEOUT_MS = 15 * 60_000;
 const MAX_HANDED_DATA_CHARS = 40_000;
 
 /** Per-agent, because the right ceiling is a property of the work: a quote is seconds, a DCF round
- *  is many minutes. A caller's explicit `timeout_ms` still wins. */
-export function taskTimeoutMs(request: TaskRequest): number {
-  if (request.timeout_ms !== undefined) return request.timeout_ms;
-  if (request.agent === "trading_operations") return DEFAULT_TRADE_TASK_TIMEOUT_MS;
-  if (request.agent === "financial_modeling") return DCF_TASK_TIMEOUT_MS;
-  return DEFAULT_TASK_TIMEOUT_MS;
+ *  is many minutes. The agent's own ceiling comes from its topology node; a caller's explicit
+ *  `timeout_ms` still wins, and the timeout does not cancel — a late finisher still writes its own
+ *  task_result, which the first-writer-wins guard then ignores. */
+export function taskTimeoutMs(request: TaskRequest, definition?: { taskTimeoutMs?: number }): number {
+  return request.timeout_ms ?? definition?.taskTimeoutMs ?? DEFAULT_TASK_TIMEOUT_MS;
 }
 
 /**
@@ -68,9 +60,8 @@ export class Dispatcher {
   private readonly tools: McpToolRegistry;
   private readonly state: SessionState;
   private readonly tenantId: string;
-  private skillSections: Partial<Record<AgentKind, string>> = {};
-  private skillTools: string[] | undefined;
   private userInputAllowed = true;
+  private readonly parentPath: readonly AgentKind[];
 
   constructor(
     sessionId: string,
@@ -79,6 +70,9 @@ export class Dispatcher {
     tools: McpToolRegistry,
     state: SessionState,
     tenantId: string,
+    /** The agents already running above the tasks this dispatcher will start. Empty at the top:
+     *  the orchestrator is the root. A delegating agent passes its own chain. */
+    parentPath: readonly AgentKind[] = [],
   ) {
     this.sessionId = sessionId;
     this.subagents = subagents;
@@ -86,24 +80,7 @@ export class Dispatcher {
     this.tools = tools;
     this.state = state;
     this.tenantId = tenantId;
-  }
-
-  /**
-   * 当前 turn 激活的 skill 的定向指导。orchestrator 每轮新建一个 Dispatcher，
-   * 所以这份状态活不过这个 turn——skill 的单 turn 生命周期由此而来，不需要
-   * 额外的清理逻辑。
-   */
-  setSkillSections(sections: Partial<Record<AgentKind, string>>): void {
-    this.skillSections = sections;
-  }
-
-  /**
-   * 激活的 skill 额外授予的工具。它只放宽 agent 自己的池，从不收窄——收窄那套
-   * 已经删掉了：skill 是指导不是沙箱。真正的隔离仍在 toolAccess 的 category 门，
-   * 并集里每个名字照样要过那道门。
-   */
-  setSkillTools(tools: string[] | undefined): void {
-    this.skillTools = tools;
+    this.parentPath = parentPath;
   }
 
   /**
@@ -152,6 +129,33 @@ export class Dispatcher {
     const opened = this.recordDispatch(request);
     if (opened.error) return;
     await this.runExistingTask(opened.taskId, request, opened.threadId, opened.handedData);
+  }
+
+  /**
+   * One task, run to completion, with its outcome returned rather than only logged.
+   *
+   * The other entry points report through the session log because the orchestrator reads results
+   * there. An agent delegating to another agent is blocked inside a tool call and needs the outcome
+   * in hand — and needs `threadId`, which no TaskResult carries, because that is the handle it must
+   * quote to continue the same conversation next round.
+   */
+  async runOne(request: TaskRequest): Promise<{ taskId: string; threadId: string; result: TaskResult }> {
+    const opened = this.recordDispatch(request);
+    if (!opened.error) {
+      await this.runExistingTask(opened.taskId, request, opened.threadId, opened.handedData);
+    }
+    // Every path above writes a task_result — recordDispatch on a bad thread name, the runtime on
+    // its own, recordGenericFailure on a throw or timeout. Synthesized rather than asserted anyway:
+    // compaction runs inside the callee, and a future change there that evicted the dispatch event
+    // would turn a non-null assertion into a crash inside the caller's tool call.
+    const result = this.state.task(opened.taskId)?.result ?? {
+      task_id: opened.taskId,
+      agent: request.agent,
+      status: "failed" as const,
+      summary: "Delegated task produced no result.",
+      error: { code: "task_failed", message: "Delegated task produced no result." },
+    };
+    return { taskId: opened.taskId, threadId: opened.threadId, result };
   }
 
   /**
@@ -241,13 +245,6 @@ export class Dispatcher {
     return `[DATA HANDED TO YOU]\nResults from earlier work this task builds on, verbatim. Treat them as given.\n${rendered}\n\n`;
   }
 
-  /** The event log should show the user's intent; only the subagent's input carries skill text. */
-  private withSkillSection(request: TaskRequest): TaskRequest {
-    const section = this.skillSections[request.agent];
-    if (!section) return request;
-    return { ...request, task: `${request.task}\n\n[SKILL GUIDANCE]\n${section}` };
-  }
-
   private async runExistingTask(taskId: string, request: TaskRequest, threadId: string, handedData: string): Promise<void> {
     log.info(`dispatch → ${request.agent}`, { task: request.task, taskId, threadId });
     const definition = this.subagents.get(request.agent);
@@ -255,9 +252,8 @@ export class Dispatcher {
     try {
       allowedTools = this.resolveAllowedTools(request.agent, definition.defaultTools, request.tools);
     } catch (error) {
-      // Unknown tool name, category mismatch, and anything else resolution can
-      // throw share the generic task_failed path, so their handling stays
-      // identical to a subagent-run failure.
+      // Unknown tool name and anything else resolution can throw share the generic task_failed
+      // path, so their handling stays identical to a subagent-run failure.
       this.recordGenericFailure(request, taskId, error);
       return;
     }
@@ -269,12 +265,13 @@ export class Dispatcher {
           tenantId: this.tenantId,
           taskId,
           threadId,
-          request: this.withSkillSection(request),
+          request,
           handedData,
           allowedTools,
           state: this.state,
+          agentPath: this.parentPath,
         }),
-        taskTimeoutMs(request),
+        taskTimeoutMs(request, definition),
       );
       log.info(`done ← ${request.agent}`, { taskId });
     } catch (error) {
@@ -286,7 +283,7 @@ export class Dispatcher {
   private recordGenericFailure(request: TaskRequest, taskId: string, error: unknown): void {
     const isTimeout = error instanceof Error && error.message === "timeout";
     if (isTimeout) {
-      log.warn(`timeout ← ${request.agent}`, { taskId, timeout_ms: taskTimeoutMs(request) });
+      log.warn(`timeout ← ${request.agent}`, { taskId, timeout_ms: taskTimeoutMs(request, this.subagents.get(request.agent)) });
     } else {
       log.error(`failed ← ${request.agent}`, { taskId, error: error instanceof Error ? error.message : String(error) });
     }
@@ -304,14 +301,10 @@ export class Dispatcher {
   }
 
   private resolveAllowedTools(agent: AgentKind, pool: string[], requestedTools?: string[]): ToolDefinition[] {
-    // The agent's own pool plus whatever the active skill grants. The union is
-    // the upper bound for this dispatch — an explicit request may pick from it,
-    // never past it.
-    const granted = this.skillTools ? [...new Set([...pool, ...this.skillTools])] : pool;
-    // The strip runs on the union, not on the pool: a skill that happens to
-    // declare ask_user must not smuggle it past `userInputAllowed`, or a stream
-    // with nobody watching would end its turn on a question against an empty seat.
-    const available = this.userInputAllowed ? granted : granted.filter((name) => name !== "ask_user");
+    // The pool IS the upper bound: what an agent may reach is declared on its topology node and
+    // nowhere else. (Skills used to widen this per turn; that grant was a capability side-channel
+    // around the topology and is gone — a skill guides its reader, it does not arm anyone.)
+    const available = this.userInputAllowed ? pool : pool.filter((name) => name !== "ask_user");
     const availableSet = new Set(available);
     let names: string[];
 
@@ -329,7 +322,6 @@ export class Dispatcher {
     return names.map((name) => {
       const tool = this.tools.get(name);
       if (!tool) throw new Error(`tool not registered: ${name}`);
-      assertToolAllowedForAgent(agent, name, tool.category);
       const { execute: _execute, ...definition } = tool;
       return definition;
     });

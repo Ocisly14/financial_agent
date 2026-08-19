@@ -29,7 +29,7 @@ const bulk = (marker: string, rows: number): JsonObject => ({
   })),
 });
 
-type Step = { tool: string; data: JsonObject };
+type Step = { tool: string; data: JsonObject; input?: JsonObject };
 
 /** Runs one agent's real definition against scripted tool results, returning the messages the
  *  provider saw at each step. */
@@ -43,7 +43,9 @@ async function drive(agent: AgentKind, script: Step[]): Promise<LlmMessage[][]> 
       const step = script[sent.length - 1];
       const toolCalls = step === undefined
         ? [{ name: "finish", input: { summary: "done" } }]
-        : [{ name: step.tool, input: {} }];
+        // delegate_to_agent must name a delegate on the caller's roster, or the runtime's roster
+        // gate refuses the call before the stubbed tool ever runs.
+        : [{ name: step.tool, input: step.input ?? {} }];
       return { text: `step ${sent.length}: calling ${step?.tool ?? "finish"}`, toolCalls,
         metrics: { tokens_in: 1, tokens_out: 1, ms: 0, model_class: "MEDIUM", provider: "stub" } };
     },
@@ -67,7 +69,8 @@ async function drive(agent: AgentKind, script: Step[]): Promise<LlmMessage[][]> 
   const thread = state.openThread(agent);
   const dispatch = state.recordDispatch(agent, "value AMZN", thread);
 
-  await new SubagentRuntime(new ModelRouter(provider), tools).run(definition, {
+  // The real registry, so the rendered delegate roster is production's and not "(none)".
+  await new SubagentRuntime(new ModelRouter(provider), tools, undefined, registry).run(definition, {
     sessionId: "s", tenantId: "agent-1", taskId: dispatch.event_id,
     request: { agent, task: "value AMZN" },
     allowedTools: [...queues.keys()].map((name) => {
@@ -114,12 +117,14 @@ test("financial_modeling: a playbook read and a subagent report reach the next s
   const sent = await drive("financial_modeling", [
     { tool: "read_skill_reference", data: { skill: "dcf-modeling", path: "02-unification.md",
       content: `UNIFICATION PLAYBOOK\n${"guidance line\n".repeat(1200)}` } },
-    { tool: "run_dcf_subagent", data: { subagent: "statement_unification",
-      account: "unified 76 row(s) over 5 period(s)", ...bulk("unified", 120) } },
+    { tool: "delegate_to_agent", input: { agent: "statement_unification", task: "unify AMZN" },
+      data: { delegation: { agent: "statement_unification", thread: "s:statement_unification:1", task_id: "t1", status: "ok",
+        summary: "unified 76 row(s) over 5 period(s)", ...bulk("unified", 120) } } },
     { tool: "read_skill_reference", data: { skill: "dcf-modeling", path: "03-spine-and-commit.md",
       content: `SPINE PLAYBOOK\n${"commit guidance\n".repeat(1200)}` } },
-    { tool: "run_dcf_subagent", data: { subagent: "spine_mapping",
-      account: "mapped 61 row(s) onto the spine", ...bulk("mapped", 120) } },
+    { tool: "delegate_to_agent", input: { agent: "spine_mapping", task: "map AMZN" },
+      data: { delegation: { agent: "spine_mapping", thread: "s:spine_mapping:1", task_id: "t2", status: "ok",
+        summary: "mapped 61 row(s) onto the spine", ...bulk("mapped", 120) } } },
   ]);
 
   // The playbook body must survive into later steps — this projection drops it once, and the agent
@@ -127,7 +132,7 @@ test("financial_modeling: a playbook read and a subagent report reach the next s
   assert.match(promptOf(sent[4]!), /UNIFICATION PLAYBOOK/);
   assert.match(promptOf(sent[4]!), /SPINE PLAYBOOK/, "both playbooks, not just the latest");
   // The seam between agents: what the delegated subagent reported is the orchestrator's only view
-  // of that work, and it rides in on run_dcf_subagent's data.
+  // of that work, and it rides in on delegate_to_agent's delegation payload.
   assert.match(promptOf(sent[4]!), /unified 76 row\(s\) over 5 period\(s\)/);
   assertStableInjection(sent, 4, /UNIFICATION PLAYBOOK/);
 });
@@ -201,7 +206,7 @@ test("subagents retain the preceding native tool exchange alongside rendered pro
 for (const agent of ["financial_modeling", "statement_unification", "spine_mapping"] as const) {
   test(`${agent}: identical tool results render a byte-identical progress region`, async () => {
     const script = [
-      { tool: agent === "financial_modeling" ? "run_dcf_subagent" : "load_unified_statements", data: bulk("first", 60) },
+      { tool: agent === "financial_modeling" ? "calculate_model_rows" : "load_unified_statements", data: bulk("first", 60) },
       { tool: agent === "financial_modeling" ? "financial_search" : "load_spine_targets", data: bulk("second", 60) },
     ];
 

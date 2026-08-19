@@ -45,7 +45,7 @@ function suite(name: string, open: () => { store: SourceReviewStore & FilingInge
   });
 
   // The regression this file exists for. `create_financial_model` writes the review once, then
-  // `run_dcf_subagent` writes it again to attach `unifiedStatements` — so a save-once store fails
+  // an accepted unification decision writes it again to attach `unifiedStatements` — so a save-once store fails
   // the whole DCF at the moment statement_unification hands back its artifact, after the subagent
   // has already spent its work. The in-memory store always overwrote; SQLite used a bare INSERT
   // against a PRIMARY KEY and threw "UNIQUE constraint failed".

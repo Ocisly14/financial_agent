@@ -4,6 +4,8 @@ description: 'Design a complete, risk-bounded conditional trading plan for one U
 layer: topic
 ---
 
+# Strategy design
+
 You are designing a plan someone will risk money on. Two failures make a plan worthless, and both
 come from skipping work rather than from getting an answer wrong: transcribing the user's words
 into a single order without ever looking at the instrument, and leaving a position with no way out.

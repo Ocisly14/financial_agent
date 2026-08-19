@@ -5,7 +5,6 @@ import { SessionState, SessionRegistry } from "../sessionState.ts";
 import { SubagentRegistry, SubagentRuntime } from "../subagent.ts";
 import { OrchestratorRuntime } from "../orchestrator.ts";
 import { SkillRegistry } from "../skill.ts";
-import { assertToolAllowedForAgent } from "../toolAccess.ts";
 import { createSubagentRegistry } from "../../agent/subagents/registerSubagents.ts";
 import { McpToolRegistry } from "../../../mcp_tools/toolRegistry.ts";
 import { ModelRouter } from "../../infra/llm/provider.ts";
@@ -62,12 +61,6 @@ test("only financial_modeling carries ask_user in its default pool", () => {
   const withAskUser = registry.list().filter((d) => d.defaultTools.includes("ask_user")).map((d) => d.name);
 
   assert.deepEqual(withAskUser, ["financial_modeling"]);
-});
-
-test("the category gate lets ask_user through despite its main category", () => {
-  assert.doesNotThrow(() => assertToolAllowedForAgent("financial_modeling", "ask_user", "main"));
-  // The pool is what actually grants it — the gate no longer has to reject it.
-  assert.throws(() => assertToolAllowedForAgent("market_data", "get_sector_analysis", "trading"), /not allowed/);
 });
 
 // ── the suppression ──────────────────────────────────────────────────────
@@ -373,8 +366,8 @@ test("a subagent's pending question ends the orchestrator turn", async () => {
     new Dispatcher(sessionId, subagents, subagentRuntime as never, tools, sessions.getExisting(sessionId), tenantId);
 
   const steps = [
-    JSON.stringify({ reply: "building", dispatch: [{ agent: "financial_modeling", task: "value AAPL" }] }),
-    JSON.stringify({ reply: "should never be reached", dispatch: [{ agent: "financial_modeling", task: "again" }] }),
+    JSON.stringify({ reply: "building", tool_calls: [{ name: "delegate_to_agent", input: { agent: "financial_modeling", task: "value AAPL" } }] }),
+    JSON.stringify({ reply: "should never be reached", tool_calls: [{ name: "delegate_to_agent", input: { agent: "financial_modeling", task: "again" } }] }),
   ];
   let call = 0;
   const provider: LlmProvider = {

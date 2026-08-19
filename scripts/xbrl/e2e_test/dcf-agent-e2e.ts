@@ -2,7 +2,7 @@
 //
 // Unlike step1-8, which hand-build the data foundation and only hand the agent the last mile, this
 // script injects ONE prompt and lets the agent do everything itself: extract the filings, delegate
-// statement_unification and spine_mapping through run_dcf_subagent, author the forecast, complete
+// statement_unification and spine_mapping through delegate_to_agent, author the forecast, complete
 // the WACC sheet and terminal assumptions, and advance the model to `valued`. The script makes no
 // modeling choice of its own — it only dispatches, records, and reports.
 //

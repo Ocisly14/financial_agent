@@ -5,6 +5,8 @@ import type { SubagentRegistry } from "./subagent.ts";
 import type { ModelRouter } from "../infra/llm/provider.ts";
 import { formatLatestInput, type LiveThread, type SessionRegistry, SessionState } from "./sessionState.ts";
 import { maybeCompact } from "./contextCompaction.ts";
+import { DELEGATE_TO_AGENT } from "./delegation.ts";
+import { INVOKE_SKILL } from "./skillTools.ts";
 import type { McpToolRegistry } from "../../mcp_tools/toolRegistry.ts";
 import type { PromptTemplate } from "./prompt.ts";
 import type { AgentKind, JsonObject, OrchestratorStep, OrchestratorToolCall, SkillResult, TaskRequest, UserInputRequest, UserInputResponse } from "./types.ts";
@@ -99,7 +101,7 @@ function salvageReply(text: string): string | null {
   const rest = text.slice(bodyStart);
   // Closing quote precedes either the next known key or the object end. If the
   // stream was truncated, no such marker exists — take everything that's left.
-  const endMatch = rest.match(/"\s*(?:,\s*"(?:dispatch|skill|tool_calls?)"|}\s*$)/);
+  const endMatch = rest.match(/"\s*(?:,\s*"tool_calls?"|}\s*$)/);
   const body = endMatch && endMatch.index !== undefined ? rest.slice(0, endMatch.index) : rest;
   const decoded = decodeJsonString(body).trim();
   return decoded.length > 0 ? decoded : null;
@@ -112,20 +114,28 @@ function salvageReply(text: string): string | null {
  */
 function parseStep(text: string): OrchestratorStep {
   const cleaned = stripCodeFence(text);
-  const rawFallback: OrchestratorStep = { reply: text.trim(), dispatch: null, skill: null, tool_calls: null };
+  const rawFallback: OrchestratorStep = { reply: text.trim(), tool_calls: null };
   const json = extractJsonObject(cleaned);
 
   if (json) {
     try {
       const raw = JSON.parse(json) as Record<string, unknown>;
       const reply = typeof raw.reply === "string" ? raw.reply : "";
-      const dispatch = Array.isArray(raw.dispatch) ? (raw.dispatch as TaskRequest[]) : null;
-      const skill = typeof raw.skill === "string" && raw.skill.trim() ? raw.skill.trim() : null;
       // The schema asks for `tool_calls: [...]`, but a model that has seen the
       // singular form elsewhere reverts to it often enough that refusing it
       // would cost a whole retry step for nothing.
-      const toolCalls = normalizeToolCalls(raw.tool_calls ?? raw.tool_call);
-      return { reply, dispatch, skill, tool_calls: toolCalls };
+      const toolCalls = normalizeToolCalls(raw.tool_calls ?? raw.tool_call) ?? [];
+      // Output tolerance for the two retired step fields, same spirit as accepting a lone
+      // `tool_call`: a model emitting the old shapes is asking for exactly what the tools do,
+      // and dropping its actions on the floor would read as work that silently never ran.
+      const legacyDispatch = Array.isArray(raw.dispatch)
+        ? (raw.dispatch as JsonObject[]).map((task) => ({ name: DELEGATE_TO_AGENT, input: task }))
+        : [];
+      const legacySkill = typeof raw.skill === "string" && raw.skill.trim()
+        ? [{ name: INVOKE_SKILL, input: { skill: raw.skill.trim() } }]
+        : [];
+      const merged = [...toolCalls, ...legacyDispatch, ...legacySkill];
+      return { reply, tool_calls: merged.length > 0 ? merged : null };
     } catch {
       // Fall through to salvage — most often a truncated or lightly-malformed
       // JSON string (raw newlines, trailing comma) that strict parsing rejects.
@@ -136,7 +146,7 @@ function parseStep(text: string): OrchestratorStep {
   // reply text so the user sees markdown, not a raw `{"reply": ...}` dump.
   const salvaged = salvageReply(cleaned);
   if (salvaged !== null) {
-    return { reply: salvaged, dispatch: null, skill: null, tool_calls: null };
+    return { reply: salvaged, tool_calls: null };
   }
   return rawFallback;
 }
@@ -358,20 +368,21 @@ export class OrchestratorRuntime {
       // dispatch written in the same step was written blind to it. Resolving the
       // clash by branch order would drop an action the model asked for without
       // telling it — the failure then looks like the skill simply never ran.
-      const otherAction = (stepObj.dispatch?.length ?? 0) > 0 || (stepObj.tool_calls?.length ?? 0) > 0;
-      if (stepObj.skill && otherAction) {
+      const skillCalls = (stepObj.tool_calls ?? []).filter((call) => call.name === INVOKE_SKILL);
+      const requestedSkill = typeof skillCalls[0]?.input["skill"] === "string" ? skillCalls[0].input["skill"] : "";
+      if (skillCalls.length > 0 && (skillCalls.length > 1 || (stepObj.tool_calls?.length ?? 0) > 1)) {
         state.record("orchestrator", "error", {
           scope: "protocol",
           message:
-            "skill is mutually exclusive with dispatch and tool_calls — invoke the skill alone, then act on its guidance in the next step",
+            "invoke_skill must be the only call in its step — its guidance shapes what you write NEXT, so anything issued beside it was written without it",
         });
         continue;
       }
 
       const askUserCalls = (stepObj.tool_calls ?? []).filter((call) => call.name === "ask_user");
+      // delegate_to_agent entries count against this too: they sit in the same tool_calls list.
       const askUserMixed = askUserCalls.length > 0 && (
         askUserCalls.length > 1 ||
-        (stepObj.dispatch?.length ?? 0) > 0 ||
         (stepObj.tool_calls?.length ?? 0) !== askUserCalls.length
       );
       if (askUserCalls.length > 0 && input.allowUserInput === false) {
@@ -389,10 +400,16 @@ export class OrchestratorRuntime {
         continue;
       }
 
-      // --- dispatch + tool_calls: independent of each other, so they share a step ---
-      const tasks: TaskRequest[] = (stepObj.dispatch ?? [])
+      // --- tool_calls: one list, one contract. delegate_to_agent entries become dispatches
+      // through THIS turn's dispatcher — which carries the active skill's sections and the
+      // user-input allowance — and run beside the direct tool calls, independent of them.
+      // The root's authority is the one asymmetry: it may delegate to ANY registered agent,
+      // where an agent's own delegate_to_agent is gated by its declared roster.
+      const tasks: TaskRequest[] = (stepObj.tool_calls ?? [])
+        .filter((call) => call.name === DELEGATE_TO_AGENT)
+        .map((call) => call.input as Partial<TaskRequest>)
         .filter((t) => t && typeof t.task === "string" && t.task.trim() && validAgents.has(t.agent as AgentKind))
-        .map((t) => ({ agent: t.agent as AgentKind, task: t.task.trim(),
+        .map((t) => ({ agent: t.agent as AgentKind, task: t.task!.trim(),
           ...(typeof t.thread === "string" && t.thread.trim() ? { thread: t.thread.trim() } : {}),
           // The completion can name another model when the task justifies it.
           // Otherwise carry the one the user is inspecting into the subagent's
@@ -450,19 +467,13 @@ export class OrchestratorRuntime {
         continue;
       }
 
-      // --- skill branch ---
-      if (stepObj.skill && validSkills.has(stepObj.skill)) {
+      // --- skill branch: the guidance lands in the ORCHESTRATOR's own progress, whole. What any
+      // dispatched task needs to carry from it is the orchestrator's judgment to write into that
+      // task — the framework no longer relays sections or widens pools behind its back. ---
+      if (requestedSkill && validSkills.has(requestedSkill)) {
         if (status) state.recordReply(status, false);
-        state.record("orchestrator", "skill_invoke", { skill: stepObj.skill });
-        // Sections + granted tools must be installed before invoke() runs: a
-        // code-backed workflow can dispatch from inside invoke(), and a dispatch
-        // that happened before the install would run without the skill's grant.
-        const invoked = this.skills.get(stepObj.skill);
-        if (invoked) {
-          dispatcher.setSkillSections(invoked.agentSections);
-          dispatcher.setSkillTools(invoked.tools);
-        }
-        skillResult = await this.skills.invoke(stepObj.skill, {
+        state.record("orchestrator", "skill_invoke", { skill: requestedSkill });
+        skillResult = await this.skills.invoke(requestedSkill, {
           sessionId: input.sessionId,
           userMessage: input.userMessage,
           dispatcher,
