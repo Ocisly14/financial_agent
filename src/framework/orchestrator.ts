@@ -1,7 +1,7 @@
 import { formatList, PromptRenderer } from "./prompt.ts";
 import type { SkillRegistry } from "./skill.ts";
 import type { Dispatcher } from "./dispatcher.ts";
-import type { SubagentRegistry } from "./subagent.ts";
+import { buildLoopToolSpecs, type SubagentRegistry } from "./subagent.ts";
 import type { ModelRouter } from "../infra/llm/provider.ts";
 import { formatLatestInput, type LiveThread, type SessionRegistry, SessionState } from "./sessionState.ts";
 import { maybeCompact } from "./contextCompaction.ts";
@@ -9,157 +9,11 @@ import { DELEGATE_TO_AGENT } from "./delegation.ts";
 import { INVOKE_SKILL } from "./skillTools.ts";
 import type { McpToolRegistry } from "../../mcp_tools/toolRegistry.ts";
 import type { PromptTemplate } from "./prompt.ts";
-import type { AgentKind, JsonObject, OrchestratorStep, OrchestratorToolCall, SkillResult, TaskRequest, UserInputRequest, UserInputResponse } from "./types.ts";
+import type { AgentKind, JsonObject, OrchestratorToolCall, SkillResult, TaskRequest, UserInputRequest, UserInputResponse } from "./types.ts";
 
 /** Max orchestrator loop iterations per user turn — a runaway-loop backstop. */
 const MAX_STEPS = 6;
 
-/**
- * Strip a leading ```json / ``` fence and trailing ``` that some models
- * (notably Gemini) wrap structured output in. The brace scanner below also
- * tolerates fences, but removing them up front keeps logs and salvage clean.
- */
-function stripCodeFence(text: string): string {
-  const trimmed = text.trim();
-  const fenced = trimmed.match(/^```(?:json)?\s*\n([\s\S]*?)\n?```\s*$/i);
-  const body = fenced?.[1];
-  return body !== undefined ? body.trim() : trimmed;
-}
-
-/** Extract the first balanced JSON object from a possibly-noisy LLM string. */
-function extractJsonObject(text: string): string | null {
-  const start = text.indexOf("{");
-  if (start === -1) return null;
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let i = start; i < text.length; i++) {
-    const ch = text[i];
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (ch === "\\") escaped = true;
-      else if (ch === '"') inString = false;
-      continue;
-    }
-    if (ch === '"') inString = true;
-    else if (ch === "{") depth++;
-    else if (ch === "}") {
-      depth--;
-      if (depth === 0) return text.slice(start, i + 1);
-    }
-  }
-  return null;
-}
-
-/** Decode the common JSON string escapes in a raw (possibly truncated) body. */
-function decodeJsonString(body: string): string {
-  let out = "";
-  for (let i = 0; i < body.length; i++) {
-    const ch = body[i];
-    if (ch !== "\\") {
-      out += ch;
-      continue;
-    }
-    const next = body[i + 1];
-    if (next === undefined) break; // trailing backslash from a truncated stream
-    switch (next) {
-      case "n": out += "\n"; break;
-      case "t": out += "\t"; break;
-      case "r": out += "\r"; break;
-      case "b": out += "\b"; break;
-      case "f": out += "\f"; break;
-      case '"': out += '"'; break;
-      case "\\": out += "\\"; break;
-      case "/": out += "/"; break;
-      case "u": {
-        const hex = body.slice(i + 2, i + 6);
-        if (/^[0-9a-fA-F]{4}$/.test(hex)) {
-          out += String.fromCharCode(parseInt(hex, 16));
-          i += 4;
-        } else {
-          out += next;
-        }
-        break;
-      }
-      default: out += next;
-    }
-    i += 1;
-  }
-  return out;
-}
-
-/**
- * Best-effort recovery of the `reply` field when JSON.parse fails — most often
- * because the stream was truncated mid-string (no closing quote/brace) or the
- * model emitted raw newlines / trailing commas. Returns the decoded markdown so
- * the user sees prose instead of a raw `{"reply": ...}` blob.
- */
-function salvageReply(text: string): string | null {
-  const startMatch = text.match(/"reply"\s*:\s*"/);
-  if (!startMatch || startMatch.index === undefined) return null;
-  const bodyStart = startMatch.index + startMatch[0].length;
-  const rest = text.slice(bodyStart);
-  // Closing quote precedes either the next known key or the object end. If the
-  // stream was truncated, no such marker exists — take everything that's left.
-  const endMatch = rest.match(/"\s*(?:,\s*"tool_calls?"|}\s*$)/);
-  const body = endMatch && endMatch.index !== undefined ? rest.slice(0, endMatch.index) : rest;
-  const decoded = decodeJsonString(body).trim();
-  return decoded.length > 0 ? decoded : null;
-}
-
-/**
- * Parse one orchestrator completion into an OrchestratorStep. On any failure,
- * fall back to treating the raw text as a terminal user-facing reply so the loop
- * still ends gracefully instead of looping or crashing.
- */
-function parseStep(text: string): OrchestratorStep {
-  const cleaned = stripCodeFence(text);
-  const rawFallback: OrchestratorStep = { reply: text.trim(), tool_calls: null };
-  const json = extractJsonObject(cleaned);
-
-  if (json) {
-    try {
-      const raw = JSON.parse(json) as Record<string, unknown>;
-      const reply = typeof raw.reply === "string" ? raw.reply : "";
-      // The schema asks for `tool_calls: [...]`, but a model that has seen the
-      // singular form elsewhere reverts to it often enough that refusing it
-      // would cost a whole retry step for nothing.
-      const toolCalls = normalizeToolCalls(raw.tool_calls ?? raw.tool_call) ?? [];
-      // Output tolerance for the two retired step fields, same spirit as accepting a lone
-      // `tool_call`: a model emitting the old shapes is asking for exactly what the tools do,
-      // and dropping its actions on the floor would read as work that silently never ran.
-      const legacyDispatch = Array.isArray(raw.dispatch)
-        ? (raw.dispatch as JsonObject[]).map((task) => ({ name: DELEGATE_TO_AGENT, input: task }))
-        : [];
-      const legacySkill = typeof raw.skill === "string" && raw.skill.trim()
-        ? [{ name: INVOKE_SKILL, input: { skill: raw.skill.trim() } }]
-        : [];
-      const merged = [...toolCalls, ...legacyDispatch, ...legacySkill];
-      return { reply, tool_calls: merged.length > 0 ? merged : null };
-    } catch {
-      // Fall through to salvage — most often a truncated or lightly-malformed
-      // JSON string (raw newlines, trailing comma) that strict parsing rejects.
-    }
-  }
-
-  // No complete object (truncated stream) or JSON.parse threw. Recover the
-  // reply text so the user sees markdown, not a raw `{"reply": ...}` dump.
-  const salvaged = salvageReply(cleaned);
-  if (salvaged !== null) {
-    return { reply: salvaged, tool_calls: null };
-  }
-  return rawFallback;
-}
-
-/** Accepts either `tool_calls: [...]` or a lone `tool_call: {...}`. */
-function normalizeToolCalls(raw: unknown): OrchestratorToolCall[] | null {
-  const items = Array.isArray(raw) ? raw : raw === undefined || raw === null ? [] : [raw];
-  const calls = items.filter(
-    (item): item is OrchestratorToolCall =>
-      typeof item === "object" && item !== null && typeof (item as { name?: unknown }).name === "string",
-  );
-  return calls.length > 0 ? calls : null;
-}
 
 /** A compact, automatically derived description of the model open in the UI.
  * The workbook itself remains tool-readable rather than prompt-injected. */
@@ -307,6 +161,20 @@ export class OrchestratorRuntime {
     const directTools = input.allowUserInput === false
       ? new Set([...this.orchestratorTools].filter((name) => name !== "ask_user"))
       : this.orchestratorTools;
+    // Native tool calling: the provider is handed the REAL schemas — delegation and invoke_skill
+    // included — and returns structured calls. The hand-written JSON step protocol this replaces
+    // could only describe those shapes in prose, and a model that flattened the input wrapper
+    // produced an empty call the parser silently dropped: the turn then ended on its own status
+    // line, promising work that never ran. A consultation gets no tools at all: it is answer-only.
+    const nativeTools = buildLoopToolSpecs(
+      [DELEGATE_TO_AGENT, INVOKE_SKILL, ...directTools]
+        .flatMap((name) => {
+          const registered = this.tools.get(name);
+          if (!registered) return [];
+          const { execute: _execute, ...definition } = registered;
+          return [definition];
+        }),
+    );
 
     for (let step = 1; step <= MAX_STEPS; step++) {
       // Run before every prompt, not just at the start of a user turn. The
@@ -337,22 +205,26 @@ export class OrchestratorRuntime {
       });
 
       let completionText: string;
+      let completionCalls: OrchestratorToolCall[];
       try {
         const completion = await this.modelRouter.generate(
           [
             { role: "system", content: rendered.system },
             { role: "user", content: rendered.prompt },
           ],
-          { modelClass: "LARGE", temperature: 0.2, metadata: { mode: "orchestrator" } },
+          { modelClass: "LARGE", temperature: 0.2, metadata: { mode: "orchestrator" },
+            ...(readOnlyConsultation ? {} : { tools: nativeTools }) },
         );
         completionText = completion.text;
+        completionCalls = (completion.toolCalls ?? [])
+          .map((call) => ({ name: call.name, input: (call.input ?? {}) as JsonObject }));
         state.recordPromptTokens(completion.metrics.tokens_in);
       } catch (error) {
         state.record("orchestrator", "error", { scope: "main", message: error instanceof Error ? error.message : String(error) });
         break;
       }
 
-      const stepObj = parseStep(completionText);
+      const stepObj = { reply: completionText, tool_calls: completionCalls };
       const status = stepObj.reply.trim();
 
       // A consultation is deliberately an answer-only view of the Topic. Even
@@ -431,6 +303,19 @@ export class OrchestratorRuntime {
             : {}) }));
 
       const toolCalls = (stepObj.tool_calls ?? []).filter((call) => directTools.has(call.name));
+
+      // A delegate call that produced no task was malformed or named an unknown agent. Filtering it
+      // silently would end the turn on the step's status line — the model promised work the user
+      // never gets. Say what was wrong so the next step can correct it.
+      const delegateCallCount = (stepObj.tool_calls ?? []).filter((call) => call.name === DELEGATE_TO_AGENT).length;
+      if (delegateCallCount > tasks.length) {
+        state.record("orchestrator", "error", {
+          scope: "protocol",
+          message: `${delegateCallCount - tasks.length} delegate_to_agent call(s) were invalid: input must carry `
+            + `"agent" (one of: ${[...validAgents].join(", ")}) and a non-empty "task". Re-issue the call with both.`,
+        });
+        continue;
+      }
 
       if (tasks.length > 0 || toolCalls.length > 0) {
         const tradingRetryBlocked = tasks.some((task) => task.agent === "trading_operations")

@@ -244,26 +244,14 @@ export class ResearchToolset {
   private readonly dispatchSemaphore = new Semaphore(DISPATCH_TASK_CONCURRENCY);
   /** Recursion depth 1: a Topic already driven THIS turn cannot be re-entered. */
   private drivenThisTurn = new Set<string>();
-  /** The active skill's `## for: topic` section. Becomes visible text on the
-   *  member Topic's own timeline, so it is written in the user's voice and
-   *  carries no internal marker here. */
-  private topicSection = "";
 
   constructor(ctx: ResearchToolContext) {
     this.ctx = ctx;
   }
 
-  /** Resets per-turn state. Call once at the start of every controller turn.
-   *  Deliberately does NOT reset `topicSection` — the skill is invoked
-   *  within the turn, and resetting here would erase it within that same
-   *  turn. */
+  /** Resets per-turn state. Call once at the start of every controller turn. */
   beginTurn(): void {
     this.drivenThisTurn = new Set<string>();
-  }
-
-  /** Called by the Research runtime after a skill is invoked. */
-  setTopicSection(section: string): void {
-    this.topicSection = section.trim();
   }
 
   private newId(prefix: string): string {
@@ -292,9 +280,10 @@ export class ResearchToolset {
     if (!trimmed) {
       return { topicId, topicName, status: "failed", reason: "message is empty" };
     }
-    // Appended after the empty-message check: a message that's only guidance,
-    // with no instruction, should not count as a valid drive.
-    const task = this.topicSection ? `${trimmed}\n\n${this.topicSection}` : trimmed;
+    // Exactly what the controller wrote. A skill's guidance used to be appended here behind its
+    // back; a skill acts on its READER now — the controller carries what a drive needs into the
+    // message itself.
+    const task = trimmed;
     if (this.drivenThisTurn.has(topicId)) {
       // Recursion depth 1 (§4.4): one drive per Topic per controller turn.
       const result: DispatchTaskResult = {

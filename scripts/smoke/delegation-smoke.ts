@@ -136,5 +136,34 @@ if (!toolOnly) {
   check(/0001045810|NVIDIA CORP/i.test(response), "the answer survived two relays back to the user");
 }
 
+// ── 5. research chain: controller → member Topic orchestrator → agent ──────
+if (!toolOnly) {
+  console.log("\n→ research chain: controller → member Topic → market_data, all layers native …");
+  const researchId = `${sessionId}-research`;
+  const memberTopic = `${sessionId}-member`;
+  app.eventStore.createTopic(TENANT, memberTopic, "NVDA tracking");
+  app.eventStore.createResearch(TENANT, researchId, "delegation smoke research");
+  app.eventStore.replaceResearchMembers(researchId, [memberTopic]);
+  await app.sessions.getOrCreate(researchId);
+  const started = Date.now();
+  const { response } = await app.researchRuntime.run({
+    tenantId: TENANT,
+    researchId,
+    researchName: "delegation smoke research",
+    userMessage: "Dispatch our NVDA tracking member to fetch NVIDIA's current stock price, then report the number back to me.",
+    emit: () => {},
+  });
+  console.log(`  ${Math.round((Date.now() - started) / 1000)}s`);
+  console.log(`  final reply: ${response.slice(0, 240)}`);
+
+  const researchState = app.sessions.getExisting(researchId);
+  const dispatched = researchState.allEvents().find((e) => e.kind === "tool_use" && e.payload["name"] === "dispatch_task");
+  check(Boolean(dispatched), "the controller issued a native dispatch_task call");
+  const memberState = app.sessions.getExisting(memberTopic);
+  const memberDispatch = memberState.allEvents().find((e) => e.kind === "dispatch" && e.payload["agent"] === "market_data");
+  check(Boolean(memberDispatch), "the member Topic's orchestrator delegated to market_data underneath");
+  check(/\$?\d{2,}/.test(response), "a price figure survived three relays back to the user");
+}
+
 console.log(failures === 0 ? "\nPASS — the topology delegates." : `\nFAIL — ${failures} check(s) failed.`);
 process.exit(failures === 0 ? 0 : 1);

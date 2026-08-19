@@ -41,7 +41,7 @@ import { maybeCompact } from "../../framework/contextCompaction.ts";
 import { formatLatestInput, formatUserMessageLine } from "../../framework/sessionState.ts";
 import type { SessionEvent, SessionRegistry, SessionState } from "../../framework/sessionState.ts";
 import type { JsonObject, UserInputRequest, UserInputResponse } from "../../framework/types.ts";
-import type { ModelRouter } from "../../infra/llm/provider.ts";
+import type { LlmToolSpec, ModelRouter } from "../../infra/llm/provider.ts";
 import type { SkillRegistry } from "../../framework/skill.ts";
 import type { McpToolRegistry } from "../../../mcp_tools/toolRegistry.ts";
 import type { TopicChartPreferenceRow } from "../../infra/db/sqliteEventStore.ts";
@@ -86,7 +86,9 @@ const PRIOR_TOOL_SUMMARY_CHARS = 1_200;
  *  not something to show the user. */
 const ROSTER_RECORD_NAME = "research_roster";
 
-const TOOL_NAMES = new Set(RESEARCH_TOOL_SPECS.map((spec) => spec.name));
+/** The provider-facing tool specs — RESEARCH_TOOL_SPECS carries real JSON schemas, so it IS the
+ *  native spec list. invoke_skill is in it: loading guidance is a call like any other. */
+const RESEARCH_NATIVE_TOOLS: LlmToolSpec[] = RESEARCH_TOOL_SPECS;
 
 export type ResearchRuntimeStore = ResearchToolStore;
 
@@ -119,87 +121,9 @@ export type ResearchRunInput = {
 export type ResearchRunResult = { response: string };
 
 type ToolCall = { name: string; input: JsonObject };
-type ResearchStep = { reply: string; skill: string | null; toolCalls: ToolCall[] };
+type ResearchStep = { reply: string; toolCalls: ToolCall[] };
 
-// ── step parsing ──────────────────────────────────────────────────────────
-
-function stripCodeFence(text: string): string {
-  const trimmed = text.trim();
-  const fenced = trimmed.match(/^```(?:json)?\s*\n([\s\S]*?)\n?```\s*$/i);
-  const body = fenced?.[1];
-  return body !== undefined ? body.trim() : trimmed;
-}
-
-function extractJsonObject(text: string): string | null {
-  const start = text.indexOf("{");
-  if (start === -1) return null;
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let i = start; i < text.length; i++) {
-    const ch = text[i];
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (ch === "\\") escaped = true;
-      else if (ch === '"') inString = false;
-      continue;
-    }
-    if (ch === '"') inString = true;
-    else if (ch === "{") depth++;
-    else if (ch === "}") {
-      depth--;
-      if (depth === 0) return text.slice(start, i + 1);
-    }
-  }
-  return null;
-}
-
-function asToolCall(value: unknown): ToolCall | null {
-  if (!value || typeof value !== "object") return null;
-  const raw = value as { name?: unknown; input?: unknown };
-  if (typeof raw.name !== "string" || !TOOL_NAMES.has(raw.name)) return null;
-  const input = raw.input && typeof raw.input === "object" && !Array.isArray(raw.input)
-    ? (raw.input as JsonObject)
-    : ({} as JsonObject);
-  return { name: raw.name, input };
-}
-
-/**
- * Parses one controller completion. Unparseable output degrades to "this text
- * is the final answer" rather than to a retry loop — the same failure posture
- * the Topic agent takes, for the same reason: a user waiting on a Research turn
- * would rather get prose than a spinner.
- *
- * Accepts both `tool_calls` (the documented form, an array so one step can
- * drive several Topics at once) and a single `tool_call` object, because models
- * reach for the singular form regardless of what the prompt says.
- */
-export function parseResearchStep(text: string): ResearchStep {
-  const cleaned = stripCodeFence(text);
-  const json = extractJsonObject(cleaned);
-  if (!json) return { reply: text.trim(), skill: null, toolCalls: [] };
-
-  let raw: Record<string, unknown>;
-  try {
-    raw = JSON.parse(json) as Record<string, unknown>;
-  } catch {
-    return { reply: text.trim(), skill: null, toolCalls: [] };
-  }
-
-  const reply = typeof raw.reply === "string" ? raw.reply : "";
-  const skill = typeof raw.skill === "string" && raw.skill.trim() ? raw.skill.trim() : null;
-  const candidates = Array.isArray(raw.tool_calls)
-    ? raw.tool_calls
-    : raw.tool_call
-      ? [raw.tool_call]
-      : [];
-
-  return {
-    reply,
-    skill,
-    toolCalls: candidates.map(asToolCall).filter((call): call is ToolCall => call !== null),
-  };
-}
+const INVOKE_SKILL = "invoke_skill";
 
 // ── the runtime ───────────────────────────────────────────────────────────
 
@@ -272,16 +196,22 @@ export class ResearchRuntime {
         skills,
       });
 
-      let completionText: string;
+      let parsed: ResearchStep;
       try {
         const completion = await this.modelRouter.generate(
           [
             { role: "system", content: rendered.system },
             { role: "user", content: rendered.prompt },
           ],
-          { modelClass: "LARGE", temperature: 0.2, metadata: { mode: "research_controller" } },
+          // Native tool calling: the provider holds the REAL schemas from RESEARCH_TOOL_SPECS and
+          // returns structured calls, so the hand-written JSON step protocol — and every formatting
+          // slip it tolerated — is gone. Plain text is what the user sees; no calls means the turn
+          // ends on that text as the final answer.
+          { modelClass: "LARGE", temperature: 0.2, metadata: { mode: "research_controller" },
+            tools: RESEARCH_NATIVE_TOOLS },
         );
-        completionText = completion.text;
+        parsed = { reply: completion.text,
+          toolCalls: (completion.toolCalls ?? []).map((call) => ({ name: call.name, input: (call.input ?? {}) as JsonObject })) };
         state.recordPromptTokens(completion.metrics.tokens_in);
       } catch (error) {
         state.record("orchestrator", "error", {
@@ -291,31 +221,33 @@ export class ResearchRuntime {
         break;
       }
 
-      const parsed = parseResearchStep(completionText);
       const status = parsed.reply.trim();
 
-      if (parsed.skill) {
-        if (parsed.toolCalls.length > 0) {
+      const skillCalls = parsed.toolCalls.filter((call) => call.name === INVOKE_SKILL);
+      const requestedSkill = typeof skillCalls[0]?.input["skill"] === "string" ? String(skillCalls[0].input["skill"]) : "";
+      if (skillCalls.length > 0) {
+        if (skillCalls.length > 1 || parsed.toolCalls.length > 1) {
           state.record("orchestrator", "error", {
             scope: "protocol",
             message:
-              "skill is exclusive with tool_calls — invoke the skill alone, then act on its guidance in the next step",
+              "invoke_skill must be the only call in its step — its guidance shapes what you write NEXT, so anything issued beside it was written without it",
           });
           continue;
         }
-        const skill = this.skills.get(parsed.skill, "research");
+        const skill = this.skills.get(requestedSkill, "research");
         if (!skill) {
           const available = researchSkills.map((s) => s.name).join(", ") || "(none)";
           state.record("orchestrator", "error", {
             scope: "protocol",
-            message: `unknown skill '${parsed.skill}'; available skills: ${available}`,
+            message: `unknown skill '${requestedSkill}'; available skills: ${available}`,
           });
           continue;
         }
         if (status) state.recordReply(status, false);
         state.record("orchestrator", "skill_invoke", { skill: skill.name });
-        // The section has to land here: the dispatch_task written next step is what carries it.
-        toolset.setTopicSection(skill.topicSection ?? "");
+        // The full text — "## for: topic" section included — lands in the controller's own
+        // progress. What each member's drive needs from it is the controller's judgment to write
+        // into that dispatch_task message; nothing is relayed behind its back.
         const result = await this.skills.invoke(skill.name, {
           sessionId: state.session_id,
           userMessage: input.userMessage,

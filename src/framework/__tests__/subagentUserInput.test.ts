@@ -366,16 +366,16 @@ test("a subagent's pending question ends the orchestrator turn", async () => {
     new Dispatcher(sessionId, subagents, subagentRuntime as never, tools, sessions.getExisting(sessionId), tenantId);
 
   const steps = [
-    JSON.stringify({ reply: "building", tool_calls: [{ name: "delegate_to_agent", input: { agent: "financial_modeling", task: "value AAPL" } }] }),
-    JSON.stringify({ reply: "should never be reached", tool_calls: [{ name: "delegate_to_agent", input: { agent: "financial_modeling", task: "again" } }] }),
+    { text: "building", toolCalls: [{ id: "t1", name: "delegate_to_agent", input: { agent: "financial_modeling", task: "value AAPL" } }] },
+    { text: "should never be reached", toolCalls: [{ id: "t2", name: "delegate_to_agent", input: { agent: "financial_modeling", task: "again" } }] },
   ];
   let call = 0;
   const provider: LlmProvider = {
     name: "stub",
     async generate(): Promise<GenerateResult> {
-      const text = steps[call] ?? JSON.stringify({ reply: "done" });
+      const step = steps[call] ?? { text: "done" };
       call += 1;
-      return { text, metrics: { tokens_in: 1, tokens_out: 1, ms: 0, model_class: "LARGE", provider: "stub" } };
+      return { ...step, metrics: { tokens_in: 1, tokens_out: 1, ms: 0, model_class: "LARGE", provider: "stub" } };
     },
   };
   const orchestrator = new OrchestratorRuntime(

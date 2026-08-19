@@ -74,11 +74,12 @@ test("a dispatch issued from inside a skill's workflow uses the agent's own decl
     name: "stub",
     async generate(_messages: LlmMessage[], _options: GenerateOptions): Promise<GenerateResult> {
       call += 1;
-      const text =
-        call === 1
-          ? JSON.stringify({ reply: "", dispatch: null, skill: "granting-skill", tool_call: null })
-          : JSON.stringify({ reply: "done", dispatch: null, skill: null, tool_call: null });
-      return { text, metrics: { tokens_in: 1, tokens_out: 1, ms: 0, model_class: "LARGE", provider: "stub" } };
+      if (call === 1) {
+        return { text: "loading the method",
+          toolCalls: [{ id: "t1", name: "invoke_skill", input: { skill: "granting-skill" } }],
+          metrics: { tokens_in: 1, tokens_out: 1, ms: 0, model_class: "LARGE", provider: "stub" } };
+      }
+      return { text: "done", metrics: { tokens_in: 1, tokens_out: 1, ms: 0, model_class: "LARGE", provider: "stub" } };
     },
   };
 

@@ -223,23 +223,12 @@ export type ToolExecutionResult = {
 };
 
 /**
- * One decision the orchestrator emits per loop iteration. `reply` is always the
- * user-facing message for this turn (a short status line when an action is taken,
- * the final answer when all action fields are null). Handing work to an agent is
- * a `delegate_to_agent` entry in `tool_calls`, and loading a skill is an
- * `invoke_skill` entry — the same contracts every agent uses, no fields of
- * their own. invoke_skill is exclusive: alone in its step.
+ * One structured call out of an orchestrator completion. The orchestrator acts through NATIVE tool
+ * calling — delegate_to_agent to hand work to an agent, invoke_skill to load guidance (alone in its
+ * step), the direct tools otherwise — and its plain text is what the user sees: a status line
+ * beside calls, the final answer when there are none.
  */
 export type OrchestratorToolCall = { name: string; input: JsonObject };
-
-export type OrchestratorStep = {
-  reply: string;
-  /** Every action is an entry here — delegate_to_agent to hand work to an agent, invoke_skill to
-   *  load guidance (alone in its step), the direct tools otherwise. Plural because reading two
-   *  references should not cost two loop iterations out of the step budget; a single `tool_call`
-   *  object is still parsed. */
-  tool_calls: OrchestratorToolCall[] | null;
-};
 
 export type SSEEvent =
   | { type: "token"; delta: string }

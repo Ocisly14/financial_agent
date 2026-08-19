@@ -496,32 +496,23 @@ test("create_topic creates the topic and joins it to this research", () => {
 
 // ── turn projection ───────────────────────────────────────────────────────
 
-// ── setTopicSection: the skill's `## for: topic` text ──────────────────────
+// ── dispatch_task carries exactly what the controller wrote ────────────────
 
-test("setTopicSection appends its text to the message dispatch_task sends", async () => {
+test("dispatch_task sends the controller's message verbatim — nothing is appended behind it", async () => {
+  // A skill's `## for: topic` text used to be silently appended here. A skill acts on its READER:
+  // the controller reads the guidance and writes what a drive needs into the message itself.
   const h = harness();
   h.store.createTopic("default", "room_a", "AAPL");
-  h.toolset.setTopicSection("请给出具体读数和日期。");
 
-  await h.toolset.dispatchTask("room_a", "渠道库存怎么样？");
+  await h.toolset.dispatchTask("room_a", "渠道库存怎么样？请给出具体读数和日期。");
 
   assert.equal(h.runs.length, 1);
-  assert.equal(h.runs[0]!.userMessage, "渠道库存怎么样？\n\n请给出具体读数和日期。");
+  assert.equal(h.runs[0]!.userMessage, "渠道库存怎么样？请给出具体读数和日期。");
 });
 
-test("without a topic section the message is unchanged", async () => {
+test("an empty message is rejected", async () => {
   const h = harness();
   h.store.createTopic("default", "room_a", "AAPL");
-
-  await h.toolset.dispatchTask("room_a", "渠道库存怎么样？");
-
-  assert.equal(h.runs[0]!.userMessage, "渠道库存怎么样？");
-});
-
-test("an empty message is still rejected before the section is appended", async () => {
-  const h = harness();
-  h.store.createTopic("default", "room_a", "AAPL");
-  h.toolset.setTopicSection("请给出具体读数和日期。");
 
   const result = await h.toolset.dispatchTask("room_a", "   ");
 
