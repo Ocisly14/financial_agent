@@ -6,7 +6,7 @@ import { apiClient } from "@/lib/api";
 import { TopicWorkspace } from "@/components/workspace/TopicWorkspace";
 
 /**
- * `/research/:agentId/:researchId` (spec §7.9).
+ * `/research/:tenantId/:researchId` (spec §7.9).
  *
  * Note what this route does NOT carry: the focused member. Focus is transient
  * view state and the controller agent can move it, so putting it in the URL
@@ -18,16 +18,16 @@ import { TopicWorkspace } from "@/components/workspace/TopicWorkspace";
  * empty-members state rather than an error (spec §7.3).
  */
 export default function ResearchRoute() {
-    const { agentId, researchId } = useParams<{ agentId: UUID; researchId: UUID }>();
+    const { tenantId, researchId } = useParams<{ tenantId: UUID; researchId: UUID }>();
     const { t } = useTranslation();
 
     const { data, isPending, isError } = useQuery({
-        queryKey: ["research", agentId, researchId],
-        queryFn: () => apiClient.getResearch(agentId!, researchId!),
-        enabled: Boolean(agentId && researchId),
+        queryKey: ["research", tenantId, researchId],
+        queryFn: () => apiClient.getResearch(tenantId!, researchId!),
+        enabled: Boolean(tenantId && researchId),
     });
 
-    if (!agentId || !researchId) {
+    if (!tenantId || !researchId) {
         return <CenteredMessage>{t("chat.noAgentSpecified")}</CenteredMessage>;
     }
     if (isPending) {
@@ -39,7 +39,7 @@ export default function ResearchRoute() {
 
     return (
         <TopicWorkspace
-            agentId={agentId}
+            tenantId={tenantId}
             members={data.members ?? []}
             research={data.research}
         />

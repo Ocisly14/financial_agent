@@ -45,7 +45,7 @@ function originOf(message: ContentWithUser): MessageOrigin | undefined {
  * for you. Collapsible, because on a Topic that a Research drove hard the
  * label would otherwise out-shout the questions themselves.
  */
-function OriginLabel({ agentId, origin }: { agentId: UUID; origin: MessageOrigin }) {
+function OriginLabel({ tenantId, origin }: { tenantId: UUID; origin: MessageOrigin }) {
     const { t } = useTranslation();
     const [expanded, setExpanded] = useState(true);
 
@@ -66,7 +66,7 @@ function OriginLabel({ agentId, origin }: { agentId: UUID; origin: MessageOrigin
     return (
         <span className="fin-label flex items-center gap-1 text-label-3">
             <Link
-                to={`/research/${agentId}/${origin.researchId}`}
+                to={`/research/${tenantId}/${origin.researchId}`}
                 className="truncate transition-colors hover:text-label-1"
                 title={origin.researchName}
             >
@@ -85,7 +85,7 @@ function OriginLabel({ agentId, origin }: { agentId: UUID; origin: MessageOrigin
 }
 
 interface ConversationPaneProps {
-    agentId: UUID;
+    tenantId: UUID;
     title: string;
     subtitle?: string;
     stream: ReturnType<typeof useTopicStream>;
@@ -101,7 +101,7 @@ interface ConversationPaneProps {
  * phase 2's Research view (several topics merged into one session) can reuse
  * this exact component with a different stream.
  */
-export function ConversationPane({ agentId, title, subtitle, stream, input, onInputChange, readOnly = false }: ConversationPaneProps) {
+export function ConversationPane({ tenantId, title, subtitle, stream, input, onInputChange, readOnly = false }: ConversationPaneProps) {
     const { scrollRef, isAtBottom, scrollToBottom, disableAutoScroll } = useAutoScroll();
 
     const {
@@ -179,7 +179,7 @@ export function ConversationPane({ agentId, title, subtitle, stream, input, onIn
                         {m.text && !opts.isLoading ? (
                             <div className="flex items-center gap-1">
                                 <CopyButton text={m.text} />
-                                <ChatTtsButton agentId={agentId} text={m.text} />
+                                <ChatTtsButton tenantId={tenantId} text={m.text} />
                             </div>
                         ) : <span />}
                         {m.createdAt ? (
@@ -195,7 +195,7 @@ export function ConversationPane({ agentId, title, subtitle, stream, input, onIn
         const origin = originOf(m);
         return (
         <div className="group/msg mb-5 mt-7 flex min-w-0 max-w-full flex-col items-end gap-1">
-            {origin && <OriginLabel agentId={agentId} origin={origin} />}
+            {origin && <OriginLabel tenantId={tenantId} origin={origin} />}
             <ChatBubbleMessage variant="sent" className="max-w-[85%] whitespace-pre-wrap">
                 {m.text}
             </ChatBubbleMessage>
@@ -242,7 +242,7 @@ export function ConversationPane({ agentId, title, subtitle, stream, input, onIn
             </div>
 
             <ChatComposer
-                agentId={agentId}
+                tenantId={tenantId}
                 input={input}
                 isProcessing={isProcessing}
                 isDisabled={isHistoryLoading}

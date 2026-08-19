@@ -68,7 +68,7 @@ export class SqliteSourceReviewStore implements SourceReviewStore, FilingIngesti
   private constructor(db: DatabaseSync) { this.db = db; this.db.exec(`CREATE TABLE IF NOT EXISTS financial_model_source_reviews (
     model_id TEXT PRIMARY KEY, artifact_json TEXT NOT NULL, created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS financial_model_filing_ingestions (
-      ingestion_run_id TEXT PRIMARY KEY, owner_agent_id TEXT NOT NULL, symbol TEXT NOT NULL, artifact_json TEXT NOT NULL, created_at TEXT NOT NULL
+      ingestion_run_id TEXT PRIMARY KEY, owner_tenant_id TEXT NOT NULL, symbol TEXT NOT NULL, artifact_json TEXT NOT NULL, created_at TEXT NOT NULL
     );`); }
   static open(path: string): SqliteSourceReviewStore { mkdirSync(dirname(path), { recursive: true }); return new SqliteSourceReviewStore(new DatabaseSync(path)); }
   // Upsert, not insert: a review is written once when the model is created and again by each
@@ -88,7 +88,7 @@ export class SqliteSourceReviewStore implements SourceReviewStore, FilingIngesti
   // under the same run id. Insert-only would raise a UNIQUE error there and bury the real failure.
   saveIngestion(artifact: FilingIngestionArtifact): void {
     this.db.prepare(`INSERT INTO financial_model_filing_ingestions VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(ingestion_run_id) DO UPDATE SET owner_agent_id=excluded.owner_agent_id,
+      ON CONFLICT(ingestion_run_id) DO UPDATE SET owner_tenant_id=excluded.owner_tenant_id,
         symbol=excluded.symbol, artifact_json=excluded.artifact_json`)
       .run(artifact.ingestionRunId, artifact.ownerTenantId, artifact.symbol, JSON.stringify(artifact), new Date().toISOString());
   }

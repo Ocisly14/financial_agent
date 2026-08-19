@@ -142,7 +142,7 @@ function CopyId({ value }: { value: string }) {
 
 export default function StrategyDetailPage() {
     const { t } = useTranslation();
-    const { agentId, strategyId } = useParams<{ agentId: string; strategyId: string }>();
+    const { tenantId, strategyId } = useParams<{ tenantId: string; strategyId: string }>();
     const queryClient = useQueryClient();
 
     const query = useQuery({
@@ -214,7 +214,7 @@ export default function StrategyDetailPage() {
         return (
             <div className="min-h-dvh bg-background">
                 <div className="mx-auto max-w-6xl px-6 py-8">
-                    <NavLink to={`/strategies/${agentId}`} className="mb-6 inline-block text-sm text-label-2 hover:text-label-1">
+                    <NavLink to={`/strategies/${tenantId}`} className="mb-6 inline-block text-sm text-label-2 hover:text-label-1">
                         {t("strategies.backToList")}
                     </NavLink>
                     <p className="text-sm text-label-2">{t("strategies.notFound")}</p>
@@ -229,7 +229,7 @@ export default function StrategyDetailPage() {
     return (
         <div className="min-h-dvh bg-background">
             <div className="mx-auto max-w-6xl px-6 py-8">
-                <NavLink to={`/strategies/${agentId}`} className="mb-6 inline-block text-sm text-label-2 hover:text-label-1">
+                <NavLink to={`/strategies/${tenantId}`} className="mb-6 inline-block text-sm text-label-2 hover:text-label-1">
                     {t("strategies.backToList")}
                 </NavLink>
 

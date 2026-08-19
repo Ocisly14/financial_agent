@@ -308,7 +308,7 @@ test("a database written before the digest columns existed is migrated on open",
 
   const legacy = new DatabaseSync(path);
   legacy.exec(`CREATE TABLE chat_rooms (
-    id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, name TEXT NOT NULL,
+    id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, name TEXT NOT NULL,
     created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, archived_at INTEGER)`);
   legacy.exec("INSERT INTO chat_rooms VALUES ('t1', 'a1', '旧话题', 100, 100, NULL)");
   legacy.close();

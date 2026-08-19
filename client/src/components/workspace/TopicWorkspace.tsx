@@ -49,13 +49,13 @@ const RAIL_WIDTH_COLLAPSED = 56;
  *   3. the StatusBar reports the Research, not a `leadSymbol` (spec §7.6).
  */
 export function TopicWorkspace({
-    agentId,
+    tenantId,
     members,
     activeTopic,
     research,
     demo,
 }: {
-    agentId: UUID;
+    tenantId: UUID;
     /** Phase 1 always passes one. Research passes N — possibly zero. */
     members: TopicSummary[];
     /** The Topic whose session drives a phase-1 view. Undefined in a Research,
@@ -90,16 +90,16 @@ export function TopicWorkspace({
     const chartTopicId = focusedMember?.id;
 
     // Scoped the same way chart tabs are (`chartTopicId ?? sessionId`): a
-    // model belongs to a topic — `GET /api/agents/:agentId/topics/:topicId/models`
+    // model belongs to a topic — `GET /api/tenants/:tenantId/topics/:topicId/models`
     // — not to a Research session, so it follows the focused member exactly
     // like `useTopicCharts` does below.
-    const model = useFinancialModel(agentId, chartTopicId ?? sessionId);
+    const model = useFinancialModel(tenantId, chartTopicId ?? sessionId);
     // Which sheet is on screen, and whether the user has steered it away from
     // auto-locate (Task 11 §7.3) themselves during the turn in progress.
     const [activeSheetId, setActiveSheetId] = useState<string | undefined>(() => demo?.initialSheetId);
     const [userPickedThisTurn, setUserPickedThisTurn] = useState(false);
 
-    const stream = useResearchStream(agentId, sessionId, {
+    const stream = useResearchStream(tenantId, sessionId, {
         onModelRevision: model.onRevisionFrame,
         activeModelId: model.activeModelId,
     });
@@ -142,9 +142,9 @@ export function TopicWorkspace({
     // read from that member's own history (same query key `useTopicStream`
     // uses, so opening the Topic later is a cache hit).
     const { data: memberMessages } = useQuery<ContentWithUser[]>({
-        queryKey: ["messages", agentId, chartTopicId],
+        queryKey: ["messages", tenantId, chartTopicId],
         queryFn: async () => {
-            const result = await apiClient.getMessages(agentId, chartTopicId!, { limit: 500 });
+            const result = await apiClient.getMessages(tenantId, chartTopicId!, { limit: 500 });
             return (result.messages ?? []) as ContentWithUser[];
         },
         enabled: isResearch && Boolean(chartTopicId),
@@ -156,7 +156,7 @@ export function TopicWorkspace({
 
     // ChartPane owns the tab state; this read is only to decide whether the
     // column exists at all. Both calls share the same query cache.
-    const { tabs } = useTopicCharts(agentId, chartTopicId ?? sessionId, chartMessages, chartStreamingText);
+    const { tabs } = useTopicCharts(tenantId, chartTopicId ?? sessionId, chartMessages, chartStreamingText);
 
     // Model tabs are not a preference (see ModelChartTab's doc comment in
     // lib/topicCharts.ts) — they come straight from the backend's own model
@@ -183,8 +183,8 @@ export function TopicWorkspace({
     // the merged tab list is already on hand and is strictly more accurate.
     const memberChartCounts = useQueries({
         queries: members.map((member) => ({
-            queryKey: ["topicCharts", agentId, member.id],
-            queryFn: async () => (await apiClient.getTopicCharts(agentId, member.id)).charts ?? [],
+            queryKey: ["topicCharts", tenantId, member.id],
+            queryFn: async () => (await apiClient.getTopicCharts(tenantId, member.id)).charts ?? [],
             enabled: isResearch,
             refetchOnWindowFocus: false,
         })),
@@ -225,15 +225,15 @@ export function TopicWorkspace({
     }, [stream.agentFocusTopicId, members]);
 
     const refreshResearch = useCallback(() => {
-        void queryClient.invalidateQueries({ queryKey: ["research", agentId, research?.id] });
-        void queryClient.invalidateQueries({ queryKey: ["researches", agentId] });
-    }, [queryClient, agentId, research?.id]);
+        void queryClient.invalidateQueries({ queryKey: ["research", tenantId, research?.id] });
+        void queryClient.invalidateQueries({ queryKey: ["researches", tenantId] });
+    }, [queryClient, tenantId, research?.id]);
 
     const writeMembers = useCallback(
         async (topicIds: string[]) => {
             if (!research) return;
             try {
-                await apiClient.setResearchMembers(agentId, research.id, topicIds);
+                await apiClient.setResearchMembers(tenantId, research.id, topicIds);
                 refreshResearch();
             } catch (error) {
                 toast({
@@ -243,7 +243,7 @@ export function TopicWorkspace({
                 });
             }
         },
-        [agentId, research, refreshResearch, toast, t],
+        [tenantId, research, refreshResearch, toast, t],
     );
 
     // `onAddMembers` hands back only the freshly picked ids; the endpoint is a
@@ -272,11 +272,11 @@ export function TopicWorkspace({
         async (topicIds: string[]) => {
             if (!activeTopic) return;
             try {
-                const result = await apiClient.createResearch(agentId, {
+                const result = await apiClient.createResearch(tenantId, {
                     topicIds: Array.from(new Set([activeTopic.id, ...topicIds])),
                 });
-                void queryClient.invalidateQueries({ queryKey: ["researches", agentId] });
-                navigate(`/research/${agentId}/${result.research.id}`);
+                void queryClient.invalidateQueries({ queryKey: ["researches", tenantId] });
+                navigate(`/research/${tenantId}/${result.research.id}`);
             } catch (error) {
                 toast({
                     variant: "destructive",
@@ -285,7 +285,7 @@ export function TopicWorkspace({
                 });
             }
         },
-        [agentId, activeTopic, navigate, queryClient, toast, t],
+        [tenantId, activeTopic, navigate, queryClient, toast, t],
     );
 
     // One member reads as that topic's name; several read as the set. Phase 1
@@ -324,7 +324,7 @@ export function TopicWorkspace({
 
     const chartPane = chartTopicId ? (
         <ChartPane
-            agentId={agentId}
+            tenantId={tenantId}
             topicId={chartTopicId}
             messages={chartMessages}
             streamingText={chartStreamingText}
@@ -344,7 +344,7 @@ export function TopicWorkspace({
     const memberBand = showMemberRow ? (
         <div className="shrink-0 border-b border-sep bg-background px-3 py-2">
             <MemberRow
-                agentId={agentId}
+                tenantId={tenantId}
                 members={memberChips}
                 activeMemberId={chartTopicId}
                 onSelectMember={setFocusedMemberId}
@@ -360,7 +360,7 @@ export function TopicWorkspace({
 
     const conversationPane = (
         <ConversationPane
-            agentId={agentId}
+            tenantId={tenantId}
             title={conversationTitle}
             subtitle={isResearch ? undefined : activeTopic?.leadSymbol ?? undefined}
             stream={stream}
@@ -395,7 +395,7 @@ export function TopicWorkspace({
                             <SheetTitle className="sr-only">{t("topics.title")}</SheetTitle>
                             <div className={demo ? "pointer-events-none h-full" : "h-full"}>
                                 <TopicRail
-                                    agentId={agentId}
+                                    tenantId={tenantId}
                                     activeTopicId={isResearch ? undefined : activeTopic?.id}
                                     activeResearchId={research?.id}
                                     collapsed={false}
@@ -410,7 +410,7 @@ export function TopicWorkspace({
                 <div ref={containerRef} className="flex min-h-0 flex-1 overflow-hidden">
                     <div className={demo ? "pointer-events-none h-full" : "h-full"}>
                         <TopicRail
-                            agentId={agentId}
+                            tenantId={tenantId}
                             activeTopicId={isResearch ? undefined : activeTopic?.id}
                             activeResearchId={research?.id}
                             collapsed={railCollapsed}

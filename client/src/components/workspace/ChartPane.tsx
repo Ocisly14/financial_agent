@@ -62,7 +62,7 @@ function tabTitle(tab: TopicChartTab): string {
  * always comes back from a reload with every tab in the strip.
  */
 export function ChartPane({
-    agentId,
+    tenantId,
     topicId,
     messages,
     streamingText,
@@ -72,7 +72,7 @@ export function ChartPane({
     modelFocusRequest = null,
     readOnly = false,
 }: {
-    agentId: UUID;
+    tenantId: UUID;
     topicId: UUID;
     messages: ChartWorkspaceMessage[];
     streamingText: string;
@@ -101,7 +101,7 @@ export function ChartPane({
 }) {
     const { t } = useTranslation();
     const { tabs: chartTabs, activeKey: chartActiveKey, setActiveTab, addSymbol, closeTab, reorderTabs } = useTopicCharts(
-        agentId,
+        tenantId,
         topicId,
         messages,
         streamingText,
@@ -270,7 +270,7 @@ export function ChartPane({
                         onReorder={reorderTabs}
                         onAdd={addSymbol}
                         onDetach={narrow || readOnly ? undefined : handleDetach}
-                        agentId={onCompare ? agentId : undefined}
+                        tenantId={onCompare ? tenantId : undefined}
                         currentTopicId={onCompare ? topicId : undefined}
                         onCompare={onCompare}
                         readOnly={readOnly}

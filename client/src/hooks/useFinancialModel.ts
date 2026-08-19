@@ -26,7 +26,7 @@ export type ModelChangeState = {
     sheetIds: string[];
 };
 
-export function useFinancialModel(agentId: string, topicId: string) {
+export function useFinancialModel(tenantId: string, topicId: string) {
     const queryClient = useQueryClient();
     const [activeModelId, setActiveModelId] = useState<string | null>(null);
     const [change, setChange] = useState<ModelChangeState | null>(null);
@@ -54,8 +54,8 @@ export function useFinancialModel(agentId: string, topicId: string) {
     const [focusRequest, setFocusRequest] = useState<{ modelId: string; token: number } | null>(null);
 
     const { data: models = [] } = useQuery<ModelView[]>({
-        queryKey: ["financialModels", agentId, topicId],
-        queryFn: async () => (await apiClient.getTopicModels(agentId, topicId)).models ?? [],
+        queryKey: ["financialModels", tenantId, topicId],
+        queryFn: async () => (await apiClient.getTopicModels(tenantId, topicId)).models ?? [],
         refetchOnWindowFocus: false,
     });
 
@@ -84,9 +84,9 @@ export function useFinancialModel(agentId: string, topicId: string) {
         }
         // A model the strip has never seen means the agent just created one.
         if ([...modelIds].some((id) => !models.some((model) => model.modelId === id))) {
-            void queryClient.invalidateQueries({ queryKey: ["financialModels", agentId, topicId] });
+            void queryClient.invalidateQueries({ queryKey: ["financialModels", tenantId, topicId] });
         }
-    }, [agentId, models, queryClient, topicId]);
+    }, [tenantId, models, queryClient, topicId]);
 
     const onRevisionFrame = useCallback((frame: ModelRevisionFrame) => {
         pendingRef.current.push(frame);

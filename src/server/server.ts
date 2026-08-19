@@ -40,7 +40,7 @@ function setCors(req: http.IncomingMessage, res: http.ServerResponse): void {
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Credentials", "true");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Agent-Id");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Tenant-Id");
 }
 
 async function readBody(req: http.IncomingMessage): Promise<string> {
@@ -207,7 +207,7 @@ async function handleChat(
     return jsonError(res, 400, "sessionId is required for inputResponse");
   }
   const sessionId = body.sessionId ?? newId("sess");
-  const tenantId = (req.headers["x-agent-id"] as string | undefined) ?? "default";
+  const tenantId = (req.headers["x-tenant-id"] as string | undefined) ?? "default";
   const state = await app.sessions.getOrCreate(sessionId);
 
   let message: string;
@@ -721,7 +721,7 @@ export function createHttpServer(app: FinancialAgentApp): http.Server {
         return await handleChatHistory(res, app, decodeURIComponent(historyMatch[1]!), searchParams);
       }
 
-      const topicsMatch = pathname.match(/^\/api\/agents\/([^/]+)\/topics$/);
+      const topicsMatch = pathname.match(/^\/api\/tenants\/([^/]+)\/topics$/);
       if (topicsMatch) {
         const tenantId = decodeURIComponent(topicsMatch[1]!);
         if (method === "GET") {
@@ -735,7 +735,7 @@ export function createHttpServer(app: FinancialAgentApp): http.Server {
         if (method === "POST") return await handleCreateTopic(req, res, app, tenantId);
       }
 
-      const topicModelsMatch = pathname.match(/^\/api\/agents\/([^/]+)\/topics\/([^/]+)\/models$/);
+      const topicModelsMatch = pathname.match(/^\/api\/tenants\/([^/]+)\/topics\/([^/]+)\/models$/);
       if (topicModelsMatch && method === "GET") {
         const result = listTopicModels(
           { modelStore: getDefaultFinancialModelToolDeps().modelStore },
@@ -756,7 +756,7 @@ export function createHttpServer(app: FinancialAgentApp): http.Server {
         return jsonOk(res, { success: true, ...result.body });
       }
 
-      const topicChartsMatch = pathname.match(/^\/api\/agents\/([^/]+)\/topics\/([^/]+)\/charts$/);
+      const topicChartsMatch = pathname.match(/^\/api\/tenants\/([^/]+)\/topics\/([^/]+)\/charts$/);
       if (topicChartsMatch) {
         const topicId = decodeURIComponent(topicChartsMatch[2]!);
         if (method === "GET") {
@@ -765,7 +765,7 @@ export function createHttpServer(app: FinancialAgentApp): http.Server {
         if (method === "PUT") return await handleReplaceTopicCharts(req, res, app, topicId);
       }
 
-      const topicMatch = pathname.match(/^\/api\/agents\/([^/]+)\/topics\/([^/]+)$/);
+      const topicMatch = pathname.match(/^\/api\/tenants\/([^/]+)\/topics\/([^/]+)$/);
       if (topicMatch) {
         const tenantId = decodeURIComponent(topicMatch[1]!);
         const topicId = decodeURIComponent(topicMatch[2]!);
@@ -777,7 +777,7 @@ export function createHttpServer(app: FinancialAgentApp): http.Server {
         }
       }
 
-      const researchesMatch = pathname.match(/^\/api\/agents\/([^/]+)\/researches$/);
+      const researchesMatch = pathname.match(/^\/api\/tenants\/([^/]+)\/researches$/);
       if (researchesMatch) {
         const tenantId = decodeURIComponent(researchesMatch[1]!);
         if (method === "GET") return jsonOk(res, { success: true, researches: app.eventStore.listResearches(tenantId) });
@@ -786,7 +786,7 @@ export function createHttpServer(app: FinancialAgentApp): http.Server {
 
       // Matched before the bare /researches/:id route below, which would
       // otherwise swallow "/members" as part of the id.
-      const researchMembersMatch = pathname.match(/^\/api\/agents\/([^/]+)\/researches\/([^/]+)\/members$/);
+      const researchMembersMatch = pathname.match(/^\/api\/tenants\/([^/]+)\/researches\/([^/]+)\/members$/);
       if (researchMembersMatch) {
         const tenantId = decodeURIComponent(researchMembersMatch[1]!);
         const researchId = decodeURIComponent(researchMembersMatch[2]!);
@@ -797,7 +797,7 @@ export function createHttpServer(app: FinancialAgentApp): http.Server {
         if (method === "PUT") return await handleReplaceResearchMembers(req, res, app, tenantId, researchId);
       }
 
-      const researchMatch = pathname.match(/^\/api\/agents\/([^/]+)\/researches\/([^/]+)$/);
+      const researchMatch = pathname.match(/^\/api\/tenants\/([^/]+)\/researches\/([^/]+)$/);
       if (researchMatch) {
         const tenantId = decodeURIComponent(researchMatch[1]!);
         const researchId = decodeURIComponent(researchMatch[2]!);
@@ -813,6 +813,18 @@ export function createHttpServer(app: FinancialAgentApp): http.Server {
           app.sessions.delete(researchId);
           return jsonOk(res, { success: true, message: "deleted" });
         }
+      }
+
+      // The agent roster, from the ONE place agents are declared. The tenant-scoped routes live
+      // under /api/tenants/{tenantId}/… — "agent" on a path now means an agent and nothing else. The client used to carry its own
+      // hard-coded list and lumped every name missing from it into "Other" — so a nested delegate
+      // showed up as an unlabelled row, and adding an agent silently created another. Serving the
+      // topology means the two can no longer drift: presentation (icon, colour) stays client-side,
+      // identity does not.
+      if (method === "GET" && pathname === "/api/agent-roster") {
+        return jsonOk(res, {
+          agents: app.subagents.list().map((node) => ({ name: node.name, description: node.description })),
+        });
       }
 
       if (method === "GET" && pathname === "/health") return jsonOk(res, { status: "ok" });
@@ -831,7 +843,7 @@ export function createHttpServer(app: FinancialAgentApp): http.Server {
         return await handleLinkPreview(searchParams, res);
       }
 
-      const workflowMatch = pathname.match(/^\/agents\/([^/]+)\/active-workflow$/);
+      const workflowMatch = pathname.match(/^\/tenants\/([^/]+)\/active-workflow$/);
       if (workflowMatch && method === "GET") {
         const workflow = activeWorkflows.get(workflowMatch[1]!);
         return jsonOk(res, {

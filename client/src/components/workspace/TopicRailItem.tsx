@@ -25,7 +25,7 @@ import {
 type RowMode = "idle" | "renaming";
 
 interface TopicRailItemProps {
-    agentId: UUID;
+    tenantId: UUID;
     topic: TopicSummary;
     isActive: boolean;
     /** Rail is at its 56px width — render only the ticker badge. */
@@ -48,7 +48,7 @@ interface TopicRailItemProps {
  * wherever that guess is visible, which is here.
  */
 export function TopicRailItem({
-    agentId,
+    tenantId,
     topic,
     isActive,
     collapsed,
@@ -88,7 +88,7 @@ export function TopicRailItem({
         setMode("idle");
         if (trimmed === topic.name) return;
         try {
-            await apiClient.updateTopic(agentId, topic.id, { name: trimmed });
+            await apiClient.updateTopic(tenantId, topic.id, { name: trimmed });
             onMutated();
         } catch (error) {
             toast({
@@ -102,7 +102,7 @@ export function TopicRailItem({
     /** `null` hands the topic back to the background classifier. */
     const setCategory = async (category: TopicCategory | null) => {
         try {
-            await apiClient.updateTopic(agentId, topic.id, { category });
+            await apiClient.updateTopic(tenantId, topic.id, { category });
             onMutated();
         } catch (error) {
             toast({
@@ -115,7 +115,7 @@ export function TopicRailItem({
 
     const handleDelete = async () => {
         try {
-            await apiClient.deleteTopic(agentId, topic.id);
+            await apiClient.deleteTopic(tenantId, topic.id);
             onMutated();
         } catch (error) {
             toast({
@@ -129,7 +129,7 @@ export function TopicRailItem({
     if (collapsed) {
         return (
             <NavLink
-                to={`/topic/${agentId}/${topic.id}`}
+                to={`/topic/${tenantId}/${topic.id}`}
                 className={cn(
                     "flex items-center justify-center rounded-md py-1.5 transition-colors",
                     isActive ? "bg-brand-sub" : "hover:bg-fill-1",
@@ -187,7 +187,7 @@ export function TopicRailItem({
                 </button>
             ) : (
                 <NavLink
-                    to={`/topic/${agentId}/${topic.id}`}
+                    to={`/topic/${tenantId}/${topic.id}`}
                     className={cn(
                         "flex min-w-0 flex-1 items-center gap-2 rounded-md border-l-2 p-2 text-left transition-colors",
                         isActive

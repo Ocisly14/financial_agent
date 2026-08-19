@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ChevronDown, Loader2, Waypoints } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { agentMeta, isProgressAgent, type ProgressTask } from "@/components/ChatProgressPill";
+import { agentPresentation, isProgressAgent, type ProgressTask } from "@/components/ChatProgressPill";
 import { buildDelegationTree, type DelegationNode, type TurnInput } from "@/lib/delegationTree";
 import type { ContentWithUser } from "@/components/chat/types";
 
@@ -55,7 +55,7 @@ function loadPrefs(): PanelPrefs {
 const truncate = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
 
 const agentColor = (agent: string | undefined) =>
-    isProgressAgent(agent) ? agentMeta[agent].iconClassName : "text-label-3";
+    isProgressAgent(agent) ? agentPresentation(agent).iconClassName : "text-label-3";
 
 function StatusGlyph({ status, cx, cy }: { status: DelegationNode["status"]; cx: number; cy: number }) {
     if (status === "running") {

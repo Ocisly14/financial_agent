@@ -18,7 +18,7 @@ const TICKER_PATTERN = /^[A-Z][A-Z.-]{0,5}$/;
  * hook only wires it to data sources and persists the result.
  */
 export function useTopicCharts(
-    agentId: UUID,
+    tenantId: UUID,
     topicId: UUID,
     messages: ChartWorkspaceMessage[],
     streamingText: string,
@@ -32,11 +32,11 @@ export function useTopicCharts(
         [messages, streamingText],
     );
 
-    const preferencesQueryKey = useMemo(() => ["topicCharts", agentId, topicId], [agentId, topicId]);
+    const preferencesQueryKey = useMemo(() => ["topicCharts", tenantId, topicId], [tenantId, topicId]);
     const { data: preferences = [] } = useQuery<TopicChartPreference[]>({
         queryKey: preferencesQueryKey,
         queryFn: async () => {
-            const result = await apiClient.getTopicCharts(agentId, topicId);
+            const result = await apiClient.getTopicCharts(tenantId, topicId);
             return result.charts ?? [];
         },
         refetchOnWindowFocus: false,
@@ -112,12 +112,12 @@ export function useTopicCharts(
     const persist = useCallback(
         (nextTabs: TopicChartTab[]) => {
             void apiClient
-                .setTopicCharts(agentId, topicId, preferencesFor(nextTabs, hiddenRef.current))
+                .setTopicCharts(tenantId, topicId, preferencesFor(nextTabs, hiddenRef.current))
                 .then(() => {
                     void queryClient.invalidateQueries({ queryKey: preferencesQueryKey });
                 });
         },
-        [agentId, topicId, queryClient, preferencesQueryKey],
+        [tenantId, topicId, queryClient, preferencesQueryKey],
     );
 
     const addSymbol = useCallback(

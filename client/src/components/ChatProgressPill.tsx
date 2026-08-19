@@ -1,17 +1,14 @@
 import { useEffect, useState } from "react";
-import { Loader2, CheckCircle, Circle, XCircle, ChevronDown, ChevronRight, Database, Newspaper, ChartNoAxesCombined, Calculator } from "lucide-react";
+import { Loader2, CheckCircle, Circle, XCircle, ChevronDown, ChevronRight, Database, Newspaper, ChartNoAxesCombined, Calculator, Layers, GitBranch, Bot } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { threadGroups } from "@/lib/progressThreads";
+import { useAgentRoster } from "@/hooks/useAgentRoster";
+import { agentLabel, agentsInOrder, isProgressAgent } from "@/lib/agentGroups";
 
-export type ProgressAgent = "market_data" | "market_research" | "trading_operations" | "financial_modeling";
-
-const PROGRESS_AGENTS = ["market_data", "market_research", "trading_operations", "financial_modeling"] as const;
-
-/** The dispatch frame's `agent` is a bare string; only these get their own
- *  group in the pill, the rest fall into "Other". */
-export function isProgressAgent(agent: string | undefined): agent is ProgressAgent {
-    return PROGRESS_AGENTS.includes(agent as ProgressAgent);
-}
+/** An agent name. Any name the server declares is one — deliberately not a closed union; grouping
+ *  and labelling live in lib/agentGroups (pure, tested), presentation lives here. */
+export type ProgressAgent = string;
+export { isProgressAgent } from "@/lib/agentGroups";
 
 export interface ProgressTask {
     taskId: string;
@@ -24,6 +21,12 @@ export interface ProgressTask {
      *  on history recorded before threads existed. */
     threadId?: string;
     tool?: string;
+    /** The agent's own line about what this step is doing, from its
+     *  `subagent_note`. On a long delegate it is the only thing that moves
+     *  between one dispatch and its result, so it outranks `tool` on the
+     *  detail line: "Balance sheet rows added (50 so far)" over
+     *  "patch_unification_decision". */
+    note?: string;
     status: "in_progress" | "completed" | "error";
     summary?: string;
     /** The caller's task when a nested delegate_to_agent made this dispatch;
@@ -44,51 +47,41 @@ function statusIcon(status: ProgressTask["status"]) {
     }
 }
 
-/** Exported for the topology panel, so both surfaces color an agent the same way. */
-export const agentMeta: Record<ProgressAgent, { label: string; icon: typeof Database; iconClassName: string }> = {
-    market_data: {
-        label: "Market data agent",
-        icon: Database,
-        iconClassName: "text-blue-600 dark:text-blue-300",
-    },
-    market_research: {
-        label: "Market research agent",
-        icon: Newspaper,
-        iconClassName: "text-violet-600 dark:text-violet-300",
-    },
-    trading_operations: {
-        label: "Stock strategy agent",
-        icon: ChartNoAxesCombined,
-        iconClassName: "text-amber-600 dark:text-amber-300",
-    },
-    financial_modeling: {
-        label: "DCF modeling agent",
-        icon: Calculator,
-        iconClassName: "text-emerald-600 dark:text-emerald-300",
-    },
+/** Icon + colour, curated for the agents worth telling apart at a glance. Deliberately partial:
+ *  an agent with no entry gets a generic icon and its humanized label — never "Other". */
+const agentIcons: Record<string, { icon: typeof Database; iconClassName: string }> = {
+    market_data: { icon: Database, iconClassName: "text-blue-600 dark:text-blue-300" },
+    market_research: { icon: Newspaper, iconClassName: "text-violet-600 dark:text-violet-300" },
+    trading_operations: { icon: ChartNoAxesCombined, iconClassName: "text-amber-600 dark:text-amber-300" },
+    financial_modeling: { icon: Calculator, iconClassName: "text-emerald-600 dark:text-emerald-300" },
+    statement_unification: { icon: Layers, iconClassName: "text-cyan-600 dark:text-cyan-300" },
+    spine_mapping: { icon: GitBranch, iconClassName: "text-teal-600 dark:text-teal-300" },
 };
 
-function uniqueAgents(tasks: ProgressTask[]) {
-    return PROGRESS_AGENTS.filter((agent) => tasks.some((task) => task.agent === agent));
+/** Label + icon + colour for any agent name. Exported so the topology panel matches the pill. */
+export function agentPresentation(agent: string): { label: string; icon: typeof Database; iconClassName: string } {
+    return { label: agentLabel(agent), ...(agentIcons[agent] ?? { icon: Bot, iconClassName: "text-label-3" }) };
 }
 
+const uniqueAgents = agentsInOrder;
+
 function taskGroups(tasks: ProgressTask[], agents: ProgressAgent[]): Array<ProgressAgent | "uncategorized"> {
-    // "Other" holds both agentless orchestrator rows and nested delegates whose
-    // agent has no tab of its own — without the guard those would vanish entirely.
+    // "Other" now means exactly one thing: rows with no agent, which are the orchestrator's own
+    // direct tool calls. It used to also swallow every agent missing from a hard-coded list.
     const hasUncategorized = tasks.some((task) => !isProgressAgent(task.agent));
     return hasUncategorized ? [...agents, "uncategorized"] : agents;
 }
 
 function groupLabel(group: ProgressAgent | "uncategorized") {
-    return group === "uncategorized" ? "Other" : agentMeta[group].label;
+    return group === "uncategorized" ? "Other" : agentPresentation(group).label;
 }
 
 function groupIcon(group: ProgressAgent | "uncategorized") {
-    return group === "uncategorized" ? Circle : agentMeta[group].icon;
+    return group === "uncategorized" ? Circle : agentPresentation(group).icon;
 }
 
 function groupIconClassName(group: ProgressAgent | "uncategorized") {
-    return group === "uncategorized" ? "text-label-4" : agentMeta[group].iconClassName;
+    return group === "uncategorized" ? "text-label-4" : agentPresentation(group).iconClassName;
 }
 
 function groupStatus(tasks: ProgressTask[]) {
@@ -171,7 +164,7 @@ export function ChatProgressPill({ tasks, isComplete }: { tasks: ProgressTask[];
                                     )}
                                 >
                                     <GroupIcon className={cn("size-3", groupIconClassName(group))} />
-                                    <span>{groupLabel(group)}</span>
+                                    <span title={group === "uncategorized" ? undefined : describeAgent(group)}>{groupLabel(group)}</span>
                                     <span className="text-muted-foreground">{groupTasks.length}</span>
                                     {statusIcon(groupStatus(groupTasks))}
                                 </button>
@@ -203,9 +196,9 @@ export function ChatProgressPill({ tasks, isComplete }: { tasks: ProgressTask[];
                                                     result are detail under it. Kept on one
                                                     truncating line so a long tool argument
                                                     can't push the next task off the list. */}
-                                                {(t.tool || t.summary) && (
+                                                {(t.note || t.tool || t.summary) && (
                                                     <div className="truncate text-[11px] text-muted-foreground">
-                                                        {[t.tool, t.summary].filter(Boolean).join(" · ")}
+                                                        {[t.note || t.tool, t.summary].filter(Boolean).join(" · ")}
                                                     </div>
                                                 )}
                                             </div>

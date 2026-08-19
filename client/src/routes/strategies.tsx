@@ -56,7 +56,7 @@ function StatusPill({ status }: { status: StrategyLifecycle }) {
 
 export default function StrategiesPage() {
     const { t } = useTranslation();
-    const { agentId } = useParams<{ agentId: string }>();
+    const { tenantId } = useParams<{ tenantId: string }>();
     const navigate = useNavigate();
     const [statusFilter, setStatusFilter] = useState<StrategyLifecycle | "">("");
     const tradingMode = useTradingMode();
@@ -99,7 +99,7 @@ export default function StrategiesPage() {
 
                 <nav className="my-6 flex items-center gap-1">
                     <Button asChild variant="ghost" size="sm" className="bg-fill-2 text-label-1 hover:bg-fill-2">
-                        <NavLink to={`/strategies/${agentId}`}>{t("strategies.tabs.strategies")}</NavLink>
+                        <NavLink to={`/strategies/${tenantId}`}>{t("strategies.tabs.strategies")}</NavLink>
                     </Button>
                 </nav>
 
@@ -159,7 +159,7 @@ export default function StrategiesPage() {
                                         key={s.id}
                                         data-testid="strategies-row"
                                         className="cursor-pointer border-b border-sep transition-colors last:border-0 hover:bg-fill-1"
-                                        onClick={() => navigate(`/strategies/${agentId}/${s.id}`)}
+                                        onClick={() => navigate(`/strategies/${tenantId}/${s.id}`)}
                                     >
                                         <td className="px-4 py-3.5 align-middle">
                                             <StatusPill status={s.status} />

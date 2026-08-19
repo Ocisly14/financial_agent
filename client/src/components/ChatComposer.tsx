@@ -9,7 +9,7 @@ import { AudioRecorder } from "@/components/audio-recorder";
 import { cn } from "@/lib/utils";
 
 interface ChatComposerProps {
-    agentId: UUID;
+    tenantId: UUID;
     input: string;
     isProcessing: boolean;
     isDisabled?: boolean;
@@ -23,7 +23,7 @@ interface ChatComposerProps {
 }
 
 export function ChatComposer({
-    agentId,
+    tenantId,
     input,
     isProcessing,
     isDisabled = false,
@@ -72,8 +72,12 @@ export function ChatComposer({
                     // materials, and a second elevation for one control.
                     "relative mx-auto w-full px-4 sm:px-0 pointer-events-auto",
                     "ease-in-out",
+                    // Collapse is the expand run in reverse: expand plays
+                    // width 0→1s with height finishing early (0→0.5s), so its
+                    // mirror shrinks width the whole second and drops height
+                    // over the final half (0.5s→1s).
                     isInputCollapsed
-                        ? "max-w-[160px] max-h-6 overflow-hidden mb-3 [transition:max-height_0.5s_ease-in-out,max-width_1s_ease-in-out_0.5s]"
+                        ? "max-w-[160px] max-h-6 overflow-hidden mb-3 [transition:max-width_1s_ease-in-out,max-height_0.5s_ease-in-out_0.5s]"
                         : "max-w-2xl md:max-w-3xl xl:max-w-4xl max-h-[80vh] mb-2 [transition:max-width_1s_ease-in-out,max-height_0.5s_ease-in-out]"
                 )}
             >
@@ -87,7 +91,7 @@ export function ChatComposer({
                     aria-hidden
                     className={cn(
                         "pointer-events-none absolute inset-0 flex items-center justify-center transition-opacity",
-                        isInputCollapsed ? "opacity-100 duration-300 delay-[1100ms]" : "opacity-0 duration-150 delay-0",
+                        isInputCollapsed ? "opacity-100 duration-300 delay-[800ms]" : "opacity-0 duration-150 delay-0",
                     )}
                 >
                     <div className="h-1.5 w-28 rounded-full border border-sep bg-fill-2" />
@@ -147,7 +151,7 @@ export function ChatComposer({
                                 <div className="flex items-center p-1.5 pt-0">
                                     {!readOnly && (
                                         <AudioRecorder
-                                            agentId={agentId}
+                                            tenantId={tenantId}
                                             onChange={(newInput) => onInputChange(newInput)}
                                         />
                                     )}

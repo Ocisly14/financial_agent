@@ -27,18 +27,18 @@ const queryClient = new QueryClient({
 /** `/` is now an entry redirect, not a standalone home page. */
 function RootRedirect() {
     const { data, isPending, isError } = useQuery({
-        queryKey: ["agents"],
-        queryFn: () => apiClient.getAgents(),
+        queryKey: ["tenants"],
+        queryFn: () => apiClient.getTenants(),
         staleTime: Number.POSITIVE_INFINITY,
     });
-    const firstAgent = data?.agents?.[0];
+    const firstTenant = data?.tenants?.[0];
     if (isPending) {
         return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">Loading…</div>;
     }
-    if (isError || !firstAgent) {
-        return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No agents available.</div>;
+    if (isError || !firstTenant) {
+        return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No workspace available.</div>;
     }
-    return <Navigate to={`/topic/${firstAgent.id}`} replace />;
+    return <Navigate to={`/topic/${firstTenant.id}`} replace />;
 }
 
 function AppShell() {
@@ -61,12 +61,12 @@ function AppShell() {
                         <Suspense fallback={<div className="flex flex-1 items-center justify-center text-muted-foreground" />}>
                             <Routes>
                                 <Route path="/" element={<RootRedirect />} />
-                                <Route path="topic/:agentId/:topicId" element={<Topic />} />
-                                <Route path="topic/:agentId" element={<Topic />} />
+                                <Route path="topic/:tenantId/:topicId" element={<Topic />} />
+                                <Route path="topic/:tenantId" element={<Topic />} />
                                 {/* Spec §7.9 — the focused member is deliberately absent. */}
-                                <Route path="research/:agentId/:researchId" element={<Research />} />
-                                <Route path="strategies/:agentId" element={<Strategies />} />
-                                <Route path="strategies/:agentId/:strategyId" element={<StrategyDetail />} />
+                                <Route path="research/:tenantId/:researchId" element={<Research />} />
+                                <Route path="strategies/:tenantId" element={<Strategies />} />
+                                <Route path="strategies/:tenantId/:strategyId" element={<StrategyDetail />} />
                                 <Route path="dcf-demo" element={<DcfDemo />} />
                             </Routes>
                         </Suspense>

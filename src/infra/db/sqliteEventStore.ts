@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS session_compaction (
 -- call in server.ts).
 CREATE TABLE IF NOT EXISTS chat_rooms (
   id          TEXT PRIMARY KEY,
-  agent_id    TEXT NOT NULL,
+  tenant_id    TEXT NOT NULL,
   name        TEXT NOT NULL,
   created_at  INTEGER NOT NULL,
   updated_at  INTEGER NOT NULL,
@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS chat_rooms (
 );
 
 CREATE INDEX IF NOT EXISTS idx_chat_rooms_agent_updated
-  ON chat_rooms (agent_id, updated_at DESC);
+  ON chat_rooms (tenant_id, updated_at DESC);
 
 -- A tab is either a single ticker (kind='symbol') or a multi-ticker overlay
 -- (kind='overlay', payload in the overlay JSON column). Only one of
@@ -97,13 +97,13 @@ CREATE INDEX IF NOT EXISTS idx_topic_charts_topic_order
 -- researches.id doubles as its session_id, reusing the same trick as topic.
 CREATE TABLE IF NOT EXISTS researches (
   id         TEXT PRIMARY KEY,
-  agent_id   TEXT NOT NULL,
+  tenant_id   TEXT NOT NULL,
   name       TEXT NOT NULL,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_researches_agent_updated
-  ON researches (agent_id, updated_at DESC);
+  ON researches (tenant_id, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS research_members (
   research_id         TEXT NOT NULL,
@@ -405,7 +405,7 @@ export class SqliteEventStore implements EventStore {
 
   createTopic(tenantId: string, topicId: string, name: string, createdAt = Date.now()): TopicSummary {
     this.db.prepare(
-      `INSERT INTO chat_rooms (id, agent_id, name, created_at, updated_at)
+      `INSERT INTO chat_rooms (id, tenant_id, name, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(id) DO NOTHING`,
     ).run(topicId, tenantId, name, createdAt, createdAt);
@@ -440,7 +440,7 @@ export class SqliteEventStore implements EventStore {
                 ROW_NUMBER() OVER (PARTITION BY topic_id ORDER BY sort_order ASC) AS rn
          FROM topic_charts WHERE hidden = 0
        ) lead ON lead.topic_id = chat_rooms.id AND lead.rn = 1
-       WHERE agent_id = ?
+       WHERE tenant_id = ?
        ORDER BY updated_at DESC, created_at DESC`,
     ).all(tenantId) as TopicRow[];
     const countStatement = this.db.prepare(
@@ -519,7 +519,7 @@ export class SqliteEventStore implements EventStore {
     values.push(Date.now(), topicId, tenantId);
 
     const result = this.db.prepare(
-      `UPDATE chat_rooms SET ${assignments.join(", ")} WHERE id = ? AND agent_id = ?`,
+      `UPDATE chat_rooms SET ${assignments.join(", ")} WHERE id = ? AND tenant_id = ?`,
     ).run(...values);
     return result.changes > 0;
   }
@@ -615,7 +615,7 @@ export class SqliteEventStore implements EventStore {
        LEFT JOIN (
          SELECT session_id, MAX(turn) AS max_turn FROM session_events GROUP BY session_id
        ) turns ON turns.session_id = chat_rooms.id
-       WHERE chat_rooms.agent_id = ?
+       WHERE chat_rooms.tenant_id = ?
          AND COALESCE(turns.max_turn, 0) > chat_rooms.digest_through_turn`,
     ).all(tenantId) as Array<{ id: string }>;
     return rows.map((row) => row.id);
@@ -629,7 +629,7 @@ export class SqliteEventStore implements EventStore {
        LEFT JOIN (
          SELECT session_id, MAX(turn) AS max_turn FROM session_events GROUP BY session_id
        ) turns ON turns.session_id = chat_rooms.id
-       WHERE chat_rooms.agent_id = ?
+       WHERE chat_rooms.tenant_id = ?
          AND (
            (chat_rooms.digest_through_turn = 0 AND COALESCE(turns.max_turn, 0) >= 1)
            OR COALESCE(turns.max_turn, 0) >= chat_rooms.digest_through_turn + 3
@@ -639,7 +639,7 @@ export class SqliteEventStore implements EventStore {
   }
 
   deleteTopic(tenantId: string, topicId: string): boolean {
-    const topic = this.db.prepare("SELECT 1 FROM chat_rooms WHERE id = ? AND agent_id = ?").get(topicId, tenantId);
+    const topic = this.db.prepare("SELECT 1 FROM chat_rooms WHERE id = ? AND tenant_id = ?").get(topicId, tenantId);
     if (!topic) return false;
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -647,7 +647,7 @@ export class SqliteEventStore implements EventStore {
       this.db.prepare("DELETE FROM session_compaction WHERE session_id = ?").run(topicId);
       this.db.prepare("DELETE FROM topic_charts WHERE topic_id = ?").run(topicId);
       this.db.prepare("DELETE FROM research_members WHERE topic_id = ?").run(topicId);
-      this.db.prepare("DELETE FROM chat_rooms WHERE id = ? AND agent_id = ?").run(topicId, tenantId);
+      this.db.prepare("DELETE FROM chat_rooms WHERE id = ? AND tenant_id = ?").run(topicId, tenantId);
       this.db.exec("COMMIT");
       return true;
     } catch (error) {
@@ -744,7 +744,7 @@ export class SqliteEventStore implements EventStore {
 
   createResearch(tenantId: string, researchId: string, name: string, createdAt = Date.now()): ResearchSummary {
     this.db.prepare(
-      `INSERT INTO researches (id, agent_id, name, created_at, updated_at)
+      `INSERT INTO researches (id, tenant_id, name, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(id) DO NOTHING`,
     ).run(researchId, tenantId, name, createdAt, createdAt);
@@ -758,7 +758,7 @@ export class SqliteEventStore implements EventStore {
               COUNT(research_members.topic_id) AS member_count
        FROM researches
        LEFT JOIN research_members ON research_members.research_id = researches.id
-       WHERE researches.agent_id = ?
+       WHERE researches.tenant_id = ?
        GROUP BY researches.id
        ORDER BY researches.updated_at DESC, researches.created_at DESC`,
     ).all(tenantId) as ResearchRow[];
@@ -778,7 +778,7 @@ export class SqliteEventStore implements EventStore {
               COUNT(research_members.topic_id) AS member_count
        FROM researches
        LEFT JOIN research_members ON research_members.research_id = researches.id
-       WHERE researches.agent_id = ? AND researches.id = ?
+       WHERE researches.tenant_id = ? AND researches.id = ?
        GROUP BY researches.id`,
     ).get(tenantId, researchId) as ResearchRow | undefined;
     if (!row) return undefined;
@@ -793,18 +793,18 @@ export class SqliteEventStore implements EventStore {
 
   renameResearch(tenantId: string, researchId: string, name: string): boolean {
     const result = this.db.prepare(
-      `UPDATE researches SET name = ?, updated_at = ? WHERE id = ? AND agent_id = ?`,
+      `UPDATE researches SET name = ?, updated_at = ? WHERE id = ? AND tenant_id = ?`,
     ).run(name, Date.now(), researchId, tenantId);
     return result.changes > 0;
   }
 
   deleteResearch(tenantId: string, researchId: string): boolean {
-    const research = this.db.prepare("SELECT 1 FROM researches WHERE id = ? AND agent_id = ?").get(researchId, tenantId);
+    const research = this.db.prepare("SELECT 1 FROM researches WHERE id = ? AND tenant_id = ?").get(researchId, tenantId);
     if (!research) return false;
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.db.prepare("DELETE FROM research_members WHERE research_id = ?").run(researchId);
-      this.db.prepare("DELETE FROM researches WHERE id = ? AND agent_id = ?").run(researchId, tenantId);
+      this.db.prepare("DELETE FROM researches WHERE id = ? AND tenant_id = ?").run(researchId, tenantId);
       this.db.prepare("DELETE FROM session_events WHERE session_id = ?").run(researchId);
       this.db.prepare("DELETE FROM session_compaction WHERE session_id = ?").run(researchId);
       this.db.exec("COMMIT");

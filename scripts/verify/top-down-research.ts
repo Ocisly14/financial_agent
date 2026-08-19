@@ -57,7 +57,7 @@ async function main(): Promise<void> {
   console.log(`${DIM}server=${SERVER_URL} db=${DB_PATH} agent=${AGENT_ID}${RESET}\n`);
 
   // ── Step 1: create an empty Research ─────────────────────────────────────
-  const createRes = await fetch(`${SERVER_URL}/api/agents/${AGENT_ID}/researches`, {
+  const createRes = await fetch(`${SERVER_URL}/api/tenants/${AGENT_ID}/researches`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name: "verify: sector rotation research" }),
@@ -70,7 +70,7 @@ async function main(): Promise<void> {
   // ── Step 2: fire the first turn (SSE; we just drain it) ──────────────────
   const chatRes = await fetch(`${SERVER_URL}/api/chat`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-Agent-Id": AGENT_ID },
+    headers: { "Content-Type": "application/json", "X-Tenant-Id": AGENT_ID },
     body: JSON.stringify({
       sessionId: researchId,
       message: "Given the current market environment, identify several promising sectors and then screen for stocks within them.",

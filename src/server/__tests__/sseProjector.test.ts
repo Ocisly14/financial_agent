@@ -181,3 +181,40 @@ test("a model revision defaults to focus, and a tool can opt out with silent", (
   // An unrecognised value must not silently suppress the artifact.
   assert.equal(frameFor("nonsense").display, "focus");
 });
+
+test("a subagent's step note is projected as progress on the task it belongs to", () => {
+  const state = new SessionState("session-note", new Date().toISOString());
+  state.beginTurn("Value GOOGL");
+  const thread = state.openThread("statement_unification");
+  const dispatch = state.recordDispatch("statement_unification", "unify GOOGL statements", thread);
+
+  const note = state.record("statement_unification", "subagent_note",
+    { task_id: dispatch.event_id, step: 6, note: "Balance sheet rows added (50 total so far)." },
+    { threadId: thread, parent: dispatch.event_id });
+
+  assert.deepEqual(projectEvent(note, state), [{
+    type: "progress",
+    task_id: dispatch.event_id,
+    phase: "note",
+    note: "Balance sheet rows added (50 total so far).",
+  }]);
+});
+
+test("bookkeeping notes the model writes to itself are not progress", () => {
+  const state = new SessionState("session-note-internal", new Date().toISOString());
+  state.beginTurn("Value GOOGL");
+  const thread = state.openThread("statement_unification");
+  const dispatch = state.recordDispatch("statement_unification", "unify GOOGL statements", thread);
+
+  // The round seam (step 0) and the compaction barrier are addressed to the
+  // model, not the user: neither says anything about work having advanced.
+  const seam = state.record("statement_unification", "subagent_note",
+    { task_id: dispatch.event_id, step: 0, note: "[new round] ..." },
+    { threadId: thread, parent: dispatch.event_id });
+  const barrier = state.record("statement_unification", "subagent_note",
+    { task_id: dispatch.event_id, step: 0, thread_summary: true, note: "[earlier in this thread, summarized]\n..." },
+    { threadId: thread });
+
+  assert.deepEqual(projectEvent(seam, state), []);
+  assert.deepEqual(projectEvent(barrier, state), []);
+});

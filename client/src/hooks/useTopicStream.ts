@@ -36,7 +36,7 @@ type ClientInterrupt = {
  * session never receives these frames at all.
  */
 export function useTopicStream(
-    agentId: UUID,
+    tenantId: UUID,
     topicId: UUID,
     options?: {
         onDirective?: (step: ProcessingStep) => void;
@@ -72,11 +72,11 @@ export function useTopicStream(
     // Strategy approval state populated by the backend approval event.
     const [pendingInterrupt, setPendingInterrupt] = useState<ClientInterrupt | null>(null);
 
-    const queryKey = useMemo(() => ["messages", agentId, topicId], [agentId, topicId]);
+    const queryKey = useMemo(() => ["messages", tenantId, topicId], [tenantId, topicId]);
     const { data: messages = [], isLoading: isHistoryLoading } = useQuery<ContentWithUser[]>({
         queryKey,
         queryFn: async () => {
-            const result = await apiClient.getMessages(agentId, topicId, { limit: 500 });
+            const result = await apiClient.getMessages(tenantId, topicId, { limit: 500 });
             return (result.messages ?? []) as ContentWithUser[];
         },
         refetchOnWindowFocus: false,
@@ -130,7 +130,7 @@ export function useTopicStream(
             let failed = false;
             try {
                 await streaming.sendMessageStream(
-                    agentId,
+                    tenantId,
                     trimmed,
                     topicId,
                     (step) => {
@@ -173,7 +173,7 @@ export function useTopicStream(
                                 action: {
                                     label: "Open",
                                     onClick: () => {
-                                        navigate(strategyId ? `/strategies/${agentId}/${strategyId}` : `/strategies/${agentId}`);
+                                        navigate(strategyId ? `/strategies/${tenantId}/${strategyId}` : `/strategies/${tenantId}`);
                                     },
                                 },
                             });
@@ -212,6 +212,12 @@ export function useTopicStream(
                                 // preceding dispatch, so there is no task to
                                 // show; the tool name is the best label there.
                                 rec.description = rec.description || step.message || "";
+                                if (rec.status !== "completed" && rec.status !== "error") rec.status = "in_progress";
+                            } else if (step.name === "note") {
+                                // Written between tool calls, so it lands after
+                                // the `tool_call` frame it explains and reads as
+                                // the row's current activity.
+                                rec.note = step.message || rec.note;
                                 if (rec.status !== "completed" && rec.status !== "error") rec.status = "in_progress";
                             } else if (step.name === "task_done") {
                                 rec.status = step.status === "error" ? "error" : "completed";
@@ -286,7 +292,7 @@ export function useTopicStream(
             }
             return !failed;
         },
-        [agentId, topicId, isProcessing, isHistoryLoading, appendMessages, streaming, queryClient, navigate]
+        [tenantId, topicId, isProcessing, isHistoryLoading, appendMessages, streaming, queryClient, navigate]
     );
 
     const sendMessage = useCallback(
@@ -357,7 +363,7 @@ export function useTopicStream(
 
             try {
                 await streaming.sendMessageStream(
-                    agentId,
+                    tenantId,
                     answerText(request, answers),
                     topicId,
                     () => {}, // onStep
@@ -383,14 +389,14 @@ export function useTopicStream(
                 );
             }
         },
-        [agentId, streaming, updateInputRequests],
+        [tenantId, streaming, updateInputRequests],
     );
 
     const stop = useCallback(() => {
-        streaming.cancelStreamForAgent(agentId);
+        streaming.cancelStreamForAgent(tenantId);
         setIsProcessing(false);
         setStreamingText("");
-    }, [streaming, agentId]);
+    }, [streaming, tenantId]);
 
     const resolveApproval = useCallback(
         async (decision: "approve" | "reject") => {

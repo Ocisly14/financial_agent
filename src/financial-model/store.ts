@@ -211,7 +211,7 @@ implements ModelStore<TSnapshot, TChangeSummary> {
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS financial_models (
-  model_id TEXT PRIMARY KEY, owner_agent_id TEXT NOT NULL, origin_session_id TEXT NOT NULL,
+  model_id TEXT PRIMARY KEY, owner_tenant_id TEXT NOT NULL, origin_session_id TEXT NOT NULL,
   symbol TEXT NOT NULL, metadata_json TEXT NOT NULL, created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS financial_model_revisions (
@@ -225,7 +225,7 @@ CREATE INDEX IF NOT EXISTS financial_model_revisions_latest
   ON financial_model_revisions(model_id, revision DESC);
 `;
 
-type ModelRow = { model_id: string; owner_agent_id: string; origin_session_id: string; symbol: string; metadata_json: string; created_at: string };
+type ModelRow = { model_id: string; owner_tenant_id: string; origin_session_id: string; symbol: string; metadata_json: string; created_at: string };
 type RevisionRow = { model_id: string; revision: number; parent_revision: number | null; lifecycle_stage: LifecycleStage;
   snapshot_json: string; change_summary_json: string; engine_version: string; creating_session_id: string; created_at: string };
 type RevisionHeaderRow = Omit<RevisionRow, "snapshot_json">;
@@ -279,7 +279,7 @@ implements ModelStore<TSnapshot, TChangeSummary> {
         revision: number; lifecycle_stage: LifecycleStage; updated_at: string;
       }) | undefined;
     if (!row) return undefined;
-    return { modelId: row.model_id, ownerTenantId: row.owner_agent_id, originSessionId: row.origin_session_id,
+    return { modelId: row.model_id, ownerTenantId: row.owner_tenant_id, originSessionId: row.origin_session_id,
       symbol: row.symbol, metadata: decodeSummary<JsonObject>(row.metadata_json), currentRevision: row.revision,
       lifecycleStage: row.lifecycle_stage, updatedAt: row.updated_at, createdAt: row.created_at };
   }

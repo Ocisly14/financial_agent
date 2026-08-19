@@ -44,7 +44,7 @@ export function ChartTabBar({
     onReorder,
     onAdd,
     onDetach,
-    agentId,
+    tenantId,
     currentTopicId,
     onCompare,
     readOnly = false,
@@ -71,7 +71,7 @@ export function ChartTabBar({
         originRect: { left: number; top: number; width: number; height: number },
     ) => void;
     /** Required together with `currentTopicId`/`onCompare` to render the "+ Compare" affordance (spec §7.4) — omit all three in contexts where spinning up a Research doesn't apply (e.g. inside a Research view's own tab bar). */
-    agentId?: UUID;
+    tenantId?: UUID;
     /** The Topic this tab bar belongs to — excluded from the picker's candidate list so a Topic can't be compared against itself. */
     currentTopicId?: UUID;
     /** Fired with the topic ids picked from `MemberPicker`. The caller owns turning that into a new Research (name join + `createResearch` + navigate) — this component only opens the selector. */
@@ -337,9 +337,9 @@ export function ChartTabBar({
                 </button>
             ))}
 
-            {!readOnly && agentId && currentTopicId && onCompare && (
+            {!readOnly && tenantId && currentTopicId && onCompare && (
                 <MemberPicker
-                    agentId={agentId}
+                    tenantId={tenantId}
                     excludeTopicIds={[currentTopicId]}
                     onConfirm={onCompare}
                     trigger={

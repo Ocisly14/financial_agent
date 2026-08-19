@@ -11,12 +11,12 @@ import { Button } from "@/components/ui/button";
 import { TopicWorkspace } from "@/components/workspace/TopicWorkspace";
 
 /**
- * Resolves `:agentId` / `:topicId` into an active Topic and hands it to the
+ * Resolves `:tenantId` / `:topicId` into an active Topic and hands it to the
  * workspace. Three cases: no such topic (redirect to the most recent one),
  * no topics at all (empty state with a create button), and the normal one.
  */
 export default function TopicRoute() {
-    const { agentId, topicId } = useParams<{ agentId: UUID; topicId?: UUID }>();
+    const { tenantId, topicId } = useParams<{ tenantId: UUID; topicId?: UUID }>();
     const navigate = useNavigate();
     const queryClient = useQueryClient();
     const { toast } = useToast();
@@ -24,9 +24,9 @@ export default function TopicRoute() {
     const [isCreating, setIsCreating] = useState(false);
 
     const { data, isPending, isError } = useQuery({
-        queryKey: ["topics", agentId],
-        queryFn: () => apiClient.getTopics(agentId!),
-        enabled: Boolean(agentId),
+        queryKey: ["topics", tenantId],
+        queryFn: () => apiClient.getTopics(tenantId!),
+        enabled: Boolean(tenantId),
     });
 
     // Most recently active first — the same order the rail shows.
@@ -43,20 +43,20 @@ export default function TopicRoute() {
     const activeTopic = topicId ? topics.find((topic) => topic.id === topicId) : undefined;
 
     useEffect(() => {
-        if (!agentId || isPending || topics.length === 0) return;
+        if (!tenantId || isPending || topics.length === 0) return;
         if (activeTopic) return;
         // Either no id in the URL, or one that no longer exists.
-        navigate(`/topic/${agentId}/${topics[0].id}`, { replace: true });
-    }, [agentId, isPending, topics, activeTopic, navigate]);
+        navigate(`/topic/${tenantId}/${topics[0].id}`, { replace: true });
+    }, [tenantId, isPending, topics, activeTopic, navigate]);
 
     const handleCreate = async () => {
-        if (!agentId) return;
+        if (!tenantId) return;
         setIsCreating(true);
         try {
-            const result = await apiClient.createTopic(agentId, generateTopicName());
+            const result = await apiClient.createTopic(tenantId, generateTopicName());
             if (result.success) {
-                void queryClient.invalidateQueries({ queryKey: ["topics", agentId] });
-                navigate(`/topic/${agentId}/${result.topic.id}`, { replace: true });
+                void queryClient.invalidateQueries({ queryKey: ["topics", tenantId] });
+                navigate(`/topic/${tenantId}/${result.topic.id}`, { replace: true });
             } else {
                 toast({
                     variant: "destructive",
@@ -75,7 +75,7 @@ export default function TopicRoute() {
         }
     };
 
-    if (!agentId) {
+    if (!tenantId) {
         return <CenteredMessage>{t("chat.noAgentSpecified")}</CenteredMessage>;
     }
 
@@ -109,7 +109,7 @@ export default function TopicRoute() {
     // than a flash of the wrong topic.
     if (!activeTopic) return <CenteredMessage>{t("topics.loading")}</CenteredMessage>;
 
-    return <TopicWorkspace agentId={agentId} members={[activeTopic]} activeTopic={activeTopic} />;
+    return <TopicWorkspace tenantId={tenantId} members={[activeTopic]} activeTopic={activeTopic} />;
 }
 
 function CenteredMessage({ children }: { children: React.ReactNode }) {
