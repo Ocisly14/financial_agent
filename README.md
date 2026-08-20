@@ -6,6 +6,7 @@ _A local-first multi-agent workspace for financial research, auditable DCF valua
 ![Node.js 23+](https://img.shields.io/badge/node-%3E%3D23-5FA04E?logo=node.js&logoColor=white)
 ![pnpm 10](https://img.shields.io/badge/pnpm-10-F69220?logo=pnpm&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.6-3178C6?logo=typescript&logoColor=white)
+![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue)
 
 > [!IMPORTANT]
 > Financial Agent is an experimental alpha. It is designed for research, valuation analysis, and paper/shadow strategy evaluation—not live brokerage execution or personalized financial advice.
