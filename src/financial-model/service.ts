@@ -440,6 +440,30 @@ export class FinancialModelService {
     return result;
   }
 
+  /**
+   * Record that the unified statements were accepted for this model.
+   *
+   * The snapshot is unchanged on purpose: the artifact lives in the source-review store, because
+   * it is evidence the mapping stage reads rather than workbook cells, and copying its hundreds of
+   * rows into every later revision would pay for them forever. What lands here is the EVENT — the
+   * counts, the periods, how much was left unresolved — so the model's own history shows the
+   * judgment that produced its foundation, and so anything watching revisions (the workspace panel,
+   * a resumed agent reading the log) learns that this stage is done.
+   *
+   * Lifecycle deliberately does not advance: the workbook gains no history until spine_mapping
+   * commits facts, and a stage that claimed otherwise would be lying about what is in the model.
+   */
+  recordStatementsUnified(modelId: string, expectedRevision: number, input: {
+    rowCount: number; breakdownRowCount: number; periodIds: string[];
+    restatementCount: number; unresolvedFindingCount: number;
+  }): CommitResult {
+    const parent = this.store.getRevision(modelId, expectedRevision);
+    if (!parent) throw new FinancialModelError("revision_conflict", `revision ${expectedRevision} not found`, {});
+    const snapshot = structuredClone(parent.snapshot);
+    return this.commit(modelId, expectedRevision, snapshot,
+      makeSummary(snapshot, [{ kind: "statements_unified", ...input }]));
+  }
+
   private commit(
     modelId: string,
     expectedRevision: number,

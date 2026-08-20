@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Layers, Plus, Scale, Table2, X } from "lucide-react";
+import { Layers, Plus, Scale, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { chartTabKey, type TopicChartTab } from "@/lib/topicCharts";
 import { overlayTabLabel } from "@/lib/overlayChart";
@@ -49,7 +49,9 @@ export function ChartTabBar({
     onCompare,
     readOnly = false,
 }: {
-    tabs: TopicChartTab[];
+    /** Chart tabs only. A model workbook is not a chart preference — it lives
+     *  in ChartPane's sibling model view, never in this strip. */
+    tabs: Exclude<TopicChartTab, { kind: "model" }>[];
     activeKey: string | undefined;
     onSelect: (key: string) => void;
     /** The `×`. This is the ONE path that removes a tab (design §5 rule 2) —
@@ -198,13 +200,7 @@ export function ChartTabBar({
         setDropTarget(null);
         if (!dragged || dragged === key) return;
 
-        // Model tabs are excluded from the order handed to `onReorder`: they
-        // are not draggable (see the `draggable` prop below), so `dragged` is
-        // never one, but `tabs` may still contain one interspersed in the
-        // strip. Leaving it in would make `reorderTabs`'s own tab list (which
-        // never contains a model tab) come back shorter than `orderedKeys`,
-        // and its length-mismatch guard would silently drop the whole reorder.
-        const order = tabs.filter((tab) => tab.kind !== "model").map(chartTabKey);
+        const order = tabs.map(chartTabKey);
         const from = order.indexOf(dragged);
         if (from === -1) return;
         order.splice(from, 1);
@@ -233,17 +229,11 @@ export function ChartTabBar({
                 const isDragging = key === draggedKey;
                 const isDropBefore = dropTarget?.key === key && dropTarget.edge === "before";
                 const isDropAfter = dropTarget?.key === key && dropTarget.edge === "after";
-                const label = tab.kind === "symbol" || tab.kind === "model" ? tab.symbol : overlayTabLabel(tab.overlay.symbols);
+                const label = tab.kind === "symbol" ? tab.symbol : overlayTabLabel(tab.overlay.symbols);
                 return (
                     <div
                         key={key}
-                        // A model tab comes straight from the backend's model list, not
-                        // from a preference row (see ModelChartTab's doc comment), so it
-                        // cannot be torn into a floating window — that path (`onDetach`)
-                        // ends in `useDetachedTabs`/`preferencesFor`, neither of which
-                        // knows what to do with one. Blocking the drag at its start is
-                        // simpler and safer than trying to catch it further down.
-                        draggable={!readOnly && tab.kind !== "model"}
+                        draggable={!readOnly}
                         onDragStart={(event) => handleDragStart(event, key)}
                         onDragOver={(event) => handleDragOver(event, key)}
                         onDrop={(event) => handleDrop(event, key)}
@@ -280,9 +270,6 @@ export function ChartTabBar({
                                     aria-label={t("charts.overlay.derivedHint")}
                                 />
                             )}
-                            {/* The workbook mark: a model tab is a DCF workbook, not a
-                                ticker chart, and reads that way before the symbol does. */}
-                            {tab.kind === "model" && <Table2 className="h-3 w-3 shrink-0" />}
                             {label}
                             {isPending && (
                                 <span

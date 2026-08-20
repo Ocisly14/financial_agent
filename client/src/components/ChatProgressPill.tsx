@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { Loader2, CheckCircle, Circle, XCircle, ChevronDown, ChevronRight, Database, Newspaper, ChartNoAxesCombined, Calculator, Layers, GitBranch, Bot } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Loader2, CheckCircle, Circle, XCircle, ChevronDown, ChevronRight, Database, Newspaper, ChartNoAxesCombined, Calculator, Layers, GitBranch, Bot, Wrench } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { threadGroups } from "@/lib/progressThreads";
 import { useAgentRoster } from "@/hooks/useAgentRoster";
@@ -9,6 +9,14 @@ import { agentLabel, agentsInOrder, isProgressAgent } from "@/lib/agentGroups";
  *  and labelling live in lib/agentGroups (pure, tested), presentation lives here. */
 export type ProgressAgent = string;
 export { isProgressAgent } from "@/lib/agentGroups";
+
+/** One step of a task's running commentary, in arrival order. A `note` is the
+ *  agent's own words about what it is doing; a `tool` is what it reached for.
+ *  Kept apart so the feed can style the agent's voice above the plumbing. */
+export type ProgressFeedItem = {
+    kind: "note" | "tool";
+    text: string;
+};
 
 export interface ProgressTask {
     taskId: string;
@@ -27,6 +35,12 @@ export interface ProgressTask {
      *  detail line: "Balance sheet rows added (50 so far)" over
      *  "patch_unification_decision". */
     note?: string;
+    /** Every note and tool call this task emitted, in order — the full trail
+     *  behind the latest-only `note`/`tool` fields above. A long delegate (a
+     *  DCF build runs for minutes) narrates each step; keeping only the last
+     *  line threw that narration away. Absent on history recorded before the
+     *  feed existed. */
+    feed?: ProgressFeedItem[];
     status: "in_progress" | "completed" | "error";
     summary?: string;
     /** The caller's task when a nested delegate_to_agent made this dispatch;
@@ -91,6 +105,48 @@ function groupStatus(tasks: ProgressTask[]) {
 }
 
 /**
+ * A task's full running commentary — every note and tool call, in order —
+ * folded under its row. The scroller stays pinned to the newest line while the
+ * task is live, so a minutes-long delegate (a DCF build) reads as a ticker
+ * rather than a frozen first page.
+ */
+function TaskFeed({ feed, live }: { feed: ProgressFeedItem[]; live: boolean }) {
+    const scrollRef = useRef<HTMLDivElement>(null);
+    useEffect(() => {
+        const el = scrollRef.current;
+        if (el && live) el.scrollTop = el.scrollHeight;
+    }, [feed.length, live]);
+    return (
+        <div
+            ref={scrollRef}
+            className="custom-scrollbar mt-1 max-h-36 space-y-0.5 overflow-y-auto border-l border-sep pl-2"
+        >
+            {feed.map((item, index) => {
+                const isLatest = index === feed.length - 1;
+                // The agent's own words carry the row; tool calls are plumbing
+                // and read a register quieter.
+                if (item.kind === "note") {
+                    return (
+                        <div key={index} className="flex items-start gap-1.5 text-[11px] leading-4 text-foreground/75">
+                            {live && isLatest && (
+                                <span className="mt-1.5 size-1 shrink-0 animate-pulse rounded-full bg-blue-500" />
+                            )}
+                            <span className="min-w-0 break-words">{item.text}</span>
+                        </div>
+                    );
+                }
+                return (
+                    <div key={index} className="flex items-center gap-1.5 text-[10px] leading-4 text-muted-foreground/70">
+                        <Wrench className="size-2.5 shrink-0" />
+                        <span className="fin-figure truncate">{item.text}</span>
+                    </div>
+                );
+            })}
+        </div>
+    );
+}
+
+/**
  * Collapsed one-line progress pill that sits atop an assistant reply. Shows the
  * current task (or "Done") + a step count; click to expand the per-task list
  * (status icon + task description + a muted "tool · summary" sub-line).
@@ -98,6 +154,7 @@ function groupStatus(tasks: ProgressTask[]) {
 export function ChatProgressPill({ tasks, isComplete }: { tasks: ProgressTask[]; isComplete: boolean }) {
     const [expanded, setExpanded] = useState(false);
     const [activeGroup, setActiveGroup] = useState<ProgressAgent | "uncategorized" | null>(null);
+    const { describeAgent } = useAgentRoster();
 
     const doneCount = tasks.filter((t) => t.status === "completed" || t.status === "error").length;
     const running = tasks.find((t) => t.status === "in_progress");
@@ -133,10 +190,17 @@ export function ChatProgressPill({ tasks, isComplete }: { tasks: ProgressTask[];
                 )}
                 {agents.length > 0 && (
                     <span className="hidden max-w-[18ch] truncate text-muted-foreground/90 sm:inline">
-                        {agents.map((agent) => agentMeta[agent].label.replace(" agent", "")).join(", ")}
+                        {agents.map((agent) => agentLabel(agent).replace(" agent", "")).join(", ")}
                     </span>
                 )}
                 <span className="text-foreground/80 truncate max-w-[40ch]">{label}</span>
+                {/* The live ticker: the running task's own latest line, visible
+                    without expanding — the whole trail is inside. */}
+                {!isComplete && running?.note && running.note !== label && (
+                    <span className="hidden max-w-[36ch] truncate text-muted-foreground/80 md:inline">
+                        {running.note}
+                    </span>
+                )}
                 <span>· {count}</span>
                 {expanded ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
             </button>
@@ -190,15 +254,25 @@ export function ChatProgressPill({ tasks, isComplete }: { tasks: ProgressTask[];
                                     {group.tasks.map((t) => (
                                         <div key={t.taskId} className="flex items-start gap-2 py-1">
                                             <span className="mt-0.5 flex-shrink-0">{statusIcon(t.status)}</span>
-                                            <div className="min-w-0">
+                                            <div className="min-w-0 flex-1">
                                                 <div className="text-foreground/90">{t.description || t.taskId}</div>
-                                                {/* The task names the row; the tool and the
-                                                    result are detail under it. Kept on one
-                                                    truncating line so a long tool argument
-                                                    can't push the next task off the list. */}
-                                                {(t.note || t.tool || t.summary) && (
+                                                {/* The full trail when we have it; the old
+                                                    latest-only line for history recorded
+                                                    before the feed existed. */}
+                                                {t.feed && t.feed.length > 0 ? (
+                                                    <TaskFeed feed={t.feed} live={t.status === "in_progress"} />
+                                                ) : (
+                                                    (t.note || t.tool) && (
+                                                        <div className="truncate text-[11px] text-muted-foreground">
+                                                            {t.note || t.tool}
+                                                        </div>
+                                                    )
+                                                )}
+                                                {/* The result line, kept apart from the trail:
+                                                    it is the task's outcome, not a step of it. */}
+                                                {t.summary && (
                                                     <div className="truncate text-[11px] text-muted-foreground">
-                                                        {[t.note || t.tool, t.summary].filter(Boolean).join(" · ")}
+                                                        {t.summary}
                                                     </div>
                                                 )}
                                             </div>

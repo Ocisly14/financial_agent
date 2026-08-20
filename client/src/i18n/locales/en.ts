@@ -50,6 +50,8 @@ const en = {
     },
     charts: {
         marketWorkspace: "Market charts",
+        modelWorkspace: "DCF model",
+        modelTabs: "DCF workbooks",
         symbolTabs: "Symbols",
         studyCount: "{{count}} studies",
         collapseWorkspace: "Collapse market charts",

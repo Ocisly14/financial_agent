@@ -6,6 +6,9 @@ import { SessionState } from "../sessionState.ts";
 import { ModelRouter } from "../../infra/llm/provider.ts";
 import type { GenerateResult, LlmMessage, LlmProvider } from "../../infra/llm/provider.ts";
 import { McpToolRegistry } from "../../../mcp_tools/toolRegistry.ts";
+import { TURN_PROGRESS_MARKER } from "../orchestrator.ts";
+import { orchestratorPrompt } from "../../agent/prompts/orchestratorPrompt.ts";
+import { researchPrompt } from "../../agent/research/researchPrompt.ts";
 
 /**
  * A provider caches a request by byte prefix, so what a step pays for is whatever changed since the
@@ -312,4 +315,38 @@ test("the live revision is stated below the region, never inside the projection"
     `active_model_context still stamps the live revision, so every mutation splits it: ${JSON.stringify(active).slice(0, 300)}`);
   assert.equal(active["model_id"], "m1", "the model id stays — it does not change between steps");
   assert.ok(JSON.stringify(active).includes('"revision":7'), "the slice keeps the revision it was read at, as data");
+});
+
+test("the orchestrator prompt cuts at its own marker, and the region really is last", () => {
+  // The orchestrator/research loops reuse the same split with their own marker. Two things must
+  // hold or their caching silently dies: the split honours the custom marker, and the rendered
+  // template keeps every per-step change inside the region (i.e. the region reaches END of prompt,
+  // so nothing volatile can sit below it).
+  const marker = TURN_PROGRESS_MARKER;
+  const progress = `${marker}\n${"p".repeat(30_000)}\n\nTake your next action now.`;
+  const prompt = `Current Date: 2026-08-19\n\n[CONVERSATION SO FAR]\nuser: value AAPL\n\n${progress}`;
+
+  const step1 = splitForPromptCache("system", prompt, undefined, marker);
+  assert.equal(step1.messages.length, 3);
+  assert.equal(cached(step1.messages), 2, "system and the pre-region prefix are marked");
+  assert.equal(step1.messages.map((m) => m.content).slice(1).join(""), prompt,
+    "cutting at the custom marker must not change what the model reads");
+  assert.equal(progressRegion(prompt, marker), progress, "the region runs from the marker to the end");
+
+  // Template guard: every slot that can change BETWEEN STEPS of one turn must sit below the
+  // marker — one above it moves the divergence point to the top of the prompt and no breakpoint
+  // is ever reachable. {{threads}} is the proven case: a dispatch opens a thread mid-turn, and
+  // with the listing in the system prompt a two-step turn read back zero cached tokens.
+  for (const template of [orchestratorPrompt.prompt, researchPrompt.prompt]) {
+    const at = template.indexOf(marker);
+    assert.ok(at > 0, "the marker exists in the template");
+    const belowMarkerSlots = [...template.slice(at).matchAll(/\{\{\s*([\w.]+)\s*\}\}/g)].map((m) => m[1]);
+    for (const slot of belowMarkerSlots) {
+      assert.ok(["turnProgress", "threads"].includes(slot!),
+        `slot {{${slot}}} below the marker is not in the volatile allowlist — if it is per-step, fine, add it; if not, it belongs above`);
+    }
+  }
+  assert.ok(!orchestratorPrompt.system.includes("{{threads}}")
+    && orchestratorPrompt.prompt.indexOf("{{threads}}") > orchestratorPrompt.prompt.indexOf(marker),
+    "the live thread listing changes mid-turn, so it must render below the marker, never in the system prompt");
 });

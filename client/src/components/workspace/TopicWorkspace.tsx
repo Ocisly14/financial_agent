@@ -332,6 +332,8 @@ export function TopicWorkspace({
             modelTabs={modelTabs}
             modelPane={modelPane}
             modelFocusRequest={model.focusRequest}
+            activeModelId={model.activeModelId}
+            onSelectModel={model.setActiveModelId}
             readOnly={demo !== undefined}
         />
     ) : null;

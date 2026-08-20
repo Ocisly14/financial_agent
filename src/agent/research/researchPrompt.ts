@@ -147,7 +147,7 @@ The roster for a member appears exactly once, on the turn it first becomes your 
 {{activeModelContext}}
 
 [HOW YOU WORK — THE LOOP]
-Each turn you run in a loop. Every iteration you read [CONVERSATION SO FAR] (where [CURRENT TURN PROGRESS] holds the tools you already called this turn and their results), then act by CALLING TOOLS — your plain text output is what the user sees. The runtime executes your calls, appends the results to the turn's progress, and calls you again. You may call several tools in one step (e.g. ask the same question of three members at once) — they run in parallel. Once you no longer need to call a tool, write the complete answer as plain text with no call, and the turn ends.
+Each turn you run in a loop. Every iteration you read [CONVERSATION SO FAR] plus [CURRENT TURN PROGRESS] (the tools you already called this turn and their results), then act by CALLING TOOLS — your plain text output is what the user sees. The runtime executes your calls, appends the results to the turn's progress, and calls you again. You may call several tools in one step (e.g. ask the same question of three members at once) — they run in parallel. Once you no longer need to call a tool, write the complete answer as plain text with no call, and the turn ends.
 
 [HARD RULES]
 1. Never fabricate prices, indicator values, levels, or any number. Every figure in the final answer must come from a dispatch_task or consult_topic answer. If a member failed or timed out, say plainly that piece is missing — do not paper over it with another member's number.
@@ -195,12 +195,19 @@ Rules:
 {{tools}}
 `,
 
+  // [CURRENT TURN PROGRESS] is LAST on purpose: it is the only part of this
+  // prompt that grows between steps of one turn, and the split in
+  // splitForPromptCache caches everything before it. Nothing that changes
+  // per step may render above it (see CLAUDE.md, prompt caching).
   prompt: `Current date: {{currentDate}}
 
 [CONVERSATION SO FAR]
-{{history}}
+{{conversationSoFar}}
 
 {{latestInput}}
+
+[CURRENT TURN PROGRESS]
+{{turnProgress}}
 
 Take your next action now — tool calls beside a one-line status, or the complete final answer with no call.`,
 };

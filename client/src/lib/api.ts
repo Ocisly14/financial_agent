@@ -492,9 +492,28 @@ export class StreamingApiClient {
         // Create new AbortController for this request
         const abortController = new AbortController();
         this.activeStreams.set(requestKey, abortController);
-        
+
+        // Idle timeout, not a wall-clock cap. A DCF build streams progress for
+        // 20+ minutes; a fixed AbortSignal.timeout() killed exactly those runs
+        // — the stream it aborted was healthy and the backend finished anyway.
+        // What a timeout is FOR is a stream that went silent, so the timer
+        // resets on every chunk received and only sustained silence aborts.
+        // 17 minutes of silence covers the 15-minute trading approval wait,
+        // during which the backend sends nothing.
+        const IDLE_TIMEOUT_MS = 17 * 60 * 1000;
+        const idleController = new AbortController();
+        let idleTimer: ReturnType<typeof setTimeout> | undefined;
+        const armIdleTimeout = () => {
+            clearTimeout(idleTimer);
+            idleTimer = setTimeout(
+                () => idleController.abort(new DOMException("Stream idle timeout", "TimeoutError")),
+                IDLE_TIMEOUT_MS,
+            );
+        };
+
         // Clean up on completion
         const cleanup = () => {
+            clearTimeout(idleTimer);
             this.activeStreams.delete(requestKey);
         };
         
@@ -527,13 +546,15 @@ export class StreamingApiClient {
         };
 
         try {
+            armIdleTimeout();
             const response = await fetch(`${BASE_URL}/api/chat`, {
                 method: 'POST',
                 headers,
                 body,
-                // Use combined signal for both timeout and manual abort
+                // Combined signal: sustained silence or manual abort — never
+                // total elapsed time while frames are still arriving.
                 signal: AbortSignal.any([
-                    AbortSignal.timeout(17 * 60 * 1000), // covers 15-minute trading approval waits
+                    idleController.signal,
                     abortController.signal,
                 ]),
             });
@@ -775,6 +796,8 @@ export class StreamingApiClient {
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) break;
+                // Bytes arrived — the stream is alive, push the deadline out.
+                armIdleTimeout();
                 buffer += decoder.decode(value, { stream: true });
                 const lines = buffer.split('\n');
                 buffer = lines.pop() || '';
@@ -835,8 +858,10 @@ export class StreamingApiClient {
                     return;
                 }
                 if (name === "TimeoutError") {
+                    // Only sustained silence trips this (see armIdleTimeout) —
+                    // an actively streaming run can no longer time out here.
                     onError(
-                        "Request timed out during analysis. The analysis may be too complex - please try a simpler request.",
+                        "No data received from the server for a long time, so the connection was closed. The backend may still be working — check back shortly or try again.",
                     );
                     return;
                 }

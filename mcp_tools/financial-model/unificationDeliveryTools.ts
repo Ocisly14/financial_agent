@@ -1,6 +1,7 @@
 import { validate } from "./schemas.ts";
 import { AXIS_INPUT, SYMBOL_INPUT, dimensionContext, resolveModel, runKey, runStateStore, subagentTool,
   type MappingSubagentDeps } from "./mappingShared.ts";
+import { FinancialModelService } from "../../src/financial-model/service.ts";
 import type { RegisteredTool, ToolExecutionContext } from "../toolRegistry.ts";
 import type { JsonObject, JsonSchema, JsonValue } from "../../src/framework/types.ts";
 import type { Period } from "../../src/financial-model/types.ts";
@@ -98,7 +99,7 @@ export function createUnificationAgentTools(deps: MappingSubagentDeps): Register
     return state;
   };
 
-  const evaluate = (state: UnificationRunState): JsonValue => {
+  const evaluate = (state: UnificationRunState, context: ToolExecutionContext): JsonValue => {
     const decision = state.draft!;
     const completeness = checkUnificationCompleteness({ inventory: state.inventory, decision,
       requestedPeriods: state.requestedPeriods });
@@ -115,13 +116,31 @@ export function createUnificationAgentTools(deps: MappingSubagentDeps): Register
     // Only a clean, fully verified candidate crosses the agent boundary — by being written to the
     // store, where spine_mapping reads it. Persisting here, on acceptance, is what lets the whole
     // run go through the ordinary dispatch path with no host waiting outside to do it.
+    let committedRevision: number | undefined;
     if (findings.length === 0) {
       const review = deps.sourceReviewStore.get(state.modelId);
       if (!review) throw new Error(`source review for model ${state.modelId} disappeared mid-run`);
       deps.sourceReviewStore.save(state.modelId, { ...review, unifiedStatements: candidate.artifact });
+      // The store write and the revision are one act. Without the revision the model's own history
+      // jumps from "created" to "spine committed", hiding the heaviest judgment in the foundation —
+      // and nothing watching revisions (the workspace panel, a resumed agent) can tell this ran.
+      const service = new FinancialModelService(deps.modelStore, context.sessionId);
+      const current = service.getModel(state.modelId);
+      if (!("currentWorkbook" in current)) throw new Error("default model context expected");
+      committedRevision = service.recordStatementsUnified(state.modelId, current.currentWorkbook.revision, {
+        rowCount: artifact.rows.length,
+        breakdownRowCount: breakdowns.breakdownRows.length,
+        periodIds: [...artifact.periods],
+        restatementCount: artifact.restatements.length,
+        unresolvedFindingCount: 0,
+      }).revision;
     }
     return { status: findings.length === 0 ? "accepted" : "incomplete",
-      ...(findings.length === 0 ? { stored: true, next: "dispatch spine_mapping" } : {}),
+      ...(committedRevision === undefined ? {} : {
+        stored: true, next: "dispatch spine_mapping",
+        // model_id + revision are what make a tool result refresh the workspace panel.
+        model_id: state.modelId, revision: committedRevision,
+      }),
       rows: artifact.rows.length, breakdownRows: breakdowns.breakdownRows.length,
       restatements: artifact.restatements.length,
       rollupBreaks: artifact.rollupBreaks.filter((issue) => issue.material !== false).length,
@@ -189,7 +208,7 @@ export function createUnificationAgentTools(deps: MappingSubagentDeps): Register
     const state = requireRun(context);
     validate(raw, UNIFICATION_DECISION_SCHEMA, "$", true);
     state.draft = raw["decision"] as unknown as UnificationDecision;
-    return evaluate(state);
+    return evaluate(state, context);
   });
 
   const startDraft = subagentTool({
@@ -219,7 +238,7 @@ export function createUnificationAgentTools(deps: MappingSubagentDeps): Register
     state.draft = applyUnificationPatch(state.draft, raw["patch"] as unknown as UnificationPatch);
     // Preserve the existing submit → patch → findings workflow. Before the first validation, a
     // batch only updates the draft so the model is not flooded with premature completeness findings.
-    return state.hasEvaluation ? evaluate(state) : { status: "draft_updated", rows: state.draft.rows.length } as unknown as JsonValue;
+    return state.hasEvaluation ? evaluate(state, context) : { status: "draft_updated", rows: state.draft.rows.length } as unknown as JsonValue;
   });
 
   const validateDraft = subagentTool({
@@ -230,7 +249,7 @@ export function createUnificationAgentTools(deps: MappingSubagentDeps): Register
     const state = requireRun(context);
     if (!state.draft) throw new Error("no draft on file — add your first batch with patch_unification_decision first");
     validate(raw, EMPTY_OBJECT_SCHEMA, "$", true);
-    return evaluate(state);
+    return evaluate(state, context);
   });
 
   return [load, axes, breakdown, submit, startDraft, patch, validateDraft];

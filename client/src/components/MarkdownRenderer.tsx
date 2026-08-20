@@ -351,7 +351,15 @@ const CustomTable: React.FC<{ children: React.ReactNode }> = ({ children }) => (
           worked too but breaks the row hover background; sticking
           with `border-collapse` and per-cell padding instead.
         */}
-        <table className="w-full text-left text-sm border-collapse whitespace-nowrap">
+        {/*
+          `min-w-full w-max`, never `w-full`. With `w-full` the table is pinned to the container
+          width while `whitespace-nowrap` forbids cells from shrinking to fit — so the browser
+          squeezes the columns and the text spills across cell boundaries, which is how a valuation
+          table rendered "Perpetuity growth (2.5%)" on top of its own enterprise value. The wrapper's
+          `overflow-x-auto` never engaged, because the table never asked for more room than it had.
+          `w-max` lets it size to its content and hands the overflow to the scroller.
+        */}
+        <table className="min-w-full w-max text-left text-sm border-collapse whitespace-nowrap">
             {children}
         </table>
     </div>

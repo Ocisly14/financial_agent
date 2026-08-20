@@ -233,7 +233,8 @@ export function buildLoopToolSpecs(tools: ToolDefinition[]): LlmToolSpec[] {
 
 /** 每步的请求前缀(tools + system + task)在 dispatch 内一字不变,只有
  * [PROGRESS SO FAR] 之后在长。在 marker 处切开并打 cache 标记,provider 就能
- * 把静态前缀走缓存读,每步只为动态尾部付全价。marker 缺失时退化为整段发送。 */
+ * 把静态前缀走缓存读,每步只为动态尾部付全价。marker 缺失时退化为整段发送。
+ * orchestrator/research 循环用同一套切法,只是 marker 是 [CURRENT TURN PROGRESS]。 */
 const PROGRESS_MARKER = "[PROGRESS SO FAR]";
 
 /**
@@ -270,9 +271,9 @@ export type ProgressCache = { progress: string; cuts: readonly number[] };
  * to the 1.25x write price. A cut, once made, therefore stays a cut; a step only adds a new one
  * after it, and only once enough has accrued to be worth its own write.
  */
-export function splitForPromptCache(system: string, prompt: string, previous?: ProgressCache):
-{ messages: LlmMessage[]; cuts: number[] } {
-  const index = prompt.indexOf(PROGRESS_MARKER);
+export function splitForPromptCache(system: string, prompt: string, previous?: ProgressCache,
+  marker: string = PROGRESS_MARKER): { messages: LlmMessage[]; cuts: number[] } {
+  const index = prompt.indexOf(marker);
   if (index <= 0) {
     return { messages: [{ role: "system", content: system, cache: true }, { role: "user", content: prompt }], cuts: [] };
   }
@@ -308,8 +309,8 @@ export function splitForPromptCache(system: string, prompt: string, previous?: P
 }
 
 /** The progress region of a rendered prompt, or undefined when it carries none. */
-export function progressRegion(prompt: string): string | undefined {
-  const index = prompt.indexOf(PROGRESS_MARKER);
+export function progressRegion(prompt: string, marker: string = PROGRESS_MARKER): string | undefined {
+  const index = prompt.indexOf(marker);
   return index <= 0 ? undefined : prompt.slice(index);
 }
 

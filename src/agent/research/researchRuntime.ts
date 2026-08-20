@@ -49,7 +49,8 @@ import { mapWithConcurrency } from "./concurrency.ts";
 import { buildIndexedTurns, turnCountOf } from "../topicDigest.ts";
 import { renderExternalDelta, renderRoster, type MemberFacts } from "./memberContext.ts";
 import { RESEARCH_TOOL_SPECS } from "./researchPrompt.ts";
-import type { ActiveWorkspaceModel } from "../../framework/orchestrator.ts";
+import { TURN_PROGRESS_MARKER, type ActiveWorkspaceModel } from "../../framework/orchestrator.ts";
+import { progressRegion, splitForPromptCache, type ProgressCache } from "../../framework/subagent.ts";
 import {
   requireRangeDays,
   ResearchToolset,
@@ -179,14 +180,20 @@ export class ResearchRuntime {
 
     let finalReply = "";
 
+    // Same rolling-breakpoint scheme as the Topic orchestrator, scoped to this
+    // turn: the previous step's [CURRENT TURN PROGRESS] region and its cuts.
+    let previousCache: ProgressCache | undefined;
+
     for (let step = 1; step <= MAX_STEPS; step++) {
       // Same boundary as the Topic orchestrator: compact older history as soon
       // as a prior step crosses the threshold, never this in-flight turn.
       await maybeCompact(state, this.modelRouter, turn);
+      const historyParts = this.renderHistoryParts(state, turn);
       const rendered = this.renderer.render(this.prompt, {
         currentDate: new Date().toISOString().slice(0, 10),
         latestInput: formatLatestInput(input.userMessage, Boolean(input.inputResponse)),
-        history: this.renderHistory(state, turn),
+        conversationSoFar: historyParts.conversationSoFar,
+        turnProgress: historyParts.turnProgress,
         roster,
         externalDelta,
         activeModelContext: input.activeModel
@@ -197,12 +204,13 @@ export class ResearchRuntime {
       });
 
       let parsed: ResearchStep;
+      // Cache split, same rationale as the Topic orchestrator: everything
+      // before [CURRENT TURN PROGRESS] is byte-stable across this turn's steps.
+      const progressSent = progressRegion(rendered.prompt, TURN_PROGRESS_MARKER);
+      const split = splitForPromptCache(rendered.system, rendered.prompt, previousCache, TURN_PROGRESS_MARKER);
       try {
         const completion = await this.modelRouter.generate(
-          [
-            { role: "system", content: rendered.system },
-            { role: "user", content: rendered.prompt },
-          ],
+          split.messages,
           // Native tool calling: the provider holds the REAL schemas from RESEARCH_TOOL_SPECS and
           // returns structured calls, so the hand-written JSON step protocol — and every formatting
           // slip it tolerated — is gone. Plain text is what the user sees; no calls means the turn
@@ -213,6 +221,7 @@ export class ResearchRuntime {
         parsed = { reply: completion.text,
           toolCalls: (completion.toolCalls ?? []).map((call) => ({ name: call.name, input: (call.input ?? {}) as JsonObject })) };
         state.recordPromptTokens(completion.metrics.tokens_in);
+        previousCache = progressSent === undefined ? undefined : { progress: progressSent, cuts: split.cuts };
       } catch (error) {
         state.record("orchestrator", "error", {
           scope: "main",
@@ -401,7 +410,10 @@ export class ResearchRuntime {
    * the controller asked each member and what it got back — the thing §4.2.1
    * says replaces a re-rendered roster.
    */
-  private renderHistory(state: SessionState, turn: number): string {
+  /** Prior conversation and this turn's progress, rendered apart: the prompt
+   *  template puts the progress LAST so splitForPromptCache can cache
+   *  everything before it (see the template's own comment). */
+  private renderHistoryParts(state: SessionState, turn: number): { conversationSoFar: string; turnProgress: string } {
     const compaction = state.compactionCache();
     const prior: string[] = [];
     const current: string[] = [];
@@ -426,8 +438,10 @@ export class ResearchRuntime {
       parts.push("", "[RECENT CONVERSATION]");
     }
     parts.push(prior.length ? prior.join("\n") : "(No earlier conversation yet.)");
-    if (current.length) parts.push("", "[CURRENT TURN PROGRESS]", current.join("\n"));
-    return parts.join("\n");
+    return {
+      conversationSoFar: parts.join("\n"),
+      turnProgress: current.length ? current.join("\n") : "(none yet)",
+    };
   }
 
   private renderEventLine(event: SessionEvent, isCurrent: boolean): string | null {

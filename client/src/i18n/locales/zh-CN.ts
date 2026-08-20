@@ -50,6 +50,8 @@ const zhCN = {
     },
     charts: {
         marketWorkspace: "行情图表区",
+        modelWorkspace: "DCF 模型",
+        modelTabs: "DCF 工作簿",
         symbolTabs: "股票标的",
         studyCount: "{{count}} 个指标",
         collapseWorkspace: "折叠行情图表",

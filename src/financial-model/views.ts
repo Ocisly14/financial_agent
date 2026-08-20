@@ -28,6 +28,16 @@ export type ModelReadSection = typeof MODEL_READ_SECTIONS[number];
 export type RevisionChange =
   | { kind: "model_created" }
   | { kind: "statements_staged"; rowCount: number; candidateCount: number; mappedLineItemIds: string[]; periodIds: string[] }
+  /**
+   * The unified multi-year statements were accepted and stored for this model. The artifact itself
+   * lives in the source-review store — it is evidence spine_mapping reads, not workbook cells — but
+   * the DECISION is the heaviest judgment in the whole data foundation (how years of XBRL concepts
+   * were partitioned into rows, which restatements were resolved which way), and a model whose own
+   * history skips from "created" to "spine committed" leaves no trace of it. Extraction already
+   * lands as `statements_staged`; this is the middle stage that was missing.
+   */
+  | { kind: "statements_unified"; rowCount: number; breakdownRowCount: number; periodIds: string[];
+      restatementCount: number; unresolvedFindingCount: number }
   | { kind: "fact_replaced"; lineItemId: string; periodId: string }
   | { kind: "assumption_set"; lineItemId: string; periodIds: string[] }
   | { kind: "line_item_source_set"; lineItemId: string; range: "historical" | "forecast"; source: "actual" | "assumption" | "formula" | "none" }

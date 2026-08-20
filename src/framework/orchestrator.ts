@@ -1,7 +1,7 @@
 import { formatList, PromptRenderer } from "./prompt.ts";
 import type { SkillRegistry } from "./skill.ts";
 import type { Dispatcher } from "./dispatcher.ts";
-import { buildLoopToolSpecs, type SubagentRegistry } from "./subagent.ts";
+import { buildLoopToolSpecs, progressRegion, splitForPromptCache, type ProgressCache, type SubagentRegistry } from "./subagent.ts";
 import type { ModelRouter } from "../infra/llm/provider.ts";
 import { formatLatestInput, type LiveThread, type SessionRegistry, SessionState } from "./sessionState.ts";
 import { maybeCompact } from "./contextCompaction.ts";
@@ -13,6 +13,11 @@ import type { AgentKind, JsonObject, OrchestratorToolCall, SkillResult, TaskRequ
 
 /** Max orchestrator loop iterations per user turn — a runaway-loop backstop. */
 const MAX_STEPS = 6;
+
+/** The one growing region of the orchestrator prompt — everything before it is
+ *  byte-stable across a turn's steps and cacheable. The prompt template renders
+ *  it LAST for exactly this reason. */
+export const TURN_PROGRESS_MARKER = "[CURRENT TURN PROGRESS]";
 
 
 /** A compact, automatically derived description of the model open in the UI.
@@ -176,20 +181,23 @@ export class OrchestratorRuntime {
         }),
     );
 
+    // What the previous step sent as its [CURRENT TURN PROGRESS] region and
+    // where it cut it — same rolling-breakpoint scheme the subagent loop uses,
+    // scoped to this turn (a new turn starts a new region).
+    let previousCache: ProgressCache | undefined;
+
     for (let step = 1; step <= MAX_STEPS; step++) {
       // Run before every prompt, not just at the start of a user turn. The
       // cutoff is deliberately before `turn`, so this never summarizes the
       // current request or its in-flight results.
       await maybeCompact(state, this.modelRouter, turn);
       const proj = state.projectForPrompt(turn);
-      const history = proj.currentTurnProgress
-        ? `${proj.conversationSoFar}\n\n[CURRENT TURN PROGRESS]\n${proj.currentTurnProgress}`
-        : proj.conversationSoFar;
 
       const rendered = this.renderer.render(this.prompt, {
         currentDate: new Date().toISOString().slice(0, 10),
         latestInput: formatLatestInput(input.userMessage, Boolean(input.inputResponse)),
-        history,
+        conversationSoFar: proj.conversationSoFar,
+        turnProgress: proj.currentTurnProgress || "(none yet)",
         threads: formatThreads(state.liveThreads()),
         activeModelContext: input.activeModel
           ? `The user is currently viewing this financial model:\n- Model ID: ${input.activeModel.modelId}\n- Symbol: ${input.activeModel.symbol}\n- Created: ${input.activeModel.createdAt}\n- Last updated: ${input.activeModel.updatedAt}\n- Current revision: ${input.activeModel.currentRevision}\n- Lifecycle stage: ${input.activeModel.lifecycleStage}\nIf their request concerns this DCF, prefer continuing it: dispatch financial_modeling with this model ID in model_id so the subagent can refresh its state first. This is advisory context, not a command to ignore evidence that a different model is needed.`
@@ -206,12 +214,15 @@ export class OrchestratorRuntime {
 
       let completionText: string;
       let completionCalls: OrchestratorToolCall[];
+      // Cut the prompt at [CURRENT TURN PROGRESS] and stamp cache breakpoints:
+      // tools + system + everything before the region is byte-stable across a
+      // turn's steps, so without this every step re-paid the whole prompt at
+      // full price (measured: a DCF turn's final step at in=216k, cache_r=0).
+      const progressSent = progressRegion(rendered.prompt, TURN_PROGRESS_MARKER);
+      const split = splitForPromptCache(rendered.system, rendered.prompt, previousCache, TURN_PROGRESS_MARKER);
       try {
         const completion = await this.modelRouter.generate(
-          [
-            { role: "system", content: rendered.system },
-            { role: "user", content: rendered.prompt },
-          ],
+          split.messages,
           { modelClass: "LARGE", temperature: 0.2, metadata: { mode: "orchestrator" },
             ...(readOnlyConsultation ? {} : { tools: nativeTools }) },
         );
@@ -219,6 +230,7 @@ export class OrchestratorRuntime {
         completionCalls = (completion.toolCalls ?? [])
           .map((call) => ({ name: call.name, input: (call.input ?? {}) as JsonObject }));
         state.recordPromptTokens(completion.metrics.tokens_in);
+        previousCache = progressSent === undefined ? undefined : { progress: progressSent, cuts: split.cuts };
       } catch (error) {
         state.record("orchestrator", "error", { scope: "main", message: error instanceof Error ? error.message : String(error) });
         break;

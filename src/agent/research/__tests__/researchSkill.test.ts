@@ -99,8 +99,10 @@ function makeRuntime(options: { completions: FakeCompletion[]; skills: SkillRegi
     async generate(messages: LlmMessage[], genOptions: GenerateOptions) {
       const step = options.completions[call] ?? options.completions.at(-1) ?? { text: "" };
       call += 1;
-      const userContent = messages.find((m) => m.role === "user")?.content ?? "";
-      lastPrompts.push(String(userContent));
+      // The runtime cache-splits the prompt into several user blocks; what the
+      // model reads is their concatenation, so that is what the probe records.
+      const userContent = messages.filter((m) => m.role === "user").map((m) => m.content).join("");
+      lastPrompts.push(userContent);
       return {
         text: step.text,
         ...(step.toolCalls ? { toolCalls: step.toolCalls } : {}),

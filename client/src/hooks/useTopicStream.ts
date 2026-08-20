@@ -212,12 +212,17 @@ export function useTopicStream(
                                 // preceding dispatch, so there is no task to
                                 // show; the tool name is the best label there.
                                 rec.description = rec.description || step.message || "";
+                                if (step.message) rec.feed = [...(rec.feed ?? []), { kind: "tool", text: step.message }];
                                 if (rec.status !== "completed" && rec.status !== "error") rec.status = "in_progress";
                             } else if (step.name === "note") {
                                 // Written between tool calls, so it lands after
                                 // the `tool_call` frame it explains and reads as
-                                // the row's current activity.
+                                // the row's current activity. `note` keeps only
+                                // the latest line (the collapsed pill's ticker);
+                                // `feed` keeps them all — a long delegate's
+                                // step-by-step narration is the point of it.
                                 rec.note = step.message || rec.note;
+                                if (step.message) rec.feed = [...(rec.feed ?? []), { kind: "note", text: step.message }];
                                 if (rec.status !== "completed" && rec.status !== "error") rec.status = "in_progress";
                             } else if (step.name === "task_done") {
                                 rec.status = step.status === "error" ? "error" : "completed";

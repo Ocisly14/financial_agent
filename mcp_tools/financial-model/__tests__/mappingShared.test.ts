@@ -362,3 +362,49 @@ test("an accepted spine mapping commits itself, labelling detail rows from break
   const stream = view.currentWorkbook.sections.revenue.find((row) => row.lineItemId === "revenue.products");
   assert.equal(stream?.label, "Products", JSON.stringify(view.currentWorkbook.sections.revenue.map((r) => r.lineItemId)));
 });
+
+test("an accepted unification lands a revision, so the model's own history shows its foundation", async () => {
+  // The artifact lives in the source-review store, not the workbook — but without a revision the
+  // model's history jumped from "created" straight to "spine committed", hiding the heaviest
+  // judgment in the whole data foundation, and nothing watching revisions (the workspace panel, a
+  // resumed agent) could tell this stage had run.
+  const { sourceReviewStore, modelIds, deps } = setup(["TSLA"]);
+  sourceReviewStore.save(modelIds[0]!, review({ presentationExtracts: [{ filing: { accession: "a" },
+    calculationRelations: [], negatedConcepts: [], statements: [] } as never] }));
+  const tools = createUnificationAgentTools(deps);
+  const before = deps.modelStore.getMeta(modelIds[0]!)!.currentRevision;
+  await data(byName(tools, "load_concept_inventory"), { symbol: "TSLA" }, { taskId: "t-unify" });
+
+  const accepted = await data<{ status: string; model_id?: string; revision?: number }>(
+    byName(tools, "submit_unification_decision"), { decision: { rows: [] } }, { taskId: "t-unify" });
+
+  assert.equal(accepted.status, "accepted");
+  assert.equal(accepted.model_id, modelIds[0]);
+  assert.equal(accepted.revision, before + 1, "acceptance advances the model's revision");
+  // model_id + revision together are what make a tool result refresh the workspace panel.
+  assert.equal(typeof accepted.revision, "number");
+
+  const summary = deps.modelStore.getRevision(modelIds[0]!, accepted.revision!)!.changeSummary;
+  const unified = (summary.changes as Array<{ kind: string; rowCount?: number }>).find((c) => c.kind === "statements_unified");
+  assert.ok(unified, "the revision names what happened");
+
+  // The stage does not advance: the workbook gains no history until spine_mapping commits facts.
+  assert.equal(deps.modelStore.getMeta(modelIds[0]!)!.lifecycleStage, "draft");
+});
+
+test("a decision with findings advances nothing — no store write, no revision", async () => {
+  const { sourceReviewStore, modelIds, deps } = setup(["TSLA"]);
+  sourceReviewStore.save(modelIds[0]!, review({ presentationExtracts: [{ filing: { accession: "a" },
+    calculationRelations: [], negatedConcepts: [], statements: [] } as never] }));
+  const tools = createUnificationAgentTools(deps);
+  const before = deps.modelStore.getMeta(modelIds[0]!)!.currentRevision;
+  await data(byName(tools, "load_concept_inventory"), { symbol: "TSLA" }, { taskId: "t2" });
+
+  const dirty = await data<{ status: string; revision?: number }>(byName(tools, "submit_unification_decision"),
+    { decision: { rows: [{ rowId: "ghost", statement: "income_statement", label: "Ghost",
+      components: [{ conceptQName: "x:Missing", weight: 1 }], rationale: "r" }] } }, { taskId: "t2" });
+
+  assert.equal(dirty.status, "incomplete");
+  assert.equal(dirty.revision, undefined);
+  assert.equal(deps.modelStore.getMeta(modelIds[0]!)!.currentRevision, before, "a dirty candidate must not move the model");
+});
