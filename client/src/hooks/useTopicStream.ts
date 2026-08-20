@@ -11,7 +11,6 @@ import type { StrategyApprovalDialogData } from "@/components/Dialog/StrategyApp
 import { useToast } from "@/hooks/use-toast";
 import { useTranslation } from "react-i18next";
 import type { ContentWithUser } from "@/components/chat/types";
-import { isProgressAgent } from "@/components/ChatProgressPill";
 import type { ProgressTask } from "@/components/ChatProgressPill";
 
 type ClientInterrupt = {
@@ -37,7 +36,7 @@ type ClientInterrupt = {
  * session never receives these frames at all.
  */
 export function useTopicStream(
-    agentId: UUID,
+    tenantId: UUID,
     topicId: UUID,
     options?: {
         onDirective?: (step: ProcessingStep) => void;
@@ -73,11 +72,11 @@ export function useTopicStream(
     // Strategy approval state populated by the backend approval event.
     const [pendingInterrupt, setPendingInterrupt] = useState<ClientInterrupt | null>(null);
 
-    const queryKey = useMemo(() => ["messages", agentId, topicId], [agentId, topicId]);
+    const queryKey = useMemo(() => ["messages", tenantId, topicId], [tenantId, topicId]);
     const { data: messages = [], isLoading: isHistoryLoading } = useQuery<ContentWithUser[]>({
         queryKey,
         queryFn: async () => {
-            const result = await apiClient.getMessages(agentId, topicId, { limit: 500 });
+            const result = await apiClient.getMessages(tenantId, topicId, { limit: 500 });
             return (result.messages ?? []) as ContentWithUser[];
         },
         refetchOnWindowFocus: false,
@@ -131,7 +130,7 @@ export function useTopicStream(
             let failed = false;
             try {
                 await streaming.sendMessageStream(
-                    agentId,
+                    tenantId,
                     trimmed,
                     topicId,
                     (step) => {
@@ -174,7 +173,7 @@ export function useTopicStream(
                                 action: {
                                     label: "Open",
                                     onClick: () => {
-                                        navigate(strategyId ? `/strategies/${agentId}/${strategyId}` : `/strategies/${agentId}`);
+                                        navigate(strategyId ? `/strategies/${tenantId}/${strategyId}` : `/strategies/${tenantId}`);
                                     },
                                 },
                             });
@@ -188,10 +187,14 @@ export function useTopicStream(
                             const map = tasksRef.current;
                             const rec: ProgressTask = { ...(map.get(id) ?? { taskId: id, description: "", status: "in_progress" }) };
                             if (step.name === "dispatch") {
-                                const data = step.data as { agent?: string; task?: string; thread_id?: string } | undefined;
+                                const data = step.data as { agent?: string; task?: string; thread_id?: string; parent_task_id?: string } | undefined;
                                 const task = data?.task;
                                 rec.description = task || rec.description || step.message || "";
-                                if (isProgressAgent(data?.agent)) rec.agent = data.agent;
+                                // The bare name, whatever it is: the pill buckets
+                                // unknown agents into "Other", and the topology
+                                // panel needs nested delegates by name.
+                                if (data?.agent) rec.agent = data.agent;
+                                if (data?.parent_task_id) rec.parentTaskId = data.parent_task_id;
                                 // Only the dispatch frame carries the thread —
                                 // the later progress/task_done frames for this
                                 // same row do not, so it must stick.
@@ -209,6 +212,17 @@ export function useTopicStream(
                                 // preceding dispatch, so there is no task to
                                 // show; the tool name is the best label there.
                                 rec.description = rec.description || step.message || "";
+                                if (step.message) rec.feed = [...(rec.feed ?? []), { kind: "tool", text: step.message }];
+                                if (rec.status !== "completed" && rec.status !== "error") rec.status = "in_progress";
+                            } else if (step.name === "note") {
+                                // Written between tool calls, so it lands after
+                                // the `tool_call` frame it explains and reads as
+                                // the row's current activity. `note` keeps only
+                                // the latest line (the collapsed pill's ticker);
+                                // `feed` keeps them all — a long delegate's
+                                // step-by-step narration is the point of it.
+                                rec.note = step.message || rec.note;
+                                if (step.message) rec.feed = [...(rec.feed ?? []), { kind: "note", text: step.message }];
                                 if (rec.status !== "completed" && rec.status !== "error") rec.status = "in_progress";
                             } else if (step.name === "task_done") {
                                 rec.status = step.status === "error" ? "error" : "completed";
@@ -283,7 +297,7 @@ export function useTopicStream(
             }
             return !failed;
         },
-        [agentId, topicId, isProcessing, isHistoryLoading, appendMessages, streaming, queryClient, navigate]
+        [tenantId, topicId, isProcessing, isHistoryLoading, appendMessages, streaming, queryClient, navigate]
     );
 
     const sendMessage = useCallback(
@@ -354,7 +368,7 @@ export function useTopicStream(
 
             try {
                 await streaming.sendMessageStream(
-                    agentId,
+                    tenantId,
                     answerText(request, answers),
                     topicId,
                     () => {}, // onStep
@@ -380,14 +394,14 @@ export function useTopicStream(
                 );
             }
         },
-        [agentId, streaming, updateInputRequests],
+        [tenantId, streaming, updateInputRequests],
     );
 
     const stop = useCallback(() => {
-        streaming.cancelStreamForAgent(agentId);
+        streaming.cancelStreamForAgent(tenantId);
         setIsProcessing(false);
         setStreamingText("");
-    }, [streaming, agentId]);
+    }, [streaming, tenantId]);
 
     const resolveApproval = useCallback(
         async (decision: "approve" | "reject") => {

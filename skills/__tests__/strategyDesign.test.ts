@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { SkillRegistry } from "../../src/framework/skill.ts";
 import { createReadSkillReferenceTool } from "../../src/framework/skillTools.ts";
-import { normalizePriceStrategyInput, priceStrategySchema } from "../../mcp_tools/trading/strategy/priceStrategy.ts";
+import { createCreateStrategyTool } from "../../mcp_tools/trading/strategyTools.ts";
 import { readFile } from "node:fs/promises";
 
 const SKILLS_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -90,44 +90,33 @@ test("strategy-design references are available through progressive disclosure", 
   assert.match(String(triggers.generation_context?.data["content"]), /rolling_change/);
 });
 
-test("every strategy example in the reference is a strategy the tool would accept", async () => {
-  const reference = await readFile(
-    path.join(SKILLS_ROOT, "strategy-design", "references", "trigger-selection.md"),
-    "utf8",
-  );
-  const blocks = [...reference.matchAll(/```json\n([\s\S]*?)\n```/g)].map((match) => match[1]!);
+const TRIGGER_REFERENCE = path.join(SKILLS_ROOT, "strategy-design", "references", "trigger-selection.md");
 
-  assert.equal(blocks.length, 3, "the reference should carry three worked plans");
-  for (const [index, block] of blocks.entries()) {
-    // Through the same path create_strategy uses, so an example that only looks
-    // right cannot teach a shape the schema rejects.
-    const parsed = priceStrategySchema.safeParse(
-      normalizePriceStrategyInput(JSON.parse(block) as Record<string, unknown>),
-    );
-    assert.ok(parsed.success, `example ${index + 1} rejected: ${JSON.stringify(parsed.error?.issues)}`);
-  }
+test("the decision table names exactly the triggers create_strategy accepts", async () => {
+  const reference = await readFile(TRIGGER_REFERENCE, "utf8");
+  // Second column of a decision-table row, which is a single inline-code trigger name.
+  const documented = [...reference.matchAll(/^\|[^|]+\|\s*`([a-z_]+)`\s*\|/gm)].map((match) => match[1]!);
+
+  // Read off the schema the model is actually shown, so a trigger the reference
+  // invents and a trigger it never documents both fail here.
+  const phases = createCreateStrategyTool().inputSchema["properties"]!["phases"] as Record<string, any>;
+  const declared = phases["items"]["properties"]["price_trigger"]["properties"]["type"]["enum"] as string[];
+
+  assert.deepEqual([...documented].sort(), [...declared].sort());
 });
 
-test("worked plans close a complete position and do not leave a stopped-out add live", async () => {
-  const reference = await readFile(
-    path.join(SKILLS_ROOT, "strategy-design", "references", "trigger-selection.md"),
-    "utf8",
-  );
-  const plans = [...reference.matchAll(/```json\n([\s\S]*?)\n```/g)]
-    .map((match) => JSON.parse(match[1]!) as { name: string; phases: Array<{
-      id: string; cancel_group?: string; action: { side: string; size: { type: string; value: number } } }> });
+test("the reference teaches the wiring rules and both executor limits, without worked plans", async () => {
+  const reference = await readFile(TRIGGER_REFERENCE, "utf8");
 
-  const pullback = plans.find((plan) => plan.name === "AAPL pullback")!;
-  for (const id of ["target", "stop"]) {
-    const phase = pullback.phases.find((candidate) => candidate.id === id)!;
-    assert.equal(phase.action.size.type, "pct_of_position");
-    assert.equal(phase.action.size.value, 100, `${id} must close the position completely`);
-  }
-  assert.equal(pullback.phases.find((phase) => phase.id === "target")!.cancel_group, "exit");
-  assert.equal(pullback.phases.find((phase) => phase.id === "stop")!.cancel_group, "exit");
+  assert.equal(/```/.test(reference), false, "the reference stays general: no worked strategy payloads");
 
-  const momentum = plans.find((plan) => plan.name === "SPY momentum turn")!;
-  assert.equal(momentum.phases.some((phase) => phase.id === "add"), false);
-  assert.equal(momentum.phases.find((phase) => phase.id === "target")!.cancel_group, "exit");
-  assert.equal(momentum.phases.find((phase) => phase.id === "stop")!.cancel_group, "exit");
+  // An exit is wired to the entry's actual fill, not to a level chosen in advance.
+  assert.match(reference, /activate_on: "first_fill"/);
+  assert.match(reference, /`price_anchor`[\s\S]{0,80}?`phase_fill`/);
+  assert.match(reference, /share one `cancel_group`/);
+
+  // The two executor limits the worked plans used to carry in their prose.
+  assert.match(reference, /aggregate position/);
+  assert.match(reference, /[Pp]er-leg position\s+accounting is required/);
+  assert.match(reference, /does not add after its entry/);
 });

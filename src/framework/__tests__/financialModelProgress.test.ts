@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { projectFinancialModelProgress } from "../subagent.ts";
+import { projectFinancialModelProgress } from "../../agent/financial-modeling/dcfBehavior.ts";
 
 /**
  * [PROGRESS SO FAR] is the financial_modeling agent's ENTIRE context between
@@ -195,4 +195,58 @@ test("workbook slices also obey a total context budget while retaining the curre
     slice.rows[0]!.lineItemId), ["second"]);
   assert.equal(projected.active_model_context.workbook_slices_evicted, 1);
   assert.ok(projected.active_model_context.workbook_slices_context_chars <= 120_000);
+});
+
+// ── delegated rounds ─────────────────────────────────────────────────────
+
+function delegationOutput(thread: string, taskId: string, summary: string): Output {
+  return {
+    name: "delegate_to_agent",
+    summary: `market_research (thread ${thread}): ${summary}`,
+    generation_context: {
+      data: { delegation: { agent: "market_research", thread, task_id: taskId, status: "ok", summary } },
+    },
+  } as Output;
+}
+
+test("separate delegated conversations all survive the projection", () => {
+  // The fallback bucket keys by TOOL NAME, which is right for a tool asked one question and wrong
+  // for this one: delegation is called repeatedly by construction. Landing there, three research
+  // questions would collapse to the last answer — and the two the agent could no longer see are, to
+  // it, questions it never asked. It would ask them again until its step budget ran out.
+  const projected = JSON.parse(projectFinancialModelProgress([
+    delegationOutput("s:market_research:1", "t1", "capacity is the constraint"),
+    delegationOutput("s:market_research:2", "t2", "the pricing case is weaker than guidance implies"),
+    delegationOutput("s:market_research:3", "t3", "no regulatory change lands inside the horizon"),
+  ], [], []));
+
+  assert.equal(projected.latest_delegated_results.length, 3);
+  assert.deepEqual(
+    projected.latest_delegated_results.map((r: { summary: string }) => r.summary),
+    ["capacity is the constraint", "the pricing case is weaker than guidance implies",
+      "no regulatory change lands inside the horizon"],
+  );
+  assert.deepEqual(projected.other_results, [], "and it must not also fall through to the fallback");
+});
+
+test("a follow-up round replaces the round it continues", () => {
+  // Same thread: the delegate's own thread already carries that history, so keeping both would pay
+  // twice for one conversation.
+  const projected = JSON.parse(projectFinancialModelProgress([
+    delegationOutput("s:market_research:1", "t1", "first pass, thin"),
+    delegationOutput("s:market_research:1", "t2", "pressed further: capacity, not demand"),
+  ], [], []));
+
+  assert.equal(projected.latest_delegated_results.length, 1);
+  assert.equal(projected.latest_delegated_results[0].summary, "pressed further: capacity, not demand");
+  assert.equal(projected.latest_delegated_results[0].task_id, "t2");
+});
+
+test("the delegated bucket is present before any delegation, so its key never appears mid-run", () => {
+  // A key that materialises on the step that first delegates is a divergence point in the cached
+  // prefix on exactly that step, and everything below it is re-billed.
+  const projected = JSON.parse(projectFinancialModelProgress(
+    [{ name: "some_new_tool", summary: "did the thing" } as Output], [], []));
+
+  assert.deepEqual(projected.latest_delegated_results, []);
 });

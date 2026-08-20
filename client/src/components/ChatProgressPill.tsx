@@ -1,29 +1,51 @@
-import { useEffect, useState } from "react";
-import { Loader2, CheckCircle, Circle, XCircle, ChevronDown, ChevronRight, Database, Newspaper, ChartNoAxesCombined, Calculator } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Loader2, CheckCircle, Circle, XCircle, ChevronDown, ChevronRight, Database, Newspaper, ChartNoAxesCombined, Calculator, Layers, GitBranch, Bot, Wrench } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { threadGroups } from "@/lib/progressThreads";
+import { useAgentRoster } from "@/hooks/useAgentRoster";
+import { agentLabel, agentsInOrder, isProgressAgent } from "@/lib/agentGroups";
 
-export type ProgressAgent = "market_data" | "market_research" | "trading_operations" | "financial_modeling";
+/** An agent name. Any name the server declares is one — deliberately not a closed union; grouping
+ *  and labelling live in lib/agentGroups (pure, tested), presentation lives here. */
+export type ProgressAgent = string;
+export { isProgressAgent } from "@/lib/agentGroups";
 
-const PROGRESS_AGENTS = ["market_data", "market_research", "trading_operations", "financial_modeling"] as const;
-
-/** The dispatch frame's `agent` is a bare string; only these get their own
- *  group in the pill, the rest fall into "Other". */
-export function isProgressAgent(agent: string | undefined): agent is ProgressAgent {
-    return PROGRESS_AGENTS.includes(agent as ProgressAgent);
-}
+/** One step of a task's running commentary, in arrival order. A `note` is the
+ *  agent's own words about what it is doing; a `tool` is what it reached for.
+ *  Kept apart so the feed can style the agent's voice above the plumbing. */
+export type ProgressFeedItem = {
+    kind: "note" | "tool";
+    text: string;
+};
 
 export interface ProgressTask {
     taskId: string;
     description: string;
-    agent?: ProgressAgent;
+    /** The dispatched agent's bare name. Only the four ProgressAgents get their
+     *  own pill tab; nested delegates (statement_unification, …) land in "Other". */
+    agent?: string;
     /** The subagent conversation this task is a round of. Several tasks sharing
      *  one id are one continuing piece of work, not unrelated siblings. Absent
      *  on history recorded before threads existed. */
     threadId?: string;
     tool?: string;
+    /** The agent's own line about what this step is doing, from its
+     *  `subagent_note`. On a long delegate it is the only thing that moves
+     *  between one dispatch and its result, so it outranks `tool` on the
+     *  detail line: "Balance sheet rows added (50 so far)" over
+     *  "patch_unification_decision". */
+    note?: string;
+    /** Every note and tool call this task emitted, in order — the full trail
+     *  behind the latest-only `note`/`tool` fields above. A long delegate (a
+     *  DCF build runs for minutes) narrates each step; keeping only the last
+     *  line threw that narration away. Absent on history recorded before the
+     *  feed existed. */
+    feed?: ProgressFeedItem[];
     status: "in_progress" | "completed" | "error";
     summary?: string;
+    /** The caller's task when a nested delegate_to_agent made this dispatch;
+     *  absent on orchestrator dispatches. The topology panel draws edges from it. */
+    parentTaskId?: string;
 }
 
 function statusIcon(status: ProgressTask["status"]) {
@@ -39,54 +61,89 @@ function statusIcon(status: ProgressTask["status"]) {
     }
 }
 
-const agentMeta: Record<ProgressAgent, { label: string; icon: typeof Database; iconClassName: string }> = {
-    market_data: {
-        label: "Market data agent",
-        icon: Database,
-        iconClassName: "text-blue-600 dark:text-blue-300",
-    },
-    market_research: {
-        label: "Market research agent",
-        icon: Newspaper,
-        iconClassName: "text-violet-600 dark:text-violet-300",
-    },
-    trading_operations: {
-        label: "Stock strategy agent",
-        icon: ChartNoAxesCombined,
-        iconClassName: "text-amber-600 dark:text-amber-300",
-    },
-    financial_modeling: {
-        label: "DCF modeling agent",
-        icon: Calculator,
-        iconClassName: "text-emerald-600 dark:text-emerald-300",
-    },
+/** Icon + colour, curated for the agents worth telling apart at a glance. Deliberately partial:
+ *  an agent with no entry gets a generic icon and its humanized label — never "Other". */
+const agentIcons: Record<string, { icon: typeof Database; iconClassName: string }> = {
+    market_data: { icon: Database, iconClassName: "text-blue-600 dark:text-blue-300" },
+    market_research: { icon: Newspaper, iconClassName: "text-violet-600 dark:text-violet-300" },
+    trading_operations: { icon: ChartNoAxesCombined, iconClassName: "text-amber-600 dark:text-amber-300" },
+    financial_modeling: { icon: Calculator, iconClassName: "text-emerald-600 dark:text-emerald-300" },
+    statement_unification: { icon: Layers, iconClassName: "text-cyan-600 dark:text-cyan-300" },
+    spine_mapping: { icon: GitBranch, iconClassName: "text-teal-600 dark:text-teal-300" },
 };
 
-function uniqueAgents(tasks: ProgressTask[]) {
-    return PROGRESS_AGENTS.filter((agent) => tasks.some((task) => task.agent === agent));
+/** Label + icon + colour for any agent name. Exported so the topology panel matches the pill. */
+export function agentPresentation(agent: string): { label: string; icon: typeof Database; iconClassName: string } {
+    return { label: agentLabel(agent), ...(agentIcons[agent] ?? { icon: Bot, iconClassName: "text-label-3" }) };
 }
 
+const uniqueAgents = agentsInOrder;
+
 function taskGroups(tasks: ProgressTask[], agents: ProgressAgent[]): Array<ProgressAgent | "uncategorized"> {
-    const hasUncategorized = tasks.some((task) => !task.agent);
+    // "Other" now means exactly one thing: rows with no agent, which are the orchestrator's own
+    // direct tool calls. It used to also swallow every agent missing from a hard-coded list.
+    const hasUncategorized = tasks.some((task) => !isProgressAgent(task.agent));
     return hasUncategorized ? [...agents, "uncategorized"] : agents;
 }
 
 function groupLabel(group: ProgressAgent | "uncategorized") {
-    return group === "uncategorized" ? "Other" : agentMeta[group].label;
+    return group === "uncategorized" ? "Other" : agentPresentation(group).label;
 }
 
 function groupIcon(group: ProgressAgent | "uncategorized") {
-    return group === "uncategorized" ? Circle : agentMeta[group].icon;
+    return group === "uncategorized" ? Circle : agentPresentation(group).icon;
 }
 
 function groupIconClassName(group: ProgressAgent | "uncategorized") {
-    return group === "uncategorized" ? "text-label-4" : agentMeta[group].iconClassName;
+    return group === "uncategorized" ? "text-label-4" : agentPresentation(group).iconClassName;
 }
 
 function groupStatus(tasks: ProgressTask[]) {
     if (tasks.some((task) => task.status === "in_progress")) return "in_progress";
     if (tasks.some((task) => task.status === "error")) return "error";
     return "completed";
+}
+
+/**
+ * A task's full running commentary — every note and tool call, in order —
+ * folded under its row. The scroller stays pinned to the newest line while the
+ * task is live, so a minutes-long delegate (a DCF build) reads as a ticker
+ * rather than a frozen first page.
+ */
+function TaskFeed({ feed, live }: { feed: ProgressFeedItem[]; live: boolean }) {
+    const scrollRef = useRef<HTMLDivElement>(null);
+    useEffect(() => {
+        const el = scrollRef.current;
+        if (el && live) el.scrollTop = el.scrollHeight;
+    }, [feed.length, live]);
+    return (
+        <div
+            ref={scrollRef}
+            className="custom-scrollbar mt-1 max-h-36 space-y-0.5 overflow-y-auto border-l border-sep pl-2"
+        >
+            {feed.map((item, index) => {
+                const isLatest = index === feed.length - 1;
+                // The agent's own words carry the row; tool calls are plumbing
+                // and read a register quieter.
+                if (item.kind === "note") {
+                    return (
+                        <div key={index} className="flex items-start gap-1.5 text-[11px] leading-4 text-foreground/75">
+                            {live && isLatest && (
+                                <span className="mt-1.5 size-1 shrink-0 animate-pulse rounded-full bg-blue-500" />
+                            )}
+                            <span className="min-w-0 break-words">{item.text}</span>
+                        </div>
+                    );
+                }
+                return (
+                    <div key={index} className="flex items-center gap-1.5 text-[10px] leading-4 text-muted-foreground/70">
+                        <Wrench className="size-2.5 shrink-0" />
+                        <span className="fin-figure truncate">{item.text}</span>
+                    </div>
+                );
+            })}
+        </div>
+    );
 }
 
 /**
@@ -97,6 +154,7 @@ function groupStatus(tasks: ProgressTask[]) {
 export function ChatProgressPill({ tasks, isComplete }: { tasks: ProgressTask[]; isComplete: boolean }) {
     const [expanded, setExpanded] = useState(false);
     const [activeGroup, setActiveGroup] = useState<ProgressAgent | "uncategorized" | null>(null);
+    const { describeAgent } = useAgentRoster();
 
     const doneCount = tasks.filter((t) => t.status === "completed" || t.status === "error").length;
     const running = tasks.find((t) => t.status === "in_progress");
@@ -107,7 +165,7 @@ export function ChatProgressPill({ tasks, isComplete }: { tasks: ProgressTask[];
     const displayedGroups: Array<ProgressAgent | "uncategorized"> = groups.length > 0 ? groups : ["uncategorized"];
     const selectedGroup = activeGroup && displayedGroups.includes(activeGroup) ? activeGroup : displayedGroups[0];
     const selectedTasks = selectedGroup === "uncategorized"
-        ? tasks.filter((task) => !task.agent)
+        ? tasks.filter((task) => !isProgressAgent(task.agent))
         : tasks.filter((task) => task.agent === selectedGroup);
 
     useEffect(() => {
@@ -132,10 +190,17 @@ export function ChatProgressPill({ tasks, isComplete }: { tasks: ProgressTask[];
                 )}
                 {agents.length > 0 && (
                     <span className="hidden max-w-[18ch] truncate text-muted-foreground/90 sm:inline">
-                        {agents.map((agent) => agentMeta[agent].label.replace(" agent", "")).join(", ")}
+                        {agents.map((agent) => agentLabel(agent).replace(" agent", "")).join(", ")}
                     </span>
                 )}
                 <span className="text-foreground/80 truncate max-w-[40ch]">{label}</span>
+                {/* The live ticker: the running task's own latest line, visible
+                    without expanding — the whole trail is inside. */}
+                {!isComplete && running?.note && running.note !== label && (
+                    <span className="hidden max-w-[36ch] truncate text-muted-foreground/80 md:inline">
+                        {running.note}
+                    </span>
+                )}
                 <span>· {count}</span>
                 {expanded ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
             </button>
@@ -146,7 +211,7 @@ export function ChatProgressPill({ tasks, isComplete }: { tasks: ProgressTask[];
                         {displayedGroups.map((group) => {
                             const GroupIcon = groupIcon(group);
                             const groupTasks = group === "uncategorized"
-                                ? tasks.filter((task) => !task.agent)
+                                ? tasks.filter((task) => !isProgressAgent(task.agent))
                                 : tasks.filter((task) => task.agent === group);
                             const isActive = selectedGroup === group;
 
@@ -163,7 +228,7 @@ export function ChatProgressPill({ tasks, isComplete }: { tasks: ProgressTask[];
                                     )}
                                 >
                                     <GroupIcon className={cn("size-3", groupIconClassName(group))} />
-                                    <span>{groupLabel(group)}</span>
+                                    <span title={group === "uncategorized" ? undefined : describeAgent(group)}>{groupLabel(group)}</span>
                                     <span className="text-muted-foreground">{groupTasks.length}</span>
                                     {statusIcon(groupStatus(groupTasks))}
                                 </button>
@@ -189,15 +254,25 @@ export function ChatProgressPill({ tasks, isComplete }: { tasks: ProgressTask[];
                                     {group.tasks.map((t) => (
                                         <div key={t.taskId} className="flex items-start gap-2 py-1">
                                             <span className="mt-0.5 flex-shrink-0">{statusIcon(t.status)}</span>
-                                            <div className="min-w-0">
+                                            <div className="min-w-0 flex-1">
                                                 <div className="text-foreground/90">{t.description || t.taskId}</div>
-                                                {/* The task names the row; the tool and the
-                                                    result are detail under it. Kept on one
-                                                    truncating line so a long tool argument
-                                                    can't push the next task off the list. */}
-                                                {(t.tool || t.summary) && (
+                                                {/* The full trail when we have it; the old
+                                                    latest-only line for history recorded
+                                                    before the feed existed. */}
+                                                {t.feed && t.feed.length > 0 ? (
+                                                    <TaskFeed feed={t.feed} live={t.status === "in_progress"} />
+                                                ) : (
+                                                    (t.note || t.tool) && (
+                                                        <div className="truncate text-[11px] text-muted-foreground">
+                                                            {t.note || t.tool}
+                                                        </div>
+                                                    )
+                                                )}
+                                                {/* The result line, kept apart from the trail:
+                                                    it is the task's outcome, not a step of it. */}
+                                                {t.summary && (
                                                     <div className="truncate text-[11px] text-muted-foreground">
-                                                        {[t.tool, t.summary].filter(Boolean).join(" · ")}
+                                                        {t.summary}
                                                     </div>
                                                 )}
                                             </div>

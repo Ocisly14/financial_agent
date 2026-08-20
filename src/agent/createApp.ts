@@ -3,6 +3,8 @@ import { fileURLToPath } from "node:url";
 import { Dispatcher } from "../framework/dispatcher.ts";
 import { OrchestratorRuntime } from "../framework/orchestrator.ts";
 import { assertSubagentSkills, SkillRegistry } from "../framework/skill.ts";
+import { assertAgentTopology, createDelegateToAgentTool, DELEGATE_TO_AGENT } from "../framework/delegation.ts";
+import { AGENT_TOPOLOGY } from "./subagents/topology.ts";
 import { createInvokeSkillTool, createReadSkillReferenceTool, createRunSkillScriptTool } from "../framework/skillTools.ts";
 import { SubagentRuntime } from "../framework/subagent.ts";
 import { MockLlmProvider, ModelRouter, type LlmProvider } from "../infra/llm/provider.ts";
@@ -20,7 +22,6 @@ import { ResearchRuntime } from "./research/researchRuntime.ts";
 import { TopicDigestScheduler } from "../server/topicDigestScheduler.ts";
 import { researchPrompt } from "./research/researchPrompt.ts";
 import { getDefaultFinancialModelToolDeps } from "../../mcp_tools/financial-model/financialModelTools.ts";
-import { createDcfSubagentTool } from "../../mcp_tools/financial-model/dcfSubagentTool.ts";
 import { createStatementExtractionTool } from "../../mcp_tools/financial-model/statementExtractionTool.ts";
 import { createReadCompactedTaskDataTool } from "../../mcp_tools/session/readCompactedTaskDataTool.ts";
 
@@ -40,18 +41,33 @@ export async function createFinancialAgentApp() {
   const skills = new SkillRegistry();
   await skills.loadFromDirectory(resolveSkillsPath());
   assertSubagentSkills(subagents.list(), skills);
-  const subagentRuntime = new SubagentRuntime(modelRouter, toolRegistry, skills);
+  const subagentRuntime = new SubagentRuntime(modelRouter, toolRegistry, skills, subagents);
+
+  // Declared here rather than below the tool registrations: the delegation tool closes over it.
+  // Registry lookups are by name at call time, so tools registered after this line are still reachable.
+  const dispatcherFactory = (
+    sessionId: string,
+    tenantId: string,
+    state?: import("../framework/sessionState.ts").SessionState,
+    parentPath?: readonly import("../framework/types.ts").AgentKind[],
+    parentTaskId?: string,
+  ) => new Dispatcher(sessionId, subagents, subagentRuntime, toolRegistry,
+    state ?? sessions.getExisting(sessionId), tenantId, parentPath, parentTaskId);
 
   toolRegistry.register(createInvokeSkillTool(skills));
   toolRegistry.register(createReadSkillReferenceTool(skills));
   toolRegistry.register(createRunSkillScriptTool(skills));
   toolRegistry.register(createReadCompactedTaskDataTool(sessions));
-  // Registered after the runtime exists: run_dcf_subagent hands work to it. The registry is looked up
-  // by name at call time, so registering into it after construction is fine.
-  toolRegistry.register(createDcfSubagentTool({ subagentRuntime, subagents, sessions, financial: financialModelDeps }));
-
-  const dispatcherFactory = (sessionId: string, agentId: string, state?: import("../framework/sessionState.ts").SessionState) =>
-    new Dispatcher(sessionId, subagents, subagentRuntime, toolRegistry, state ?? sessions.getExisting(sessionId), agentId);
+  toolRegistry.register(createDelegateToAgentTool({
+    describe: (name) => subagents.get(name).description,
+    policyFor: (name) => subagents.get(name).delegable,
+    delegableNames: () => subagents.list().filter((node) => node.delegable).map((node) => node.name),
+    dispatchers: dispatcherFactory,
+  }));
+  // After every registration, so the check sees the finished registry: each tool a topology node
+  // declares must actually resolve, or the declaration is decorative — which is how ten dead names
+  // sat in the mapping agents' pools for months without anything noticing.
+  assertAgentTopology(AGENT_TOPOLOGY, DELEGATE_TO_AGENT, (name) => toolRegistry.get(name) !== undefined);
 
   const orchestrator = new OrchestratorRuntime(
     orchestratorPrompt,
@@ -155,6 +171,12 @@ async function resolveEventStore(): Promise<SqliteEventStore> {
 }
 
 function resolveSkillsPath(): string {
+  // SKILLS_DIR lets a run be pointed at a staged copy of the tree instead of the repo's own. That is
+  // what an A/B over guidance needs: the control arm is a copy with some guidance removed, and
+  // editing the real tree in place between arms would make the two runs incomparable and leave the
+  // repo dirty if either crashed. Unset in production, where the repo's skills/ is the only tree.
+  const override = process.env["SKILLS_DIR"]?.trim();
+  if (override) return path.resolve(override);
   const current = path.dirname(fileURLToPath(import.meta.url));
   return path.resolve(current, "../../skills");
 }

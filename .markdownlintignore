@@ -1,0 +1,6 @@
+# Historical design docs and session reports are archives — not linted.
+docs/
+.superpowers/
+node_modules/
+client/
+data/

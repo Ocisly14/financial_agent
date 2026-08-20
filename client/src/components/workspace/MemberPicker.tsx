@@ -32,13 +32,13 @@ import {
  * policy in here would guess wrong for one of the two call sites.
  */
 export function MemberPicker({
-    agentId,
+    tenantId,
     excludeTopicIds,
     onConfirm,
     trigger,
     align = "start",
 }: {
-    agentId: UUID;
+    tenantId: UUID;
     /** Topic ids to hide from the list — typically the Research's/Topic's current members. */
     excludeTopicIds: string[];
     onConfirm: (topicIds: string[]) => void;
@@ -52,8 +52,8 @@ export function MemberPicker({
     const [selected, setSelected] = useState<Set<string>>(new Set());
 
     const { data, isPending } = useQuery({
-        queryKey: ["topics", agentId],
-        queryFn: () => apiClient.getTopics(agentId),
+        queryKey: ["topics", tenantId],
+        queryFn: () => apiClient.getTopics(tenantId),
         enabled: open,
         staleTime: 15000,
     });

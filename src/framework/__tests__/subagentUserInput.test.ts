@@ -5,7 +5,6 @@ import { SessionState, SessionRegistry } from "../sessionState.ts";
 import { SubagentRegistry, SubagentRuntime } from "../subagent.ts";
 import { OrchestratorRuntime } from "../orchestrator.ts";
 import { SkillRegistry } from "../skill.ts";
-import { assertToolAllowedForAgent } from "../toolAccess.ts";
 import { createSubagentRegistry } from "../../agent/subagents/registerSubagents.ts";
 import { McpToolRegistry } from "../../../mcp_tools/toolRegistry.ts";
 import { ModelRouter } from "../../infra/llm/provider.ts";
@@ -62,12 +61,6 @@ test("only financial_modeling carries ask_user in its default pool", () => {
   const withAskUser = registry.list().filter((d) => d.defaultTools.includes("ask_user")).map((d) => d.name);
 
   assert.deepEqual(withAskUser, ["financial_modeling"]);
-});
-
-test("the category gate lets ask_user through despite its main category", () => {
-  assert.doesNotThrow(() => assertToolAllowedForAgent("financial_modeling", "ask_user", "main"));
-  // The pool is what actually grants it — the gate no longer has to reject it.
-  assert.throws(() => assertToolAllowedForAgent("market_data", "get_sector_analysis", "trading"), /not allowed/);
 });
 
 // ── the suppression ──────────────────────────────────────────────────────
@@ -152,7 +145,7 @@ async function runSubagent(runtime: SubagentRuntime, state: SessionState, tools:
   const dispatch = state.recordDispatch("financial_modeling", "value AAPL", thread);
   await runtime.run(financialModeling, {
     sessionId: "s",
-    agentId: "agent-1",
+    tenantId: "agent-1",
     taskId: dispatch.event_id,
     request: { agent: "financial_modeling", task: "value AAPL" },
     allowedTools: ["get_financial_model", "ask_user"].map((name) => {
@@ -369,27 +362,27 @@ test("a subagent's pending question ends the orchestrator turn", async () => {
       });
     },
   };
-  const dispatcherFactory = (sessionId: string, agentId: string) =>
-    new Dispatcher(sessionId, subagents, subagentRuntime as never, tools, sessions.getExisting(sessionId), agentId);
+  const dispatcherFactory = (sessionId: string, tenantId: string) =>
+    new Dispatcher(sessionId, subagents, subagentRuntime as never, tools, sessions.getExisting(sessionId), tenantId);
 
   const steps = [
-    JSON.stringify({ reply: "building", dispatch: [{ agent: "financial_modeling", task: "value AAPL" }] }),
-    JSON.stringify({ reply: "should never be reached", dispatch: [{ agent: "financial_modeling", task: "again" }] }),
+    { text: "building", toolCalls: [{ id: "t1", name: "delegate_to_agent", input: { agent: "financial_modeling", task: "value AAPL" } }] },
+    { text: "should never be reached", toolCalls: [{ id: "t2", name: "delegate_to_agent", input: { agent: "financial_modeling", task: "again" } }] },
   ];
   let call = 0;
   const provider: LlmProvider = {
     name: "stub",
     async generate(): Promise<GenerateResult> {
-      const text = steps[call] ?? JSON.stringify({ reply: "done" });
+      const step = steps[call] ?? { text: "done" };
       call += 1;
-      return { text, metrics: { tokens_in: 1, tokens_out: 1, ms: 0, model_class: "LARGE", provider: "stub" } };
+      return { ...step, metrics: { tokens_in: 1, tokens_out: 1, ms: 0, model_class: "LARGE", provider: "stub" } };
     },
   };
   const orchestrator = new OrchestratorRuntime(
     { system: "", prompt: "" }, new ModelRouter(provider), dispatcherFactory, subagents, new SkillRegistry(), tools, sessions,
   );
 
-  await orchestrator.run({ agentId: "agent-1", sessionId: "s", userMessage: "value AAPL" });
+  await orchestrator.run({ tenantId: "agent-1", sessionId: "s", userMessage: "value AAPL" });
 
   assert.equal(call, 1, "the orchestrator kept looping after its subagent asked the user");
   const state = sessions.getExisting("s");

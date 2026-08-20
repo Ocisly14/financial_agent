@@ -8,10 +8,10 @@ import { useToast } from "@/hooks/use-toast";
 import { useTranslation } from "react-i18next";
 
 export default function ChatTtsButton({
-    agentId,
+    tenantId,
     text,
 }: {
-    agentId: string;
+    tenantId: string;
     text: string;
 }) {
     const { toast } = useToast();
@@ -22,7 +22,7 @@ export default function ChatTtsButton({
 
     const mutation = useMutation({
         mutationKey: ["tts", text],
-        mutationFn: () => apiClient.tts(agentId, text),
+        mutationFn: () => apiClient.tts(tenantId, text),
         onSuccess: (data) => {
             setAudioBlob(data);
             play();

@@ -24,11 +24,11 @@ export type RouteResult<T> = { status: 200; body: T } | { status: 404; body: { s
  *  should stay readable by id, but a live tab strip is not where it belongs. */
 export function listTopicModels(
   deps: FinancialModelReadDeps,
-  agentId: string,
+  tenantId: string,
   topicId: string,
 ): { status: 200; body: { models: ModelView[] } } {
   const service = new FinancialModelService(deps.modelStore, READ_SESSION_ID);
-  const models = service.listModels({ ownerAgentId: agentId, originSessionId: topicId, includeArchived: false });
+  const models = service.listModels({ ownerTenantId: tenantId, originSessionId: topicId, includeArchived: false });
   return { status: 200, body: { models } };
 }
 

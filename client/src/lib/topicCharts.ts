@@ -146,13 +146,13 @@ export function mergeTopicCharts(
  * discards the previous rows and their ids along with them — see
  * `handleReplaceTopicCharts`), so the id sent here is a throwaway: a stable,
  * locally-unique value is enough to satisfy the type, nothing reads it back. */
-export function preferencesFor(tabs: TopicChartTab[], hidden: string[] = []): TopicChartPreference[] {
+export function preferencesFor(
+    tabs: Exclude<TopicChartTab, { kind: "model" }>[],
+    hidden: string[] = [],
+): TopicChartPreference[] {
     // A model tab never becomes a preference row (see ModelChartTab's doc
-    // comment) — filtered here too, as a second line of defense alongside the
-    // `onClose` guard that keeps it from ever reaching this function in the
-    // first place.
+    // comment) — the parameter type shuts that door at compile time.
     const visible: TopicChartPreference[] = tabs
-        .filter((tab): tab is Exclude<TopicChartTab, { kind: "model" }> => tab.kind !== "model")
         .map((tab, index) =>
             tab.kind === "symbol"
                 ? { id: tab.symbol, kind: "symbol", symbol: tab.symbol, range: null, hidden: false, sortOrder: index }

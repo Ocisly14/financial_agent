@@ -10,6 +10,7 @@ npm run eval
 
 # 自然语言到股票策略 DSL：调用当前配置的 LLM，需要凭证
 npm run eval:nl-dsl
+
 ```
 
 `npm run eval` 包含：
@@ -24,6 +25,19 @@ npm run eval:nl-dsl
 - 百分比变化、绝对价格和移动止损等触发参数；
 - BUY/SELL、仓位大小、paper/shadow 模式；
 - 单阶段或多阶段 recurrence 与 guardrails。
+
+每个 case 都是「定稿方案 → 预期 DSL → 跑模型 → 逐字段比对」：`input` 是已经定好每个参数的执行方案，
+`gold` 是预期输出，评分器把模型生成的 `create_strategy` 参数和 `gold` 对照。多阶段评分是顺序无关的，
+只校验 `gold` 明确钉住的字段，并额外校验 `depends_on`、`price_anchor` 和 `cancel_group` 构成的依赖结构。
+
+比对之外还有一道 `schema-accepted`：生成的载荷走 `normalizePriceStrategyInput` + `tryParsePriceStrategy`，
+即 `create_strategy` 自己那道关。字段逐个对上、整体仍被 schema 拒绝是会发生的——`rolling_change`
+漏掉 `window_minutes` 就是这样，读起来每项都对，实际让 agent 赔上整个批次。所以 schema 不过即
+不算 intent-match，输出会直接打印拒绝原因。
+
+数据集里 `s01`–`s09` 是 `skills/strategy-design/references/trigger-selection.md`
+三种入场形态（pullback / breakout / indicator turn）的具体执行方案，
+覆盖支撑位回撤、突破加移动止损、以及 MACD/RSI/均线交叉三类指标入场。
 
 ## 目录
 

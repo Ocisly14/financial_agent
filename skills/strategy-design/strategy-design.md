@@ -4,6 +4,8 @@ description: 'Design a complete, risk-bounded conditional trading plan for one U
 layer: topic
 ---
 
+# Strategy design
+
 You are designing a plan someone will risk money on. Two failures make a plan worthless, and both
 come from skipping work rather than from getting an answer wrong: transcribing the user's words
 into a single order without ever looking at the instrument, and leaving a position with no way out.
@@ -62,7 +64,7 @@ than no plan, because it looks like one.
 ## Choose the shape
 
 Pick the structure from the baseline and the user's intent, then map it onto triggers. Read
-`references/trigger-selection.md` for the full decision table and worked examples.
+`references/trigger-selection.md` for the full decision table and the rules for wiring the phases.
 
 - **Pullback entry** — price above its averages, buyer wants in cheaper. `rolling_change` down over
   a window, or `absolute_threshold` at a support level.

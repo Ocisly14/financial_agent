@@ -24,7 +24,7 @@ What makes a peer, in order of weight:
 
 Pick the peer set for the company **at the end of your forecast**, not the company today. If your own forecast shifts the mix — a higher-margin segment growing from a quarter of revenue to a third — then the terminal company resembles a different peer set than the current one. Name which, and why.
 
-financial_search is the right tool here: peer multiples are exactly the case the data hierarchy reserves the web for, a market datum the stores cannot hold and the engine cannot compute. Set the assumption with sourceType `search` or `market`, sourceRefs pointing at what you actually read, and a rationale that names the peers and states the composition-and-scale grounds on which they stand in for this issuer.
+delegate_to_agent → market_research is the path here: peer multiples are exactly the case the data hierarchy reserves the outside for, a market datum the stores cannot hold and the engine cannot compute. Name the peers you want and the multiple, and say what the comparison is for. Set the assumption with sourceType `search` or `market`, sourceRefs pointing at what you actually read, and a rationale that names the peers and states the composition-and-scale grounds on which they stand in for this issuer.
 
 ## valuationConfig — three judgments the model will not make for you
 

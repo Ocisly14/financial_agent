@@ -1,12 +1,12 @@
 import type { LlmMessage, LlmToolCall, LlmToolSpec, ModelClass, ModelRouter } from "../infra/llm/provider.ts";
 import { PromptRenderer, type PromptTemplate } from "./prompt.ts";
-import type { AgentKind, JsonObject, JsonSchema, JsonValue, TaskRequest, TaskResult, ToolDefinition, UserInputRequest } from "./types.ts";
+import type { AgentKind, DelegationPolicy, JsonObject, JsonSchema, JsonValue, TaskRequest, TaskResult, ToolDefinition, UserInputRequest } from "./types.ts";
 import type { McpToolRegistry } from "../../mcp_tools/toolRegistry.ts";
 import { newId } from "./ids.ts";
 import type { SessionState } from "./sessionState.ts";
 import type { SkillRegistry } from "./skill.ts";
 import { INVOKE_SKILL } from "./skillTools.ts";
-import { assertToolAllowedForAgent } from "./toolAccess.ts";
+import { DELEGATE_TO_AGENT, formatAgentPath, renderDelegationRoster } from "./delegation.ts";
 import { maybeCompactThread } from "./contextCompaction.ts";
 import { createLogger } from "../infra/logger/logger.ts";
 
@@ -15,6 +15,35 @@ const log = createLogger("subagent");
 /** Max tool-calling iterations per subagent task — a runaway-loop backstop. */
 const DEFAULT_MAX_TOOL_STEPS = 5;
 const APPROVAL_WAIT_MS = 15 * 60_000;
+
+/**
+ * Runtime behaviour an agent may declare on its topology node, hooked by the loop where a
+ * hard-coded `definition.name === ...` branch used to sit. Every hook is optional; an agent that
+ * declares none runs the generic loop. The framework knows only these shapes — what an agent does
+ * with them lives beside its other declarations, not here.
+ */
+export type SubagentBehavior = {
+  /** Renders [PROGRESS SO FAR]. Default: the generic transcript projection. */
+  projectProgress?: (state: SessionState, threadId: string) => string;
+  /** Shapes task_result.generation_context.data (beside `task`). Default: the tool_outputs list. */
+  projectResultData?: (outputs: ReturnType<SessionState["subagentToolOutputs"]>) => JsonObject;
+  /** A step calling one of these tools must contain no other call; violations are nudged with
+   *  `code`/`message` and do not count as run failures. */
+  soloTools?: { tools: ReadonlySet<string>; code: string; message: string };
+  /** Volatile one-line stamp rendered above the step-budget line — below {{progress}}, never
+   *  inside it, because it changes every time the agent writes. */
+  stepStamp?: (state: SessionState, threadId: string) => string | undefined;
+  /** A refresh call issued before step 1 when the request names a model, and again after any step
+   *  whose results carry one of `onErrorCodes` (which are then pardoned in failure attribution if
+   *  the refresh succeeds). `input` returns the call's input, or undefined to skip. */
+  refresh?: {
+    tool: string;
+    onErrorCodes: ReadonlySet<string>;
+    input: (args: { state: SessionState; threadId: string; request: TaskRequest }) => JsonObject | undefined;
+  };
+  /** Summary for a run that spent its budget without finishing. Default names the agent and count. */
+  exhaustedSummary?: (args: { state: SessionState; threadId: string; request: TaskRequest; maxToolSteps: number }) => string;
+};
 
 export type SubagentDefinition = {
   name: AgentKind;
@@ -27,6 +56,18 @@ export type SubagentDefinition = {
    * skills/ 目录里反查谁认领了它。
    */
   skills?: string[];
+  /**
+   * 出边：这个 agent 可以把活交给谁。和 skills / defaultTools 同一个理由放在这里——
+   * 一个 agent 能够到什么，应该在注册表一处看全。声明本身不授予能力，它还需要
+   * 池子里有 DELEGATE_TO_AGENT；两者对不上由 assertAgentTopology 在启动期拦下。
+   */
+  delegatesTo?: AgentKind[];
+  /** 入口策略。缺省表示只接受 orchestrator 的派活，不接受来自别的 agent 的委派。 */
+  delegable?: DelegationPolicy;
+  /** Ceiling on one dispatched round. Absent: the dispatcher's generic default. */
+  taskTimeoutMs?: number;
+  /** Domain runtime hooks — see SubagentBehavior. */
+  behavior?: SubagentBehavior;
   systemPrompt: PromptTemplate;
   maxToolSteps?: number;
 };
@@ -192,7 +233,8 @@ export function buildLoopToolSpecs(tools: ToolDefinition[]): LlmToolSpec[] {
 
 /** 每步的请求前缀(tools + system + task)在 dispatch 内一字不变,只有
  * [PROGRESS SO FAR] 之后在长。在 marker 处切开并打 cache 标记,provider 就能
- * 把静态前缀走缓存读,每步只为动态尾部付全价。marker 缺失时退化为整段发送。 */
+ * 把静态前缀走缓存读,每步只为动态尾部付全价。marker 缺失时退化为整段发送。
+ * orchestrator/research 循环用同一套切法,只是 marker 是 [CURRENT TURN PROGRESS]。 */
 const PROGRESS_MARKER = "[PROGRESS SO FAR]";
 
 /**
@@ -229,9 +271,9 @@ export type ProgressCache = { progress: string; cuts: readonly number[] };
  * to the 1.25x write price. A cut, once made, therefore stays a cut; a step only adds a new one
  * after it, and only once enough has accrued to be worth its own write.
  */
-export function splitForPromptCache(system: string, prompt: string, previous?: ProgressCache):
-{ messages: LlmMessage[]; cuts: number[] } {
-  const index = prompt.indexOf(PROGRESS_MARKER);
+export function splitForPromptCache(system: string, prompt: string, previous?: ProgressCache,
+  marker: string = PROGRESS_MARKER): { messages: LlmMessage[]; cuts: number[] } {
+  const index = prompt.indexOf(marker);
   if (index <= 0) {
     return { messages: [{ role: "system", content: system, cache: true }, { role: "user", content: prompt }], cuts: [] };
   }
@@ -267,8 +309,8 @@ export function splitForPromptCache(system: string, prompt: string, previous?: P
 }
 
 /** The progress region of a rendered prompt, or undefined when it carries none. */
-export function progressRegion(prompt: string): string | undefined {
-  const index = prompt.indexOf(PROGRESS_MARKER);
+export function progressRegion(prompt: string, marker: string = PROGRESS_MARKER): string | undefined {
+  const index = prompt.indexOf(marker);
   return index <= 0 ? undefined : prompt.slice(index);
 }
 
@@ -324,10 +366,18 @@ function nativeToolResult(call: ToolCall, toolName: string, data: unknown, isErr
 
 export type RunSubagentInput = {
   sessionId: string;
-  agentId: string;
+  tenantId: string;
   /** The dispatch this run answers — where its task_result is written. */
   taskId: string;
   request: TaskRequest;
+  /**
+   * Earlier results' data, already resolved from `request.source_event_ids` and
+   * rendered as the block that sits above [PROGRESS SO FAR]. Empty for a task
+   * that was handed nothing — and then the prompt is byte-identical to one
+   * built before handoffs existed, which is what keeps the cached prefix of
+   * every ordinary dispatch intact.
+   */
+  handedData?: string;
   allowedTools: ToolDefinition[];
   /** Cancels every provider request in this run when the caller's overall deadline expires. */
   signal?: AbortSignal;
@@ -348,6 +398,11 @@ export type RunSubagentInput = {
    * `threadId` says which conversation the rounds belong to.
    */
   threadId: string;
+  /**
+   * The agents running above this one, root first — empty for a run the orchestrator dispatched.
+   * Handed to every tool this run calls, so a delegation can see whose chain it would extend.
+   */
+  agentPath?: readonly AgentKind[];
 };
 
 export class SubagentRuntime {
@@ -355,16 +410,20 @@ export class SubagentRuntime {
   private readonly modelRouter: ModelRouter;
   private readonly toolRegistry: McpToolRegistry;
   private readonly skills: SkillRegistry | undefined;
+  private readonly subagents: SubagentRegistry | undefined;
 
   constructor(
     modelRouter: ModelRouter,
     toolRegistry: McpToolRegistry,
     /** Absent in harnesses that prompt without skills; the roster then renders as "(none)". */
     skills?: SkillRegistry,
+    /** Same, for the delegate roster: descriptions come from the other agents' own definitions. */
+    subagents?: SubagentRegistry,
   ) {
     this.modelRouter = modelRouter;
     this.toolRegistry = toolRegistry;
     this.skills = skills;
+    this.subagents = subagents;
   }
 
   /** The agent's own skill roster, rendered for its prompt. Names come from the
@@ -379,12 +438,21 @@ export class SubagentRuntime {
     return lines.length ? lines.join("\n") : "(none)";
   }
 
+  /** The agents this one may hand work to. Static per definition, so it renders into the system
+   *  prompt and rides the cached prefix. */
+  private renderDelegates(definition: SubagentDefinition): string {
+    if (!this.subagents) return "(none)";
+    return renderDelegationRoster(definition.delegatesTo, (name) => {
+      try { return this.subagents!.get(name).description; }
+      catch { return undefined; }
+    });
+  }
+
   /**
    * Fold the tools an invoked skill declares into the live set, so the agent can
-   * call them from its next step. A name that is unregistered, or that the
-   * category gate refuses for this agent, is skipped with a warning rather than
-   * failing the task: a skill over-declaring one tool should not cost a DCF its
-   * whole round.
+   * call them from its next step. An unregistered name is skipped with a warning
+   * rather than failing the task: a skill over-declaring one tool should not cost
+   * a DCF its whole round.
    */
   private grantSkillTools(definition: SubagentDefinition, granted: unknown, allowed: Map<string, ToolDefinition>): void {
     if (!Array.isArray(granted)) return;
@@ -393,13 +461,6 @@ export class SubagentRuntime {
       const tool = this.toolRegistry.get(name);
       if (!tool) {
         log.warn(`[${definition.name}] skill grants unregistered tool: ${name}`);
-        continue;
-      }
-      try {
-        assertToolAllowedForAgent(definition.name, name, tool.category);
-      } catch (error) {
-        log.warn(`[${definition.name}] skill grant refused by category gate: ${name}`,
-          { error: error instanceof Error ? error.message : String(error) });
         continue;
       }
       const { execute: _execute, ...spec } = tool;
@@ -425,11 +486,12 @@ export class SubagentRuntime {
     // and the next step's specs are built from it.
     const allowed = new Map(input.allowedTools.map((tool) => [tool.name, tool]));
     const skillRoster = this.renderSkillRoster(definition);
+    const delegateRoster = this.renderDelegates(definition);
     let finishSummary = "";
     let llmCalls = 0;
     let awaitingApproval = false;
     let pendingApprovalId: string | undefined;
-    let recoveredRevisionConflict = false;
+    let recoveredRefresh = false;
     let pendingUserInput: UserInputRequest | undefined;
 
     log.info(`[${definition.name}] start task`, { task: input.request.task, taskId: input.taskId, threadId });
@@ -454,8 +516,12 @@ export class SubagentRuntime {
     // context rather than unbounded.
     await maybeCompactThread(state, this.modelRouter, definition.name, threadId, input.taskId);
 
-    if (definition.name === "financial_modeling" && input.request.model_id && allowed.has("get_financial_model")) {
-      await this.runToolCall(definition, input, { id: newId("toolcall"), tool: "get_financial_model", input: { modelId: input.request.model_id } }, allowed);
+    const behavior = definition.behavior;
+    if (behavior?.refresh && input.request.model_id && allowed.has(behavior.refresh.tool)) {
+      const refreshInput = behavior.refresh.input({ state, threadId, request: input.request });
+      if (refreshInput) {
+        await this.runToolCall(definition, input, { id: newId("toolcall"), tool: behavior.refresh.tool, input: refreshInput }, allowed);
+      }
     }
 
     const maxToolSteps = definition.maxToolSteps ?? DEFAULT_MAX_TOOL_STEPS;
@@ -477,6 +543,11 @@ export class SubagentRuntime {
       const rendered = this.renderer.render(definition.systemPrompt, {
         task: input.request.task,
         skills: skillRoster,
+        delegates: delegateRoster,
+        // Constant for the whole run — resolved once at dispatch, above the
+        // progress region and never rewritten, so it costs one cache write and
+        // is read back on every step after it.
+        handedData: input.handedData ?? "",
         modelContext: input.request.model_id
           ? `The user is currently viewing model ${input.request.model_id}. Prefer continuing it: refresh it before any mutation and keep your work in that model unless the task or evidence gives a concrete reason to select or create another model.`
           : "No existing model handle was supplied.",
@@ -490,22 +561,12 @@ export class SubagentRuntime {
         // is based on), so it is stated here, where being volatile costs nothing.
         stepBudget: ((): string => {
           const budget = `(you are at step ${step} of your ${maxToolSteps}-step budget)`;
-          if (definition.name !== "financial_modeling") return budget;
-          const live = latestFinancialModelState(state.subagentToolOutputs({ thread: threadId }));
-          if (live.revision === undefined && live.model_id === undefined) return budget;
-          const stamp = [
-            ...(live.model_id === undefined ? [] : [`model ${live.model_id}`]),
-            ...(live.revision === undefined ? [] : [`revision ${live.revision}`]),
-            ...(live.lifecycle_stage === undefined ? [] : [`stage ${live.lifecycle_stage}`]),
-          ].join(", ");
-          return `[LIVE MODEL STATE] ${stamp} — this is the current revision; base your next mutation on it.\n${budget}`;
+          const stamp = behavior?.stepStamp?.(state, threadId);
+          return stamp === undefined ? budget : `${stamp}\n${budget}`;
         })(),
-        progress: (definition.name === "financial_modeling"
-          // Thread scope, not task scope: continuing a thread means the agent
-          // comes back to everything it has done here, not just this round.
-          ? projectFinancialModelProgress(state.subagentToolOutputs({ thread: threadId }), state.subagentToolErrors({ thread: threadId }),
-            state.subagentNotes({ thread: threadId }))
-          : state.subagentProgress({ thread: threadId })),
+        progress: behavior?.projectProgress
+          ? behavior.projectProgress(state, threadId)
+          : state.subagentProgress({ thread: threadId }),
       });
 
       let completionText: string;
@@ -601,10 +662,10 @@ export class SubagentRuntime {
         continue;
       }
 
-      if (definition.name === "financial_modeling" && violatesFinancialMutationSeriality(stepObj.calls)) {
-        state.record(definition.name, "tool_result", { task_id: input.taskId, name: "financial_modeling_runtime", step,
-          error: { code: "financial_mutation_serialization_required",
-            message: "A revision mutation must be the only call in its step. Combine dependent changes into one ordered operations batch, then inspect the result in a later step." } },
+      const solo = behavior?.soloTools;
+      if (solo && stepObj.calls.length !== 1 && stepObj.calls.some((call) => solo.tools.has(call.tool))) {
+        state.record(definition.name, "tool_result", { task_id: input.taskId, name: `${definition.name}_runtime`, step,
+          error: { code: solo.code, message: solo.message } },
         { threadId, parent: input.taskId });
         continue;
       }
@@ -620,14 +681,12 @@ export class SubagentRuntime {
         toolCalls: stepObj.calls.map((call, index) => ({ id: call.id, name: call.tool, input: call.input,
           ...(signedCalls[index]?.signature ? { signature: signedCalls[index]!.signature } : {}) })) },
       ...toolResults.map((result) => result.nativeToolResult).filter((message): message is LlmMessage => message !== undefined)];
-      if (definition.name === "financial_modeling" && allowed.has("get_financial_model")) {
-        const stepConflict = toolResults.some((result) => result.errorCode === "revision_conflict");
-        const modelId = stepConflict
-          ? latestFinancialModelState(state.subagentToolOutputs({ thread: threadId })).model_id ?? input.request.model_id
-          : undefined;
-        if (modelId) {
-          const refresh = await this.runToolCall(definition, input, { id: newId("toolcall"), tool: "get_financial_model", input: { modelId } }, allowed);
-          recoveredRevisionConflict = refresh.errorCode === undefined;
+      if (behavior?.refresh && allowed.has(behavior.refresh.tool)
+        && toolResults.some((result) => result.errorCode !== undefined && behavior.refresh!.onErrorCodes.has(result.errorCode))) {
+        const refreshInput = behavior.refresh.input({ state, threadId, request: input.request });
+        if (refreshInput) {
+          const refreshed = await this.runToolCall(definition, input, { id: newId("toolcall"), tool: behavior.refresh.tool, input: refreshInput }, allowed);
+          recoveredRefresh = refreshed.errorCode === undefined;
         }
       }
       // A question is turn-ending: record it on the main channel so the client
@@ -684,8 +743,8 @@ export class SubagentRuntime {
     const generationContexts = outputs.map((o) => o.generation_context).filter((c): c is NonNullable<typeof c> => Boolean(c));
     // 运行时自愈类错误(串行纠正、重试提示)不算任务失败;而 agent 干净收工时,
     // 中途已被它克服的工具报错也不该盖过 finish 总结。
-    const RUNTIME_NUDGE_CODES = new Set(["financial_mutation_serialization_required", "unparseable_step", "no_action_taken",
-      "user_input_must_be_solo"]);
+    const RUNTIME_NUDGE_CODES = new Set(["unparseable_step", "no_action_taken", "user_input_must_be_solo",
+      ...(behavior?.soloTools ? [behavior.soloTools.code] : [])]);
     // Only a fault the agent never got past ended the run. A tool error is fed back to it and
     // normally corrected a step or two later, so the errors that count are the ones with no
     // successful call after them — otherwise a spent step budget three steps past a corrected fault
@@ -698,11 +757,8 @@ export class SubagentRuntime {
       .map((outcome) => outcome.error)
       .find((error): error is { code: string; message: string } => error !== undefined
         && !RUNTIME_NUDGE_CODES.has(error.code)
-        && !(recoveredRevisionConflict && error.code === "revision_conflict"));
+        && !(recoveredRefresh && behavior?.refresh?.onErrorCodes.has(error.code)));
     const finished = finishSummary !== "";
-    // Thread scope: this describes where the WORK stands, and the model handle
-    // may well have been established in an earlier round of this thread.
-    const latestModel = latestFinancialModelState(state.subagentToolOutputs({ thread: threadId }));
     const pausedForInput = pendingUserInput
       ? `Paused on ${pendingUserInput.questions.length} question${pendingUserInput.questions.length === 1 ? "" : "s"} for the user`
         + `; dispatch thread ${threadId} again with their answer and I pick up where I stopped.`
@@ -715,9 +771,10 @@ export class SubagentRuntime {
       // a host that reports this upward must not pass "completed task" off as an account
       // of work that stopped mid-stride.
       summary: pausedForInput ?? (finished ? finishSummary : (llmFailure?.message ?? firstToolError?.message ?? (exhausted
-        ? (definition.name === "financial_modeling"
-          ? `Paused after ${maxToolSteps} tool steps; dispatch thread ${threadId} again to continue ${latestModel.model_id ?? input.request.model_id ?? "the model"} at revision ${latestModel.revision ?? "unknown"} (${latestModel.lifecycle_stage ?? "unknown stage"}).`
-          : `${definition.name} stopped after ${maxToolSteps} tool steps without writing a finish summary.`)
+        // A spent budget is the agent's own hook to describe (a DCF names the model and revision to
+        // resume at); the default is the honest generic statement.
+        ? (behavior?.exhaustedSummary?.({ state, threadId, request: input.request, maxToolSteps })
+          ?? `${definition.name} stopped after ${maxToolSteps} tool steps without writing a finish summary.`)
         : `${definition.name} completed task.`))),
       artifacts: outputs.flatMap((o) => o.artifacts ?? []),
       visualizations: outputs.flatMap((o) => o.visualizations ?? []),
@@ -731,10 +788,10 @@ export class SubagentRuntime {
     log.info(`[${definition.name}] done`, { ms: Date.now() - started, tool_calls: outputs.length, llm_calls: llmCalls });
     if (generationContexts.length > 0) {
       const prompts = [...new Set(generationContexts.map((context) => context.prompt?.trim()).filter((prompt): prompt is string => Boolean(prompt)))];
-      result.generation_context = definition.name === "financial_modeling"
-        ? { data: { task: input.request.task, ...projectFinancialModelData(outputs) } }
-        : { data: { task: input.request.task,
-          tool_outputs: outputs.map((o) => ({ tool: o.name, summary: o.summary, data: o.generation_context?.data ?? {} })) } };
+      result.generation_context = { data: { task: input.request.task,
+        ...(behavior?.projectResultData
+          ? behavior.projectResultData(outputs)
+          : { tool_outputs: outputs.map((o) => ({ tool: o.name, summary: o.summary, data: o.generation_context?.data ?? {} })) }) } };
       if (prompts.length > 0) result.generation_context.prompt = prompts.join("\n\n");
     }
     state.recordTaskResult(definition.name, input.taskId, result);
@@ -787,6 +844,26 @@ export class SubagentRuntime {
       }
     }
 
+    // Same reason, same shape: the roster lives on the definition, which the tool registry does not
+    // hold, so a tool told only its caller's name still could not say what the allowed choices are.
+    // Refusing here also means no dispatch event is written for a call that was never permitted.
+    if (tool.name === DELEGATE_TO_AGENT) {
+      const requested = typeof call.input["agent"] === "string" ? call.input["agent"] : "";
+      const roster = definition.delegatesTo ?? [];
+      if (!roster.includes(requested as AgentKind)) {
+        const message = `"${requested}" is not one of your delegates — choose from: ${roster.join(", ") || "(none)"}.`;
+        log.warn(`[${definition.name}] delegate outside roster: ${requested}`);
+        state.record(
+          definition.name,
+          "tool_result",
+          { task_id: input.taskId, name: tool.name, error: { code: "agent_not_allowed", message } },
+          { threadId, parent: input.taskId },
+        );
+        return { awaitingApproval: false, errorCode: "agent_not_allowed",
+          nativeToolResult: nativeToolResult(call, tool.name, { error: "agent_not_allowed", message }, true) };
+      }
+    }
+
     const callInput: JsonObject = { ...call.input };
     const toolUseId = newId("tooluse");
     const useEv = state.record(
@@ -805,8 +882,11 @@ export class SubagentRuntime {
       const registry = input.toolRegistry?.get(tool.name) ? input.toolRegistry : this.toolRegistry;
       output = await registry.call(tool.name, callInput, {
         sessionId: input.sessionId,
-        agentId: input.agentId,
+        tenantId: input.tenantId,
         taskId: input.taskId,
+        // Including this agent, not just the ones above it: a tool asking "would this extend a
+        // chain I am already on" has to see the caller in the chain to answer.
+        agentPath: formatAgentPath([...(input.agentPath ?? []), definition.name]),
       });
     } catch (error) {
       log.error(`[${definition.name}] tool error: ${tool.name}`, { error: error instanceof Error ? error.message : String(error) });
@@ -864,254 +944,6 @@ export class SubagentRuntime {
       : { awaitingApproval: false,
         nativeToolResult: nativeToolResult(call, tool.name, output.generation_context?.data ?? { summary: output.summary }, false) };
   }
-}
-
-function latestFinancialModelState(outputs: ReturnType<SessionState["subagentToolOutputs"]>): {
-  model_id?: string; revision?: number; lifecycle_stage?: string;
-} {
-  for (const output of [...outputs].reverse()) {
-    const data = output.generation_context?.data;
-    if (!data) continue;
-    const result: { model_id?: string; revision?: number; lifecycle_stage?: string } = {};
-    if (typeof data["model_id"] === "string") result.model_id = data["model_id"];
-    if (typeof data["revision"] === "number") result.revision = data["revision"];
-    if (typeof data["lifecycle_stage"] === "string") result.lifecycle_stage = data["lifecycle_stage"];
-    if (Object.keys(result).length > 0) return result;
-  }
-  return {};
-}
-
-/** 查询类工具:结果不进 active_model_context,但 agent 的后续判断依赖它们,
- * 所以全部保留,否则 agent 会因为看不到结果而无限重查。 */
-const FINANCIAL_QUERY_TOOLS = new Set([
-  "financial_search", "get_treasury_yield", "list_unified_statements", "get_unified_rows", "calculate_model_rows",
-]);
-
-/** Narrow reads must compose, but an agent can still issue arbitrary selectors. Keep a useful working
- * set rather than letting a long run grow its prompt without bound; the projection tells it if an
- * older slice was evicted, so an intentional reread is never mistaken for a missing tool result. */
-const MAX_WORKBOOK_SLICES = 16;
-/** Approx. 30k tokens of structured workbook evidence, leaving room for playbooks, notes, and tool specs. */
-const MAX_WORKBOOK_SLICE_CONTEXT_CHARS = 120_000;
-
-/** 提取结果里唯一跨步必需的是 ingestionRunId 和覆盖率;诊断按 playbook 只在覆盖率
- *  短缺时才用来判断,所以留计数加一个样本,不把 309 条原样搬进上下文。 */
-function compactExtraction(raw: JsonObject): JsonObject {
-  const diagnostics = Array.isArray(raw["diagnostics"]) ? raw["diagnostics"] : [];
-  return {
-    ...(raw["ingestionRunId"] !== undefined ? { ingestionRunId: raw["ingestionRunId"] } : {}),
-    ...(raw["statementCoverage"] !== undefined ? { statementCoverage: raw["statementCoverage"] } : {}),
-    ...(raw["filingInsightSetId"] !== undefined ? { filingInsightSetId: raw["filingInsightSetId"] } : {}),
-    ...(raw["status"] !== undefined ? { status: raw["status"] } : {}),
-    diagnostic_count: diagnostics.length,
-    ...(diagnostics.length ? { diagnostic_sample: diagnostics.slice(0, 5) as JsonValue } : {}),
-  };
-}
-
-function projectFinancialModelData(outputs: ReturnType<SessionState["subagentToolOutputs"]>): JsonObject {
-  const revisions: JsonValue[] = [];
-  let active: JsonObject = {};
-  // The live revision is deliberately NOT a field of `active` — it changes on every mutation and is
-  // rendered below the progress region instead. The slice-invalidation logic still needs to know
-  // which revision the context is standing on, so it is tracked here rather than read back out of
-  // the projection. Reading it from `active` is what made the two concerns one; they are not.
-  let activeRevision: number | undefined;
-  // A narrowed workbook read is evidence the agent explicitly asked for.  Unlike the overview,
-  // multiple sections are meant to be read together (for example revenue plus history before a
-  // forecast), so keep every distinct slice of the current revision instead of letting whichever
-  // parallel call finishes last erase the others.  A new revision invalidates the whole cache.
-  type CachedWorkbookSlice = { slice: JsonObject; sections: Set<string> };
-  const workbookSlices = new Map<string, CachedWorkbookSlice>();
-  let workbookSliceChars = 0;
-  let evictedWorkbookSlices = 0;
-  const subagentResults: JsonValue[] = [];
-  const skillReferences = new Map<string, JsonValue>();
-  // 技能正文必须跨步存活:这份投影就是 agent 每一步的全部上下文,漏掉它等于
-  // invoke 完下一步方法论就没了。
-  const skillGuidance = new Map<string, JsonValue>();
-  const queryResults: JsonValue[] = [];
-  let extraction: JsonObject | undefined;
-  // Unknown tools get one durable slot per tool name. A fixed "last N events" window previously
-  // forgot a successful tool after enough unrelated calls, which has the same repeat-loop failure
-  // mode as dropping a workbook slice.
-  const otherResults = new Map<string, JsonValue>();
-  for (const output of outputs) {
-    const data = output.generation_context?.data;
-    if (data) {
-      if (output.name === "read_skill_reference" && typeof data["content"] === "string") {
-        skillReferences.set(`${data["skill"]}/${data["path"]}`, data["content"]);
-        continue;
-      }
-      if (output.name === INVOKE_SKILL && typeof data["content"] === "string") {
-        skillGuidance.set(String(data["skill"]), data["content"]);
-        continue;
-      }
-      let captured = false;
-      if (data["revision_summary"] && typeof data["revision_summary"] === "object") { revisions.push(data["revision_summary"]); captured = true; }
-      if (output.name === "run_dcf_subagent") { subagentResults.push(data); captured = true; }
-      if (FINANCIAL_QUERY_TOOLS.has(output.name)) { queryResults.push({ tool: output.name, data }); captured = true; }
-      // 提取结果单独一格,后一次覆盖前一次:agent 需要的是 ingestionRunId 和覆盖率,
-      // 不是 309 条诊断乘以重试次数。没有这一格,提取就等于没发生过,agent 会一直重跑。
-      if (data["extraction"] && typeof data["extraction"] === "object") {
-        extraction = compactExtraction(data["extraction"] as JsonObject);
-        captured = true;
-      }
-      if (typeof data["model_id"] === "string") {
-        const modelId = data["model_id"];
-        const revision = typeof data["revision"] === "number" ? data["revision"] : undefined;
-        const currentModelId = typeof active["model_id"] === "string" ? active["model_id"] : undefined;
-        const currentRevision = activeRevision;
-        const changesModel = currentModelId !== undefined && currentModelId !== modelId;
-        const advancesRevision = revision !== undefined && (currentRevision === undefined || revision > currentRevision);
-        // Explicit historical reads must not make the current model context regress. They remain
-        // visible in the tool trace, but forecasts and mutations should be grounded in the latest
-        // revision the agent has already observed.
-        if (currentModelId === modelId && revision !== undefined && currentRevision !== undefined && revision < currentRevision) {
-          captured = true;
-          continue;
-        }
-        // A mutation carries model_change_context, so its prior slices remain available as explicitly
-        // revision-stamped history. A different model, or an unexplained revision advance, still
-        // invalidates the cache conservatively.
-        const hasChangeContext = data["model_change_context"] !== undefined;
-        if (changesModel || (advancesRevision && !hasChangeContext)) {
-          workbookSlices.clear();
-          workbookSliceChars = 0;
-          evictedWorkbookSlices = 0;
-        }
-        const retained = changesModel || advancesRevision ? {} : active;
-        const incomingSlices = [
-          ...(data["workbook_slice"] !== undefined ? [data["workbook_slice"]] : []),
-        ];
-        for (const rawSlice of incomingSlices) {
-          if (!rawSlice || typeof rawSlice !== "object" || Array.isArray(rawSlice)) continue;
-          const slice = rawSlice as JsonObject;
-          const key = JSON.stringify(slice);
-          // Refreshing an existing slice makes it most-recently used without duplicating it.
-          if (workbookSlices.has(key)) {
-            workbookSlices.delete(key);
-            workbookSliceChars -= key.length;
-          }
-          const rows = Array.isArray(slice["rows"]) ? slice["rows"] : [];
-          const sections = new Set(rows.flatMap((row) => row && typeof row === "object" && !Array.isArray(row)
-            && typeof (row as JsonObject)["section"] === "string" ? [(row as JsonObject)["section"] as string] : []));
-          // A source-statement row has no DCF section field.  Treat an unclassifiable slice as
-          // revision-bound, so it is still conservatively dropped on a normal revision advance.
-          if (sections.size === 0) sections.add("<unknown>");
-          // Once the agent reads a section at the current revision, that fresh slice supersedes an
-          // older one for the same section. Other older sections remain historical working memory.
-          if (revision !== undefined) {
-            for (const [cachedKey, cached] of workbookSlices) {
-              const cachedRevision = typeof cached.slice["revision"] === "number" ? cached.slice["revision"] : undefined;
-              if (cachedRevision !== revision && [...cached.sections].some((section) => sections.has(section))) {
-                workbookSlices.delete(cachedKey);
-                workbookSliceChars -= cachedKey.length;
-              }
-            }
-          }
-          workbookSlices.set(key, { slice, sections });
-          workbookSliceChars += key.length;
-          // Keep the newly requested slice even if it alone exceeds the budget: hiding the result
-          // the agent explicitly asked for recreates the repeat-loop we are preventing.
-          while (workbookSlices.size > MAX_WORKBOOK_SLICES
-            || (workbookSliceChars > MAX_WORKBOOK_SLICE_CONTEXT_CHARS && workbookSlices.size > 1)) {
-            const oldest = workbookSlices.keys().next().value!;
-            workbookSlices.delete(oldest);
-            workbookSliceChars -= oldest.length;
-            evictedWorkbookSlices += 1;
-          }
-        }
-        // Key order inside this object is the same caching decision as the order of the projection
-        // that holds it, and it matters more here, because this is the largest object in the
-        // projection and it is rebuilt on every model read or write.
-        //
-        // `revision` used to sit second. It advances on every mutation, so a mutation step's cache
-        // ended 40 bytes into a 28k object and the whole of it — workbook slices the agent had read
-        // many steps ago and that had not changed since — was re-billed uncached. Measured on a TSLA
-        // run: mutation steps read back 20,441 cached tokens where the steps around them read 49,058.
-        //
-        // It is no longer here at all: the one value that changes on literally every mutation is
-        // rendered into the volatile {{stepBudget}} slot, BELOW the progress region, so it cannot
-        // divide this object at any offset. Ordering alone would have been a convention held up by a
-        // test; keeping it out of the region is structural. What stays here is the big, slow-moving
-        // evidence, and the counters, which only move when the slices above them move anyway.
-        active = { ...retained,
-          ...(data["filing_insights"] !== undefined ? { filing_insights: data["filing_insights"] } : {}),
-          ...(workbookSlices.size > 0 ? { workbook_slices: [...workbookSlices.values()].map((cached) => cached.slice) } : {}),
-          ...(data["revision_history"] !== undefined ? { revision_history: data["revision_history"] } : {}),
-          // model_overview is what both the read and the write answer with. Narrow reads accumulate
-          // in workbook_slices for this revision; neither carries a whole workbook any more.
-          ...(data["model_overview"] ? { model_overview: data["model_overview"] } : {}),
-          ...(data["model_change_context"] ? { model_change_context: data["model_change_context"] } : {}),
-          // Counters and stamps: small, and they move whenever anything above them moves.
-          ...(workbookSlices.size > 0 ? { workbook_slices_context_chars: workbookSliceChars } : {}),
-          ...(evictedWorkbookSlices > 0 ? { workbook_slices_evicted: evictedWorkbookSlices } : {}),
-          ...(workbookSlices.size > 0 && [...workbookSlices.values()].some((cached) => cached.slice["revision"] !== revision)
-            ? { workbook_slices_notice: "Slices from an earlier revision are historical context only; reread that section before using current values." } : {}),
-          model_id: modelId,
-          ...(typeof data["lifecycle_stage"] === "string" ? { lifecycle_stage: data["lifecycle_stage"] } : {}) };
-        activeRevision = revision ?? (changesModel ? undefined : currentRevision);
-        captured = true;
-      }
-      if (captured) continue;
-    }
-    // 兜底。上面每一个分支都是白名单,而白名单漏掉一个工具的后果不是"少点信息",
-    // 是那次调用在 agent 眼里从未发生——它会照着看得见的证据重跑,直到步数耗尽。
-    // summary 本来就是为压缩而写的,足够它知道自己做过什么。
-    otherResults.set(output.name, { tool: output.name, summary: output.summary });
-  }
-  // Key order is a caching decision, not a reading one. A provider caches a request by byte prefix,
-  // so the first field that changes between two steps ends the cache — and everything after it is
-  // re-billed even if it is identical. `active_model_context` used to sit second: it is rewritten on
-  // every model read or write, which left a common prefix of 76 bytes out of 38k and put the tens of
-  // thousands of characters of never-changing playbook text behind it, paid for again every step.
-  //
-  // So: what never changes first, then what only ever grows at its own end, then what is rewritten
-  // or windowed. It reads better this way too — the freshest state ends up nearest the question.
-  // Ordered by how likely a field is to be UNCHANGED between two consecutive steps, most likely
-  // first. Not by "static, then append-only, then rewritten" — that reading is wrong and cost real
-  // money. A provider matches a byte prefix, so an append is a divergence point exactly like a
-  // rewrite: everything below it is re-billed whether or not it changed. `revision_summaries` grows
-  // by one small entry on every mutation, and ordering it above `active_model_context` therefore
-  // re-bills the tens of thousands of tokens of workbook slices underneath it — slices that are
-  // deliberately retained across a mutation precisely so they can be read from cache.
-  //
-  // So the question to ask of each field is not "does it only grow?" but "will this step change it?",
-  // and the big, slow-moving evidence goes above the small, per-step bookkeeping.
-  return {
-    skill_guidance: Object.fromEntries(skillGuidance),
-    skill_references: Object.fromEntries(skillReferences),
-    ...(extraction ? { latest_extraction: extraction } : {}),
-    // Untouched by a mutation step: these move only when their own tool is called.
-    query_results: queryResults,
-    other_results: [...otherResults.values()],
-    latest_subagent_results: subagentResults.slice(-2),
-    // Large, and stable across a mutation up to the per-step stamps at its own end.
-    active_model_context: active,
-    // One small entry per mutation — last, so it cannot push anything above it out of the cache.
-    revision_summaries: revisions,
-  };
-}
-
-export function projectFinancialModelProgress(
-  outputs: ReturnType<SessionState["subagentToolOutputs"]>,
-  errors: ReturnType<SessionState["subagentToolErrors"]>,
-  notes: { step: number; note: string }[],
-): string {
-  if (outputs.length === 0 && errors.length === 0 && notes.length === 0) return "(no tools called yet)";
-  // 步号是时间坐标:模型由此能看出"报错发生在很多步之前,此后没再失败",
-  // 以及自己的 note 是否在原地重复。
-  return JSON.stringify({ ...projectFinancialModelData(outputs),
-    step_notes: notes.map((entry) => `step ${entry.step}: ${entry.note}`),
-    errors: errors.slice(-2).map((error) => ({ ...(error.step === undefined ? {} : { at_step: error.step }),
-      tool: error.name, code: error.code, message: error.message })) });
-}
-
-const FINANCIAL_MUTATION_TOOLS = new Set([
-  "create_financial_model", "apply_financial_model_operations", "archive_financial_model",
-]);
-function violatesFinancialMutationSeriality(calls: ToolCall[]): boolean {
-  return calls.some((call) => FINANCIAL_MUTATION_TOOLS.has(call.tool)) && calls.length !== 1;
 }
 
 function waitForTaskResult(state: SessionState, dispatchEventId: string, timeoutMs: number): Promise<boolean> {

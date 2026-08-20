@@ -306,7 +306,7 @@ test("a breakdown detailRow materializes staged facts from its stored values, wi
 });
 
 test("a breakdown rowId inside a mapping is excluded from the mapping's sum, not merely flagged", () => {
-  // checkSpineCompleteness raises a finding for this, but runSpineMappingAgent ships a dirty decision
+  // checkSpineCompleteness raises a finding for this, and the delivery tools ship a dirty decision
   // after maxRuns anyway — the exclusion from the sum has to be mechanical here, independent of the
   // finding being resolved.
   const unified = makeUnifiedWithNetSales();

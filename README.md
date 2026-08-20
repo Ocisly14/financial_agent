@@ -27,9 +27,9 @@ The result is not merely a chat summary: a DCF request can create a revisioned w
 - **Paper strategy workflows** — create, approve, monitor, pause, resume, and cancel price- or indicator-driven paper/shadow strategies.
 - **Streaming workspace UI** — React 19, SSE progress, resizable panes, dark/light themes, and English/Chinese localization.
 
-![AAPL DCF workbook with formula lineage and highlighted inputs](docs/assets/aapl-dcf-workbook.png)
+![AAPL DCF workbook with an open formula-lineage tooltip beside the agent's valuation conclusion](docs/assets/aapl-dcf-workbook-lineage.png)
 
-_An end-to-end AAPL DCF workspace: forecast drivers, formula lineage, highlighted inputs, valuation tabs, and the agent's auditable conclusion in one durable Topic._
+_An end-to-end AAPL DCF workspace. The open tooltip is the point: every cell says where it came from — here `Total Revenue FY2026` is a formula over `revenue.product + revenue.service`, with the exact inputs it read. On the right, the agent's own conclusion, including that its intrinsic value lands well below the market price and why._
 
 ## Core concepts
 
@@ -125,7 +125,7 @@ node --env-file=.env --experimental-strip-types --experimental-sqlite \
 
 Useful environment overrides include `E2E_SYMBOL`, `E2E_AGENT_OUTPUT_DIR`, `E2E_MAX_ROUNDS`, and `E2E_ROUND_TIMEOUT_MIN`. To resume an existing model in a clean agent session, set both `E2E_MODEL_DB_PATH` and `E2E_RESUME_MODEL_ID`.
 
-The latest full-chain AAPL validation reached `valued` from a blank model in one round; its [detailed E2E report](docs/2026-08-12-aapl-dcf-full-e2e-report.md) includes the exact assumptions, outputs, and caveats. A successful run validates the engineering workflow, not the economic correctness of its assumptions or an investment recommendation.
+The latest full-chain AAPL validation reached `valued` from a blank model in one round of 46 agent steps; its [detailed E2E report](docs/2026-08-19-aapl-dcf-full-e2e-report.md) includes the exact assumptions, delegation and playbook accounting, prompt-cost table, outputs, and caveats — including the one methodological fault the run exposed. A successful run validates the engineering workflow, not the economic correctness of its assumptions or an investment recommendation.
 
 ## Technology
 

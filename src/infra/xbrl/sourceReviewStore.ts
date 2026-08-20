@@ -26,7 +26,7 @@ export interface SourceReviewStore { save(modelId: string, artifact: SourceRevie
 export type FilingIngestionArtifact = {
   ingestionRunId: string;
   modelId: string;
-  ownerAgentId: string;
+  ownerTenantId: string;
   symbol: string;
   status: "ready" | "failed";
   source?: ResolvedFinancialModelSource;
@@ -46,7 +46,7 @@ export type FilingIngestionArtifact = {
 export interface FilingIngestionStore {
   saveIngestion(artifact: FilingIngestionArtifact): void;
   getIngestion(ingestionRunId: string): FilingIngestionArtifact | undefined;
-  consumeIngestion(ingestionRunId: string, ownerAgentId: string, symbol: string): FilingIngestionArtifact | undefined;
+  consumeIngestion(ingestionRunId: string, ownerTenantId: string, symbol: string): FilingIngestionArtifact | undefined;
 }
 
 export class InMemorySourceReviewStore implements SourceReviewStore, FilingIngestionStore {
@@ -58,7 +58,7 @@ export class InMemorySourceReviewStore implements SourceReviewStore, FilingInges
   getIngestion(id: string): FilingIngestionArtifact | undefined { const value = this.ingestions.get(id); return value && structuredClone(value); }
   consumeIngestion(id: string, owner: string, symbol: string): FilingIngestionArtifact | undefined {
     const value = this.ingestions.get(id);
-    if (!value || value.ownerAgentId !== owner || value.symbol !== symbol || value.consumedAt) return undefined;
+    if (!value || value.ownerTenantId !== owner || value.symbol !== symbol || value.consumedAt) return undefined;
     value.consumedAt = new Date().toISOString(); return structuredClone(value);
   }
 }
@@ -68,7 +68,7 @@ export class SqliteSourceReviewStore implements SourceReviewStore, FilingIngesti
   private constructor(db: DatabaseSync) { this.db = db; this.db.exec(`CREATE TABLE IF NOT EXISTS financial_model_source_reviews (
     model_id TEXT PRIMARY KEY, artifact_json TEXT NOT NULL, created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS financial_model_filing_ingestions (
-      ingestion_run_id TEXT PRIMARY KEY, owner_agent_id TEXT NOT NULL, symbol TEXT NOT NULL, artifact_json TEXT NOT NULL, created_at TEXT NOT NULL
+      ingestion_run_id TEXT PRIMARY KEY, owner_tenant_id TEXT NOT NULL, symbol TEXT NOT NULL, artifact_json TEXT NOT NULL, created_at TEXT NOT NULL
     );`); }
   static open(path: string): SqliteSourceReviewStore { mkdirSync(dirname(path), { recursive: true }); return new SqliteSourceReviewStore(new DatabaseSync(path)); }
   // Upsert, not insert: a review is written once when the model is created and again by each
@@ -88,9 +88,9 @@ export class SqliteSourceReviewStore implements SourceReviewStore, FilingIngesti
   // under the same run id. Insert-only would raise a UNIQUE error there and bury the real failure.
   saveIngestion(artifact: FilingIngestionArtifact): void {
     this.db.prepare(`INSERT INTO financial_model_filing_ingestions VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(ingestion_run_id) DO UPDATE SET owner_agent_id=excluded.owner_agent_id,
+      ON CONFLICT(ingestion_run_id) DO UPDATE SET owner_tenant_id=excluded.owner_tenant_id,
         symbol=excluded.symbol, artifact_json=excluded.artifact_json`)
-      .run(artifact.ingestionRunId, artifact.ownerAgentId, artifact.symbol, JSON.stringify(artifact), new Date().toISOString());
+      .run(artifact.ingestionRunId, artifact.ownerTenantId, artifact.symbol, JSON.stringify(artifact), new Date().toISOString());
   }
   getIngestion(id: string): FilingIngestionArtifact | undefined {
     const row = this.db.prepare("SELECT artifact_json FROM financial_model_filing_ingestions WHERE ingestion_run_id=?").get(id) as { artifact_json: string } | undefined;
@@ -100,7 +100,7 @@ export class SqliteSourceReviewStore implements SourceReviewStore, FilingIngesti
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const value = this.getIngestion(id);
-      if (!value || value.ownerAgentId !== owner || value.symbol !== symbol || value.consumedAt) { this.db.exec("ROLLBACK"); return undefined; }
+      if (!value || value.ownerTenantId !== owner || value.symbol !== symbol || value.consumedAt) { this.db.exec("ROLLBACK"); return undefined; }
       value.consumedAt = new Date().toISOString();
       this.db.prepare("UPDATE financial_model_filing_ingestions SET artifact_json=? WHERE ingestion_run_id=?").run(JSON.stringify(value), id);
       this.db.exec("COMMIT"); return value;

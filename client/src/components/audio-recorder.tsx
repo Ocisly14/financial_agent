@@ -14,7 +14,7 @@ import { apiClient } from "@/lib/api";
 import { useTranslation } from "react-i18next";
 
 type Props = {
-    agentId: UUID;
+    tenantId: UUID;
     onChange: (newInput: string) => void;
     className?: string;
     timerClassName?: string;
@@ -38,7 +38,7 @@ const padWithLeadingZeros = (num: number, length: number): string => {
 export const AudioRecorder = ({
     className,
     timerClassName,
-    agentId,
+    tenantId,
     onChange,
 }: Props) => {
     const { toast } = useToast();
@@ -80,7 +80,7 @@ export const AudioRecorder = ({
 
     const mutation = useMutation({
         mutationKey: ["whisper"],
-        mutationFn: (file: Blob) => apiClient.whisper(agentId, file),
+        mutationFn: (file: Blob) => apiClient.whisper(tenantId, file),
         onSuccess: (data: { text: string }) => {
             if (data?.text) {
                 onChange(data.text);

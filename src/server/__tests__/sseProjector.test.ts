@@ -49,6 +49,26 @@ test("final SSE carries a pending structured input request", () => {
   assert.equal(final.input_request?.status, "pending");
 });
 
+test("a dispatch frame carries its caller when the event has one, and omits it when not", () => {
+  const state = new SessionState("session-topology", new Date().toISOString());
+  state.beginTurn("Value AMZN");
+  const rootThread = state.openThread("financial_modeling");
+  const root = state.recordDispatch("financial_modeling", "value AMZN", rootThread);
+  const nestedThread = state.openThread("market_research");
+  const nested = state.recordDispatch("market_research", "AWS demand", nestedThread,
+    { taskId: root.event_id, agent: "financial_modeling" });
+
+  const rootFrame = projectEvent(root, state).find((f) => f.type === "dispatch");
+  assert.ok(rootFrame && rootFrame.type === "dispatch");
+  assert.equal(rootFrame.parent_task_id, undefined);
+  assert.equal(rootFrame.parent_agent, undefined);
+
+  const nestedFrame = projectEvent(nested, state).find((f) => f.type === "dispatch");
+  assert.ok(nestedFrame && nestedFrame.type === "dispatch");
+  assert.equal(nestedFrame.parent_task_id, root.event_id);
+  assert.equal(nestedFrame.parent_agent, "financial_modeling");
+});
+
 test("a financial model tool result projects one model_revision frame", () => {
   const state = new SessionState("session-model", new Date().toISOString());
   state.beginTurn("Build the AAPL model");
@@ -160,4 +180,41 @@ test("a model revision defaults to focus, and a tool can opt out with silent", (
   assert.equal(frameFor("silent").display, "silent");
   // An unrecognised value must not silently suppress the artifact.
   assert.equal(frameFor("nonsense").display, "focus");
+});
+
+test("a subagent's step note is projected as progress on the task it belongs to", () => {
+  const state = new SessionState("session-note", new Date().toISOString());
+  state.beginTurn("Value GOOGL");
+  const thread = state.openThread("statement_unification");
+  const dispatch = state.recordDispatch("statement_unification", "unify GOOGL statements", thread);
+
+  const note = state.record("statement_unification", "subagent_note",
+    { task_id: dispatch.event_id, step: 6, note: "Balance sheet rows added (50 total so far)." },
+    { threadId: thread, parent: dispatch.event_id });
+
+  assert.deepEqual(projectEvent(note, state), [{
+    type: "progress",
+    task_id: dispatch.event_id,
+    phase: "note",
+    note: "Balance sheet rows added (50 total so far).",
+  }]);
+});
+
+test("bookkeeping notes the model writes to itself are not progress", () => {
+  const state = new SessionState("session-note-internal", new Date().toISOString());
+  state.beginTurn("Value GOOGL");
+  const thread = state.openThread("statement_unification");
+  const dispatch = state.recordDispatch("statement_unification", "unify GOOGL statements", thread);
+
+  // The round seam (step 0) and the compaction barrier are addressed to the
+  // model, not the user: neither says anything about work having advanced.
+  const seam = state.record("statement_unification", "subagent_note",
+    { task_id: dispatch.event_id, step: 0, note: "[new round] ..." },
+    { threadId: thread, parent: dispatch.event_id });
+  const barrier = state.record("statement_unification", "subagent_note",
+    { task_id: dispatch.event_id, step: 0, thread_summary: true, note: "[earlier in this thread, summarized]\n..." },
+    { threadId: thread });
+
+  assert.deepEqual(projectEvent(seam, state), []);
+  assert.deepEqual(projectEvent(barrier, state), []);
 });

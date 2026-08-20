@@ -38,6 +38,27 @@ test("chat history projects user and assistant messages with durable UI metadata
   }]);
 });
 
+test("a replayed progress task names its caller so the topology tree can rebuild", () => {
+  const state = new SessionState("room-nested", "2026-08-19T00:00:00.000Z");
+  state.beginTurn("Value AMZN");
+  const rootThread = state.openThread("financial_modeling");
+  const root = state.recordDispatch("financial_modeling", "value AMZN", rootThread);
+  const nestedThread = state.openThread("market_research");
+  const nested = state.recordDispatch("market_research", "AWS demand", nestedThread,
+    { taskId: root.event_id, agent: "financial_modeling" });
+  for (const dispatch of [root, nested]) {
+    state.recordTaskResult(dispatch.payload.agent as "financial_modeling", dispatch.event_id, {
+      task_id: dispatch.event_id, agent: dispatch.payload.agent as "financial_modeling", status: "ok", summary: "done",
+    });
+  }
+  state.recordReply("Done.", true);
+
+  const tasks = projectChatHistory(state.allEvents()).at(-1)?.progressTasks;
+  assert.equal(tasks?.length, 2);
+  assert.equal(tasks?.[0]?.parentTaskId, undefined);
+  assert.equal(tasks?.[1]?.parentTaskId, root.event_id);
+});
+
 test("chat history includes non-final step replies in event order", () => {
   const state = new SessionState("room-2", "2026-07-29T00:00:00.000Z");
   state.beginTurn("Research AAPL");

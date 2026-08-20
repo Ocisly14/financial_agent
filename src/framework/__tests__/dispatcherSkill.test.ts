@@ -42,41 +42,26 @@ function harness(): { dispatcher: Dispatcher; seen: TaskRequest[]; state: Sessio
   return { dispatcher, seen, state, turn };
 }
 
-test("the section for the dispatched agent is appended to its task", async () => {
+/**
+ * A skill acts on its READER. The Dispatcher used to relay a skill's `## for:` sections into
+ * dispatched task text and widen pools with its `tools:` — a side-channel the orchestrator could
+ * not see and the topology did not declare. Both are gone: what a task carries is exactly what its
+ * author wrote, and what an agent can reach is exactly its topology pool.
+ */
+test("a dispatched task reaches the subagent verbatim — nothing is appended behind its author", async () => {
   const { dispatcher, seen } = harness();
-  dispatcher.setSkillSections({ market_data: "RSI period 14" });
 
   await dispatcher.dispatch([{ agent: "market_data", task: "analyse NVDA" }]);
 
   assert.equal(seen.length, 1);
-  assert.match(seen[0]!.task, /analyse NVDA/);
-  assert.match(seen[0]!.task, /RSI period 14/);
-});
-
-test("an agent with no section receives its task unchanged", async () => {
-  const { dispatcher, seen } = harness();
-  dispatcher.setSkillSections({ market_data: "RSI period 14" });
-
-  await dispatcher.dispatch([{ agent: "market_research", task: "find news" }]);
-
-  assert.equal(seen[0]!.task, "find news");
-});
-
-test("with no skill active every task is untouched", async () => {
-  const { dispatcher, seen } = harness();
-  await dispatcher.dispatch([{ agent: "market_data", task: "analyse NVDA" }]);
   assert.equal(seen[0]!.task, "analyse NVDA");
 });
 
-test("an active skill no longer gates which agent may be dispatched to", async () => {
-  const { dispatcher, seen, state, turn } = harness();
-  // `agents:` was a whitelist and is gone: a skill guides, it does not gate.
-  // Dispatching outside the skill's subject matter is off-topic, not a breach —
-  // the category gate is what keeps agents out of each other's domains.
-  dispatcher.setSkillSections({ market_data: "RSI period 14" });
+test("the dispatch event records the user's task, exactly", async () => {
+  const { dispatcher, state } = harness();
 
-  await dispatcher.dispatch([{ agent: "market_research", task: "find news" }]);
+  await dispatcher.dispatch([{ agent: "market_data", task: "analyse NVDA" }]);
 
-  assert.equal(seen.length, 1);
-  assert.equal(state.turnResults(turn).length, 0);
+  const dispatchEvent = state.allEvents().find((e) => e.kind === "dispatch");
+  assert.equal(dispatchEvent?.payload["task"], "analyse NVDA");
 });

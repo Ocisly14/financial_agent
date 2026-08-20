@@ -47,7 +47,7 @@ const FOCUS_HIGHLIGHT_MS = 600;
  * props/callbacks so the parent stays the one source of truth.
  */
 export function MemberRow({
-    agentId,
+    tenantId,
     members,
     activeMemberId,
     onSelectMember,
@@ -55,7 +55,7 @@ export function MemberRow({
     onAddMembers,
     focusSignal,
 }: {
-    agentId: UUID;
+    tenantId: UUID;
     members: MemberChip[];
     activeMemberId: string | undefined;
     onSelectMember: (memberId: string) => void;
@@ -127,7 +127,7 @@ export function MemberRow({
             })}
 
             <MemberPicker
-                agentId={agentId}
+                tenantId={tenantId}
                 excludeTopicIds={members.map((member) => member.id)}
                 onConfirm={onAddMembers}
                 trigger={

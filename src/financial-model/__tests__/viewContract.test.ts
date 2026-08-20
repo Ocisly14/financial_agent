@@ -25,7 +25,7 @@ function createTestService(): FinancialModelService {
   const service = new FinancialModelService(store, "contract-session");
   const input: CreateModelInput = {
     modelId: "contract-model",
-    ownerAgentId: "agent-1",
+    ownerTenantId: "agent-1",
     originSessionId: "topic-1",
     symbol: "TEST",
     metadata: { companyName: "Synthetic Company" },
@@ -110,7 +110,7 @@ function buildValuedContext(): ModelContextView {
   const service = new FinancialModelService(store, "contract-valuation-session");
   const modelId = "contract-valued-model";
   service.createModel({
-    modelId, ownerAgentId: "agent-1", originSessionId: "topic-1", symbol: "TEST",
+    modelId, ownerTenantId: "agent-1", originSessionId: "topic-1", symbol: "TEST",
     metadata: { companyName: "Synthetic Valued Co" }, reportingCurrency: "USD",
     periods: VALUATION_PERIODS, preparedStatementRows: [],
   });
@@ -208,7 +208,7 @@ function assertHasKeys(value: unknown, keys: string[], label: string): void {
 test("model context view exposes the top-level keys the client mirrors", () => {
   const context = buildContext();
   assertHasKeys(context, ["model", "revisionHistory", "currentWorkbook"], "ModelContextView");
-  assertHasKeys(context.model, ["modelId", "symbol", "currentRevision", "lifecycleStage", "ownerAgentId", "originSessionId"], "ModelView");
+  assertHasKeys(context.model, ["modelId", "symbol", "currentRevision", "lifecycleStage", "ownerTenantId", "originSessionId"], "ModelView");
 });
 
 test("current workbook exposes the keys the client mirrors", () => {

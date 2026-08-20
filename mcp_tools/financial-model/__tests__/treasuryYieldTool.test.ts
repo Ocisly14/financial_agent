@@ -3,7 +3,7 @@ import test from "node:test";
 import type { ToolExecutionContext } from "../../toolRegistry.ts";
 import { createTreasuryYieldTool, TREASURY_YIELD_TOOL } from "../treasuryYieldTool.ts";
 
-const CONTEXT: ToolExecutionContext = { sessionId: "s1", agentId: "a1" };
+const CONTEXT: ToolExecutionContext = { sessionId: "s1", tenantId: "a1" };
 
 function feed(date: string, bc30: string): string {
   return `<?xml version="1.0" encoding="utf-8" standalone="yes" ?>

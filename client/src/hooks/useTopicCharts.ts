@@ -10,6 +10,11 @@ import type { UUID, TopicChartPreference } from "@/types/core";
 
 const TICKER_PATTERN = /^[A-Z][A-Z.-]{0,5}$/;
 
+/** What this hook deals in. A model tab is not a chart preference — it comes
+ *  from the backend's model list and lives in ChartPane's model view — so it
+ *  can never appear here, and the type says so. */
+type ChartTab = Exclude<TopicChartTab, { kind: "model" }>;
+
 /**
  * Folds the agent's derived charts (from message history) together with the
  * user's tab preferences (from the backend) via `mergeTopicCharts`, and
@@ -18,7 +23,7 @@ const TICKER_PATTERN = /^[A-Z][A-Z.-]{0,5}$/;
  * hook only wires it to data sources and persists the result.
  */
 export function useTopicCharts(
-    agentId: UUID,
+    tenantId: UUID,
     topicId: UUID,
     messages: ChartWorkspaceMessage[],
     streamingText: string,
@@ -32,11 +37,11 @@ export function useTopicCharts(
         [messages, streamingText],
     );
 
-    const preferencesQueryKey = useMemo(() => ["topicCharts", agentId, topicId], [agentId, topicId]);
+    const preferencesQueryKey = useMemo(() => ["topicCharts", tenantId, topicId], [tenantId, topicId]);
     const { data: preferences = [] } = useQuery<TopicChartPreference[]>({
         queryKey: preferencesQueryKey,
         queryFn: async () => {
-            const result = await apiClient.getTopicCharts(agentId, topicId);
+            const result = await apiClient.getTopicCharts(tenantId, topicId);
             return result.charts ?? [];
         },
         refetchOnWindowFocus: false,
@@ -55,7 +60,7 @@ export function useTopicCharts(
         hiddenInitialized.current = true;
     }
 
-    const tabs = useMemo<TopicChartTab[]>(
+    const tabs = useMemo<ChartTab[]>(
         () => mergeTopicCharts(derived.charts, preferences),
         [derived.charts, preferences],
     );
@@ -110,14 +115,14 @@ export function useTopicCharts(
     }, []);
 
     const persist = useCallback(
-        (nextTabs: TopicChartTab[]) => {
+        (nextTabs: ChartTab[]) => {
             void apiClient
-                .setTopicCharts(agentId, topicId, preferencesFor(nextTabs, hiddenRef.current))
+                .setTopicCharts(tenantId, topicId, preferencesFor(nextTabs, hiddenRef.current))
                 .then(() => {
                     void queryClient.invalidateQueries({ queryKey: preferencesQueryKey });
                 });
         },
-        [agentId, topicId, queryClient, preferencesQueryKey],
+        [tenantId, topicId, queryClient, preferencesQueryKey],
     );
 
     const addSymbol = useCallback(
@@ -141,7 +146,7 @@ export function useTopicCharts(
             // there (see mergeTopicCharts): the symbol you just typed is the one
             // you want to look at. Appending would hide it behind everything the
             // topic has accumulated.
-            const nextTabs: TopicChartTab[] = [
+            const nextTabs: ChartTab[] = [
                 {
                     kind: "symbol",
                     symbol: normalized,
@@ -199,7 +204,7 @@ export function useTopicCharts(
             const byKey = new Map(tabs.map((tab) => [chartTabKey(tab), tab]));
             const reordered = orderedKeys
                 .map((key) => byKey.get(key))
-                .filter((tab): tab is TopicChartTab => tab !== undefined);
+                .filter((tab): tab is ChartTab => tab !== undefined);
             if (reordered.length !== orderedKeys.length) return;
             const mentioned = new Set(orderedKeys);
             const next = [...reordered];

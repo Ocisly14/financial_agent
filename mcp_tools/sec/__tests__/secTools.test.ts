@@ -5,7 +5,7 @@ import { McpToolRegistry } from "../../toolRegistry.ts";
 import type { SecDataProvider } from "../secClient.ts";
 import { createSecTools, SEC_TOOL_NAMES } from "../secTools.ts";
 
-const CTX = { sessionId: "sec-tool-test", agentId: "agent-1" };
+const CTX = { sessionId: "sec-tool-test", tenantId: "agent-1" };
 
 const submissions = {
   cik: "0000320193",

@@ -1,4 +1,5 @@
 import test from "node:test";
+import { dcfBehavior } from "../../agent/financial-modeling/dcfBehavior.ts";
 import assert from "node:assert/strict";
 import { SessionState } from "../sessionState.ts";
 import { SubagentRuntime } from "../subagent.ts";
@@ -20,6 +21,9 @@ const agent = {
   description: "d",
   modelClass: "MEDIUM" as const,
   defaultTools: ["flaky_tool"],
+  // The resumable-pause summary is no longer keyed off the agent's NAME — it is a behavior the
+  // topology node declares. The fixture declares it the same way production does.
+  behavior: dcfBehavior,
   systemPrompt: { system: "s", prompt: "{{task}} {{modelContext}} {{progress}}" },
 };
 
@@ -57,7 +61,7 @@ async function run(runtime: SubagentRuntime, state: SessionState, tools: McpTool
   const dispatch = state.recordDispatch("financial_modeling", "value AAPL", thread);
   const { execute: _execute, ...definition } = tools.get("flaky_tool")!;
   await runtime.run(agent, {
-    sessionId: "s", agentId: "agent-1", taskId: dispatch.event_id,
+    sessionId: "s", tenantId: "agent-1", taskId: dispatch.event_id,
     request: { agent: "financial_modeling", task: "value AAPL" },
     allowedTools: [definition], state, threadId: thread,
   });
@@ -127,7 +131,7 @@ test("a spent budget after a recovered tool error is a pause, not a failure", as
   const dispatch = state.recordDispatch("financial_modeling", "value AAPL", thread);
   const { execute: _execute, ...definition } = tools.get("flaky_tool")!;
   await runtime.run({ ...agent, maxToolSteps: 3 }, {
-    sessionId: "s", agentId: "agent-1", taskId: dispatch.event_id,
+    sessionId: "s", tenantId: "agent-1", taskId: dispatch.event_id,
     request: { agent: "financial_modeling", task: "value AAPL" },
     allowedTools: [definition], state, threadId: thread });
 
@@ -148,7 +152,7 @@ test("a tool error the agent never got past is still what failed the run", async
   const dispatch = state.recordDispatch("financial_modeling", "value AAPL", thread);
   const { execute: _execute, ...definition } = tools.get("always_fails")!;
   await runtime.run({ ...agent, defaultTools: ["always_fails"], maxToolSteps: 2 }, {
-    sessionId: "s", agentId: "agent-1", taskId: dispatch.event_id,
+    sessionId: "s", tenantId: "agent-1", taskId: dispatch.event_id,
     request: { agent: "financial_modeling", task: "value AAPL" },
     allowedTools: [definition], state, threadId: thread });
 
@@ -190,7 +194,7 @@ test("a successful tool result is not reclassified as an error because its summa
 
   await new SubagentRuntime(new ModelRouter(provider), tools).run(
     { ...agent, defaultTools: ["read_model"] } as never,
-    { sessionId: "s", agentId: "a", taskId: dispatch.event_id,
+    { sessionId: "s", tenantId: "a", taskId: dispatch.event_id,
       request: { agent: "financial_modeling", task: "value AMZN" },
       allowedTools: [definition], state, threadId: thread });
 
@@ -220,7 +224,7 @@ test("a tool that declares an error is still recorded as one", async () => {
 
   await new SubagentRuntime(new ModelRouter(provider), tools).run(
     { ...agent, defaultTools: ["read_model"] } as never,
-    { sessionId: "s", agentId: "a", taskId: dispatch.event_id,
+    { sessionId: "s", tenantId: "a", taskId: dispatch.event_id,
       request: { agent: "financial_modeling", task: "value AMZN" },
       allowedTools: [definition], state, threadId: thread });
 

@@ -1,4 +1,7 @@
-import { normalizePriceStrategyInput } from "../../../mcp_tools/trading/strategy/priceStrategy.ts";
+import {
+  normalizePriceStrategyInput,
+  tryParsePriceStrategy,
+} from "../../../mcp_tools/trading/strategy/priceStrategy.ts";
 import { McpToolRegistry } from "../../../mcp_tools/toolRegistry.ts";
 import { registerAllTools, TRADING_OPERATIONS_TOOLS } from "../../../mcp_tools/registerTools.ts";
 import { tradingOperationsSubagentPrompt } from "../../../src/agent/prompts/subagentPrompts.ts";
@@ -21,7 +24,7 @@ export type GoldDsl = {
 };
 export type NlCase = { id: string; input: string; gold: GoldDsl };
 
-type GenCall = { tool: string; input: Record<string, unknown> };
+export type GenCall = { tool: string; input: Record<string, unknown> };
 
 /**
  * The one level a trigger fires at, whichever field carries it. A cross trigger pins none, and
@@ -107,7 +110,12 @@ export type MultiScore = {
   guardrailsMatch: boolean;
   modeMatch: boolean;
   workflowMatch: boolean;
-  intentMatch: boolean;    // tool + every gold phase fully matched + correct count + guardrails + mode
+  /** Whether create_strategy would accept the payload at all. A transcription can carry every
+   *  gold field and still be rejected — a rolling_change missing window_minutes reads correctly
+   *  field by field and costs the agent the whole batch. Scoring that as a pass hides it. */
+  schemaValid: boolean;
+  schemaIssues: string[];
+  intentMatch: boolean;    // schema-valid + tool + every gold phase matched + count + guardrails + mode
 };
 
 /**
@@ -190,21 +198,28 @@ function guardrailsMatch(gen: Record<string, unknown>, gold: GoldMultiDsl["guard
 export function scoreMultiCase(generated: GenCall | null, gold: GoldMultiDsl): MultiScore {
   const phasesTotal = gold.phases.length;
   if (!generated) {
-    return { toolMatch: false, phaseCountMatch: false, phasesMatched: 0, phasesTotal, guardrailsMatch: false, modeMatch: false, workflowMatch: false, intentMatch: false };
+    return { toolMatch: false, phaseCountMatch: false, phasesMatched: 0, phasesTotal, guardrailsMatch: false, modeMatch: false, workflowMatch: false, schemaValid: false, schemaIssues: ["no tool call generated"], intentMatch: false };
   }
   const toolMatch = generated.tool === gold.tool;
   let genPhases: Record<string, unknown>[] = [];
   let gens: Record<string, unknown> = {};
   let mode = "";
+  let schemaValid = false;
+  let schemaIssues: string[] = [];
   try {
     const norm = normalizePriceStrategyInput(generated.input) as Record<string, unknown>;
+    // The gate create_strategy itself applies, on the normalized payload it would apply it to.
+    const parsed = tryParsePriceStrategy(norm);
+    schemaValid = parsed.ok;
+    schemaIssues = parsed.ok ? [] : parsed.issues;
     genPhases = (norm["phases"] as Record<string, unknown>[]) ?? [];
     gens = (norm["guardrails"] as Record<string, unknown>) ?? {};
     mode = String(norm["mode"] ?? "");
-  } catch {
+  } catch (err) {
     genPhases = Array.isArray(generated.input["phases"]) ? (generated.input["phases"] as Record<string, unknown>[]) : [];
     gens = (generated.input["guardrails"] as Record<string, unknown>) ?? {};
     mode = String(generated.input["mode"] ?? "");
+    schemaIssues = [`normalization threw: ${String(err)}`];
   }
 
   // Greedy, order-independent: each gold phase claims one unused fully-correct generated phase.
@@ -220,8 +235,8 @@ export function scoreMultiCase(generated: GenCall | null, gold: GoldMultiDsl): M
   const grMatch = guardrailsMatch(gens, gold.guardrails);
   const modeMatch = gold.mode === undefined ? true : mode === gold.mode;
   const workflowMatch = workflowMatches(genPhases, gold.phases, matchedIndexes);
-  const intentMatch = toolMatch && phaseCountMatch && matched === phasesTotal && grMatch && modeMatch && workflowMatch;
-  return { toolMatch, phaseCountMatch, phasesMatched: matched, phasesTotal, guardrailsMatch: grMatch, modeMatch, workflowMatch, intentMatch };
+  const intentMatch = schemaValid && toolMatch && phaseCountMatch && matched === phasesTotal && grMatch && modeMatch && workflowMatch;
+  return { toolMatch, phaseCountMatch, phasesMatched: matched, phasesTotal, guardrailsMatch: grMatch, modeMatch, workflowMatch, schemaValid, schemaIssues, intentMatch };
 }
 
 function extractJsonObject(text: string): string | null {

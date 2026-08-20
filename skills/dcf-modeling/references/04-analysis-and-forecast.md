@@ -2,6 +2,8 @@
 
 The valuation's actual work happens here, in three moves. Read `formulas.md` once before starting — every recipe below lives there with exact syntax.
 
+Read the sector playbook, or playbooks, the skill map routes this issuer to — in the same step, however many that is. The three moves below assume a margin-driven chain fits; for a bank, an insurer or a REIT it does not, and that playbook's chain-shape section replaces the default rather than annotating it. For every other sector it tells you which decomposition pays and where the margin story lives. Its calibration table is terminal only: those bands describe the steady state you will need in stage 6, and pulling one into an explicit year substitutes a sector average for the issuer evidence these three moves exist to find.
+
 ## Move 1 — decompose where profit comes from
 
 Profit is not one number; it is a sum of sources with different economics. Take the model apart before forecasting it:
@@ -19,12 +21,12 @@ For every source and every driver row ask: does the economic structure that prod
 
 - **Start from the company, then test the world around it.** Historical stream economics are the forecast anchor. From there, reason forward about the industry's likely demand, technology, supply, competitive and regulatory direction, then the issuer's product roadmap, strategic priorities, capacity, distribution and execution. Translate each conclusion into the named company line it changes. A generic sector growth rate, peer forecast or historical average is a reference check; it never substitutes for this issuer-specific causal chain.
 - **"Unchanged" is a claim, not a default.** Keeping a ratio flat asserts its causes persist — say why. The anchors make the claim testable: a driver held flat against a five-year trend moving one direction is a contradiction you must address.
-- **"Changed" needs a nameable cause**: product cycle, capacity coming online, competition, policy, mix shift. Evidence comes from the breakdown trends you computed and financial_search for management guidance and macro conditions.
+- **"Changed" needs a nameable cause**: product cycle, capacity coming online, competition, policy, mix shift. Evidence comes from the breakdown trends you computed, and from delegate_to_agent → market_research for the industry and management picture. Send it the question and what turns on it — *"AMZN: what changes AWS demand and pricing over 2026-2030, and what has management committed to on capacity"* — never a list of queries. Its answer is prose, so use it the way Move 2 uses everything else: name the company line it reaches. A round that comes back thin is continued on its own thread with the shortfall, not replaced by a second one. Single figures go the same way — you have no search tool of your own — so name the figure and the date you need rather than describing a query.
 <!-- Filing insights are switched off (FILING_INSIGHTS_ENABLED unset), so an ingestion links an empty
      set flagged filing_insights_disabled and `get_financial_model` with an insightId can only answer
      filing_insight_not_found. Restore this clause verbatim when the flag goes back on:
      "Evidence comes from the breakdown trends you computed, filing insights (get_financial_model with
-     insightId), and financial_search for management guidance and macro conditions." -->
+     insightId), and delegate_to_agent -> market_research for the industry and management picture." -->
 
 - **Macro enters as transmission, not mood.** A rate path reaches this model through named lines — financing cost, discount rate, demand for financed purchases. If you cannot name the receiving line, the macro observation does not belong in the model. The same rule applies to an industry narrative: name the company-specific product, stream, margin or reinvestment mechanism before using it in an assumption.
 - Write each conclusion as one sentence you will reuse verbatim as the assumption's rationale: *source X — changes/persists — because Y — evidence Z.*

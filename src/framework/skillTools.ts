@@ -9,9 +9,8 @@ export const READ_SKILL_REFERENCE = "read_skill_reference";
 export const INVOKE_SKILL = "invoke_skill";
 
 /**
- * 框架能力，不属于任何领域。category 门是领域隔离（研究 agent 不得触及交易工具），
- * 拿它去卡这两个等于任何 subagent 都别想读自己的方法论——所以豁免走 toolAccess，
- * 授予走各 agent 的 defaultTools：谁拿得到，由注册表显式说了算。
+ * 框架能力，不属于任何领域。授予走各 agent 的 defaultTools：谁拿得到，
+ * 由 topology 显式说了算。
  */
 export const SKILL_FRAMEWORK_TOOLS: readonly string[] = [INVOKE_SKILL, READ_SKILL_REFERENCE];
 

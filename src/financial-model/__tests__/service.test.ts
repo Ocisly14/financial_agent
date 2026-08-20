@@ -27,7 +27,7 @@ const PERIODS: Period[] = [
 
 const CREATE_INPUT: CreateModelInput = {
   modelId: "model-1",
-  ownerAgentId: "agent-1",
+  ownerTenantId: "agent-1",
   originSessionId: "session-1",
   symbol: "TEST",
   metadata: { companyName: "Synthetic Company" },

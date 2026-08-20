@@ -67,7 +67,7 @@ function contextFixture(): {
     changeSummary: summary(revision === 0 ? "model_created" : "stage_advanced"), engineVersion: ENGINE_VERSION,
     creatingSessionId: "s", createdAt: `2025-01-0${revision + 1}T00:00:00.000Z`,
   }));
-  const meta: ModelView = { modelId: "m", ownerAgentId: "a", originSessionId: "s", symbol: "TEST",
+  const meta: ModelView = { modelId: "m", ownerTenantId: "a", originSessionId: "s", symbol: "TEST",
     metadata: {}, currentRevision: 1, lifecycleStage: "history_committed", createdAt: headers[0]!.createdAt,
     updatedAt: headers[1]!.createdAt };
   const current: Revision<FinancialModelSnapshot, RevisionChangeSummary> = {

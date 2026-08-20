@@ -58,7 +58,15 @@ export type DerivationDeps = {
   dailyCloses: (symbol: string, from: string, to: string) => Promise<PriceBar[]>;
   /** The official 30-year Treasury yield as of a date, when a feed is wired; absent or a failed
    * resolution both leave riskFreeRate unreachable rather than fabricating a value. */
-  treasury30y?: (asOfDate: string) => Promise<{ value: number; curveDate: string } | undefined>;
+  /**
+   * The risk-free anchor. 10Y, not 30Y, because the rate and the equity risk premium added to it
+   * must be measured on the SAME instrument: the published implied-ERP estimates an analyst reaches
+   * for (Damodaran's among them) are computed over the 10Y, so pairing them with the 30Y counts the
+   * term premium twice — once inside the rate, once inside a premium calibrated without it.
+   * A longer tenor is still defensible for a terminal-value-heavy issuer; it is then an override
+   * with its own rationale, and the ERP owes the same adjustment.
+   */
+  treasuryRiskFree?: (asOfDate: string) => Promise<{ value: number; curveDate: string } | undefined>;
 };
 
 /** The WACC sheet's hidden `cash_and_equivalents_value` row is not one of the seven `WaccParameterName`
@@ -222,14 +230,14 @@ export async function deriveWaccParameters(input: {
 
   // --- Risk-free rate: the 30-year Treasury constant-maturity yield, straight off treasury.gov's own
   // daily yield curve feed, when one is wired and resolves. Otherwise the agent supplies it.
-  const treasury = input.deps.treasury30y ? await input.deps.treasury30y(input.asOfDate) : undefined;
+  const treasury = input.deps.treasuryRiskFree ? await input.deps.treasuryRiskFree(input.asOfDate) : undefined;
   if (treasury) {
     derived.push({ ...base, name: "riskFreeRate", value: treasury.value, sourceType: "market",
-      sourceRefs: [`treasury.gov:30y:${treasury.curveDate}`],
-      derivation: { term: "30Y", curveDate: treasury.curveDate, feed: "treasury.gov" },
+      sourceRefs: [`treasury.gov:10y:${treasury.curveDate}`],
+      derivation: { term: "10Y", curveDate: treasury.curveDate, feed: "treasury.gov" },
       rationale: `30-year constant-maturity Treasury yield as of ${treasury.curveDate} (treasury.gov daily yield curve).` });
   } else {
-    unreachable.push({ name: "riskFreeRate", reason: "treasury.gov 30Y yield unavailable; supply it as an override" });
+    unreachable.push({ name: "riskFreeRate", reason: "treasury.gov 10Y yield unavailable; supply it as an override" });
   }
 
   // --- The one term the engine has no source for at all.

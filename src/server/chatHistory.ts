@@ -12,6 +12,9 @@ type ProgressTask = {
    *  can group rounds of one thread without a second round trip. */
   threadId?: string;
   summary?: string;
+  /** The caller's dispatch when this task came from a nested delegate_to_agent;
+   *  absent on orchestrator-rooted dispatches. The topology view draws its edges from this. */
+  parentTaskId?: string;
 };
 
 export type ChatHistoryMessage = {
@@ -65,6 +68,7 @@ function turnDetails(events: readonly SessionEvent[], turn: number) {
     };
     if (typeof dispatch.payload.agent === "string") task.agent = dispatch.payload.agent;
     if (typeof dispatch.payload.child_thread_id === "string") task.threadId = dispatch.payload.child_thread_id;
+    if (typeof dispatch.payload.parent_task_id === "string") task.parentTaskId = dispatch.payload.parent_task_id;
     if (typeof result?.payload.summary === "string") task.summary = result.payload.summary;
     progressTasks.push(task);
   }

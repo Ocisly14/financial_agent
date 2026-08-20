@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { assertSubagentSkills, SkillRegistry } from "../skill.ts";
 import { createInvokeSkillTool } from "../skillTools.ts";
-import { assertToolAllowedForAgent } from "../toolAccess.ts";
 import { SubagentRuntime, type SubagentDefinition } from "../subagent.ts";
 import { SessionState } from "../sessionState.ts";
 import { McpToolRegistry } from "../../../mcp_tools/toolRegistry.ts";
@@ -60,14 +59,6 @@ test("invoke_skill refuses a topic-layer name — only agent-layer skills are in
   const result = await tool.execute({ skill: "demo-topic" } as JsonObject, {} as never);
 
   assert.equal(result.error?.code, "skill_not_found");
-});
-
-test("the skill framework tools are exempt from the category gate", () => {
-  // They belong to no domain: gating them by domain would mean no subagent
-  // could ever read its own methodology.
-  assert.doesNotThrow(() => assertToolAllowedForAgent("financial_modeling", "invoke_skill", "main"));
-  assert.doesNotThrow(() => assertToolAllowedForAgent("financial_modeling", "read_skill_reference", "main"));
-  assert.throws(() => assertToolAllowedForAgent("financial_modeling", "create_strategy", "trading"));
 });
 
 test("assertSubagentSkills rejects an unknown skill name at startup", async () => {
@@ -146,7 +137,7 @@ test("the agent's roster reaches its system prompt, and an invoked skill's tools
   const { runtime, definition, state, toolSpecsPerStep, systemPrompts } = runtimeHarness({}, skills);
 
   await runtime.run(definition, {
-    sessionId: "s", agentId: "a", taskId: "t", threadId: "th", state,
+    sessionId: "s", tenantId: "a", taskId: "t", threadId: "th", state,
     request: { agent: "financial_modeling", task: "do it" },
     allowedTools: [{ name: "invoke_skill", description: "d", category: "main", inputSchema: { type: "object" } }],
   });
@@ -163,7 +154,7 @@ test("a skill outside the agent's roster never reaches the registry", async () =
   const { runtime, definition, state, toolSpecsPerStep } = runtimeHarness({ skills: [] }, skills);
 
   await runtime.run(definition, {
-    sessionId: "s", agentId: "a", taskId: "t", threadId: "th", state,
+    sessionId: "s", tenantId: "a", taskId: "t", threadId: "th", state,
     request: { agent: "financial_modeling", task: "do it" },
     allowedTools: [{ name: "invoke_skill", description: "d", category: "main", inputSchema: { type: "object" } }],
   });

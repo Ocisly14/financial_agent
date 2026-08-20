@@ -1,155 +1,24 @@
 import { formatList, PromptRenderer } from "./prompt.ts";
 import type { SkillRegistry } from "./skill.ts";
 import type { Dispatcher } from "./dispatcher.ts";
-import type { SubagentRegistry } from "./subagent.ts";
+import { buildLoopToolSpecs, progressRegion, splitForPromptCache, type ProgressCache, type SubagentRegistry } from "./subagent.ts";
 import type { ModelRouter } from "../infra/llm/provider.ts";
 import { formatLatestInput, type LiveThread, type SessionRegistry, SessionState } from "./sessionState.ts";
 import { maybeCompact } from "./contextCompaction.ts";
+import { DELEGATE_TO_AGENT } from "./delegation.ts";
+import { INVOKE_SKILL } from "./skillTools.ts";
 import type { McpToolRegistry } from "../../mcp_tools/toolRegistry.ts";
 import type { PromptTemplate } from "./prompt.ts";
-import type { AgentKind, JsonObject, OrchestratorStep, OrchestratorToolCall, SkillResult, TaskRequest, UserInputRequest, UserInputResponse } from "./types.ts";
+import type { AgentKind, JsonObject, OrchestratorToolCall, SkillResult, TaskRequest, UserInputRequest, UserInputResponse } from "./types.ts";
 
 /** Max orchestrator loop iterations per user turn — a runaway-loop backstop. */
 const MAX_STEPS = 6;
 
-/**
- * Strip a leading ```json / ``` fence and trailing ``` that some models
- * (notably Gemini) wrap structured output in. The brace scanner below also
- * tolerates fences, but removing them up front keeps logs and salvage clean.
- */
-function stripCodeFence(text: string): string {
-  const trimmed = text.trim();
-  const fenced = trimmed.match(/^```(?:json)?\s*\n([\s\S]*?)\n?```\s*$/i);
-  const body = fenced?.[1];
-  return body !== undefined ? body.trim() : trimmed;
-}
+/** The one growing region of the orchestrator prompt — everything before it is
+ *  byte-stable across a turn's steps and cacheable. The prompt template renders
+ *  it LAST for exactly this reason. */
+export const TURN_PROGRESS_MARKER = "[CURRENT TURN PROGRESS]";
 
-/** Extract the first balanced JSON object from a possibly-noisy LLM string. */
-function extractJsonObject(text: string): string | null {
-  const start = text.indexOf("{");
-  if (start === -1) return null;
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let i = start; i < text.length; i++) {
-    const ch = text[i];
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (ch === "\\") escaped = true;
-      else if (ch === '"') inString = false;
-      continue;
-    }
-    if (ch === '"') inString = true;
-    else if (ch === "{") depth++;
-    else if (ch === "}") {
-      depth--;
-      if (depth === 0) return text.slice(start, i + 1);
-    }
-  }
-  return null;
-}
-
-/** Decode the common JSON string escapes in a raw (possibly truncated) body. */
-function decodeJsonString(body: string): string {
-  let out = "";
-  for (let i = 0; i < body.length; i++) {
-    const ch = body[i];
-    if (ch !== "\\") {
-      out += ch;
-      continue;
-    }
-    const next = body[i + 1];
-    if (next === undefined) break; // trailing backslash from a truncated stream
-    switch (next) {
-      case "n": out += "\n"; break;
-      case "t": out += "\t"; break;
-      case "r": out += "\r"; break;
-      case "b": out += "\b"; break;
-      case "f": out += "\f"; break;
-      case '"': out += '"'; break;
-      case "\\": out += "\\"; break;
-      case "/": out += "/"; break;
-      case "u": {
-        const hex = body.slice(i + 2, i + 6);
-        if (/^[0-9a-fA-F]{4}$/.test(hex)) {
-          out += String.fromCharCode(parseInt(hex, 16));
-          i += 4;
-        } else {
-          out += next;
-        }
-        break;
-      }
-      default: out += next;
-    }
-    i += 1;
-  }
-  return out;
-}
-
-/**
- * Best-effort recovery of the `reply` field when JSON.parse fails — most often
- * because the stream was truncated mid-string (no closing quote/brace) or the
- * model emitted raw newlines / trailing commas. Returns the decoded markdown so
- * the user sees prose instead of a raw `{"reply": ...}` blob.
- */
-function salvageReply(text: string): string | null {
-  const startMatch = text.match(/"reply"\s*:\s*"/);
-  if (!startMatch || startMatch.index === undefined) return null;
-  const bodyStart = startMatch.index + startMatch[0].length;
-  const rest = text.slice(bodyStart);
-  // Closing quote precedes either the next known key or the object end. If the
-  // stream was truncated, no such marker exists — take everything that's left.
-  const endMatch = rest.match(/"\s*(?:,\s*"(?:dispatch|skill|tool_calls?)"|}\s*$)/);
-  const body = endMatch && endMatch.index !== undefined ? rest.slice(0, endMatch.index) : rest;
-  const decoded = decodeJsonString(body).trim();
-  return decoded.length > 0 ? decoded : null;
-}
-
-/**
- * Parse one orchestrator completion into an OrchestratorStep. On any failure,
- * fall back to treating the raw text as a terminal user-facing reply so the loop
- * still ends gracefully instead of looping or crashing.
- */
-function parseStep(text: string): OrchestratorStep {
-  const cleaned = stripCodeFence(text);
-  const rawFallback: OrchestratorStep = { reply: text.trim(), dispatch: null, skill: null, tool_calls: null };
-  const json = extractJsonObject(cleaned);
-
-  if (json) {
-    try {
-      const raw = JSON.parse(json) as Record<string, unknown>;
-      const reply = typeof raw.reply === "string" ? raw.reply : "";
-      const dispatch = Array.isArray(raw.dispatch) ? (raw.dispatch as TaskRequest[]) : null;
-      const skill = typeof raw.skill === "string" && raw.skill.trim() ? raw.skill.trim() : null;
-      // The schema asks for `tool_calls: [...]`, but a model that has seen the
-      // singular form elsewhere reverts to it often enough that refusing it
-      // would cost a whole retry step for nothing.
-      const toolCalls = normalizeToolCalls(raw.tool_calls ?? raw.tool_call);
-      return { reply, dispatch, skill, tool_calls: toolCalls };
-    } catch {
-      // Fall through to salvage — most often a truncated or lightly-malformed
-      // JSON string (raw newlines, trailing comma) that strict parsing rejects.
-    }
-  }
-
-  // No complete object (truncated stream) or JSON.parse threw. Recover the
-  // reply text so the user sees markdown, not a raw `{"reply": ...}` dump.
-  const salvaged = salvageReply(cleaned);
-  if (salvaged !== null) {
-    return { reply: salvaged, dispatch: null, skill: null, tool_calls: null };
-  }
-  return rawFallback;
-}
-
-/** Accepts either `tool_calls: [...]` or a lone `tool_call: {...}`. */
-function normalizeToolCalls(raw: unknown): OrchestratorToolCall[] | null {
-  const items = Array.isArray(raw) ? raw : raw === undefined || raw === null ? [] : [raw];
-  const calls = items.filter(
-    (item): item is OrchestratorToolCall =>
-      typeof item === "object" && item !== null && typeof (item as { name?: unknown }).name === "string",
-  );
-  return calls.length > 0 ? calls : null;
-}
 
 /** A compact, automatically derived description of the model open in the UI.
  * The workbook itself remains tool-readable rather than prompt-injected. */
@@ -164,7 +33,7 @@ export type ActiveWorkspaceModel = {
 
 export type OrchestratorInput = {
   sessionId: string;
-  agentId: string;
+  tenantId: string;
   userMessage: string;
   inputResponse?: UserInputResponse;
   /** Model open in the caller's workspace; advisory context for DCF work. */
@@ -176,7 +45,7 @@ export type OrchestratorInput = {
 /** A read-only, non-persistent consultation of a Topic's current working context. */
 export type TopicConsultationInput = {
   sessionId: string;
-  agentId: string;
+  tenantId: string;
   question: string;
   activeModel?: ActiveWorkspaceModel;
 };
@@ -227,7 +96,7 @@ export class OrchestratorRuntime {
   private readonly renderer = new PromptRenderer();
   private readonly prompt: PromptTemplate;
   private readonly modelRouter: ModelRouter;
-  private readonly dispatcherFactory: (sessionId: string, agentId: string, state?: SessionState) => Dispatcher;
+  private readonly dispatcherFactory: (sessionId: string, tenantId: string, state?: SessionState) => Dispatcher;
   private readonly subagents: SubagentRegistry;
   private readonly skills: SkillRegistry;
   private readonly tools: McpToolRegistry;
@@ -237,7 +106,7 @@ export class OrchestratorRuntime {
   constructor(
     prompt: PromptTemplate,
     modelRouter: ModelRouter,
-    dispatcherFactory: (sessionId: string, agentId: string, state?: SessionState) => Dispatcher,
+    dispatcherFactory: (sessionId: string, tenantId: string, state?: SessionState) => Dispatcher,
     subagents: SubagentRegistry,
     skills: SkillRegistry,
     tools: McpToolRegistry,
@@ -272,7 +141,7 @@ export class OrchestratorRuntime {
     );
     return this.runWithState({
       sessionId: input.sessionId,
-      agentId: input.agentId,
+      tenantId: input.tenantId,
       userMessage: input.question,
       ...(input.activeModel ? { activeModel: input.activeModel } : {}),
       allowUserInput: false,
@@ -285,7 +154,7 @@ export class OrchestratorRuntime {
     }
     const turn = state.beginTurn(input.userMessage, input.inputResponse);
 
-    const dispatcher = this.dispatcherFactory(input.sessionId, input.agentId, state);
+    const dispatcher = this.dispatcherFactory(input.sessionId, input.tenantId, state);
     // The same rule the orchestrator applies to its own ask_user below, pushed
     // down to the subagents it dispatches: no human on this stream, no asking.
     dispatcher.setUserInputAllowed(input.allowUserInput !== false);
@@ -297,6 +166,25 @@ export class OrchestratorRuntime {
     const directTools = input.allowUserInput === false
       ? new Set([...this.orchestratorTools].filter((name) => name !== "ask_user"))
       : this.orchestratorTools;
+    // Native tool calling: the provider is handed the REAL schemas — delegation and invoke_skill
+    // included — and returns structured calls. The hand-written JSON step protocol this replaces
+    // could only describe those shapes in prose, and a model that flattened the input wrapper
+    // produced an empty call the parser silently dropped: the turn then ended on its own status
+    // line, promising work that never ran. A consultation gets no tools at all: it is answer-only.
+    const nativeTools = buildLoopToolSpecs(
+      [DELEGATE_TO_AGENT, INVOKE_SKILL, ...directTools]
+        .flatMap((name) => {
+          const registered = this.tools.get(name);
+          if (!registered) return [];
+          const { execute: _execute, ...definition } = registered;
+          return [definition];
+        }),
+    );
+
+    // What the previous step sent as its [CURRENT TURN PROGRESS] region and
+    // where it cut it — same rolling-breakpoint scheme the subagent loop uses,
+    // scoped to this turn (a new turn starts a new region).
+    let previousCache: ProgressCache | undefined;
 
     for (let step = 1; step <= MAX_STEPS; step++) {
       // Run before every prompt, not just at the start of a user turn. The
@@ -304,14 +192,12 @@ export class OrchestratorRuntime {
       // current request or its in-flight results.
       await maybeCompact(state, this.modelRouter, turn);
       const proj = state.projectForPrompt(turn);
-      const history = proj.currentTurnProgress
-        ? `${proj.conversationSoFar}\n\n[CURRENT TURN PROGRESS]\n${proj.currentTurnProgress}`
-        : proj.conversationSoFar;
 
       const rendered = this.renderer.render(this.prompt, {
         currentDate: new Date().toISOString().slice(0, 10),
         latestInput: formatLatestInput(input.userMessage, Boolean(input.inputResponse)),
-        history,
+        conversationSoFar: proj.conversationSoFar,
+        turnProgress: proj.currentTurnProgress || "(none yet)",
         threads: formatThreads(state.liveThreads()),
         activeModelContext: input.activeModel
           ? `The user is currently viewing this financial model:\n- Model ID: ${input.activeModel.modelId}\n- Symbol: ${input.activeModel.symbol}\n- Created: ${input.activeModel.createdAt}\n- Last updated: ${input.activeModel.updatedAt}\n- Current revision: ${input.activeModel.currentRevision}\n- Lifecycle stage: ${input.activeModel.lifecycleStage}\nIf their request concerns this DCF, prefer continuing it: dispatch financial_modeling with this model ID in model_id so the subagent can refresh its state first. This is advisory context, not a command to ignore evidence that a different model is needed.`
@@ -327,22 +213,30 @@ export class OrchestratorRuntime {
       });
 
       let completionText: string;
+      let completionCalls: OrchestratorToolCall[];
+      // Cut the prompt at [CURRENT TURN PROGRESS] and stamp cache breakpoints:
+      // tools + system + everything before the region is byte-stable across a
+      // turn's steps, so without this every step re-paid the whole prompt at
+      // full price (measured: a DCF turn's final step at in=216k, cache_r=0).
+      const progressSent = progressRegion(rendered.prompt, TURN_PROGRESS_MARKER);
+      const split = splitForPromptCache(rendered.system, rendered.prompt, previousCache, TURN_PROGRESS_MARKER);
       try {
         const completion = await this.modelRouter.generate(
-          [
-            { role: "system", content: rendered.system },
-            { role: "user", content: rendered.prompt },
-          ],
-          { modelClass: "LARGE", temperature: 0.2, metadata: { mode: "orchestrator" } },
+          split.messages,
+          { modelClass: "LARGE", temperature: 0.2, metadata: { mode: "orchestrator" },
+            ...(readOnlyConsultation ? {} : { tools: nativeTools }) },
         );
         completionText = completion.text;
+        completionCalls = (completion.toolCalls ?? [])
+          .map((call) => ({ name: call.name, input: (call.input ?? {}) as JsonObject }));
         state.recordPromptTokens(completion.metrics.tokens_in);
+        previousCache = progressSent === undefined ? undefined : { progress: progressSent, cuts: split.cuts };
       } catch (error) {
         state.record("orchestrator", "error", { scope: "main", message: error instanceof Error ? error.message : String(error) });
         break;
       }
 
-      const stepObj = parseStep(completionText);
+      const stepObj = { reply: completionText, tool_calls: completionCalls };
       const status = stepObj.reply.trim();
 
       // A consultation is deliberately an answer-only view of the Topic. Even
@@ -358,20 +252,21 @@ export class OrchestratorRuntime {
       // dispatch written in the same step was written blind to it. Resolving the
       // clash by branch order would drop an action the model asked for without
       // telling it — the failure then looks like the skill simply never ran.
-      const otherAction = (stepObj.dispatch?.length ?? 0) > 0 || (stepObj.tool_calls?.length ?? 0) > 0;
-      if (stepObj.skill && otherAction) {
+      const skillCalls = (stepObj.tool_calls ?? []).filter((call) => call.name === INVOKE_SKILL);
+      const requestedSkill = typeof skillCalls[0]?.input["skill"] === "string" ? skillCalls[0].input["skill"] : "";
+      if (skillCalls.length > 0 && (skillCalls.length > 1 || (stepObj.tool_calls?.length ?? 0) > 1)) {
         state.record("orchestrator", "error", {
           scope: "protocol",
           message:
-            "skill is mutually exclusive with dispatch and tool_calls — invoke the skill alone, then act on its guidance in the next step",
+            "invoke_skill must be the only call in its step — its guidance shapes what you write NEXT, so anything issued beside it was written without it",
         });
         continue;
       }
 
       const askUserCalls = (stepObj.tool_calls ?? []).filter((call) => call.name === "ask_user");
+      // delegate_to_agent entries count against this too: they sit in the same tool_calls list.
       const askUserMixed = askUserCalls.length > 0 && (
         askUserCalls.length > 1 ||
-        (stepObj.dispatch?.length ?? 0) > 0 ||
         (stepObj.tool_calls?.length ?? 0) !== askUserCalls.length
       );
       if (askUserCalls.length > 0 && input.allowUserInput === false) {
@@ -389,10 +284,16 @@ export class OrchestratorRuntime {
         continue;
       }
 
-      // --- dispatch + tool_calls: independent of each other, so they share a step ---
-      const tasks: TaskRequest[] = (stepObj.dispatch ?? [])
+      // --- tool_calls: one list, one contract. delegate_to_agent entries become dispatches
+      // through THIS turn's dispatcher — which carries the active skill's sections and the
+      // user-input allowance — and run beside the direct tool calls, independent of them.
+      // The root's authority is the one asymmetry: it may delegate to ANY registered agent,
+      // where an agent's own delegate_to_agent is gated by its declared roster.
+      const tasks: TaskRequest[] = (stepObj.tool_calls ?? [])
+        .filter((call) => call.name === DELEGATE_TO_AGENT)
+        .map((call) => call.input as Partial<TaskRequest>)
         .filter((t) => t && typeof t.task === "string" && t.task.trim() && validAgents.has(t.agent as AgentKind))
-        .map((t) => ({ agent: t.agent as AgentKind, task: t.task.trim(),
+        .map((t) => ({ agent: t.agent as AgentKind, task: t.task!.trim(),
           ...(typeof t.thread === "string" && t.thread.trim() ? { thread: t.thread.trim() } : {}),
           // The completion can name another model when the task justifies it.
           // Otherwise carry the one the user is inspecting into the subagent's
@@ -401,9 +302,32 @@ export class OrchestratorRuntime {
             ? { model_id: t.model_id.trim() }
             : t.agent === "financial_modeling" && input.activeModel
               ? { model_id: input.activeModel.modelId }
-              : {}) }));
+              : {}),
+          // Ids of earlier results whose data this task needs. Uncapped on purpose:
+          // the caller passes an id precisely because it cannot see how much data
+          // sits behind one, so a count it silently trimmed here would drop data
+          // the task was written around. The dispatcher's size limit is the real
+          // bound, and it fails the task out loud.
+          ...(Array.isArray(t.source_event_ids)
+            ? ((ids) => (ids.length > 0 ? { source_event_ids: ids } : {}))(
+              t.source_event_ids.filter((id): id is string => typeof id === "string" && id.trim() !== "")
+                .map((id) => id.trim()))
+            : {}) }));
 
       const toolCalls = (stepObj.tool_calls ?? []).filter((call) => directTools.has(call.name));
+
+      // A delegate call that produced no task was malformed or named an unknown agent. Filtering it
+      // silently would end the turn on the step's status line — the model promised work the user
+      // never gets. Say what was wrong so the next step can correct it.
+      const delegateCallCount = (stepObj.tool_calls ?? []).filter((call) => call.name === DELEGATE_TO_AGENT).length;
+      if (delegateCallCount > tasks.length) {
+        state.record("orchestrator", "error", {
+          scope: "protocol",
+          message: `${delegateCallCount - tasks.length} delegate_to_agent call(s) were invalid: input must carry `
+            + `"agent" (one of: ${[...validAgents].join(", ")}) and a non-empty "task". Re-issue the call with both.`,
+        });
+        continue;
+      }
 
       if (tasks.length > 0 || toolCalls.length > 0) {
         const tradingRetryBlocked = tasks.some((task) => task.agent === "trading_operations")
@@ -422,7 +346,7 @@ export class OrchestratorRuntime {
         const [, toolOutcomes] = await Promise.all([
           // Subagents write their own task_result events.
           tasks.length > 0 ? dispatcher.dispatch(tasks) : Promise.resolve(),
-          Promise.all(toolCalls.map((call) => this.runOrchestratorTool(call, input.sessionId, input.agentId, state))),
+          Promise.all(toolCalls.map((call) => this.runOrchestratorTool(call, input.sessionId, input.tenantId, state))),
         ]);
         if (toolOutcomes.some(Boolean)) {
           finalReply = status || "Please answer the questions below.";
@@ -440,19 +364,13 @@ export class OrchestratorRuntime {
         continue;
       }
 
-      // --- skill branch ---
-      if (stepObj.skill && validSkills.has(stepObj.skill)) {
+      // --- skill branch: the guidance lands in the ORCHESTRATOR's own progress, whole. What any
+      // dispatched task needs to carry from it is the orchestrator's judgment to write into that
+      // task — the framework no longer relays sections or widens pools behind its back. ---
+      if (requestedSkill && validSkills.has(requestedSkill)) {
         if (status) state.recordReply(status, false);
-        state.record("orchestrator", "skill_invoke", { skill: stepObj.skill });
-        // Sections + granted tools must be installed before invoke() runs: a
-        // code-backed workflow can dispatch from inside invoke(), and a dispatch
-        // that happened before the install would run without the skill's grant.
-        const invoked = this.skills.get(stepObj.skill);
-        if (invoked) {
-          dispatcher.setSkillSections(invoked.agentSections);
-          dispatcher.setSkillTools(invoked.tools);
-        }
-        skillResult = await this.skills.invoke(stepObj.skill, {
+        state.record("orchestrator", "skill_invoke", { skill: requestedSkill });
+        skillResult = await this.skills.invoke(requestedSkill, {
           sessionId: input.sessionId,
           userMessage: input.userMessage,
           dispatcher,
@@ -491,13 +409,13 @@ export class OrchestratorRuntime {
   private async runOrchestratorTool(
     call: OrchestratorToolCall,
     sessionId: string,
-    agentId: string,
+    tenantId: string,
     state: SessionState,
   ): Promise<UserInputRequest | undefined> {
     const { name, input: toolInput } = call;
     state.record("orchestrator", "tool_use", { name, input: toolInput });
     try {
-      const output = await this.tools.call(name, { ...toolInput }, { sessionId, agentId });
+      const output = await this.tools.call(name, { ...toolInput }, { sessionId, tenantId });
       const toolResultPayload: JsonObject = { name, summary: output.summary };
       if (output.generation_context) toolResultPayload.generation_context = output.generation_context as unknown as JsonObject;
       if (output.visualizations?.length) toolResultPayload.visualizations = output.visualizations;

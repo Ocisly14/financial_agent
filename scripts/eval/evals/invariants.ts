@@ -1,25 +1,40 @@
 import { McpToolRegistry } from "../../../mcp_tools/toolRegistry.ts";
 import { registerAllTools } from "../../../mcp_tools/registerTools.ts";
-import { categoryForAgent } from "../../../src/framework/toolAccess.ts";
+import { AGENT_TOPOLOGY } from "../../../src/agent/subagents/topology.ts";
 import { SessionState } from "../../../src/framework/sessionState.ts";
 import type { AgentKind } from "../../../src/framework/types.ts";
 import type { EvalResult } from "../lib/report.ts";
 
-const NON_TRADE_AGENTS: AgentKind[] = ["market_data", "market_research"];
+const TRADING_AGENT: AgentKind = "trading_operations";
 
+/**
+ * No agent but trading_operations may reach a trading tool.
+ *
+ * This used to ask `categoryForAgent`, a runtime gate that refused a mismatched tool as it was
+ * resolved. That gate is gone: what an agent may reach is now decided entirely by the pool it
+ * declares in the topology. So the invariant is checked where it now lives — against the declared
+ * pools themselves, which is also the more direct question. A tool's `category` survives as the
+ * label that makes the leak visible here.
+ */
 function checkCategoryIsolation(): { checked: number; violations: string[] } {
   const reg = new McpToolRegistry();
   registerAllTools(reg);
-  const tradingTools = reg.list().filter((t) => t.category === "trading");
+  const categoryOf = new Map(reg.list().map((tool) => [tool.name, tool.category]));
   const violations: string[] = [];
-  for (const tool of tradingTools) {
-    for (const agent of NON_TRADE_AGENTS) {
-      if (categoryForAgent(agent) === tool.category) {
-        violations.push(`category leak: ${agent} could reach trading tool ${tool.name}`);
+  let checked = 0;
+  for (const node of AGENT_TOPOLOGY) {
+    if (node.name === TRADING_AGENT) continue;
+    for (const name of node.defaultTools) {
+      // Run-scoped tools (the two mapping agents' own) never enter the process registry.
+      const category = categoryOf.get(name);
+      if (category === undefined) continue;
+      checked++;
+      if (category === "trading") {
+        violations.push(`category leak: ${node.name}'s pool carries trading tool ${name}`);
       }
     }
   }
-  return { checked: tradingTools.length, violations };
+  return { checked, violations };
 }
 
 function checkApprovalGate(): { trials: number; violations: string[] } {

@@ -350,7 +350,7 @@ export default function DcfDemo() {
     }
     return (
         <TopicWorkspace
-            agentId={DEMO_AGENT_ID}
+            tenantId={DEMO_AGENT_ID}
             members={[activeTopic]}
             activeTopic={activeTopic}
             demo={{ rail: { topics: demoTopics, researches: [] }, initialSheetId: "dcf" }}

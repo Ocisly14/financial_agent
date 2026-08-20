@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { BarChart3, Layers3 } from "lucide-react";
+import { BarChart3, Layers3, Table2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { UUID } from "@/types/core";
 import type { ChartWorkspaceMessage } from "@/lib/chartWorkspace";
@@ -21,14 +21,20 @@ const MIN_CHART_HEIGHT = 200;
 /** Height a chart is given inside a floating window, below its title bar. */
 const FLOATING_CHROME_HEIGHT = 60;
 
+/** The two same-level views this column can show. Charts and the DCF model
+ *  are siblings, not parent and child: the model is a workbook, not another
+ *  chart, so it gets its own view with its own icon rather than a tab hiding
+ *  inside the market-chart strip. */
+type PaneView = "charts" | "model";
+
 /** One tab's chart, in whichever container is hosting it. Branching on `kind`
  *  rather than inspecting a symbol string is the whole point of the tagged
  *  union (design §6.2): the compiler, not a convention, keeps an overlay from
  *  being handed to the single-symbol renderer.
  *
- *  A model tab never reaches here — it renders `modelPane` instead, at the
- *  call site — so its kind is excluded from the prop type rather than given a
- *  dead branch below. */
+ *  A model tab never reaches here — it renders in the model view instead —
+ *  so its kind is excluded from the prop type rather than given a dead
+ *  branch below. */
 function ChartForTab({ tab, height }: { tab: Exclude<TopicChartTab, { kind: "model" }>; height: number }) {
     if (tab.kind === "overlay") {
         return <OverlayChart overlay={tab.overlay} height={height} />;
@@ -50,19 +56,52 @@ function tabTitle(tab: TopicChartTab): string {
     return tab.symbol;
 }
 
+/** One of the two view buttons in the pane header. Same-level by construction:
+ *  both views render through this one shape, so neither can quietly become a
+ *  child of the other again. */
+function ViewSwitchButton({
+    icon,
+    label,
+    active,
+    onClick,
+}: {
+    icon: ReactNode;
+    label: string;
+    active: boolean;
+    onClick: () => void;
+}) {
+    return (
+        <button
+            type="button"
+            role="tab"
+            aria-selected={active}
+            onClick={onClick}
+            className={cn(
+                "fin-label flex min-w-0 items-center gap-2 rounded-[5px] px-2 py-1 transition-colors",
+                active
+                    ? "bg-muted text-foreground/80"
+                    : "text-muted-foreground hover:bg-muted/50 hover:text-foreground",
+            )}
+        >
+            {icon}
+            <span className="truncate">{label}</span>
+        </button>
+    );
+}
+
 /**
- * The chart column of the three-column research workspace: a tab row the
- * user owns (add / close / drag to reorder / drag out) over the shared chart
- * renderer. Evolved from MarketChartWorkspace — collapse is gone (the split
- * ratio owns width allocation now), and the header height is measured instead
- * of assumed, since the tab row can wrap onto a second line.
+ * The chart column of the three-column research workspace, with two
+ * same-level views: the market charts (a tab row the user owns — add / close
+ * / drag to reorder / drag out — over the shared chart renderer) and the DCF
+ * model workbook. Each view has its own icon and title in the header
+ * switcher; the model is NOT a tab inside the market-chart strip.
  *
- * Tabs dragged past the strip become floating windows (design §5). That state
- * lives in `useDetachedTabs` and is deliberately never persisted, so this pane
- * always comes back from a reload with every tab in the strip.
+ * Chart tabs dragged past the strip become floating windows (design §5). That
+ * state lives in `useDetachedTabs` and is deliberately never persisted, so
+ * this pane always comes back from a reload with every tab in the strip.
  */
 export function ChartPane({
-    agentId,
+    tenantId,
     topicId,
     messages,
     streamingText,
@@ -70,9 +109,11 @@ export function ChartPane({
     modelTabs = [],
     modelPane = null,
     modelFocusRequest = null,
+    activeModelId = null,
+    onSelectModel,
     readOnly = false,
 }: {
-    agentId: UUID;
+    tenantId: UUID;
     topicId: UUID;
     messages: ChartWorkspaceMessage[];
     streamingText: string;
@@ -81,14 +122,15 @@ export function ChartPane({
      *  the member row is already the place membership is edited, and a second
      *  entry point on the tab row would be offering to compare a comparison. */
     onCompare?: (topicIds: string[]) => void;
-    /** The model workbook tab(s) — handed in rather than fetched here, same
+    /** The model workbook(s) — handed in rather than fetched here, same
      *  reason ChartPane doesn't fetch chart data itself: a model is a backend
      *  object TopicWorkspace already reads via `useFinancialModel`, not
      *  something derived from `messages`/`streamingText` the way chart tabs
-     *  are. */
+     *  are. Rendered as the model view's own workbook row, never folded into
+     *  the market-chart strip. */
     modelTabs?: Extract<TopicChartTab, { kind: "model" }>[];
-    /** Rendered content for whichever model tab is currently active. Passed
-     *  whole rather than assembled here, for the same reason as `modelTabs`. */
+    /** Rendered content for the currently active model. Passed whole rather
+     *  than assembled here, for the same reason as `modelTabs`. */
     modelPane?: ReactNode;
     /** The backend asking for a model to be brought on screen — raised once,
      *  when a model first appears, unless its producing tool opted out. The
@@ -96,43 +138,30 @@ export function ChartPane({
      *  the model-side twin of `useTopicCharts`' focusRevision pull, so an agent
      *  that builds something the user asked for shows it without being asked. */
     modelFocusRequest?: { modelId: string; token: number } | null;
+    /** Which model `modelPane` is showing (useFinancialModel's effective id).
+     *  Needed to mark the active chip on the model view's workbook row. */
+    activeModelId?: string | null;
+    /** Fired when the user picks a workbook on the model view's row — wired to
+     *  `useFinancialModel`'s `setActiveModelId`, so picking actually swaps the
+     *  workbook on screen. */
+    onSelectModel?: (modelId: string) => void;
     /** Local replay mode: preserve viewing but prohibit chart preference writes. */
     readOnly?: boolean;
 }) {
     const { t } = useTranslation();
-    const { tabs: chartTabs, activeKey: chartActiveKey, setActiveTab, addSymbol, closeTab, reorderTabs } = useTopicCharts(
-        agentId,
+    const { tabs, activeKey, setActiveTab, addSymbol, closeTab, reorderTabs } = useTopicCharts(
+        tenantId,
         topicId,
         messages,
         streamingText,
     );
     const narrow = useIsNarrow();
 
-    // Model tabs are folded in here, not inside useTopicCharts: that hook's
-    // whole contract is "derived from message history, merged with a
-    // preference row" (see lib/topicCharts.ts), and a model tab is neither.
-    const tabs = useMemo<TopicChartTab[]>(() => [...chartTabs, ...modelTabs], [chartTabs, modelTabs]);
-
-    // useTopicCharts only resolves its own (chart) tab keys, so selecting a
-    // model tab would otherwise be silently overridden back onto a chart tab
-    // by its internal activeKey fallback on the very next render. Tracked
-    // separately here instead, and cleared the moment a chart tab is picked.
-    const [selectedModelKey, setSelectedModelKey] = useState<string | null>(null);
-    const handleSelectTab = useCallback(
-        (key: string) => {
-            if (key.startsWith("model:")) {
-                setSelectedModelKey(key);
-            } else {
-                setSelectedModelKey(null);
-                setActiveTab(key);
-            }
-        },
-        [setActiveTab],
-    );
-    const activeKey =
-        selectedModelKey && modelTabs.some((tab) => chartTabKey(tab) === selectedModelKey)
-            ? selectedModelKey
-            : chartActiveKey;
+    const hasModels = modelTabs.length > 0;
+    // The user's explicit pick; the effective view falls back to whichever
+    // side has content, so a topic whose only content is a model opens on it.
+    const [pickedView, setPickedView] = useState<PaneView | null>(null);
+    const view: PaneView = !hasModels ? "charts" : (pickedView ?? (tabs.length > 0 ? "charts" : "model"));
 
     // Keyed on the token, not the model id: the effect must fire again if the
     // backend asks for the same model twice, and must NOT fire on unrelated
@@ -141,20 +170,9 @@ export function ChartPane({
     useEffect(() => {
         if (!modelFocusRequest || modelFocusRequest.token === focusTokenRef.current) return;
         focusTokenRef.current = modelFocusRequest.token;
-        setSelectedModelKey(`model:${modelFocusRequest.modelId}`);
-    }, [modelFocusRequest]);
-
-    // The `×`. A model tab must not take the path that writes a hidden chart
-    // preference (design note, Task 10) — the next `model_revision` frame
-    // would just bring it back anyway, so a persisted "hidden" would only
-    // mean permanently hiding a model that is still growing.
-    const handleCloseTab = useCallback(
-        (key: string) => {
-            if (key.startsWith("model:")) return;
-            closeTab(key);
-        },
-        [closeTab],
-    );
+        setPickedView("model");
+        onSelectModel?.(modelFocusRequest.modelId);
+    }, [modelFocusRequest, onSelectModel]);
 
     const containerRef = useRef<HTMLElement>(null);
     const headerRef = useRef<HTMLElement>(null);
@@ -227,9 +245,10 @@ export function ChartPane({
     );
     const byKey = useMemo(() => new Map(tabs.map((tab) => [chartTabKey(tab), tab])), [tabs]);
 
-    if (tabs.length === 0) return null;
+    if (tabs.length === 0 && !hasModels) return null;
 
     const chartHeight = Math.max(MIN_CHART_HEIGHT, Math.floor(paneHeight));
+    const effectiveModelId = activeModelId ?? modelTabs[0]?.modelId ?? null;
 
     return (
         <section
@@ -245,47 +264,98 @@ export function ChartPane({
                 )}
             >
                 <div className="flex items-center justify-between gap-3">
-                    <div className="flex min-w-0 items-center gap-2">
-                        <BarChart3 className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
-                        <h2 className="fin-label truncate text-foreground/80">{t("charts.marketWorkspace")}</h2>
-                    </div>
-                    <div className="fin-label flex shrink-0 items-center gap-1 text-muted-foreground">
-                        <Layers3 className="size-3" />
-                        {active === undefined
-                            ? t("charts.studyCount", { count: 0 })
-                            : active.kind === "model"
-                              ? null
-                              : active.kind === "overlay"
-                                ? t("charts.overlay.symbolCount", { count: active.overlay.symbols.length })
-                                : t("charts.studyCount", { count: active.studies.length })}
-                    </div>
+                    {hasModels ? (
+                        // The same-level switcher: charts and the DCF model are
+                        // siblings, each with its own icon and title.
+                        <div role="tablist" className="flex min-w-0 items-center gap-1">
+                            <ViewSwitchButton
+                                icon={<BarChart3 className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />}
+                                label={t("charts.marketWorkspace")}
+                                active={view === "charts"}
+                                onClick={() => setPickedView("charts")}
+                            />
+                            <ViewSwitchButton
+                                icon={<Table2 className="size-3.5 shrink-0 text-sky-600 dark:text-sky-400" />}
+                                label={t("charts.modelWorkspace")}
+                                active={view === "model"}
+                                onClick={() => setPickedView("model")}
+                            />
+                        </div>
+                    ) : (
+                        <div className="flex min-w-0 items-center gap-2">
+                            <BarChart3 className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                            <h2 className="fin-label truncate text-foreground/80">{t("charts.marketWorkspace")}</h2>
+                        </div>
+                    )}
+                    {view === "charts" && (
+                        <div className="fin-label flex shrink-0 items-center gap-1 text-muted-foreground">
+                            <Layers3 className="size-3" />
+                            {active === undefined
+                                ? t("charts.studyCount", { count: 0 })
+                                : active.kind === "overlay"
+                                  ? t("charts.overlay.symbolCount", { count: active.overlay.symbols.length })
+                                  : t("charts.studyCount", { count: active.studies.length })}
+                        </div>
+                    )}
                 </div>
 
                 <div className="mt-3">
-                    <ChartTabBar
-                        tabs={stripTabs}
-                        activeKey={active ? chartTabKey(active) : undefined}
-                        onSelect={handleSelectTab}
-                        onClose={handleCloseTab}
-                        onReorder={reorderTabs}
-                        onAdd={addSymbol}
-                        onDetach={narrow || readOnly ? undefined : handleDetach}
-                        agentId={onCompare ? agentId : undefined}
-                        currentTopicId={onCompare ? topicId : undefined}
-                        onCompare={onCompare}
-                        readOnly={readOnly}
-                    />
+                    {view === "charts" ? (
+                        <ChartTabBar
+                            tabs={stripTabs}
+                            activeKey={active ? chartTabKey(active) : undefined}
+                            onSelect={setActiveTab}
+                            onClose={closeTab}
+                            onReorder={reorderTabs}
+                            onAdd={addSymbol}
+                            onDetach={narrow || readOnly ? undefined : handleDetach}
+                            tenantId={onCompare ? tenantId : undefined}
+                            currentTopicId={onCompare ? topicId : undefined}
+                            onCompare={onCompare}
+                            readOnly={readOnly}
+                        />
+                    ) : (
+                        // The model view's own workbook row. Chips echo the chart
+                        // tab shape so the two views read as one family, but a
+                        // workbook can't be closed, reordered, or torn off — the
+                        // backend's model list, not a preference row, owns it.
+                        <div
+                            role="tablist"
+                            aria-label={t("charts.modelTabs")}
+                            className="flex flex-wrap items-center gap-1.5"
+                        >
+                            {modelTabs.map((tab) => {
+                                const isActive = tab.modelId === effectiveModelId;
+                                return (
+                                    <button
+                                        key={tab.modelId}
+                                        type="button"
+                                        role="tab"
+                                        aria-selected={isActive}
+                                        onClick={() => onSelectModel?.(tab.modelId)}
+                                        className={cn(
+                                            "fin-figure flex shrink-0 items-center gap-1 rounded-[5px] border px-2.5 py-1 text-xs font-semibold tracking-wide transition-colors",
+                                            isActive
+                                                ? "border-foreground/20 bg-foreground text-background"
+                                                : "border-border bg-muted/30 text-muted-foreground hover:border-foreground/25 hover:bg-muted hover:text-foreground",
+                                        )}
+                                    >
+                                        <Table2 className="h-3 w-3 shrink-0" />
+                                        {tab.symbol}
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    )}
                 </div>
             </header>
 
             <div className="relative h-0 min-h-0 flex-1 overflow-hidden">
                 <div ref={attachScroller} className="custom-scrollbar absolute inset-0 overflow-y-auto overflow-x-hidden p-3">
-                    {active ? (
-                        active.kind === "model" ? (
-                            modelPane
-                        ) : (
-                            <ChartForTab key={chartTabKey(active)} tab={active} height={chartHeight} />
-                        )
+                    {view === "model" ? (
+                        modelPane
+                    ) : active ? (
+                        <ChartForTab key={chartTabKey(active)} tab={active} height={chartHeight} />
                     ) : (
                         // Every tab is out in a window. Say so, rather than
                         // rendering a blank column that reads as a failure.
@@ -299,11 +369,7 @@ export function ChartPane({
             {/* Array order is z-order: the last entry is frontmost. */}
             {windows.map((entry, index) => {
                 const tab = byKey.get(entry.key);
-                // A model tab is never draggable (ChartTabBar), so this
-                // should be unreachable — kept as a guard so `ChartForTab`
-                // below stays statically safe rather than needing a runtime
-                // branch for a tab kind it was never meant to render.
-                if (!tab || tab.kind === "model") return null;
+                if (!tab) return null;
                 return (
                     <FloatingChart
                         key={entry.key}

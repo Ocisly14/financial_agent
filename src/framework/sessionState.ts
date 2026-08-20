@@ -1,5 +1,5 @@
 import { newId } from "./ids.ts";
-import { isAgentKind } from "./types.ts";
+import { AGENT_KINDS, isAgentKind } from "./types.ts";
 import type {
   AgentKind,
   ArtifactRef,
@@ -98,18 +98,20 @@ function formatToolErrorProgress(name: string, payload: JsonObject): string {
 }
 
 /** Allowed (source, kind) pairs. Lightweight fail-fast guard against dirty events. */
+/** Every agent writes the same event kinds, wherever it sits in the hierarchy — a mapping agent
+ *  reporting to financial_modeling records exactly like one reporting to the orchestrator, which is
+ *  what makes its progress visible while it runs. The approval kinds are here for every agent even
+ *  though only trading tools raise them today: the gate on approvals is whether a tool returns one,
+ *  not this whitelist, and enumerating agents per kind meant editing this table for every new agent. */
+const AGENT_EVENT_KINDS: ReadonlySet<string> = new Set([
+  "task_result", "tool_use", "tool_result", "subagent_note", "approval_required", "approval_resolved",
+]);
+
 const KINDS: Record<Source, ReadonlySet<string>> = {
   user: new Set(["user_message"]),
   orchestrator: new Set(["reply", "dispatch", "skill_invoke", "skill_result", "error", "tool_use", "tool_result", "user_input_required"]),
-  market_data: new Set(["task_result", "tool_use", "tool_result", "subagent_note"]),
-  market_research: new Set(["task_result", "tool_use", "tool_result", "subagent_note"]),
-  trading_operations: new Set(["task_result", "tool_use", "tool_result", "approval_required", "approval_resolved", "subagent_note"]),
-  financial_modeling: new Set(["task_result", "tool_use", "tool_result", "subagent_note"]),
-  // The DCF mapping agents report to financial_modeling rather than to the orchestrator, but they
-  // write the same events — which is what makes their progress visible while they run.
-  statement_unification: new Set(["task_result", "tool_use", "tool_result", "subagent_note"]),
-  spine_mapping: new Set(["task_result", "tool_use", "tool_result", "subagent_note"]),
   skill: new Set(["skill_invoke", "workflow_started", "workflow_step", "workflow_done"]),
+  ...Object.fromEntries([...AGENT_KINDS].map((kind) => [kind, AGENT_EVENT_KINDS])) as Record<AgentKind, ReadonlySet<string>>,
 };
 
 export interface DerivedTask {
@@ -446,8 +448,11 @@ export class SessionState {
    * conversations, and it is how the orchestrator learns the id of a thread it
    * just opened.
    */
-  recordDispatch(agent: AgentKind, task: string, childThreadId: string): SessionEvent {
-    return this.record("orchestrator", "dispatch", { agent, task, child_thread_id: childThreadId });
+  recordDispatch(agent: AgentKind, task: string, childThreadId: string, parent?: { taskId: string; agent?: AgentKind }): SessionEvent {
+    return this.record("orchestrator", "dispatch", {
+      agent, task, child_thread_id: childThreadId,
+      ...(parent ? { parent_task_id: parent.taskId, ...(parent.agent ? { parent_agent: parent.agent } : {}) } : {}),
+    });
   }
 
   recordTaskResult(agent: AgentKind, dispatchEventId: string, result: TaskResult): SessionEvent {
@@ -494,6 +499,21 @@ export class SessionState {
       out.result = result;
     }
     return out;
+  }
+
+  /**
+   * One task result's own data, by the `source_event_id` printed on its result
+   * line. Used to hand an earlier result's data to a later dispatch without a
+   * model retyping it.
+   *
+   * `agent` and `summary` come back with it because the receiving subagent has
+   * never seen this result and needs to know whose work it is looking at.
+   */
+  taskResultData(sourceEventId: string): { agent: AgentKind; summary: string; data: JsonObject } | undefined {
+    const event = this.events.find((e) => e.kind === "task_result" && e.event_id === sourceEventId);
+    const data = (event?.payload.generation_context as GenerationContext | undefined)?.data;
+    if (!event || !data) return undefined;
+    return { agent: event.source as AgentKind, summary: String(event.payload.summary ?? ""), data };
   }
 
   /**
@@ -928,7 +948,9 @@ export class SessionState {
     const evArtifacts = (e.payload.artifacts as ArtifactRef[] | undefined) ?? [];
     const error = e.payload.error as { code: string; message: string } | undefined;
 
-    const parts: string[] = [`[${agent} result] status=${e.payload.status as string} | ${e.payload.summary as string}`];
+    // The id is printed so the caller can hand this result's data to a later
+    // dispatch (`source_event_ids`) instead of retyping its numbers into prose.
+    const parts: string[] = [`[${agent} result] status=${e.payload.status as string} source_event_id=${e.event_id} | ${e.payload.summary as string}`];
     if (error) parts.push(`  error(${error.code}): ${error.message}`);
     if (gc) {
       if (gc.prompt) parts.push(`  generation_context_prompt: ${gc.prompt}`);

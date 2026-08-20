@@ -41,7 +41,7 @@ function loadGroupingMode(): GroupingMode {
 }
 
 interface TopicRailProps {
-    agentId: UUID;
+    tenantId: UUID;
     activeTopicId: UUID | undefined;
     /** Set when a Research is open. A Research and a Topic are never both
      *  active — they are two flat sections, not a path. */
@@ -67,7 +67,7 @@ interface TopicRailProps {
  * and nowhere else.
  */
 export function TopicRail({
-    agentId,
+    tenantId,
     activeTopicId,
     activeResearchId,
     collapsed,
@@ -97,8 +97,8 @@ export function TopicRail({
     };
 
     const { data, isPending } = useQuery({
-        queryKey: ["topics", agentId],
-        queryFn: () => apiClient.getTopics(agentId),
+        queryKey: ["topics", tenantId],
+        queryFn: () => apiClient.getTopics(tenantId),
         refetchInterval: 30000,
         staleTime: 15000,
         enabled: demoData === undefined,
@@ -125,8 +125,8 @@ export function TopicRail({
     };
 
     const { data: researchData } = useQuery({
-        queryKey: ["researches", agentId],
-        queryFn: () => apiClient.getResearches(agentId),
+        queryKey: ["researches", tenantId],
+        queryFn: () => apiClient.getResearches(tenantId),
         refetchInterval: 30000,
         staleTime: 15000,
         enabled: demoData === undefined,
@@ -138,7 +138,7 @@ export function TopicRail({
     }, [researchData, demoData]);
 
     const refetchTopics = () => {
-        queryClient.invalidateQueries({ queryKey: ["topics", agentId] });
+        queryClient.invalidateQueries({ queryKey: ["topics", tenantId] });
     };
 
     // "+ compare" from the rail (spec §7.4). The Topic view's chart tab row
@@ -147,9 +147,9 @@ export function TopicRail({
     // The name is the server's job (members' leadSymbol-or-name joined by " · ").
     const handleCreateResearch = async (topicIds: string[]) => {
         try {
-            const result = await apiClient.createResearch(agentId, { topicIds });
-            void queryClient.invalidateQueries({ queryKey: ["researches", agentId] });
-            navigate(`/research/${agentId}/${result.research.id}`);
+            const result = await apiClient.createResearch(tenantId, { topicIds });
+            void queryClient.invalidateQueries({ queryKey: ["researches", tenantId] });
+            navigate(`/research/${tenantId}/${result.research.id}`);
         } catch (error) {
             toast({
                 variant: "destructive",
@@ -161,7 +161,7 @@ export function TopicRail({
 
     const handleCreate = async () => {
         try {
-            const result = await apiClient.createTopic(agentId, generateTopicName());
+            const result = await apiClient.createTopic(tenantId, generateTopicName());
             if (result.success) {
                 refetchTopics();
             }
@@ -186,7 +186,7 @@ export function TopicRail({
     const handleBatchDelete = async () => {
         const ids = Array.from(selectedIds);
         try {
-            await apiClient.batchDeleteTopics(agentId, ids);
+            await apiClient.batchDeleteTopics(tenantId, ids);
         } catch (error) {
             toast({
                 variant: "destructive",
@@ -221,7 +221,7 @@ export function TopicRail({
                     {researches.map((research) => (
                         <NavLink
                             key={research.id}
-                            to={`/research/${agentId}/${research.id}`}
+                            to={`/research/${tenantId}/${research.id}`}
                             title={research.name}
                             className={cn(
                                 "flex size-8 shrink-0 flex-col items-center justify-center rounded-md transition-colors",
@@ -240,7 +240,7 @@ export function TopicRail({
                     {topics.map((topic) => (
                         <TopicRailItem
                             key={topic.id}
-                            agentId={agentId}
+                            tenantId={tenantId}
                             topic={topic}
                             isActive={topic.id === activeTopicId}
                             collapsed
@@ -252,7 +252,7 @@ export function TopicRail({
                     ))}
                 </div>
                 <NavLink
-                    to={`/strategies/${agentId}`}
+                    to={`/strategies/${tenantId}`}
                     className={({ isActive }) =>
                         cn(
                             "inline-flex size-8 items-center justify-center rounded-md transition-colors",
@@ -294,7 +294,7 @@ export function TopicRail({
                 <div className="flex items-center gap-2 px-2 pb-1 pt-2">
                     <span className="fin-label flex-1 truncate text-label-3">{t("research.title")}</span>
                     <MemberPicker
-                        agentId={agentId}
+                        tenantId={tenantId}
                         excludeTopicIds={[]}
                         onConfirm={(topicIds) => void handleCreateResearch(topicIds)}
                         trigger={
@@ -316,7 +316,7 @@ export function TopicRail({
                         researches.map((research) => (
                             <NavLink
                                 key={research.id}
-                                to={`/research/${agentId}/${research.id}`}
+                                to={`/research/${tenantId}/${research.id}`}
                                 title={research.name}
                                 className={cn(
                                     "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
@@ -419,7 +419,7 @@ export function TopicRail({
                                 {group.topics.map((topic) => (
                                     <TopicRailItem
                                         key={topic.id}
-                                        agentId={agentId}
+                                        tenantId={tenantId}
                                         topic={topic}
                                         isActive={topic.id === activeTopicId}
                                         collapsed={false}
@@ -451,7 +451,7 @@ export function TopicRail({
 
             {/* Top-level entry, not a link buried in a dialog footer. */}
             <NavLink
-                to={`/strategies/${agentId}`}
+                to={`/strategies/${tenantId}`}
                 className={({ isActive }) =>
                     cn(
                         "flex shrink-0 items-center gap-2.5 border-t border-sep px-3 py-2.5 text-left text-sm font-medium transition-colors",

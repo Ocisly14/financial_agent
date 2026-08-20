@@ -74,7 +74,7 @@ type ChatFrame = { type: string; [key: string]: unknown };
 async function postChat(body: Record<string, unknown>): Promise<ChatFrame[]> {
   const res = await fetch(`${SERVER_URL}/api/chat`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-Agent-Id": AGENT_ID },
+    headers: { "Content-Type": "application/json", "X-Tenant-Id": AGENT_ID },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`POST /api/chat failed: ${res.status} ${await res.text()}`);
@@ -109,7 +109,7 @@ async function main(): Promise<void> {
   console.log(`${DIM}server=${SERVER_URL} db=${DB_PATH} agent=${AGENT_ID} forceAskUser=${FORCE_ASK_USER}${RESET}\n`);
 
   // ── Step 1: a Topic + a Research containing it ───────────────────────────
-  const topicRes = await fetch(`${SERVER_URL}/api/agents/${AGENT_ID}/topics`, {
+  const topicRes = await fetch(`${SERVER_URL}/api/tenants/${AGENT_ID}/topics`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name: "verify: member-input passthrough" }),
@@ -119,7 +119,7 @@ async function main(): Promise<void> {
   const topicId = topic.topic.id;
   console.log(`Created Topic ${topicId}`);
 
-  const researchRes = await fetch(`${SERVER_URL}/api/agents/${AGENT_ID}/researches`, {
+  const researchRes = await fetch(`${SERVER_URL}/api/tenants/${AGENT_ID}/researches`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name: "verify: member-input passthrough", topicIds: [topicId] }),

@@ -13,22 +13,24 @@ async function loadAll(): Promise<SkillRegistry> {
   return registry;
 }
 
-test("the shipped stock-analysis skill loads with narrow research access", async () => {
+test("the shipped stock-analysis skill guides its reader and grants nothing", async () => {
   const registry = await loadAll();
   const skill = registry.get("stock-analysis")!;
 
   assert.ok(skill, "stock-analysis skill should be discovered");
   assert.equal(skill.layer, "topic");
-  assert.ok(skill.tools?.includes("get_stock_price"));
-  assert.ok(skill.tools?.includes("get_sector_analysis"));
-  assert.ok(skill.tools?.includes("get_sec_company_profile"));
-  assert.ok(skill.tools?.includes("get_sec_filings"));
-  assert.ok(skill.tools?.includes("get_sec_company_facts"));
-  assert.ok(skill.tools?.includes("financial_search"));
+  // A topic skill may not arm anyone: what an agent can reach is declared on its topology node,
+  // and the old `tools:` grant was a capability side-channel around that.
+  assert.equal(skill.tools, undefined);
+  // The `## for:` sections are drafting notes the ORCHESTRATOR reads and relays by judgment,
+  // so they must be part of the body it receives, not split away from it.
   assert.ok(skill.agentSections.market_data);
   assert.ok(skill.agentSections.market_research);
   assert.equal(skill.agentSections.trading_operations, undefined);
+  assert.match(skill.body, /## for: market_data/);
+  assert.match(skill.body, /## for: market_research/);
 });
+
 
 test("stock-analysis requires macro and company evidence to remain separate until synthesis", async () => {
   const registry = await loadAll();
@@ -88,7 +90,7 @@ test("stock-analysis references support progressive disclosure", async () => {
 
   const results = await Promise.all(paths.map((referencePath) => readReference.execute(
     { skill: "stock-analysis", path: referencePath },
-    { sessionId: "stock-analysis-reference-test", agentId: "agent-1" },
+    { sessionId: "stock-analysis-reference-test", tenantId: "agent-1" },
   )));
 
   for (const result of results) assert.equal(result.error, undefined);

@@ -1,15 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Dispatcher, taskTimeoutMs } from "../dispatcher.ts";
+import { createSubagentRegistry } from "../../agent/subagents/registerSubagents.ts";
 import { SessionState } from "../sessionState.ts";
 import { SubagentRegistry } from "../subagent.ts";
 import { McpToolRegistry } from "../../../mcp_tools/toolRegistry.ts";
 import type { TaskRequest, ToolDefinition } from "../types.ts";
 
 /**
- * A skill's `tools:` GRANTS — it adds to the agent's own pool and never takes
- * away. Domain isolation is not this list's job: toolAccess's category gate runs
- * on every name in the union, and it is what actually keeps agents apart.
+ * What an agent may reach is decided entirely by its own pool, declared in the
+ * topology; there is no second gate underneath and no side-channel that widens it.
  */
 
 function harness(): {
@@ -24,7 +24,7 @@ function harness(): {
     name: "market_data",
     description: "d",
     modelClass: "MEDIUM",
-    defaultTools: ["stock_sma", "stock_rsi", "stock_macd"],
+    defaultTools: ["stock_sma", "stock_rsi", "stock_macd", "ask_user"],
     systemPrompt: { system: "", prompt: "" },
   });
 
@@ -58,54 +58,29 @@ function harness(): {
   return { dispatcher, seen, state, turn };
 }
 
-test("with no skill active, the agent's full default pool is used", async () => {
+test("the agent's pool is the whole allowance — no skill widens it", async () => {
+  // Skills used to add tools to a dispatched agent's pool per turn. That grant was a capability
+  // side-channel around the topology, which is now the ONE place an agent's reach is declared.
   const { dispatcher, seen } = harness();
 
   await dispatcher.dispatch([{ agent: "market_data", task: "analyse NVDA" }]);
 
-  assert.deepEqual(seen[0]!.allowedTools.map((t) => t.name), ["stock_sma", "stock_rsi", "stock_macd"]);
+  assert.deepEqual(seen[0]!.allowedTools.map((t) => t.name), ["stock_sma", "stock_rsi", "stock_macd", "ask_user"]);
 });
 
-test("the skill's tools: adds to the pool and never removes from it", async () => {
-  const { dispatcher, seen, state, turn } = harness();
-  dispatcher.setSkillTools(["stock_sma", "stock_atr"]);
-
-  await dispatcher.dispatch([{ agent: "market_data", task: "analyse NVDA" }]);
-
-  assert.equal(seen.length, 1, "the subagent must still run");
-  // stock_rsi and stock_macd are in the pool and unmentioned by the skill: they stay.
-  assert.deepEqual(seen[0]!.allowedTools.map((t) => t.name),
-    ["stock_sma", "stock_rsi", "stock_macd", "stock_atr"]);
-  assert.equal(state.turnResults(turn).length, 0, "no failure result should be recorded");
-});
-
-test("a skill naming only tools outside the pool still leaves the pool intact", async () => {
+test("an explicitly requested tool must come from the pool", async () => {
   const { dispatcher, seen } = harness();
-  dispatcher.setSkillTools(["stock_atr"]);
 
-  await dispatcher.dispatch([{ agent: "market_data", task: "analyse NVDA" }]);
+  await dispatcher.dispatch([{ agent: "market_data", task: "analyse NVDA", tools: ["stock_rsi"] }]);
 
-  // Under the old intersection this emptied the set and failed the task.
   assert.equal(seen.length, 1);
-  assert.deepEqual(seen[0]!.allowedTools.map((t) => t.name),
-    ["stock_sma", "stock_rsi", "stock_macd", "stock_atr"]);
+  assert.deepEqual(seen[0]!.allowedTools.map((t) => t.name), ["stock_rsi"]);
 });
 
-test("an explicitly requested tool may come from the skill's grant", async () => {
-  const { dispatcher, seen } = harness();
-  dispatcher.setSkillTools(["stock_atr"]);
+test("an explicitly requested tool outside the pool is refused", async () => {
+  const { dispatcher, seen, state, turn } = harness();
 
   await dispatcher.dispatch([{ agent: "market_data", task: "analyse NVDA", tools: ["stock_atr"] }]);
-
-  assert.equal(seen.length, 1);
-  assert.deepEqual(seen[0]!.allowedTools.map((t) => t.name), ["stock_atr"]);
-});
-
-test("an explicitly requested tool outside both the pool and the grant is refused", async () => {
-  const { dispatcher, seen, state, turn } = harness();
-  dispatcher.setSkillTools(["stock_atr"]);
-
-  await dispatcher.dispatch([{ agent: "market_data", task: "analyse NVDA", tools: ["not_in_pool"] }]);
 
   assert.equal(seen.length, 0);
   const [result] = state.turnResults(turn);
@@ -113,34 +88,8 @@ test("an explicitly requested tool outside both the pool and the grant is refuse
   assert.equal(result?.error?.code, "task_failed");
 });
 
-test("a granted tool the category gate refuses still fails the dispatch", async () => {
-  const { dispatcher, seen, state, turn } = harness();
-  const tools = new McpToolRegistry();
-  // Rebuilt here so the grant names a trading tool a market_data agent may not have.
-  for (const name of ["stock_sma", "stock_rsi", "stock_macd"]) {
-    tools.register({ name, description: "d", category: "non_trading", inputSchema: { type: "object" }, execute: async () => ({ summary: "ok" }) });
-  }
-  tools.register({ name: "create_strategy", description: "d", category: "trading", inputSchema: { type: "object" }, execute: async () => ({ summary: "ok" }) });
-  const subagents = new SubagentRegistry();
-  subagents.register({ name: "market_data", description: "d", modelClass: "MEDIUM",
-    defaultTools: ["stock_sma"], systemPrompt: { system: "", prompt: "" } });
-  const gated = new Dispatcher("s", subagents, { run: async () => { seen.push({} as never); } } as never,
-    tools, state, "agent-1");
-  gated.setSkillTools(["create_strategy"]);
-
-  await gated.dispatch([{ agent: "market_data", task: "analyse NVDA" }]);
-
-  assert.equal(seen.length, 0, "the category gate is the real isolation and must still bite");
-  const result = state.turnResults(turn).at(-1);
-  assert.equal(result?.status, "failed");
-  assert.equal(result?.error?.code, "task_failed");
-});
-
-test("ask_user is stripped from the union, not just from the pool, when no human is watching", async () => {
+test("ask_user is stripped from the pool when no human is watching", async () => {
   const { dispatcher, seen } = harness();
-  // The strip used to run on the pool alone, so a skill granting ask_user could
-  // smuggle it past userInputAllowed and end the turn on an empty seat.
-  dispatcher.setSkillTools(["ask_user"]);
   dispatcher.setUserInputAllowed(false);
 
   await dispatcher.dispatch([{ agent: "market_data", task: "analyse NVDA" }]);
@@ -149,17 +98,20 @@ test("ask_user is stripped from the union, not just from the pool, when no human
   assert.ok(!seen[0]!.allowedTools.some((t) => t.name === "ask_user"));
 });
 
-test("the task ceiling is per-agent, because the right ceiling is a property of the work", () => {
+test("the task ceiling comes from the agent's own topology node", () => {
   const min = (n: number) => n * 60_000;
+  const registry = createSubagentRegistry();
+  const timeout = (agent: Parameters<typeof registry.get>[0]) =>
+    taskTimeoutMs({ agent, task: "t" }, registry.get(agent));
 
   // A quote is seconds; leaving this high would only delay noticing a hang.
-  assert.equal(taskTimeoutMs({ agent: "market_data", task: "quote NVDA" }), min(5));
-  // A DCF round is 30 tool steps and nests a whole agent inside run_dcf_subagent.
+  assert.equal(timeout("market_data"), min(5));
+  // A DCF round is 60 tool steps and nests whole agent rounds inside delegate_to_agent.
   // At five minutes it timed out mid-round while the agent ran on unheard.
-  assert.equal(taskTimeoutMs({ agent: "financial_modeling", task: "value AAPL" }), min(15));
-  assert.equal(taskTimeoutMs({ agent: "trading_operations", task: "start it" }), min(16));
-  // An explicit request always wins, whatever the agent.
-  assert.equal(taskTimeoutMs({ agent: "financial_modeling", task: "value AAPL", timeout_ms: 42 }), 42);
+  assert.equal(timeout("financial_modeling"), min(30));
+  assert.equal(timeout("trading_operations"), min(16));
+  // An explicit request always wins, whatever the agent declares.
+  assert.equal(taskTimeoutMs({ agent: "financial_modeling", task: "t", timeout_ms: 42 }, registry.get("financial_modeling")), 42);
 });
 
 test("a task that outlives its ceiling is recorded as a timeout", async () => {

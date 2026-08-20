@@ -75,7 +75,7 @@ function setup(): { financial: FinancialModelToolDeps; modelId: string; sourceRe
   const sourceReviewStore = new InMemorySourceReviewStore();
   const service = new FinancialModelService(modelStore, "session-1");
   const modelId = "fm-1";
-  service.createModel({ modelId, ownerAgentId: "agent-1", originSessionId: "session-1", symbol: "TEST",
+  service.createModel({ modelId, ownerTenantId: "agent-1", originSessionId: "session-1", symbol: "TEST",
     metadata: {}, reportingCurrency: "USD", periods: PERIODS, preparedStatementRows: [] });
   return { modelId, sourceReviewStore,
     financial: { modelStore, sourceReviewStore, ingestionStore: sourceReviewStore,
@@ -87,7 +87,7 @@ function tools(financial: FinancialModelToolDeps) {
   return { list: list!, get: get!, calculate: calculate! };
 }
 
-const ctx = { agentId: "agent-1", sessionId: "s1" };
+const ctx = { tenantId: "agent-1", sessionId: "s1" };
 
 function spineFact(lineItemId: string, periodId: string, value: number): Fact {
   return { factId: `spine.${lineItemId}.${periodId}`, status: "staged", lineItemId, periodId, value,
@@ -276,7 +276,7 @@ test("missing artifact and foreign owner fail with the documented codes", async 
   assert.equal(notRun.error?.code, "unified_statements_unavailable");
 
   sourceReviewStore.save(modelId, review({ unifiedStatements: baseUnified() }));
-  const foreignOwner = await get.execute({ modelId }, { agentId: "agent-2", sessionId: "s2" });
+  const foreignOwner = await get.execute({ modelId }, { tenantId: "agent-2", sessionId: "s2" });
   assert.equal(foreignOwner.error?.code, "financial_model_not_found");
 
   const unknownModel = await list.execute({ modelId: "fm-does-not-exist" }, ctx);
@@ -525,6 +525,6 @@ test("foreign owner gets financial_model_not_found", async () => {
 
   const result = await calculate.execute({ modelId, expectedRevision: 1, rows: [
     { id: "a", formula: "revenue.total" },
-  ] }, { agentId: "agent-2", sessionId: "s2" });
+  ] }, { tenantId: "agent-2", sessionId: "s2" });
   assert.equal(result.error?.code, "financial_model_not_found");
 });

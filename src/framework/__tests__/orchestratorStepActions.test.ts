@@ -18,7 +18,7 @@ import type { JsonObject, TaskRequest } from "../types.ts";
  */
 
 type Harness = {
-  run: (steps: string[], options?: { allowUserInput?: boolean; activeModel?: { modelId: string; symbol: string; createdAt: string; updatedAt: string; currentRevision: number; lifecycleStage: string } }) => Promise<void>;
+  run: (steps: Array<{ text?: string; calls?: Array<{ name: string; input: JsonObject }> }>, options?: { allowUserInput?: boolean; activeModel?: { modelId: string; symbol: string; createdAt: string; updatedAt: string; currentRevision: number; lifecycleStage: string } }) => Promise<void>;
   dispatched: TaskRequest[];
   toolCalls: { name: string; input: JsonObject }[];
   sessions: SessionRegistry;
@@ -79,21 +79,23 @@ function harness(): Harness {
   }
 
   const sessions = new SessionRegistry();
-  const dispatcherFactory = (sessionId: string, agentId: string) =>
-    new Dispatcher(sessionId, subagents, subagentRuntime as never, tools, sessions.getExisting(sessionId), agentId);
+  const dispatcherFactory = (sessionId: string, tenantId: string) =>
+    new Dispatcher(sessionId, subagents, subagentRuntime as never, tools, sessions.getExisting(sessionId), tenantId);
 
   return {
     dispatched,
     toolCalls,
     sessions,
-    run: async (steps: string[], options?: { allowUserInput?: boolean; activeModel?: { modelId: string; symbol: string; createdAt: string; updatedAt: string; currentRevision: number; lifecycleStage: string } }) => {
+    run: async (steps: Array<{ text?: string; calls?: Array<{ name: string; input: JsonObject }> }>, options?: { allowUserInput?: boolean; activeModel?: { modelId: string; symbol: string; createdAt: string; updatedAt: string; currentRevision: number; lifecycleStage: string } }) => {
       let call = 0;
       const provider: LlmProvider = {
         name: "stub",
         async generate(_messages: LlmMessage[], _options: GenerateOptions): Promise<GenerateResult> {
-          const text = steps[call] ?? JSON.stringify({ reply: "done" });
+          const step = steps[call] ?? { text: "done" };
           call += 1;
-          return { text, metrics: { tokens_in: 1, tokens_out: 1, ms: 0, model_class: "LARGE", provider: "stub" } };
+          return { text: step.text ?? "working",
+            ...(step.calls ? { toolCalls: step.calls.map((c, i) => ({ id: `t${i}`, ...c })) } : {}),
+            metrics: { tokens_in: 1, tokens_out: 1, ms: 0, model_class: "LARGE", provider: "stub" } };
         },
       };
       const orchestrator = new OrchestratorRuntime(
@@ -105,7 +107,7 @@ function harness(): Harness {
         tools,
         sessions,
       );
-      await orchestrator.run({ agentId: "agent-1", sessionId: "s", userMessage: "go", ...options });
+      await orchestrator.run({ tenantId: "agent-1", sessionId: "s", userMessage: "go", ...options });
     },
   };
 }
@@ -114,52 +116,47 @@ test("two tool calls in one step both run, instead of costing two loop iteration
   const h = harness();
 
   await h.run([
-    JSON.stringify({
-      reply: "reading",
-      tool_calls: [
+    {
+      text: "reading",
+      calls: [
         { name: "read_skill_reference", input: { path: "a.md" } },
         { name: "read_skill_reference", input: { path: "b.md" } },
       ],
-    }),
-    JSON.stringify({ reply: "done" }),
+    },
+    { text: "done" },
   ]);
 
   assert.deepEqual(h.toolCalls.map((c) => c.input["path"]), ["a.md", "b.md"]);
 });
 
-test("a single tool_call object is still accepted", async () => {
+
+
+test("a delegation and a direct tool call share one step and one list", async () => {
   const h = harness();
 
   await h.run([
-    JSON.stringify({ reply: "reading", tool_call: { name: "read_skill_reference", input: { path: "a.md" } } }),
-    JSON.stringify({ reply: "done" }),
-  ]);
-
-  assert.deepEqual(h.toolCalls.map((c) => c.input["path"]), ["a.md"]);
-});
-
-test("dispatch and tool calls in the same step both run", async () => {
-  const h = harness();
-
-  await h.run([
-    JSON.stringify({
-      reply: "working",
-      dispatch: [{ agent: "market_data", task: "quote NVDA" }],
-      tool_calls: [{ name: "read_skill_reference", input: { path: "a.md" } }],
-    }),
-    JSON.stringify({ reply: "done" }),
+    {
+      text: "working",
+      calls: [
+        { name: "delegate_to_agent", input: { agent: "market_data", task: "quote NVDA" } },
+        { name: "read_skill_reference", input: { path: "a.md" } },
+      ],
+    },
+    { text: "done" },
   ]);
 
   assert.deepEqual(h.dispatched.map((d) => d.task), ["quote NVDA"]);
   assert.deepEqual(h.toolCalls.map((c) => c.input["path"]), ["a.md"]);
 });
 
+
+
 test("the visible model becomes the advisory default for a DCF dispatch", async () => {
   const h = harness();
 
   await h.run([
-    JSON.stringify({ reply: "updating", dispatch: [{ agent: "financial_modeling", task: "update the DCF" }] }),
-    JSON.stringify({ reply: "done" }),
+    { text: "updating", calls: [{ name: "delegate_to_agent", input: { agent: "financial_modeling", task: "update the DCF" } }] },
+    { text: "done" },
   ], { activeModel: { modelId: "model-visible", symbol: "AAPL", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-08-12T00:00:00Z", currentRevision: 7, lifecycleStage: "valued" } });
 
   assert.equal(h.dispatched[0]?.model_id, "model-visible");
@@ -169,8 +166,8 @@ test("an explicit DCF model choice remains available to the agent", async () => 
   const h = harness();
 
   await h.run([
-    JSON.stringify({ reply: "updating", dispatch: [{ agent: "financial_modeling", task: "build a comparison model", model_id: "model-other" }] }),
-    JSON.stringify({ reply: "done" }),
+    { text: "updating", calls: [{ name: "delegate_to_agent", input: { agent: "financial_modeling", task: "build a comparison model", model_id: "model-other" } }] },
+    { text: "done" },
   ], { activeModel: { modelId: "model-visible", symbol: "AAPL", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-08-12T00:00:00Z", currentRevision: 7, lifecycleStage: "valued" } });
 
   assert.equal(h.dispatched[0]?.model_id, "model-other");
@@ -180,12 +177,11 @@ test("pairing skill with another action is refused outright, not silently resolv
   const h = harness();
 
   await h.run([
-    JSON.stringify({
-      reply: "working",
-      skill: "whatever",
-      dispatch: [{ agent: "market_data", task: "quote NVDA" }],
-    }),
-    JSON.stringify({ reply: "done" }),
+    { text: "working", calls: [
+      { name: "invoke_skill", input: { skill: "whatever" } },
+      { name: "delegate_to_agent", input: { agent: "market_data", task: "quote NVDA" } },
+    ] },
+    { text: "done" },
   ]);
 
   assert.equal(h.dispatched.length, 0, "the dispatch must not win by branch order");
@@ -196,26 +192,25 @@ test("the protocol error is visible to the model, so it can correct itself next 
   const h = harness();
 
   await h.run([
-    JSON.stringify({
-      reply: "working",
-      skill: "whatever",
-      dispatch: [{ agent: "market_data", task: "quote NVDA" }],
-    }),
-    JSON.stringify({ reply: "done" }),
+    { text: "working", calls: [
+      { name: "invoke_skill", input: { skill: "whatever" } },
+      { name: "delegate_to_agent", input: { agent: "market_data", task: "quote NVDA" } },
+    ] },
+    { text: "done" },
   ]);
 
   const state = h.sessions.getExisting("s");
   const progress = state.projectForPrompt(1).currentTurnProgress;
-  assert.match(progress, /skill/i);
-  assert.match(progress, /exclusive|同时|mutually/i);
+  assert.match(progress, /invoke_skill/);
+  assert.match(progress, /only call/);
 });
 
 test("ask_user records a request and ends the turn without another model step", async () => {
   const h = harness();
 
   await h.run([
-    JSON.stringify({ reply: "Choose what fits.", tool_calls: [{ name: "ask_user", input: { questions: [] } }] }),
-    JSON.stringify({ reply: "this must not be reached" }),
+    { text: "Choose what fits.", calls: [{ name: "ask_user", input: { questions: [] } }] },
+    { text: "this must not be reached" },
   ]);
 
   const state = h.sessions.getExisting("s");
@@ -231,14 +226,14 @@ test("ask_user is rejected when mixed with another action", async () => {
   const h = harness();
 
   await h.run([
-    JSON.stringify({
-      reply: "mixed",
-      tool_calls: [
+    {
+      text: "mixed",
+      calls: [
         { name: "ask_user", input: {} },
         { name: "read_skill_reference", input: { path: "a.md" } },
       ],
-    }),
-    JSON.stringify({ reply: "done" }),
+    },
+    { text: "done" },
   ]);
 
   assert.equal(h.toolCalls.length, 0);
@@ -249,10 +244,29 @@ test("ask_user is unavailable when a Research controller drives a Topic in the b
   const h = harness();
 
   await h.run([
-    JSON.stringify({ reply: "choose", tool_calls: [{ name: "ask_user", input: {} }] }),
-    JSON.stringify({ reply: "missing input returned to caller" }),
+    { text: "choose", calls: [{ name: "ask_user", input: {} }] },
+    { text: "missing input returned to caller" },
   ], { allowUserInput: false });
 
   assert.equal(h.toolCalls.length, 0);
   assert.equal(h.sessions.getExisting("s").userInputRequest("input_test"), undefined);
+});
+
+
+
+test("a delegate call that stays invalid is a loud protocol error, never a silent turn end", async () => {
+  const h = harness();
+
+  await h.run([
+    {
+      text: "working",
+      calls: [{ name: "delegate_to_agent", input: { agent: "market_data" } }], // no task
+    },
+    { text: "done" },
+  ]);
+
+  assert.equal(h.dispatched.length, 0);
+  const state = h.sessions.getExisting("s");
+  const progress = state.projectForPrompt(1).currentTurnProgress;
+  assert.match(progress, /delegate_to_agent call\(s\) were invalid/);
 });

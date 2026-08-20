@@ -60,7 +60,7 @@ class FakeStore implements ResearchToolStore {
   members: ResearchMember[] = [];
   seen: Array<{ topicId: string; turn: number }> = [];
 
-  createTopic(_agentId: string, topicId: string, name: string, createdAt = Date.now()): TopicSummary {
+  createTopic(_tenantId: string, topicId: string, name: string, createdAt = Date.now()): TopicSummary {
     const topic: TopicSummary = {
       id: topicId, name, leadSymbol: null, subjectSymbols: [], createdAt, lastMessage: null, messageCount: 0,
       summary: null, category: null, categoryLocked: false,
@@ -132,7 +132,7 @@ function harness(options: {
   const frames: ResearchFrame[] = [];
   const runs: Array<{ sessionId: string; userMessage: string; allowUserInput?: boolean; activeModel?: { modelId: string } }> = [];
   const toolset = new ResearchToolset({
-    agentId: "default",
+    tenantId: "default",
     researchId: "res_1",
     researchName: "半导体估值",
     store,
@@ -168,7 +168,7 @@ test("dispatch_task runs the Topic's own orchestrator and returns its final repl
 
   assert.equal(result.status, "ok");
   assert.equal(result.reply, "reply to 渠道库存怎么样？");
-  assert.deepEqual(h.runs, [{ agentId: "default", sessionId: "room_a", userMessage: "渠道库存怎么样？" }],
+  assert.deepEqual(h.runs, [{ tenantId: "default", sessionId: "room_a", userMessage: "渠道库存怎么样？" }],
     "the background Topic run must not surface an input card outside the current Research");
 });
 
@@ -293,7 +293,7 @@ test("consult_topic is ephemeral: it asks the Topic but writes no member turn", 
   const sessions = new SessionRegistry(new InMemoryEventStore());
   store.createTopic("default", "room_a", "AAPL");
   const toolset = new ResearchToolset({
-    agentId: "default", researchId: "res_1", researchName: "Research", store, sessions,
+    tenantId: "default", researchId: "res_1", researchName: "Research", store, sessions,
     orchestrator: {
       async run() { return { response: "unused" }; },
       async consult(input) { consulted = input; return { response: "AAPL's established view is constructive." }; },
@@ -496,32 +496,23 @@ test("create_topic creates the topic and joins it to this research", () => {
 
 // ── turn projection ───────────────────────────────────────────────────────
 
-// ── setTopicSection: the skill's `## for: topic` text ──────────────────────
+// ── dispatch_task carries exactly what the controller wrote ────────────────
 
-test("setTopicSection appends its text to the message dispatch_task sends", async () => {
+test("dispatch_task sends the controller's message verbatim — nothing is appended behind it", async () => {
+  // A skill's `## for: topic` text used to be silently appended here. A skill acts on its READER:
+  // the controller reads the guidance and writes what a drive needs into the message itself.
   const h = harness();
   h.store.createTopic("default", "room_a", "AAPL");
-  h.toolset.setTopicSection("请给出具体读数和日期。");
 
-  await h.toolset.dispatchTask("room_a", "渠道库存怎么样？");
+  await h.toolset.dispatchTask("room_a", "渠道库存怎么样？请给出具体读数和日期。");
 
   assert.equal(h.runs.length, 1);
-  assert.equal(h.runs[0]!.userMessage, "渠道库存怎么样？\n\n请给出具体读数和日期。");
+  assert.equal(h.runs[0]!.userMessage, "渠道库存怎么样？请给出具体读数和日期。");
 });
 
-test("without a topic section the message is unchanged", async () => {
+test("an empty message is rejected", async () => {
   const h = harness();
   h.store.createTopic("default", "room_a", "AAPL");
-
-  await h.toolset.dispatchTask("room_a", "渠道库存怎么样？");
-
-  assert.equal(h.runs[0]!.userMessage, "渠道库存怎么样？");
-});
-
-test("an empty message is still rejected before the section is appended", async () => {
-  const h = harness();
-  h.store.createTopic("default", "room_a", "AAPL");
-  h.toolset.setTopicSection("请给出具体读数和日期。");
 
   const result = await h.toolset.dispatchTask("room_a", "   ");
 

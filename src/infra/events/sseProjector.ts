@@ -17,7 +17,9 @@ export function projectEvent(event: SessionEvent, state: SessionState): SSEEvent
       return [
         { type: "progress", task_id: event.event_id, phase: "subagent_started", pct: 5, note: `${p.agent as string} subagent started` },
         { type: "dispatch", task_id: event.event_id, agent: p.agent as AgentKind, task: p.task as string,
-          thread_id: (p.child_thread_id as string) ?? event.session_id },
+          thread_id: (p.child_thread_id as string) ?? event.session_id,
+          ...(typeof p.parent_task_id === "string" ? { parent_task_id: p.parent_task_id } : {}),
+          ...(typeof p.parent_agent === "string" ? { parent_agent: p.parent_agent as AgentKind } : {}) },
       ];
     case "task_result":
       return [
@@ -34,6 +36,17 @@ export function projectEvent(event: SessionEvent, state: SessionState): SSEEvent
       const artifactFrames: SSEEvent[] = ((p.artifacts as ArtifactRef[] | undefined) ?? [])
         .map((artifact) => ({ type: "artifact", task_id: taskId, artifact }));
       return [...artifactFrames, ...modelRevisionFrames(p)];
+    }
+    case "subagent_note": {
+      // The agent's own words about what it is doing this step — the only
+      // signal there is while a long delegate (statement_unification runs for
+      // minutes) neither commits a revision nor returns. Two notes are written
+      // to the MODEL rather than about the work and say nothing has advanced:
+      // the round seam and the compaction barrier, both stamped step 0.
+      if (p.thread_summary === true) return [];
+      if (typeof p.step !== "number" || p.step < 1) return [];
+      if (typeof p.note !== "string" || p.note === "") return [];
+      return [{ type: "progress", task_id: (p.task_id as string) ?? event.parent_event_id ?? "", phase: "note", note: p.note }];
     }
     case "approval_required":
       return [{ type: "approval_required", approval_id: p.approval_id as string, payload: p.payload as Record<string, never> }];

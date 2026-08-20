@@ -2,8 +2,9 @@
 name: stock-analysis
 description: Produce evidence-based analysis of one publicly traded US company by combining current market data, sector context, macro transmission, reported fundamentals, valuation context, technical structure, news, catalysts, risks, and conditional forward scenarios. Use when the user asks for a deep dive, investment thesis, outlook, risk review, earnings-informed view, or "what is going on" analysis for a single stock or ticker.
 layer: topic
-tools: [get_stock_price, get_sector_analysis, stock_sma, stock_ema, stock_rsi, stock_macd, stock_bollinger_bands, stock_atr, stock_obv, stock_vwap, stock_support_resistance, get_sec_company_profile, get_sec_filings, get_sec_company_facts, financial_search]
 ---
+
+# Single-stock analysis
 
 Analyze one operating company in this order: scope -> market baseline -> company evidence -> sector and macro transmission -> valuation and expectations -> technical structure -> forward scenarios. Treat macro conditions and company data as separate evidence streams until synthesis.
 

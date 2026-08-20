@@ -41,7 +41,7 @@ import { maybeCompact } from "../../framework/contextCompaction.ts";
 import { formatLatestInput, formatUserMessageLine } from "../../framework/sessionState.ts";
 import type { SessionEvent, SessionRegistry, SessionState } from "../../framework/sessionState.ts";
 import type { JsonObject, UserInputRequest, UserInputResponse } from "../../framework/types.ts";
-import type { ModelRouter } from "../../infra/llm/provider.ts";
+import type { LlmToolSpec, ModelRouter } from "../../infra/llm/provider.ts";
 import type { SkillRegistry } from "../../framework/skill.ts";
 import type { McpToolRegistry } from "../../../mcp_tools/toolRegistry.ts";
 import type { TopicChartPreferenceRow } from "../../infra/db/sqliteEventStore.ts";
@@ -49,7 +49,8 @@ import { mapWithConcurrency } from "./concurrency.ts";
 import { buildIndexedTurns, turnCountOf } from "../topicDigest.ts";
 import { renderExternalDelta, renderRoster, type MemberFacts } from "./memberContext.ts";
 import { RESEARCH_TOOL_SPECS } from "./researchPrompt.ts";
-import type { ActiveWorkspaceModel } from "../../framework/orchestrator.ts";
+import { TURN_PROGRESS_MARKER, type ActiveWorkspaceModel } from "../../framework/orchestrator.ts";
+import { progressRegion, splitForPromptCache, type ProgressCache } from "../../framework/subagent.ts";
 import {
   requireRangeDays,
   ResearchToolset,
@@ -86,7 +87,9 @@ const PRIOR_TOOL_SUMMARY_CHARS = 1_200;
  *  not something to show the user. */
 const ROSTER_RECORD_NAME = "research_roster";
 
-const TOOL_NAMES = new Set(RESEARCH_TOOL_SPECS.map((spec) => spec.name));
+/** The provider-facing tool specs — RESEARCH_TOOL_SPECS carries real JSON schemas, so it IS the
+ *  native spec list. invoke_skill is in it: loading guidance is a call like any other. */
+const RESEARCH_NATIVE_TOOLS: LlmToolSpec[] = RESEARCH_TOOL_SPECS;
 
 export type ResearchRuntimeStore = ResearchToolStore;
 
@@ -104,7 +107,7 @@ export type ResearchRuntimeDeps = {
 };
 
 export type ResearchRunInput = {
-  agentId: string;
+  tenantId: string;
   researchId: string;
   researchName: string;
   userMessage: string;
@@ -119,87 +122,9 @@ export type ResearchRunInput = {
 export type ResearchRunResult = { response: string };
 
 type ToolCall = { name: string; input: JsonObject };
-type ResearchStep = { reply: string; skill: string | null; toolCalls: ToolCall[] };
+type ResearchStep = { reply: string; toolCalls: ToolCall[] };
 
-// ── step parsing ──────────────────────────────────────────────────────────
-
-function stripCodeFence(text: string): string {
-  const trimmed = text.trim();
-  const fenced = trimmed.match(/^```(?:json)?\s*\n([\s\S]*?)\n?```\s*$/i);
-  const body = fenced?.[1];
-  return body !== undefined ? body.trim() : trimmed;
-}
-
-function extractJsonObject(text: string): string | null {
-  const start = text.indexOf("{");
-  if (start === -1) return null;
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let i = start; i < text.length; i++) {
-    const ch = text[i];
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (ch === "\\") escaped = true;
-      else if (ch === '"') inString = false;
-      continue;
-    }
-    if (ch === '"') inString = true;
-    else if (ch === "{") depth++;
-    else if (ch === "}") {
-      depth--;
-      if (depth === 0) return text.slice(start, i + 1);
-    }
-  }
-  return null;
-}
-
-function asToolCall(value: unknown): ToolCall | null {
-  if (!value || typeof value !== "object") return null;
-  const raw = value as { name?: unknown; input?: unknown };
-  if (typeof raw.name !== "string" || !TOOL_NAMES.has(raw.name)) return null;
-  const input = raw.input && typeof raw.input === "object" && !Array.isArray(raw.input)
-    ? (raw.input as JsonObject)
-    : ({} as JsonObject);
-  return { name: raw.name, input };
-}
-
-/**
- * Parses one controller completion. Unparseable output degrades to "this text
- * is the final answer" rather than to a retry loop — the same failure posture
- * the Topic agent takes, for the same reason: a user waiting on a Research turn
- * would rather get prose than a spinner.
- *
- * Accepts both `tool_calls` (the documented form, an array so one step can
- * drive several Topics at once) and a single `tool_call` object, because models
- * reach for the singular form regardless of what the prompt says.
- */
-export function parseResearchStep(text: string): ResearchStep {
-  const cleaned = stripCodeFence(text);
-  const json = extractJsonObject(cleaned);
-  if (!json) return { reply: text.trim(), skill: null, toolCalls: [] };
-
-  let raw: Record<string, unknown>;
-  try {
-    raw = JSON.parse(json) as Record<string, unknown>;
-  } catch {
-    return { reply: text.trim(), skill: null, toolCalls: [] };
-  }
-
-  const reply = typeof raw.reply === "string" ? raw.reply : "";
-  const skill = typeof raw.skill === "string" && raw.skill.trim() ? raw.skill.trim() : null;
-  const candidates = Array.isArray(raw.tool_calls)
-    ? raw.tool_calls
-    : raw.tool_call
-      ? [raw.tool_call]
-      : [];
-
-  return {
-    reply,
-    skill,
-    toolCalls: candidates.map(asToolCall).filter((call): call is ToolCall => call !== null),
-  };
-}
+const INVOKE_SKILL = "invoke_skill";
 
 // ── the runtime ───────────────────────────────────────────────────────────
 
@@ -233,7 +158,7 @@ export class ResearchRuntime {
     const turn = state.beginTurn(input.userMessage, input.inputResponse);
 
     const toolset = new ResearchToolset({
-      agentId: input.agentId,
+      tenantId: input.tenantId,
       researchId: input.researchId,
       researchName: input.researchName,
       store: this.store,
@@ -255,14 +180,20 @@ export class ResearchRuntime {
 
     let finalReply = "";
 
+    // Same rolling-breakpoint scheme as the Topic orchestrator, scoped to this
+    // turn: the previous step's [CURRENT TURN PROGRESS] region and its cuts.
+    let previousCache: ProgressCache | undefined;
+
     for (let step = 1; step <= MAX_STEPS; step++) {
       // Same boundary as the Topic orchestrator: compact older history as soon
       // as a prior step crosses the threshold, never this in-flight turn.
       await maybeCompact(state, this.modelRouter, turn);
+      const historyParts = this.renderHistoryParts(state, turn);
       const rendered = this.renderer.render(this.prompt, {
         currentDate: new Date().toISOString().slice(0, 10),
         latestInput: formatLatestInput(input.userMessage, Boolean(input.inputResponse)),
-        history: this.renderHistory(state, turn),
+        conversationSoFar: historyParts.conversationSoFar,
+        turnProgress: historyParts.turnProgress,
         roster,
         externalDelta,
         activeModelContext: input.activeModel
@@ -272,17 +203,25 @@ export class ResearchRuntime {
         skills,
       });
 
-      let completionText: string;
+      let parsed: ResearchStep;
+      // Cache split, same rationale as the Topic orchestrator: everything
+      // before [CURRENT TURN PROGRESS] is byte-stable across this turn's steps.
+      const progressSent = progressRegion(rendered.prompt, TURN_PROGRESS_MARKER);
+      const split = splitForPromptCache(rendered.system, rendered.prompt, previousCache, TURN_PROGRESS_MARKER);
       try {
         const completion = await this.modelRouter.generate(
-          [
-            { role: "system", content: rendered.system },
-            { role: "user", content: rendered.prompt },
-          ],
-          { modelClass: "LARGE", temperature: 0.2, metadata: { mode: "research_controller" } },
+          split.messages,
+          // Native tool calling: the provider holds the REAL schemas from RESEARCH_TOOL_SPECS and
+          // returns structured calls, so the hand-written JSON step protocol — and every formatting
+          // slip it tolerated — is gone. Plain text is what the user sees; no calls means the turn
+          // ends on that text as the final answer.
+          { modelClass: "LARGE", temperature: 0.2, metadata: { mode: "research_controller" },
+            tools: RESEARCH_NATIVE_TOOLS },
         );
-        completionText = completion.text;
+        parsed = { reply: completion.text,
+          toolCalls: (completion.toolCalls ?? []).map((call) => ({ name: call.name, input: (call.input ?? {}) as JsonObject })) };
         state.recordPromptTokens(completion.metrics.tokens_in);
+        previousCache = progressSent === undefined ? undefined : { progress: progressSent, cuts: split.cuts };
       } catch (error) {
         state.record("orchestrator", "error", {
           scope: "main",
@@ -291,31 +230,33 @@ export class ResearchRuntime {
         break;
       }
 
-      const parsed = parseResearchStep(completionText);
       const status = parsed.reply.trim();
 
-      if (parsed.skill) {
-        if (parsed.toolCalls.length > 0) {
+      const skillCalls = parsed.toolCalls.filter((call) => call.name === INVOKE_SKILL);
+      const requestedSkill = typeof skillCalls[0]?.input["skill"] === "string" ? String(skillCalls[0].input["skill"]) : "";
+      if (skillCalls.length > 0) {
+        if (skillCalls.length > 1 || parsed.toolCalls.length > 1) {
           state.record("orchestrator", "error", {
             scope: "protocol",
             message:
-              "skill is exclusive with tool_calls — invoke the skill alone, then act on its guidance in the next step",
+              "invoke_skill must be the only call in its step — its guidance shapes what you write NEXT, so anything issued beside it was written without it",
           });
           continue;
         }
-        const skill = this.skills.get(parsed.skill, "research");
+        const skill = this.skills.get(requestedSkill, "research");
         if (!skill) {
           const available = researchSkills.map((s) => s.name).join(", ") || "(none)";
           state.record("orchestrator", "error", {
             scope: "protocol",
-            message: `unknown skill '${parsed.skill}'; available skills: ${available}`,
+            message: `unknown skill '${requestedSkill}'; available skills: ${available}`,
           });
           continue;
         }
         if (status) state.recordReply(status, false);
         state.record("orchestrator", "skill_invoke", { skill: skill.name });
-        // The section has to land here: the dispatch_task written next step is what carries it.
-        toolset.setTopicSection(skill.topicSection ?? "");
+        // The full text — "## for: topic" section included — lands in the controller's own
+        // progress. What each member's drive needs from it is the controller's judgment to write
+        // into that dispatch_task message; nothing is relayed behind its back.
         const result = await this.skills.invoke(skill.name, {
           sessionId: state.session_id,
           userMessage: input.userMessage,
@@ -349,7 +290,7 @@ export class ResearchRuntime {
       // Calls in one step run together: three `dispatch_task`s issued at once is the
       // whole reason the concurrency guard exists.
       const outcomes = await mapWithConcurrency(parsed.toolCalls, MAX_PARALLEL_TOOL_CALLS, (call) =>
-        this.invokeTool(toolset, state, input.agentId, call),
+        this.invokeTool(toolset, state, input.tenantId, call),
       );
       if (outcomes.some(Boolean)) {
         finalReply = status || "Please answer the questions below.";
@@ -389,7 +330,7 @@ export class ResearchRuntime {
     input: ResearchRunInput,
     state: SessionState,
   ): Promise<{ roster: string; externalDelta: string }> {
-    const facts = await this.memberFacts(input.agentId, input.researchId);
+    const facts = await this.memberFacts(input.tenantId, input.researchId);
     if (facts.length === 0) {
       return {
         roster: "(This Research has no members yet. Use create_topic to start a line of investigation, or edit_members to add an existing Topic.)",
@@ -436,11 +377,11 @@ export class ResearchRuntime {
     return seen;
   }
 
-  private async memberFacts(agentId: string, researchId: string): Promise<MemberFacts[]> {
+  private async memberFacts(tenantId: string, researchId: string): Promise<MemberFacts[]> {
     const members = this.store.listResearchMembers(researchId);
     if (members.length === 0) return [];
 
-    const topics = new Map(this.store.listTopics(agentId).map((topic) => [topic.id, topic]));
+    const topics = new Map(this.store.listTopics(tenantId).map((topic) => [topic.id, topic]));
 
     return mapWithConcurrency(members, 3, async (member): Promise<MemberFacts> => {
       const topic = topics.get(member.topicId);
@@ -469,7 +410,10 @@ export class ResearchRuntime {
    * the controller asked each member and what it got back — the thing §4.2.1
    * says replaces a re-rendered roster.
    */
-  private renderHistory(state: SessionState, turn: number): string {
+  /** Prior conversation and this turn's progress, rendered apart: the prompt
+   *  template puts the progress LAST so splitForPromptCache can cache
+   *  everything before it (see the template's own comment). */
+  private renderHistoryParts(state: SessionState, turn: number): { conversationSoFar: string; turnProgress: string } {
     const compaction = state.compactionCache();
     const prior: string[] = [];
     const current: string[] = [];
@@ -494,8 +438,10 @@ export class ResearchRuntime {
       parts.push("", "[RECENT CONVERSATION]");
     }
     parts.push(prior.length ? prior.join("\n") : "(No earlier conversation yet.)");
-    if (current.length) parts.push("", "[CURRENT TURN PROGRESS]", current.join("\n"));
-    return parts.join("\n");
+    return {
+      conversationSoFar: parts.join("\n"),
+      turnProgress: current.length ? current.join("\n") : "(none yet)",
+    };
   }
 
   private renderEventLine(event: SessionEvent, isCurrent: boolean): string | null {
@@ -545,11 +491,11 @@ export class ResearchRuntime {
    * Research's (§4.4). Bad arguments are reported back to the model in the same
    * shape, so it can correct itself on the next step rather than crash the turn.
    */
-  private async invokeTool(toolset: ResearchToolset, state: SessionState, agentId: string, call: ToolCall): Promise<UserInputRequest | undefined> {
+  private async invokeTool(toolset: ResearchToolset, state: SessionState, tenantId: string, call: ToolCall): Promise<UserInputRequest | undefined> {
     state.record("orchestrator", "tool_use", { name: call.name, input: call.input });
     try {
       if (call.name === "ask_user") {
-        const output = await this.tools.call("ask_user", call.input, { sessionId: state.session_id, agentId });
+        const output = await this.tools.call("ask_user", call.input, { sessionId: state.session_id, tenantId });
         const payload: JsonObject = { name: call.name, summary: output.summary };
         if (output.error) payload.error = output.error;
         state.record("orchestrator", "tool_result", payload);

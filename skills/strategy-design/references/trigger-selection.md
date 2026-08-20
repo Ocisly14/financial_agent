@@ -1,4 +1,4 @@
-# Choosing triggers, and three complete plans
+# Choosing triggers and wiring the phases
 
 ## Decision table
 
@@ -19,137 +19,51 @@ Two rules the table cannot show:
 - A cross trigger in a range-bound tape fires repeatedly and loses on each one. Check the baseline
   for a trend before choosing one.
 
-## Plan 1 — Pullback entry with OCO exits
+## Entry shapes
 
-One entry at support with a target and stop anchored to its actual fill. They share a cancel group,
-so the first one out closes the complete position and cancels the other.
+The baseline decides the shape; the shape decides the entry trigger and what the exits can be.
 
-```json
-{
-  "name": "AAPL pullback",
-  "symbol": "AAPL",
-  "mode": "paper",
-  "guardrails": { "total_budget_usd": 25000, "max_notional_usd": 25000 },
-  "phases": [
-    {
-      "id": "entry",
-      "name": "Pullback to support",
-      "depends_on": [],
-      "price_trigger": { "type": "absolute_threshold", "direction": "down", "price": 182.4 },
-      "action": { "side": "BUY", "size": { "type": "fixed_quote_usd", "value": 25000 } },
-      "recurrence": { "mode": "one_shot" }
-    },
-    {
-      "id": "target",
-      "name": "Pullback target",
-      "depends_on": ["entry"],
-      "activate_on": "first_fill",
-      "cancel_group": "exit",
-      "price_anchor": { "type": "phase_fill", "phase_id": "entry" },
-      "price_trigger": { "type": "relative_change", "direction": "up", "pct": 6 },
-      "action": { "side": "SELL", "size": { "type": "pct_of_position", "value": 100 } },
-      "recurrence": { "mode": "one_shot" }
-    },
-    {
-      "id": "stop",
-      "name": "Pullback stop",
-      "depends_on": ["entry"],
-      "activate_on": "first_fill",
-      "cancel_group": "exit",
-      "price_anchor": { "type": "phase_fill", "phase_id": "entry" },
-      "price_trigger": { "type": "relative_change", "direction": "down", "pct": 3 },
-      "action": { "side": "SELL", "size": { "type": "pct_of_position", "value": 100 } },
-      "recurrence": { "mode": "one_shot" }
-    }
-  ]
-}
-```
+| Shape | When the baseline supports it | Entry trigger | Exits it admits |
+| --- | --- | --- | --- |
+| Pullback | Price above its averages, buyer wants in cheaper | `absolute_threshold` down at a support level, or `rolling_change` down over a window | Target and stop as an exclusive pair |
+| Breakout | Price compressed under resistance | `absolute_threshold` up through the level | A lone trailing stop when the move should run, or a target and stop pair |
+| Indicator turn | The user described the entry in indicator terms, and the tape trends | `rsi_threshold`, `macd_cross`, or `moving_average_cross` | Target and stop as an exclusive pair |
 
-The exit sizes are 100% because `pct_of_position` addresses the strategy's whole position, not an
-individual entry leg. A multi-rung plan needs per-leg position accounting before it can safely give
-each rung an independent OCO pair.
+## Wiring the phases
 
-## Plan 2 — Breakout with a trailing stop
+Every phase of a plan goes in the single `phases[]` array of one `create_strategy` call. The
+structure, not the order of the array, decides what runs when.
 
-No fixed target: the user wants the move to run. The trailing stop is the only exit, so it does not
-need a cancel group.
+- **The entry is a root phase.** No `depends_on`, so it monitors from the moment the strategy is
+  activated.
+- **Every exit depends on the entry** and sets `activate_on: "first_fill"`, so it starts watching
+  only once there is a position to protect.
+- **An exit takes its level from the fill, never from a predicted price.** Give it a `price_anchor`
+  of type `phase_fill` naming the entry's id, then express the distance as `relative_change` or
+  `trailing_stop`. Writing the level as an `absolute_threshold` computed by hand bakes in a fill
+  price the market never had to honour.
+- **Exits that must not both fire share one `cancel_group`.** The first to fill cancels its peer.
+  A single exit — a lone trailing stop — needs no group, because there is nothing to cancel.
+- **`recurrence.mode` is `one_shot`** for an entry and its exits. Use `recurring` only when the plan
+  genuinely re-arms after firing, and cap it with `max_triggers`.
+- **`mode` is `paper` or `shadow`**, and both `guardrails.total_budget_usd` and
+  `guardrails.max_notional_usd` are set on every plan.
 
-```json
-{
-  "name": "NVDA breakout",
-  "symbol": "NVDA",
-  "mode": "paper",
-  "guardrails": { "total_budget_usd": 20000, "max_notional_usd": 20000 },
-  "phases": [
-    {
-      "id": "breakout",
-      "name": "Break of the range high",
-      "depends_on": [],
-      "price_trigger": { "type": "absolute_threshold", "direction": "up", "price": 194.5 },
-      "action": { "side": "BUY", "size": { "type": "fixed_quote_usd", "value": 20000 } },
-      "recurrence": { "mode": "one_shot" }
-    },
-    {
-      "id": "trail",
-      "name": "Trailing stop from the high since entry",
-      "depends_on": ["breakout"],
-      "activate_on": "first_fill",
-      "price_anchor": { "type": "phase_fill", "phase_id": "breakout" },
-      "price_trigger": { "type": "trailing_stop", "direction": "down", "pct": 4 },
-      "action": { "side": "SELL", "size": { "type": "pct_of_position", "value": 100 } },
-      "recurrence": { "mode": "one_shot" }
-    }
-  ]
-}
-```
+A phase referred to by another phase needs a stable `id`. Name ids for their role in the plan, so a
+dependency reads as a sentence rather than as a pair of opaque strings.
 
-## Plan 3 — Indicator cross with OCO exits
+## Two structural limits
 
-The entry is the momentum turn the user described. A fixed target and stop are both anchored to
-the actual cross fill, so either one closes the complete position and cancels the other.
+Both come from the executor, not from style. Neither is negotiable by writing the plan differently.
 
-```json
-{
-  "name": "SPY momentum turn",
-  "symbol": "SPY",
-  "mode": "paper",
-  "guardrails": { "total_budget_usd": 18000, "max_notional_usd": 12000 },
-  "phases": [
-    {
-      "id": "cross",
-      "name": "MACD turns up on the daily",
-      "depends_on": [],
-      "price_trigger": { "type": "macd_cross", "direction": "bullish", "timeframe": "1Day" },
-      "action": { "side": "BUY", "size": { "type": "fixed_quote_usd", "value": 12000 } },
-      "recurrence": { "mode": "one_shot" }
-    },
-    {
-      "id": "target",
-      "name": "Target above the cross",
-      "depends_on": ["cross"],
-      "activate_on": "first_fill",
-      "cancel_group": "exit",
-      "price_anchor": { "type": "phase_fill", "phase_id": "cross" },
-      "price_trigger": { "type": "relative_change", "direction": "up", "pct": 5 },
-      "action": { "side": "SELL", "size": { "type": "pct_of_position", "value": 100 } },
-      "recurrence": { "mode": "one_shot" }
-    },
-    {
-      "id": "stop",
-      "name": "Stop below the cross",
-      "depends_on": ["cross"],
-      "activate_on": "first_fill",
-      "cancel_group": "exit",
-      "price_anchor": { "type": "phase_fill", "phase_id": "cross" },
-      "price_trigger": { "type": "relative_change", "direction": "down", "pct": 2.5 },
-      "action": { "side": "SELL", "size": { "type": "pct_of_position", "value": 100 } },
-      "recurrence": { "mode": "one_shot" }
-    }
-  ]
-}
-```
+**Exit sizing addresses the whole position.** `pct_of_position` is a percentage of the strategy's
+aggregate position, not of the entry leg that caused the exit. So an exit that is meant to close the
+trade uses the full position, and a multi-rung ladder cannot give each rung an independent exclusive
+pair — a stop belonging to one rung would close every other rung with it. Per-leg position
+accounting is required before a ladder like that is safe; until then, deliver one fully protected
+entry instead and say why.
 
-This strategy intentionally does not add after entry. A separately activated add can remain live
-after a one-shot stop has closed the original position; the current phase model has no safe way to
-cancel that add without also cancelling its protection. Keep it as a new, fully protected plan
-instead of silently reopening a stopped-out trade.
+**A plan does not add after its entry.** An add activated independently of the exits can still be
+live after a one-shot stop has closed the original position, and the phase model has no way to
+cancel that add without also cancelling the protection around it. A later addition belongs in a new,
+fully protected plan rather than in a leg that can silently reopen a stopped-out trade.

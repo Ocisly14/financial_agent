@@ -114,14 +114,21 @@ const fetcher = async ({
 // ── Agents/topics ─────────────────────────────────────────────────────────────
 // The app has one implicit agent. Topic metadata and transcripts are persisted
 // by the backend in the same local SQLite database.
-export const DEFAULT_AGENT_ID = "default";
+/** The tenant this client speaks for — the owner key behind every topic, research and model,
+ *  sent as the x-tenant-id header. Not an agent: the agents
+ *  are the workers the server declares in its topology, served by getAgentRoster. */
+export const DEFAULT_TENANT_ID = "default";
 
 export const apiClient = {
-    getAgents: (): Promise<{ agents: Array<{ id: string; name: string }> }> =>
-        Promise.resolve({ agents: [{ id: DEFAULT_AGENT_ID, name: "Financial Agent" }] }),
-    tts: (agentId: string, text: string) =>
+    /** Whose workspace this is. Stubbed to a single tenant until accounts exist. */
+    getTenants: (): Promise<{ tenants: Array<{ id: string; name: string }> }> =>
+        Promise.resolve({ tenants: [{ id: DEFAULT_TENANT_ID, name: "Financial Agent" }] }),
+    /** The agent roster, served from the server's own topology — the one place agents are declared. */
+    getAgentRoster: (): Promise<{ agents: Array<{ name: string; description: string }> }> =>
+        fetcher({ url: "/api/agent-roster", method: "GET" }),
+    tts: (tenantId: string, text: string) =>
         fetcher({
-            url: `/${agentId}/tts`,
+            url: `/${tenantId}/tts`,
             method: "POST",
             body: {
                 text,
@@ -132,59 +139,59 @@ export const apiClient = {
                 "Transfer-Encoding": "chunked",
             },
         }),
-    whisper: async (agentId: string, audioBlob: Blob) => {
+    whisper: async (tenantId: string, audioBlob: Blob) => {
         const formData = new FormData();
         formData.append("file", audioBlob, "recording.wav");
         return fetcher({
-            url: `/${agentId}/whisper`,
+            url: `/${tenantId}/whisper`,
             method: "POST",
             body: formData,
         });
     },
     // Topic management — backed by the server's local SQLite database.
-    createTopic: (agentId: string, name?: string): Promise<{ success: boolean; topic: TopicSummary }> =>
-        fetcher({ url: `/api/agents/${encodeURIComponent(agentId)}/topics`, method: "POST", body: { name } }),
+    createTopic: (tenantId: string, name?: string): Promise<{ success: boolean; topic: TopicSummary }> =>
+        fetcher({ url: `/api/tenants/${encodeURIComponent(tenantId)}/topics`, method: "POST", body: { name } }),
 
-    getTopics: (agentId: string): Promise<{ success: boolean; topics: TopicSummary[] }> =>
-        fetcher({ url: `/api/agents/${encodeURIComponent(agentId)}/topics` }),
+    getTopics: (tenantId: string): Promise<{ success: boolean; topics: TopicSummary[] }> =>
+        fetcher({ url: `/api/tenants/${encodeURIComponent(tenantId)}/topics` }),
 
     /** `category: null` means "back to automatic" — it clears the user's lock
      *  and lets the next background digest classify the topic again. */
     updateTopic: (
-        agentId: string,
+        tenantId: string,
         topicId: string,
         patch: { name?: string; category?: TopicCategory | null },
     ): Promise<{ success: boolean }> =>
         fetcher({
-            url: `/api/agents/${encodeURIComponent(agentId)}/topics/${encodeURIComponent(topicId)}`,
+            url: `/api/tenants/${encodeURIComponent(tenantId)}/topics/${encodeURIComponent(topicId)}`,
             method: "PUT",
             body: patch,
         }),
 
-    deleteTopic: (agentId: string, topicId: string): Promise<{ success: boolean; message: string }> =>
+    deleteTopic: (tenantId: string, topicId: string): Promise<{ success: boolean; message: string }> =>
         fetcher({
-            url: `/api/agents/${encodeURIComponent(agentId)}/topics/${encodeURIComponent(topicId)}`,
+            url: `/api/tenants/${encodeURIComponent(tenantId)}/topics/${encodeURIComponent(topicId)}`,
             method: "DELETE",
         }),
 
-    batchDeleteTopics: async (agentId: string, topicIds: string[]) => {
-        const results = await Promise.all(topicIds.map((topicId) => apiClient.deleteTopic(agentId, topicId)));
+    batchDeleteTopics: async (tenantId: string, topicIds: string[]) => {
+        const results = await Promise.all(topicIds.map((topicId) => apiClient.deleteTopic(tenantId, topicId)));
         return {
             success: results.every((result) => result.success),
             message: results.every((result) => result.success) ? "deleted" : "some topics could not be deleted",
         };
     },
 
-    getTopicCharts: (agentId: string, topicId: string): Promise<{ success: boolean; charts: TopicChartPreference[] }> =>
-        fetcher({ url: `/api/agents/${encodeURIComponent(agentId)}/topics/${encodeURIComponent(topicId)}/charts` }),
+    getTopicCharts: (tenantId: string, topicId: string): Promise<{ success: boolean; charts: TopicChartPreference[] }> =>
+        fetcher({ url: `/api/tenants/${encodeURIComponent(tenantId)}/topics/${encodeURIComponent(topicId)}/charts` }),
 
     setTopicCharts: (
-        agentId: string,
+        tenantId: string,
         topicId: string,
         charts: TopicChartPreference[],
     ): Promise<{ success: boolean; charts: TopicChartPreference[] }> =>
         fetcher({
-            url: `/api/agents/${encodeURIComponent(agentId)}/topics/${encodeURIComponent(topicId)}/charts`,
+            url: `/api/tenants/${encodeURIComponent(tenantId)}/topics/${encodeURIComponent(topicId)}/charts`,
             method: "PUT",
             body: { charts },
         }),
@@ -192,40 +199,40 @@ export const apiClient = {
     // Research management (spec §8) — a Research groups several Topics under
     // one controller agent. Its id doubles as its chat session id, same trick
     // as a Topic. See src/server/server.ts for the routes as actually built.
-    getResearches: (agentId: string): Promise<{ success: boolean; researches: ResearchSummary[] }> =>
-        fetcher({ url: `/api/agents/${encodeURIComponent(agentId)}/researches` }),
+    getResearches: (tenantId: string): Promise<{ success: boolean; researches: ResearchSummary[] }> =>
+        fetcher({ url: `/api/tenants/${encodeURIComponent(tenantId)}/researches` }),
 
     createResearch: (
-        agentId: string,
+        tenantId: string,
         body: { name?: string; topicIds: string[] },
     ): Promise<{ success: boolean; research: ResearchSummary; members: ResearchMember[] }> =>
-        fetcher({ url: `/api/agents/${encodeURIComponent(agentId)}/researches`, method: "POST", body }),
+        fetcher({ url: `/api/tenants/${encodeURIComponent(tenantId)}/researches`, method: "POST", body }),
 
     // Not in spec §8's route list, but the server implements it (GET
-    // /api/agents/:agentId/researches/:id) and the client needs it to render
+    // /api/tenants/:tenantId/researches/:id) and the client needs it to render
     // a single Research plus its member row without listing every Research.
     getResearch: (
-        agentId: string,
+        tenantId: string,
         researchId: string,
     ): Promise<{ success: boolean; research: ResearchSummary; members: ResearchMember[] }> =>
         fetcher({
-            url: `/api/agents/${encodeURIComponent(agentId)}/researches/${encodeURIComponent(researchId)}`,
+            url: `/api/tenants/${encodeURIComponent(tenantId)}/researches/${encodeURIComponent(researchId)}`,
         }),
 
     updateResearch: (
-        agentId: string,
+        tenantId: string,
         researchId: string,
         patch: { name: string },
     ): Promise<{ success: boolean; research: ResearchSummary }> =>
         fetcher({
-            url: `/api/agents/${encodeURIComponent(agentId)}/researches/${encodeURIComponent(researchId)}`,
+            url: `/api/tenants/${encodeURIComponent(tenantId)}/researches/${encodeURIComponent(researchId)}`,
             method: "PUT",
             body: patch,
         }),
 
-    deleteResearch: (agentId: string, researchId: string): Promise<{ success: boolean; message: string }> =>
+    deleteResearch: (tenantId: string, researchId: string): Promise<{ success: boolean; message: string }> =>
         fetcher({
-            url: `/api/agents/${encodeURIComponent(agentId)}/researches/${encodeURIComponent(researchId)}`,
+            url: `/api/tenants/${encodeURIComponent(tenantId)}/researches/${encodeURIComponent(researchId)}`,
             method: "DELETE",
         }),
 
@@ -233,33 +240,33 @@ export const apiClient = {
     // .../researches/:id/members) — lets the member row refresh independently
     // of the parent Research fetch.
     getResearchMembers: (
-        agentId: string,
+        tenantId: string,
         researchId: string,
     ): Promise<{ success: boolean; members: ResearchMember[] }> =>
         fetcher({
-            url: `/api/agents/${encodeURIComponent(agentId)}/researches/${encodeURIComponent(researchId)}/members`,
+            url: `/api/tenants/${encodeURIComponent(tenantId)}/researches/${encodeURIComponent(researchId)}/members`,
         }),
 
     // Whole-set replace — the client always sends the full membership list it
     // wants; the server preserves each surviving member's digest/seen marker.
     setResearchMembers: (
-        agentId: string,
+        tenantId: string,
         researchId: string,
         topicIds: string[],
     ): Promise<{ success: boolean; members: ResearchMember[] }> =>
         fetcher({
-            url: `/api/agents/${encodeURIComponent(agentId)}/researches/${encodeURIComponent(researchId)}/members`,
+            url: `/api/tenants/${encodeURIComponent(tenantId)}/researches/${encodeURIComponent(researchId)}/members`,
             method: "PUT",
             body: { topicIds },
         }),
 
     // Get historical messages for a topic (topic.id === session id)
     getMessages: (
-        agentId: string,
+        tenantId: string,
         topicId: string,
         params?: { limit?: number; before?: string }
-    ): Promise<{ agentId?: string; memories?: any[]; messages?: any[]; hasMore?: boolean; oldestId?: string }> => {
-        void agentId;
+    ): Promise<{ tenantId?: string; memories?: any[]; messages?: any[]; hasMore?: boolean; oldestId?: string }> => {
+        void tenantId;
         const query = new URLSearchParams();
         if (params?.limit !== undefined) query.set("limit", String(params.limit));
         if (params?.before) query.set("before", params.before);
@@ -303,8 +310,8 @@ export const apiClient = {
             body: { op },
         }),
 
-    getTopicModels: (agentId: string, topicId: string) =>
-        fetcher({ url: `/api/agents/${agentId}/topics/${topicId}/models` }) as Promise<{
+    getTopicModels: (tenantId: string, topicId: string) =>
+        fetcher({ url: `/api/tenants/${tenantId}/topics/${topicId}/models` }) as Promise<{
             success: boolean; models: ModelView[];
         }>,
 
@@ -340,7 +347,7 @@ type ChatArtifact = { n: number; type: "file" | "url"; ref: string; label?: stri
  * visualization data travels through its own structured side-channel.
  */
 function buildAssistantResponse(
-    agentId: string,
+    tenantId: string,
     response: string,
     artifacts: ChatArtifact[],
     visualizations: Record<string, unknown>[] = [],
@@ -358,7 +365,7 @@ function buildAssistantResponse(
     const id = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `msg-${Date.now()}`;
     return {
         id,
-        userId: agentId,
+        userId: tenantId,
         user: "system",
         createdAt: Date.now(),
         text,
@@ -392,9 +399,9 @@ export class StreamingApiClient {
      */
     private userStoppedAgentIds = new Set<string>();
 
-    private hasActiveStreamForAgent(agentId: string): boolean {
+    private hasActiveStreamForAgent(tenantId: string): boolean {
         for (const key of this.activeStreams.keys()) {
-            if (key.startsWith(agentId)) return true;
+            if (key.startsWith(tenantId)) return true;
         }
         return false;
     }
@@ -405,9 +412,9 @@ export class StreamingApiClient {
      * prevents the flag from leaking into an unrelated future stream when the
      * user clicks Stop in an edge state (no active stream).
      */
-    registerUserStopIntent(agentId: string): void {
-        if (this.hasActiveStreamForAgent(agentId)) {
-            this.userStoppedAgentIds.add(agentId);
+    registerUserStopIntent(tenantId: string): void {
+        if (this.hasActiveStreamForAgent(tenantId)) {
+            this.userStoppedAgentIds.add(tenantId);
         }
     }
 
@@ -420,22 +427,22 @@ export class StreamingApiClient {
     }
 
     // Cancel specific stream by agent ID
-    cancelStreamForAgent(agentId: string) {
+    cancelStreamForAgent(tenantId: string) {
         let aborted = false;
         for (const [key, controller] of this.activeStreams.entries()) {
-            if (key.startsWith(agentId)) {
+            if (key.startsWith(tenantId)) {
                 controller.abort();
                 this.activeStreams.delete(key);
                 aborted = true;
             }
         }
         if (aborted) {
-            this.userStoppedAgentIds.add(agentId);
+            this.userStoppedAgentIds.add(tenantId);
         }
     }
     
     async sendMessageStream(
-        agentId: string,
+        tenantId: string,
         message: string,
         topicId: string,
         onStep: (step: ProcessingStep) => void,
@@ -464,7 +471,7 @@ export class StreamingApiClient {
     ) {
         // Create a unique key for request deduplication.
         const classificationKeySegment = messageClassification ?? "";
-        const requestKey = `${agentId}-${topicId}-${message.substring(0, 50)}-${classificationKeySegment}`;
+        const requestKey = `${tenantId}-${topicId}-${message.substring(0, 50)}-${classificationKeySegment}`;
         
         // Cancel any existing request with the same key
         if (this.activeStreams.has(requestKey)) {
@@ -479,15 +486,34 @@ export class StreamingApiClient {
         // Retry paths set retryCount > 0 — keep the flag in that case so a
         // user stop during retries still classifies correctly.
         if (retryCount === 0) {
-            this.userStoppedAgentIds.delete(agentId);
+            this.userStoppedAgentIds.delete(tenantId);
         }
 
         // Create new AbortController for this request
         const abortController = new AbortController();
         this.activeStreams.set(requestKey, abortController);
-        
+
+        // Idle timeout, not a wall-clock cap. A DCF build streams progress for
+        // 20+ minutes; a fixed AbortSignal.timeout() killed exactly those runs
+        // — the stream it aborted was healthy and the backend finished anyway.
+        // What a timeout is FOR is a stream that went silent, so the timer
+        // resets on every chunk received and only sustained silence aborts.
+        // 17 minutes of silence covers the 15-minute trading approval wait,
+        // during which the backend sends nothing.
+        const IDLE_TIMEOUT_MS = 17 * 60 * 1000;
+        const idleController = new AbortController();
+        let idleTimer: ReturnType<typeof setTimeout> | undefined;
+        const armIdleTimeout = () => {
+            clearTimeout(idleTimer);
+            idleTimer = setTimeout(
+                () => idleController.abort(new DOMException("Stream idle timeout", "TimeoutError")),
+                IDLE_TIMEOUT_MS,
+            );
+        };
+
         // Clean up on completion
         const cleanup = () => {
+            clearTimeout(idleTimer);
             this.activeStreams.delete(requestKey);
         };
         
@@ -501,7 +527,7 @@ export class StreamingApiClient {
             sessionId: topicId,
             ...(activeModelId ? { activeModelId } : {}),
         });
-        const headers: HeadersInit = { "Content-Type": "application/json", "X-Agent-Id": agentId };
+        const headers: HeadersInit = { "Content-Type": "application/json", "X-Tenant-Id": tenantId };
 
         let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
         // Set true once a `final` event arrives, so a clean stream close (the
@@ -510,23 +536,25 @@ export class StreamingApiClient {
         let finalReceived = false;
 
         const finishAsUserStopIfNeeded = (): boolean => {
-            if (!this.userStoppedAgentIds.has(agentId)) {
+            if (!this.userStoppedAgentIds.has(tenantId)) {
                 return false;
             }
-            this.userStoppedAgentIds.delete(agentId);
+            this.userStoppedAgentIds.delete(tenantId);
             cleanup();
             onComplete?.();
             return true;
         };
 
         try {
+            armIdleTimeout();
             const response = await fetch(`${BASE_URL}/api/chat`, {
                 method: 'POST',
                 headers,
                 body,
-                // Use combined signal for both timeout and manual abort
+                // Combined signal: sustained silence or manual abort — never
+                // total elapsed time while frames are still arriving.
                 signal: AbortSignal.any([
-                    AbortSignal.timeout(17 * 60 * 1000), // covers 15-minute trading approval waits
+                    idleController.signal,
                     abortController.signal,
                 ]),
             });
@@ -573,7 +601,7 @@ export class StreamingApiClient {
                             status: 'in_progress',
                             message: `${parsed.agent ?? ''}: ${parsed.task ?? ''}`.trim(),
                             timestamp: Date.now(),
-                            data: { task_id: parsed.task_id, agent: parsed.agent, task: parsed.task, thread_id: parsed.thread_id },
+                            data: { task_id: parsed.task_id, agent: parsed.agent, task: parsed.task, thread_id: parsed.thread_id, parent_task_id: parsed.parent_task_id },
                         });
                         break;
                     case 'progress':
@@ -684,7 +712,7 @@ export class StreamingApiClient {
                         const id = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `step-${Date.now()}`;
                         onIntermediateResponse({
                             id,
-                            userId: agentId,
+                            userId: tenantId,
                             user: 'system',
                             createdAt: Date.now(),
                             text: parsed.content ?? '',
@@ -701,13 +729,13 @@ export class StreamingApiClient {
                         break;
                     case 'final':
                         finalReceived = true;
-                        this.userStoppedAgentIds.delete(agentId);
+                        this.userStoppedAgentIds.delete(tenantId);
                         if (parsed.sessionId && parsed.sessionId !== topicId) {
                             onTopicUpdate?.({ id: parsed.sessionId, name: '' });
                         }
                         onFinalResponse([
                             buildAssistantResponse(
-                                agentId,
+                                tenantId,
                                 parsed.response ?? '',
                                 parsed.artifacts ?? [],
                                 parsed.visualizations ?? [],
@@ -768,6 +796,8 @@ export class StreamingApiClient {
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) break;
+                // Bytes arrived — the stream is alive, push the deadline out.
+                armIdleTimeout();
                 buffer += decoder.decode(value, { stream: true });
                 const lines = buffer.split('\n');
                 buffer = lines.pop() || '';
@@ -828,8 +858,10 @@ export class StreamingApiClient {
                     return;
                 }
                 if (name === "TimeoutError") {
+                    // Only sustained silence trips this (see armIdleTimeout) —
+                    // an actively streaming run can no longer time out here.
                     onError(
-                        "Request timed out during analysis. The analysis may be too complex - please try a simpler request.",
+                        "No data received from the server for a long time, so the connection was closed. The backend may still be working — check back shortly or try again.",
                     );
                     return;
                 }
@@ -855,7 +887,7 @@ export class StreamingApiClient {
 
                 setTimeout(() => {
                     this.sendMessageStream(
-                        agentId,
+                        tenantId,
                         message,
                         topicId,
                         onStep,

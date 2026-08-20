@@ -7,7 +7,7 @@ import { InMemoryModelStore } from "../../../src/financial-model/store.ts";
 import { InMemoryFilingInsightStore } from "../../../src/infra/filing-insights/store.ts";
 import { InMemorySourceReviewStore } from "../../../src/infra/xbrl/sourceReviewStore.ts";
 import { FinancialModelService } from "../../../src/financial-model/service.ts";
-import { projectFinancialModelProgress } from "../../../src/framework/subagent.ts";
+import { projectFinancialModelProgress } from "../../../src/agent/financial-modeling/dcfBehavior.ts";
 import { createFinancialModelTools, type FinancialModelToolDeps } from "../financialModelTools.ts";
 import type { RegisteredTool } from "../../toolRegistry.ts";
 import type { JsonObject } from "../../../src/framework/types.ts";
@@ -25,7 +25,7 @@ const PERIODS = [
   { id: "FY2025", label: "FY2025", start: "2025-01-01", end: "2025-12-31", cls: "forecast" as const },
 ];
 
-const CONTEXT = { agentId: "owner-1", sessionId: "s1" };
+const CONTEXT = { tenantId: "owner-1", sessionId: "s1" };
 
 function setup(): { tools: Map<string, RegisteredTool>; deps: FinancialModelToolDeps; modelId: string } {
   const sourceReviewStore = new InMemorySourceReviewStore();
@@ -35,7 +35,7 @@ function setup(): { tools: Map<string, RegisteredTool>; deps: FinancialModelTool
   };
   const modelId = "model-1";
   new FinancialModelService(deps.modelStore, "s1").createModel({
-    modelId, ownerAgentId: "owner-1", originSessionId: "s1", symbol: "TEST",
+    modelId, ownerTenantId: "owner-1", originSessionId: "s1", symbol: "TEST",
     metadata: {}, reportingCurrency: "USD", periods: PERIODS, preparedStatementRows: [],
   });
   return { tools: new Map(createFinancialModelTools(deps).map((tool) => [tool.name, tool])), deps, modelId };

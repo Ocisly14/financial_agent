@@ -43,8 +43,8 @@ export const DISPATCH_TASK_TIMEOUT_MS = 6 * 60_000;
 /** The store surface these tools use. Narrower than SqliteEventStore so tests
  *  can hand in a stub; every method here already exists (Task 1). */
 export type ResearchToolStore = {
-  createTopic(agentId: string, topicId: string, name: string, createdAt?: number): TopicSummary;
-  listTopics(agentId: string): TopicSummary[];
+  createTopic(tenantId: string, topicId: string, name: string, createdAt?: number): TopicSummary;
+  listTopics(tenantId: string): TopicSummary[];
   listTopicCharts(topicId: string): TopicChartPreferenceRow[];
   replaceTopicCharts(topicId: string, rows: TopicChartPreferenceRow[]): void;
   listResearchMembers(researchId: string): ResearchMember[];
@@ -56,7 +56,7 @@ export type ResearchToolStore = {
  *  is allowed to use — the same one `handleChat` calls. */
 export type TopicOrchestrator = {
   run(input: {
-    agentId: string;
+    tenantId: string;
     sessionId: string;
     userMessage: string;
     allowUserInput?: boolean;
@@ -64,7 +64,7 @@ export type TopicOrchestrator = {
     activeModel?: ActiveWorkspaceModel;
   }): Promise<{ response: string }>;
   consult(input: {
-    agentId: string;
+    tenantId: string;
     sessionId: string;
     question: string;
     activeModel?: ActiveWorkspaceModel;
@@ -123,7 +123,7 @@ export type ResearchFrame =
     };
 
 export type ResearchToolContext = {
-  agentId: string;
+  tenantId: string;
   researchId: string;
   researchName: string;
   store: ResearchToolStore;
@@ -244,26 +244,14 @@ export class ResearchToolset {
   private readonly dispatchSemaphore = new Semaphore(DISPATCH_TASK_CONCURRENCY);
   /** Recursion depth 1: a Topic already driven THIS turn cannot be re-entered. */
   private drivenThisTurn = new Set<string>();
-  /** The active skill's `## for: topic` section. Becomes visible text on the
-   *  member Topic's own timeline, so it is written in the user's voice and
-   *  carries no internal marker here. */
-  private topicSection = "";
 
   constructor(ctx: ResearchToolContext) {
     this.ctx = ctx;
   }
 
-  /** Resets per-turn state. Call once at the start of every controller turn.
-   *  Deliberately does NOT reset `topicSection` — the skill is invoked
-   *  within the turn, and resetting here would erase it within that same
-   *  turn. */
+  /** Resets per-turn state. Call once at the start of every controller turn. */
   beginTurn(): void {
     this.drivenThisTurn = new Set<string>();
-  }
-
-  /** Called by the Research runtime after a skill is invoked. */
-  setTopicSection(section: string): void {
-    this.topicSection = section.trim();
   }
 
   private newId(prefix: string): string {
@@ -271,7 +259,7 @@ export class ResearchToolset {
   }
 
   private topicName(topicId: string): string {
-    return this.ctx.store.listTopics(this.ctx.agentId).find((t) => t.id === topicId)?.name ?? topicId;
+    return this.ctx.store.listTopics(this.ctx.tenantId).find((t) => t.id === topicId)?.name ?? topicId;
   }
 
   // ── dispatch_task ───────────────────────────────────────────────────────
@@ -292,9 +280,10 @@ export class ResearchToolset {
     if (!trimmed) {
       return { topicId, topicName, status: "failed", reason: "message is empty" };
     }
-    // Appended after the empty-message check: a message that's only guidance,
-    // with no instruction, should not count as a valid drive.
-    const task = this.topicSection ? `${trimmed}\n\n${this.topicSection}` : trimmed;
+    // Exactly what the controller wrote. A skill's guidance used to be appended here behind its
+    // back; a skill acts on its READER now — the controller carries what a drive needs into the
+    // message itself.
+    const task = trimmed;
     if (this.drivenThisTurn.has(topicId)) {
       // Recursion depth 1 (§4.4): one drive per Topic per controller turn.
       const result: DispatchTaskResult = {
@@ -343,7 +332,7 @@ export class ResearchToolset {
       let response: string;
       try {
         const topicRun = this.ctx.orchestrator.run({
-          agentId: this.ctx.agentId,
+          tenantId: this.ctx.tenantId,
           sessionId: topicId,
           userMessage: task,
           ...(this.ctx.activeModel?.topicId === topicId ? { activeModel: this.ctx.activeModel } : {}),
@@ -417,7 +406,7 @@ export class ResearchToolset {
     try {
       const result = await withTimeout(
         this.ctx.orchestrator.consult({
-          agentId: this.ctx.agentId,
+          tenantId: this.ctx.tenantId,
           sessionId: topicId,
           question: `Answer from your established Topic context only; do not do new research. Question: ${trimmed}`,
           ...(this.ctx.activeModel?.topicId === topicId ? { activeModel: this.ctx.activeModel } : {}),
@@ -479,7 +468,7 @@ export class ResearchToolset {
     // session row (the table is still named chat_rooms). Everything the code
     // *says* is `topic`.
     const topicId = this.newId("room");
-    this.ctx.store.createTopic(this.ctx.agentId, topicId, trimmed);
+    this.ctx.store.createTopic(this.ctx.tenantId, topicId, trimmed);
     const members = this.ctx.store.listResearchMembers(this.ctx.researchId).map((m) => m.topicId);
     const next = [...members, topicId];
     this.ctx.store.replaceResearchMembers(this.ctx.researchId, next);
@@ -671,7 +660,7 @@ export class ResearchToolset {
    */
   editMembers(ops: MemberOp[]): { members: string[]; previous: string[] } {
     const previous = this.ctx.store.listResearchMembers(this.ctx.researchId).map((m) => m.topicId);
-    const known = new Set(this.ctx.store.listTopics(this.ctx.agentId).map((t) => t.id));
+    const known = new Set(this.ctx.store.listTopics(this.ctx.tenantId).map((t) => t.id));
     let next = [...previous];
 
     for (const op of ops) {

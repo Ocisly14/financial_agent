@@ -54,7 +54,7 @@ const presentationExtracts: PresentationExtract[] = [{
 
 function run(ready = true) {
   const value = fixture();
-  const artifact: FilingIngestionArtifact = { ingestionRunId: "ing-1", modelId: "model-1", ownerAgentId: "owner-1", symbol: "TEST",
+  const artifact: FilingIngestionArtifact = { ingestionRunId: "ing-1", modelId: "model-1", ownerTenantId: "owner-1", symbol: "TEST",
     status: ready ? "ready" : "failed", source: { company: { cik: 1, ticker: "TEST", title: "Test Co" }, reportingCurrency: "USD",
       fiscalYearEnd: "12-31", periods: value.prepared.periods, filings: [] }, diagnostics: [],
     curatedTables: structuredClone(curatedTables), curations: structuredClone(curations),
@@ -66,12 +66,12 @@ function run(ready = true) {
 
 test("create writes explicit revisions zero and one, and the same run can seed further model versions", async () => {
   const { deps, ingestion, tools } = run();
-  const result = await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1" }, { agentId: "owner-1", sessionId: "s1" });
+  const result = await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1" }, { tenantId: "owner-1", sessionId: "s1" });
   assert.equal(result.error, undefined);
   assert.equal(result.generation_context?.data["revision"], 1);
   assert.deepEqual(deps.modelStore.listRevisionHeaders("model-1").map((header) => header.revision), [0, 1]);
   // A second create from the same extraction mints an independent model version of the same issuer.
-  const second = await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1" }, { agentId: "owner-1", sessionId: "s1" });
+  const second = await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1" }, { tenantId: "owner-1", sessionId: "s1" });
   assert.equal(second.error, undefined);
   const secondId = second.generation_context?.data["model_id"] as string;
   assert.notEqual(secondId, "model-1");
@@ -83,17 +83,17 @@ test("create writes explicit revisions zero and one, and the same run can seed f
 
 test("failed three-statement ingestion leaves a durable revision zero", async () => {
   const { deps, tools } = run(false);
-  const result = await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1" }, { agentId: "owner-1", sessionId: "s1" });
+  const result = await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1" }, { tenantId: "owner-1", sessionId: "s1" });
   assert.equal(result.error?.code, "incomplete_financial_statements");
   assert.equal(deps.modelStore.getRevision("model-1")?.revision, 0);
 });
 
 test("all reads and mutations are owner scoped without disclosing another owner's model", async () => {
   const { tools } = run();
-  await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1" }, { agentId: "owner-1", sessionId: "s1" });
-  const read = await tools.get("get_financial_model")!.execute({ modelId: "model-1" }, { agentId: "owner-2", sessionId: "s2" });
-  const archive = await tools.get("archive_financial_model")!.execute({ modelId: "model-1", expectedRevision: 1 }, { agentId: "owner-2", sessionId: "s2" });
-  const list = await tools.get("list_financial_models")!.execute({}, { agentId: "owner-2", sessionId: "s2" });
+  await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1" }, { tenantId: "owner-1", sessionId: "s1" });
+  const read = await tools.get("get_financial_model")!.execute({ modelId: "model-1" }, { tenantId: "owner-2", sessionId: "s2" });
+  const archive = await tools.get("archive_financial_model")!.execute({ modelId: "model-1", expectedRevision: 1 }, { tenantId: "owner-2", sessionId: "s2" });
+  const list = await tools.get("list_financial_models")!.execute({}, { tenantId: "owner-2", sessionId: "s2" });
   assert.equal(read.error?.code, "financial_model_not_found");
   assert.equal(archive.error?.code, "financial_model_not_found");
   assert.deepEqual(list.generation_context?.data["models"], []);
@@ -101,20 +101,20 @@ test("all reads and mutations are owner scoped without disclosing another owner'
 
 test("ingestion ownership/symbol checks still gate every create, and use never consumes the artifact", async () => {
   const { tools } = run();
-  const wrongOwner = await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1" }, { agentId: "owner-2", sessionId: "s" });
-  const wrongSymbol = await tools.get("create_financial_model")!.execute({ symbol: "NOPE", ingestionRunId: "ing-1" }, { agentId: "owner-1", sessionId: "s" });
+  const wrongOwner = await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1" }, { tenantId: "owner-2", sessionId: "s" });
+  const wrongSymbol = await tools.get("create_financial_model")!.execute({ symbol: "NOPE", ingestionRunId: "ing-1" }, { tenantId: "owner-1", sessionId: "s" });
   assert.equal(wrongOwner.error?.code, "filing_ingestion_not_found");
   assert.equal(wrongSymbol.error?.code, "filing_ingestion_not_found");
-  const valid = await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1" }, { agentId: "owner-1", sessionId: "s" });
+  const valid = await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1" }, { tenantId: "owner-1", sessionId: "s" });
   assert.equal(valid.error, undefined);
-  const wrongOwnerAfterUse = await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1" }, { agentId: "owner-2", sessionId: "s" });
+  const wrongOwnerAfterUse = await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1" }, { tenantId: "owner-2", sessionId: "s" });
   assert.equal(wrongOwnerAfterUse.error?.code, "filing_ingestion_not_found");
 });
 
 test("create carries the curation loop's tables and decisions into the source review artifact", async () => {
   const { ingestion, tools } = run();
   const created = await tools.get("create_financial_model")!.execute(
-    { symbol: "TEST", ingestionRunId: "ing-1" }, { agentId: "owner-1", sessionId: "s" });
+    { symbol: "TEST", ingestionRunId: "ing-1" }, { tenantId: "owner-1", sessionId: "s" });
   assert.equal(created.error, undefined);
   const source = ingestion.get("model-1")!;
   assert.deepEqual(source.curations, curations);
@@ -130,22 +130,22 @@ test("tool schemas expose nested operation contracts and reject unknown or malfo
   const rendered = formatAllowedTools([tools.get("apply_financial_model_operations")!]);
   for (const field of ["set_assumption", "set_formula", "set_valuation_config", "assumptionId", "sensitivity"]) assert.match(rendered, new RegExp(field));
 
-  const unknown = await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1", surprise: true }, { agentId: "owner-1", sessionId: "s" });
+  const unknown = await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1", surprise: true }, { tenantId: "owner-1", sessionId: "s" });
   assert.equal(unknown.error?.code, "invalid_tool_input");
   const invalidOperation = await tools.get("apply_financial_model_operations")!.execute({ modelId: "m", expectedRevision: 1,
-    operations: [{ kind: "invented_operation" }] }, { agentId: "owner-1", sessionId: "s" });
+    operations: [{ kind: "invented_operation" }] }, { tenantId: "owner-1", sessionId: "s" });
   assert.equal(invalidOperation.error?.code, "invalid_tool_input");
   assert.match(invalidOperation.summary, /operations\[0\]\.kind/);
   assert.match(invalidOperation.summary, /invented_operation/);
   assert.match(invalidOperation.summary, /set_assumption/);
   const missingOperationKind = await tools.get("apply_financial_model_operations")!.execute({ modelId: "m", expectedRevision: 1,
-    operations: [{}] }, { agentId: "owner-1", sessionId: "s" });
+    operations: [{}] }, { tenantId: "owner-1", sessionId: "s" });
   assert.equal(missingOperationKind.error?.code, "invalid_tool_input");
   assert.match(missingOperationKind.summary, /operations\[0\]\.kind is required/);
 
   const missingCurrencyCode = await tools.get("apply_financial_model_operations")!.execute({ modelId: "m", expectedRevision: 1,
     operations: [{ kind: "add_line_item", lineItem: { id: "custom.revenue", label: "Custom revenue", parentId: "custom_metrics",
-      unit: { kind: "currency" } } }] }, { agentId: "owner-1", sessionId: "s" });
+      unit: { kind: "currency" } } }] }, { tenantId: "owner-1", sessionId: "s" });
   assert.equal(missingCurrencyCode.error?.code, "invalid_tool_input");
   assert.match(missingCurrencyCode.summary, /unit\.code is required/);
 
@@ -153,7 +153,7 @@ test("tool schemas expose nested operation contracts and reject unknown or malfo
     operations: [{ kind: "set_assumption", assumption: { assumptionId: "terminal", lineItemId: "terminal_growth",
       periods: ["FY2025"], payload: { kind: "values", values: [0.03], unit: { kind: "percent" } },
       sourceType: "search", sourceRefs: ["financial_search:peer-multiples"], asOfDate: "2026-08-13", rationale: "test" } }],
-  }, { agentId: "owner-1", sessionId: "s" });
+  }, { tenantId: "owner-1", sessionId: "s" });
   assert.equal(invalidAssumptionSource.error?.code, "invalid_tool_input");
   assert.match(invalidAssumptionSource.summary, /operations\[0\]\.assumption\.sourceType/);
   assert.match(invalidAssumptionSource.summary, /received "search"/);
@@ -162,7 +162,7 @@ test("tool schemas expose nested operation contracts and reject unknown or malfo
 
 test("apply_financial_model_operations writes set_wacc_input end to end, and rejects a payload missing rationale", async () => {
   const { tools } = run();
-  const owner = { agentId: "owner-1", sessionId: "s" };
+  const owner = { tenantId: "owner-1", sessionId: "s" };
   await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1" }, owner);
 
   const missingRationale = await tools.get("apply_financial_model_operations")!.execute({
@@ -190,7 +190,7 @@ test("apply_financial_model_operations writes set_wacc_input end to end, and rej
 
 test("a review decision may omit reviewedAt, and the committed ledger carries the host's stamp", async () => {
   const { deps, tools } = run();
-  const owner = { agentId: "owner-1", sessionId: "s" };
+  const owner = { tenantId: "owner-1", sessionId: "s" };
   await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1" }, owner);
   // replace_fact is the surviving path that writes review decisions, and it supersedes a COMMITTED
   // fact — so commit one off the spine first, exactly as spine_mapping would.
@@ -227,7 +227,7 @@ test("without a price data source the WACC refresh reports itself skipped instea
   assert.equal(deps.barRepository, undefined);
   const service = new FinancialModelService(deps.modelStore, "s");
   const tools = new Map(createFinancialModelTools(deps).map((tool) => [tool.name, tool]));
-  await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1" }, { agentId: "owner-1", sessionId: "s" });
+  await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1" }, { tenantId: "owner-1", sessionId: "s" });
   const outcome = await refreshWaccSheetFromSpine(deps, service, "model-1", 1);
   assert.equal(outcome.kind, "skipped");
   if (outcome.kind === "skipped") assert.ok(outcome.reason.length > 0);
@@ -235,7 +235,7 @@ test("without a price data source the WACC refresh reports itself skipped instea
 
 // --- WACC-sheet auto-refresh, wired end to end through review_financial_model_history --------------
 
-// refreshWaccSheetFromSpine wires treasury30y straight to fetchTreasury30y's default (global) fetch, so
+// refreshWaccSheetFromSpine wires treasuryRiskFree straight to fetchTreasuryYield's default (global) fetch, so
 // these tests stub globalThis.fetch with a canned treasury.gov-shaped feed rather than hitting the
 // network. Every requested month resolves to one point, dated the 1st of that month, at a fixed rate —
 // on or before any asOfDate drawn from that same month (model creation uses today's date).
@@ -250,7 +250,7 @@ function stubTreasuryFetch(): void {
 <feed xmlns:d="http://schemas.microsoft.com/ado/2007/08/dataservices" xmlns="http://www.w3.org/2005/Atom">
 <entry><content type="application/xml"><m:properties>
 <d:NEW_DATE m:type="Edm.DateTime">${month.slice(0, 4)}-${month.slice(4, 6)}-01T00:00:00</d:NEW_DATE>
-<d:BC_30YEAR m:type="Edm.Double">${WACC_TEST_RISK_FREE_RATE * 100}</d:BC_30YEAR>
+<d:BC_10YEAR m:type="Edm.Double">${WACC_TEST_RISK_FREE_RATE * 100}</d:BC_10YEAR>
 </m:properties></content></entry>
 </feed>`;
     return new Response(xml, { status: 200 });
@@ -304,7 +304,7 @@ function waccHarness() {
     sourceReviewStore: review, ingestionStore: review,
     barRepository: async () => waccBarRepository() };
   const service = new FinancialModelService(modelStore, "session-1");
-  service.createModel({ modelId: "fm-1", ownerAgentId: "agent-1", originSessionId: "session-1", symbol: "AAPL",
+  service.createModel({ modelId: "fm-1", ownerTenantId: "agent-1", originSessionId: "session-1", symbol: "AAPL",
     metadata: {}, reportingCurrency: "USD", periods: WACC_PERIODS, preparedStatementRows: [] });
   return { modelStore, deps, service };
 }
@@ -318,7 +318,7 @@ const WACC_FULL_FACTS: Fact[] = [
   waccCommittedFact("cash_and_equivalents", "FY2025", 12_000),
 ];
 
-const waccContext = { agentId: "agent-1", sessionId: "session-1" };
+const waccContext = { tenantId: "agent-1", sessionId: "session-1" };
 
 test("the WACC refresh derives the reachable rows, skips an agent-authored row, and lands one wacc_sheet_refreshed revision", async () => {
   stubTreasuryFetch();
@@ -411,7 +411,7 @@ test("an agent-preset risk_free_rate survives the Treasury-feed auto-refresh unt
 });
 test("create returns the coverage baseline without the workbook, which is unmapped filing rows at this revision", async () => {
   const { tools } = run();
-  const result = await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1" }, { agentId: "owner-1", sessionId: "s1" });
+  const result = await tools.get("create_financial_model")!.execute({ symbol: "TEST", ingestionRunId: "ing-1" }, { tenantId: "owner-1", sessionId: "s1" });
   const data = result.generation_context!.data;
 
   // The regression this pins: current_workbook rode along here at ~430k characters, and the

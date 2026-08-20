@@ -125,7 +125,7 @@ test("golden service workflow maps statements once and produces a deterministic 
   // (source rows plus their staged evidence facts), then spine_mapping's canonical facts committed
   // straight onto the spine — no review ceremony in between.
   const created = service.createModel({
-    modelId: "golden-dcf", ownerAgentId: "agent", originSessionId: "golden-session",
+    modelId: "golden-dcf", ownerTenantId: "agent", originSessionId: "golden-session",
     symbol: "GOLD", metadata: { companyName: "Golden Co" }, reportingCurrency: "USD",
     periods: PERIODS, preparedStatementRows: [],
   });

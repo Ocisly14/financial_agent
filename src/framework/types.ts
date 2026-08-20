@@ -29,6 +29,27 @@ export type SkillStatus = "loaded" | "ok" | "failed";
 
 export type SkillLayer = "topic" | "research" | "agent";
 
+/**
+ * How an agent behaves when *another agent* hands it work. Its presence on a
+ * definition is the opt-in: an agent without one can only be dispatched by the
+ * orchestrator, so nothing becomes reachable from inside a run by accident.
+ */
+export type DelegationPolicy = {
+  /**
+   * What the caller gets back. `summary` hands over only the account the agent
+   * wrote when it finished; `summary_and_data` also passes its
+   * generation_context.
+   *
+   * `summary` is the one to reach for. A task result's `data` is every tool
+   * payload the agent collected — for a research agent that is the full text of
+   * every search it ran, which is precisely the cost delegating was supposed to
+   * keep out of the caller's context.
+   */
+  returns: "summary" | "summary_and_data";
+  /** Ceiling on one delegated round. Sits inside the caller's own deadline. */
+  timeoutMs: number;
+};
+
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 export type JsonObject = { [key: string]: JsonValue };
@@ -118,6 +139,19 @@ export type TaskRequest = {
   /** The financial-model handle to refresh before mutating. Not a resumption
    *  key — continuity is `thread`. */
   model_id?: string;
+  /**
+   * Earlier task results whose data this task needs verbatim, named by the
+   * `source_event_id` the caller saw on their result lines. The host reads each
+   * one's `generation_context.data` out of the log and renders it into the
+   * subagent's prompt.
+   *
+   * This exists because the caller is the only actor holding every result, and
+   * retyping numbers out of one result into a task's prose is a transcription
+   * step that can silently get them wrong. Passing the id moves the data
+   * without a model in the middle of it. What the id CANNOT carry is why that
+   * data matters here — that still belongs in `task`.
+   */
+  source_event_ids?: string[];
   tools?: string[];
   timeout_ms?: number;
 };
@@ -189,21 +223,12 @@ export type ToolExecutionResult = {
 };
 
 /**
- * One decision the orchestrator emits per loop iteration. `reply` is always the
- * user-facing message for this turn (a short status line when an action is taken,
- * the final answer when all action fields are null). `dispatch` / `skill` /
- * `tool_calls` may share a step; `skill` is exclusive of both.
+ * One structured call out of an orchestrator completion. The orchestrator acts through NATIVE tool
+ * calling — delegate_to_agent to hand work to an agent, invoke_skill to load guidance (alone in its
+ * step), the direct tools otherwise — and its plain text is what the user sees: a status line
+ * beside calls, the final answer when there are none.
  */
 export type OrchestratorToolCall = { name: string; input: JsonObject };
-
-export type OrchestratorStep = {
-  reply: string;
-  dispatch: TaskRequest[] | null;
-  skill: string | null;
-  /** Plural because reading two references should not cost two loop iterations
-   *  out of the step budget. A single `tool_call` object is still parsed. */
-  tool_calls: OrchestratorToolCall[] | null;
-};
 
 export type SSEEvent =
   | { type: "token"; delta: string }
@@ -211,7 +236,9 @@ export type SSEEvent =
   | { type: "workflow_started"; workflow_id: string; skill: string; workflow: string; title?: string }
   | { type: "workflow_step"; workflow_id: string; step_id: string; title: string; status: "pending" | "running" | "done" | "failed"; pct?: number; note?: string }
   | { type: "workflow_done"; workflow_id: string; status: "ok" | "failed"; summary: string }
-  | { type: "dispatch"; task_id: string; agent: AgentKind; task: string; thread_id: string }
+  /** `parent_task_id`/`parent_agent` name the caller when a subagent delegated this
+   *  dispatch; absent on orchestrator-rooted dispatches. */
+  | { type: "dispatch"; task_id: string; agent: AgentKind; task: string; thread_id: string; parent_task_id?: string; parent_agent?: AgentKind }
   | { type: "progress"; task_id: string; phase: string; pct?: number; note?: string }
   | { type: "task_done"; task_id: string; status: TaskStatus; summary: string }
   | { type: "strategy_created"; strategy_id: string; status?: string; summary?: string }

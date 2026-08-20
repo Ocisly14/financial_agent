@@ -101,7 +101,7 @@ function asTopicIds(value: unknown): string[] {
  * a transient toast and never in persistent chrome.
  */
 export function useResearchStream(
-    agentId: UUID,
+    tenantId: UUID,
     researchId: UUID,
     options?: { onModelRevision?: (frame: ModelRevisionFrame) => void; activeModelId?: string | null },
 ) {
@@ -119,12 +119,12 @@ export function useResearchStream(
         async (directive: LayoutChangedDirective) => {
             try {
                 if (directive.scope === "members") {
-                    await apiClient.setResearchMembers(agentId, researchId, asTopicIds(directive.next));
-                    void queryClient.invalidateQueries({ queryKey: ["research", agentId, researchId] });
+                    await apiClient.setResearchMembers(tenantId, researchId, asTopicIds(directive.next));
+                    void queryClient.invalidateQueries({ queryKey: ["research", tenantId, researchId] });
                 } else if (directive.topicId) {
-                    await apiClient.setTopicCharts(agentId, directive.topicId, asChartPreferences(directive.next));
+                    await apiClient.setTopicCharts(tenantId, directive.topicId, asChartPreferences(directive.next));
                     void queryClient.invalidateQueries({
-                        queryKey: ["topicCharts", agentId, directive.topicId],
+                        queryKey: ["topicCharts", tenantId, directive.topicId],
                     });
                 }
             } catch (error) {
@@ -133,7 +133,7 @@ export function useResearchStream(
                 });
             }
         },
-        [agentId, researchId, queryClient, t],
+        [tenantId, researchId, queryClient, t],
     );
 
     const undoLastLayoutChange = useCallback(() => {
@@ -161,9 +161,9 @@ export function useResearchStream(
             // The change already landed server-side; pull it in so the row and
             // the tab bar show what the agent actually did.
             if (directive.scope === "members") {
-                void queryClient.invalidateQueries({ queryKey: ["research", agentId, researchId] });
+                void queryClient.invalidateQueries({ queryKey: ["research", tenantId, researchId] });
             } else if (directive.topicId) {
-                void queryClient.invalidateQueries({ queryKey: ["topicCharts", agentId, directive.topicId] });
+                void queryClient.invalidateQueries({ queryKey: ["topicCharts", tenantId, directive.topicId] });
             }
 
             if (directive.source !== "agent") return;
@@ -175,10 +175,10 @@ export function useResearchStream(
                 },
             );
         },
-        [agentId, researchId, queryClient, t, undoLastLayoutChange],
+        [tenantId, researchId, queryClient, t, undoLastLayoutChange],
     );
 
-    const stream = useTopicStream(agentId, researchId, {
+    const stream = useTopicStream(tenantId, researchId, {
         onDirective: handleDirective,
         onModelRevision: options?.onModelRevision,
         activeModelId: options?.activeModelId,
