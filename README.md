@@ -10,6 +10,8 @@ _A local-first multi-agent workspace for financial research, auditable DCF valua
 > [!IMPORTANT]
 > Financial Agent is an experimental alpha. It is designed for research, valuation analysis, and paper/shadow strategy evaluation—not live brokerage execution or personalized financial advice.
 
+📖 [Design Philosophy](docs/article/philosophy.md)
+
 Financial Agent turns isolated AI chats into durable financial workspaces. It combines three connected loops: research a company or macro question, build a filing-grounded intrinsic-value model when valuation is needed, and evaluate a paper strategy when an investment thesis becomes a rule. A **Topic** keeps the conversation, charts, evidence, and model activity for one company or question. A **Research** workspace brings several Topics together so a controller agent can compare their evidence and valuation conclusions without erasing their independent histories.
 
 The result is not merely a chat summary: a DCF request can create a revisioned workbook whose historical facts trace to filings and whose forecast, WACC, terminal-value, and equity-bridge choices remain inspectable after the agent finishes.
